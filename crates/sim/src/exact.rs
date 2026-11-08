@@ -30,6 +30,7 @@ pub struct ExactEngine {
     position: usize,
     draft_tokens: usize,
     exponents: u32,
+    pub(crate) logits: Vec<f32>,
 }
 
 impl ExactEngine {
@@ -38,7 +39,7 @@ impl ExactEngine {
         let weights = Arc::new(weights);
         let layout = Layout::new(&program, &weights, config, false)?;
         let vm = BlockVm::new(&config, layout.registers_used() as usize + 8, Some(weights));
-        let mut engine = Self { program, layout, vm, position: 0, draft_tokens: 0, exponents: exponent_register(&config) };
+        let mut engine = Self { program, layout, vm, position: 0, draft_tokens: 0, exponents: exponent_register(&config), logits: Vec::new() };
         engine.reset();
         Ok(engine)
     }

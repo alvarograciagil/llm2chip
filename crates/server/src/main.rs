@@ -10,7 +10,8 @@ use axum::{
 };
 use compiler::compile_qwen3_5;
 use serde::{Deserialize, Serialize};
-use sim::{Engine, Numeric, Weights};
+use netlist::format::WeightFormat;
+use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokenizers::Tokenizer;
@@ -21,7 +22,7 @@ const STOP_TOKENS: [u32; 2] = [248046, 248044];
 
 struct Loaded {
     name: String,
-    engine: Engine,
+    engine: Box<dyn Runner>,
     tokenizer: Tokenizer,
 }
 
@@ -93,6 +94,12 @@ async fn status(State(app): State<App>) -> Json<serde_json::Value> {
 struct LoadRequest {
     path: String,
     numeric: Option<NumericRequest>,
+    /// Runs the die's exact integer arithmetic instead of a software model of it.
+    #[serde(default)]
+    exact: bool,
+    /// The chip's weight format; `None` keeps the checkpoint as it is.
+    #[serde(default)]
+    format: Option<WeightFormat>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -102,7 +109,9 @@ struct NumericRequest {
     table_bits: Option<u32>,
 }
 
-fn load_model(path: &str, numeric: Option<NumericRequest>) -> Result<Loaded, String> {
+fn load_model(request: LoadRequest) -> Result<Loaded, String> {
+    let LoadRequest { path, numeric, exact, format } = request;
+    let path = path.as_str();
     let dir = Path::new(path);
     let entry = scan_models().into_iter().find(|m| m.path == path).ok_or("el modelo no está en las carpetas conocidas")?;
     if !entry.supported {
@@ -114,13 +123,18 @@ fn load_model(path: &str, numeric: Option<NumericRequest>) -> Result<Loaded, Str
         None => Numeric::Float,
         Some(n) => Numeric::Block { activation_bits: n.activation_bits.clamp(4, 24), state_bits: n.state_bits.clamp(4, 24), table_bits: n.table_bits.map(|b| b.clamp(4, 16)) },
     };
-    let engine = Engine::new(compile_qwen3_5(&config)?, Weights::open(dir)?, mode)?;
+    let weights = Weights::open(dir)?.with_format(format);
+    let engine: Box<dyn Runner> = if exact {
+        Box::new(ExactEngine::new(compile_qwen3_5(&config)?, weights)?)
+    } else {
+        Box::new(Engine::new(compile_qwen3_5(&config)?, weights, mode)?)
+    };
     Ok(Loaded { name: entry.name, engine, tokenizer })
 }
 
 async fn load(State(app): State<App>, Json(request): Json<LoadRequest>) -> Response {
     let result = tokio::task::spawn_blocking(move || {
-        let loaded = load_model(&request.path, request.numeric)?;
+        let loaded = load_model(request)?;
         let name = loaded.name.clone();
         *app.loaded.lock().unwrap() = Some(loaded);
         Ok::<_, String>(name)

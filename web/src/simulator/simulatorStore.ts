@@ -8,7 +8,16 @@ export interface ServerModel {
   size_gb: number;
 }
 
-export type Numeric = "float" | "fixed";
+export type Numeric = "float" | "fixed" | "exact";
+
+export interface WeightFormat {
+  coding: string;
+  bits: number;
+  exponent_bits: number;
+  bias: boolean;
+  group_size: number;
+  keep_source: boolean;
+}
 
 interface SimulatorState {
   online: boolean | null;
@@ -20,6 +29,8 @@ interface SimulatorState {
   activationBits: number;
   stateBits: number;
   tableBits: number;
+  useDesignFormat: boolean;
+  designFormat: WeightFormat | null;
   mtpDepth: number;
   acceptance: { hits: number[]; tries: number[] };
   prompt: string;
@@ -58,6 +69,8 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   activationBits: 16,
   stateBits: 16,
   tableBits: 12,
+  useDesignFormat: false,
+  designFormat: null,
   mtpDepth: 0,
   acceptance: { hits: [], tries: [] },
   prompt: "¿Cuál es la capital de Francia? Responde en una frase.",
@@ -91,11 +104,13 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   set: (patch) => set(patch),
 
   async load() {
-    const { path, numeric, activationBits, stateBits, tableBits } = get();
+    const { path, numeric, activationBits, stateBits, tableBits, useDesignFormat, designFormat } = get();
     set({ loading: true, error: null });
     const body = {
       path,
       numeric: numeric === "fixed" ? { activation_bits: activationBits, state_bits: stateBits, table_bits: tableBits } : null,
+      exact: numeric === "exact",
+      format: useDesignFormat ? designFormat : null,
     };
     try {
       const response = await fetch("/api/load", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });

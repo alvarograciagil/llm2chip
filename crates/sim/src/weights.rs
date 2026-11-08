@@ -1,12 +1,15 @@
 //! Reads MLX-quantised safetensors checkpoints without loading them into memory.
 
+use crate::requant::{quantize, train_table, Reference};
 use half::f16;
 use memmap2::Mmap;
+use netlist::format::{WeightCoding, WeightFormat};
 use rayon::prelude::*;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 struct TensorRef {
     file: usize,
@@ -19,6 +22,14 @@ struct TensorRef {
 pub struct Weights {
     files: Vec<Mmap>,
     tensors: HashMap<String, TensorRef>,
+    /// The chip's format, when weights must be rewritten to match it.
+    format: Option<WeightFormat>,
+    references: Mutex<HashMap<String, Arc<Reference>>>,
+}
+
+/// Tensors that real mixed checkpoints keep at 8 bits.
+fn keeps_eight_bits(name: &str) -> bool {
+    name.contains("embed_tokens") || name.contains("lm_head") || name.contains("out_proj")
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -78,7 +89,13 @@ impl Weights {
             }
             files.push(map);
         }
-        Ok(Self { files, tensors })
+        Ok(Self { files, tensors, format: None, references: Mutex::new(HashMap::new()) })
+    }
+
+    /// Makes every matrix read back as if stored in `format`.
+    pub fn with_format(mut self, format: Option<WeightFormat>) -> Self {
+        self.format = format;
+        self
     }
 
     fn bytes(&self, name: &str) -> Result<(&[u8], &TensorRef), String> {
@@ -106,7 +123,7 @@ impl Weights {
         if t.dtype == "U32" {
             let (scales, ts) = self.bytes(&format!("{name}.scales"))?;
             let (biases, _) = self.bytes(&format!("{name}.biases"))?;
-            return Ok(Matrix { rows, source: Source::Packed { words_per_row: last[0], groups: *ts.shape.last().unwrap_or(&1), words: bytes, scales, biases } });
+            return Ok(Matrix { rows, owner: self, name: name.to_string(), source: Source::Packed { words_per_row: last[0], groups: *ts.shape.last().unwrap_or(&1), words: bytes, scales, biases } });
         }
         let format = Plain::parse(&t.dtype).ok_or_else(|| format!("{name}: tipo {} no soportado", t.dtype))?;
         // Integer checkpoints may carry the factor that turns codes into real values.
@@ -114,7 +131,7 @@ impl Weights {
             Ok(values) if !values.is_empty() => values[0],
             _ => format.default_factor(),
         };
-        Ok(Matrix { rows, source: Source::Plain { format, bytes, factor } })
+        Ok(Matrix { rows, owner: self, name: name.to_string(), source: Source::Plain { format, bytes, factor } })
     }
 }
 
@@ -185,8 +202,12 @@ enum Source<'a> {
 
 pub struct Matrix<'a> {
     rows: usize,
+    owner: &'a Weights,
+    name: String,
     source: Source<'a>,
 }
+
+type Requant = (WeightFormat, Arc<Reference>);
 
 #[inline]
 fn half_at(bytes: &[u8], index: usize) -> f32 {
@@ -210,12 +231,8 @@ impl Matrix<'_> {
         self.rows
     }
 
-    pub fn row(&self, index: usize, out: usize) -> Result<Vec<f32>, String> {
-        if index >= self.rows {
-            return Err("fila fuera de rango".into());
-        }
-        let cols = out;
-        let mut y = vec![0f32; cols];
+    fn decode_into(&self, index: usize, y: &mut [f32]) {
+        let cols = y.len();
         match &self.source {
             Source::Packed { words_per_row, groups, words, scales, biases } => {
                 let group_size = cols / groups;
@@ -231,13 +248,79 @@ impl Matrix<'_> {
                     }
                 }
             }
-            Source::Plain { format, bytes, factor, .. } => {
+            Source::Plain { format, bytes, factor } => {
                 let size = format.size();
                 let row = &bytes[index * cols * size..(index + 1) * cols * size];
                 for (out, element) in y.iter_mut().zip(row.chunks_exact(size)) {
                     *out = format.decode(element, *factor);
                 }
             }
+        }
+    }
+
+    /// The format to rewrite this matrix in, or `None` when it is stored as the chip wants.
+    fn requant(&self, cols: usize) -> Option<Requant> {
+        let mut format = self.owner.format?;
+        if let Source::Packed { words_per_row, groups, .. } = &self.source {
+            let bits = (words_per_row * 32 / cols) as u32;
+            let same = format.coding == WeightCoding::Affine && format.bias && format.bits == bits && format.group_size as usize == cols / groups;
+            if format.keep_source || same {
+                return None;
+            }
+        } else if format.keep_source && keeps_eight_bits(&self.name) {
+            format.bits = format.bits.max(8);
+            format.group_size *= 2;
+        }
+        let mut cache = self.owner.references.lock().expect("caché de referencias");
+        let reference = cache.entry(self.name.clone()).or_insert_with(|| Arc::new(self.reference(cols, &format))).clone();
+        Some((format, reference))
+    }
+
+    fn reference(&self, cols: usize, format: &WeightFormat) -> Reference {
+        let (min, max) = match &self.source {
+            Source::Packed { words_per_row, groups, scales, biases, .. } => {
+                let top = ((1u32 << (words_per_row * 32 / cols)) - 1) as f32;
+                (0..self.rows * groups)
+                    .into_par_iter()
+                    .with_min_len(4096)
+                    .map(|i| {
+                        let (scale, bias) = (half_at(scales, i), half_at(biases, i));
+                        let end = top * scale + bias;
+                        (bias.min(end), bias.max(end))
+                    })
+                    .reduce(|| (f32::MAX, f32::MIN), |a, b| (a.0.min(b.0), a.1.max(b.1)))
+            }
+            Source::Plain { format, bytes, factor } => bytes
+                .par_chunks_exact(format.size())
+                .with_min_len(4096)
+                .map(|e| {
+                    let v = format.decode(e, *factor);
+                    (v, v)
+                })
+                .reduce(|| (f32::MAX, f32::MIN), |a, b| (a.0.min(b.0), a.1.max(b.1))),
+        };
+        let mut table = Vec::new();
+        if format.coding == WeightCoding::Codebook {
+            let stride = (self.rows / 256).max(1);
+            let mut row = vec![0f32; cols];
+            let mut sample = Vec::new();
+            for index in (0..self.rows).step_by(stride) {
+                self.decode_into(index, &mut row);
+                sample.extend_from_slice(&row);
+            }
+            table = train_table(sample, 1usize << format.bits.min(12));
+        }
+        Reference { min, max, table }
+    }
+
+    pub fn row(&self, index: usize, out: usize) -> Result<Vec<f32>, String> {
+        if index >= self.rows {
+            return Err("fila fuera de rango".into());
+        }
+        let mut y = vec![0f32; out];
+        self.decode_into(index, &mut y);
+        if let Some((format, reference)) = self.requant(out) {
+            quantize(&format, &reference, &mut y);
         }
         Ok(y)
     }
@@ -250,6 +333,17 @@ impl Matrix<'_> {
     /// Like `apply`, over the rows starting at `first`; `y.len()` sets how many.
     pub fn apply_rows(&self, first: usize, x: &[f32], y: &mut [f32]) {
         let cols = x.len();
+        if let Some((format, reference)) = self.requant(cols) {
+            y.par_iter_mut().with_min_len(8).enumerate().for_each_init(
+                || vec![0f32; cols],
+                |row, (index, out)| {
+                    self.decode_into(first + index, row);
+                    quantize(&format, &reference, row);
+                    *out = row.iter().zip(x).map(|(w, v)| w * v).sum();
+                },
+            );
+            return;
+        }
         match &self.source {
             Source::Packed { words_per_row, groups, words, scales, biases } => {
                 let group_size = cols / groups;
@@ -284,6 +378,9 @@ impl Matrix<'_> {
 
     /// The exponent shared by the matrix's 16-bit mantissas.
     pub fn exponent(&self, cols: usize) -> i64 {
+        if let Some((_, reference)) = self.requant(cols) {
+            return exponent_of(reference.largest());
+        }
         match &self.source {
             Source::Packed { words_per_row, groups, scales, biases, .. } => {
                 let top = ((1u32 << (words_per_row * 32 / cols)) - 1) as f32;
@@ -306,6 +403,10 @@ impl Matrix<'_> {
 
     /// One row as the 16-bit mantissas the hardware stores.
     pub fn fixed_row(&self, index: usize, cols: usize, exponent: i64) -> Result<Vec<i64>, String> {
+        if self.requant(cols).is_some() {
+            let scale = 2f64.powi(MANTISSA_FRACTION - exponent as i32);
+            return Ok(self.row(index, cols)?.iter().map(|v| ((*v as f64 * scale).round() as i64).clamp(-MANTISSA_LIMIT, MANTISSA_LIMIT)).collect());
+        }
         match &self.source {
             Source::Packed { words_per_row, groups, words, scales, biases } => {
                 let group_size = cols / groups;
@@ -334,6 +435,18 @@ impl Matrix<'_> {
     pub fn exact_sums(&self, first: usize, rows: usize, x: &[i32], exponent: i64) -> Vec<i64> {
         let cols = x.len();
         let mut sums = vec![0i64; rows];
+        if let Some((format, reference)) = self.requant(cols) {
+            let scale = 2f64.powi(MANTISSA_FRACTION - exponent as i32);
+            sums.par_iter_mut().with_min_len(8).enumerate().for_each_init(
+                || vec![0f32; cols],
+                |row, (index, out)| {
+                    self.decode_into(first + index, row);
+                    quantize(&format, &reference, row);
+                    *out = row.iter().zip(x).map(|(w, v)| ((*w as f64 * scale).round() as i64).clamp(-MANTISSA_LIMIT, MANTISSA_LIMIT) * *v as i64).sum();
+                },
+            );
+            return sums;
+        }
         match &self.source {
             Source::Packed { words_per_row, groups, words, scales, biases } => {
                 let group_size = cols / groups;

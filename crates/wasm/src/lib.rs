@@ -168,6 +168,27 @@ impl CellSimulation {
     pub fn snapshot(&self, path: &str) -> Result<String, JsError> {
         to_js(&self.sim.snapshot(path))
     }
+
+    /// The accumulator value these stored codes and activations must produce, as a
+    /// signed decimal string. Floating formats are read with an exponent base of zero.
+    pub fn expected(&self, codes: &str, activations: &str) -> Result<String, JsError> {
+        let c = self.config;
+        let parse = |text: &str| text.split(',').map(|v| v.trim().parse::<i128>()).collect::<Result<Vec<i128>, _>>().map_err(|_| JsError::new("lista inválida"));
+        let shift_bits = 32 - (c.accumulator_bits - 1).leading_zeros();
+        let mut total = 0i128;
+        for (code, x) in parse(codes)?.iter().zip(parse(activations)?) {
+            let raw = *code as u64;
+            let (significand, shift) = if c.coding == netlist::format::WeightCoding::Codebook {
+                (((raw << (64 - c.weight_bits)) as i64) >> (64 - c.weight_bits), 0)
+            } else {
+                let (significand, exponent) = c.decode_code(raw);
+                (significand, exponent.min((1u64 << shift_bits) - 1) as u32)
+            };
+            total = total.wrapping_add((significand as i128 * x) << shift);
+        }
+        let excess = 128 - c.accumulator_bits;
+        Ok((total << excess >> excess).to_string())
+    }
 }
 
 /// The reduced die running one worked example, gate by gate.

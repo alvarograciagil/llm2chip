@@ -1,6 +1,6 @@
 import { Segmented } from "../components/controls";
 import { formatNumber } from "../format";
-import { currentModule, expectedTotal, toSigned, useCellSim, validateInputs, type DieDemo } from "./simStore";
+import { currentModule, toSigned, useCellSim, validateInputs, type DieDemo } from "./simStore";
 
 const COVERAGE: [string, boolean][] = [
   ["Celda: memoria, multiplicador y acumulador", true],
@@ -179,7 +179,7 @@ function CellPanel({ selector }: { selector: React.ReactNode }) {
   if (!info || !handle) return <aside className="inspector" />;
 
   const parsed = validateInputs(info, weightsText, activationsText);
-  const expected = "error" in parsed ? null : expectedTotal(parsed.weights, parsed.activations, info.config.accumulator_bits);
+  const expected = "error" in parsed ? null : BigInt(handle.expected(parsed.weights.map(String).join(","), parsed.activations.map(String).join(",")));
   const finished = index >= script.length && script.length > 0;
   const total = topTotal !== undefined ? toSigned(topTotal) : null;
   const status = script[index]?.label ?? (finished ? "Terminado" : "Sin programa");
@@ -193,7 +193,7 @@ function CellPanel({ selector }: { selector: React.ReactNode }) {
 
       <div className="inset padded form">
         <label>
-          Pesos ({info.config.weight_bits} bits con signo)
+          Códigos de peso ({info.config.weight_bits} bits)
           <textarea rows={2} spellCheck={false} value={weightsText} onChange={(e) => setWeights(e.target.value)} />
         </label>
         <label>

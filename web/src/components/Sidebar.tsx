@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import type { Maturity, QualityRisk } from "../engine";
 import { formatNumber, fromLog, toLog } from "../format";
-import { PARAM_GROUPS, type Field } from "../params";
+import { matchingPreset, PARAM_GROUPS, type Field } from "../params";
 import { useDesign } from "../store";
 import { Disclosure, Segmented, Switch } from "./controls";
 
@@ -112,10 +112,37 @@ function RangeRow({ field }: { field: RangeField }) {
   );
 }
 
+function PresetRow({ field }: { field: Extract<Field, { kind: "preset" }> }) {
+  const params = useDesign((s) => s.params);
+  const setParam = useDesign((s) => s.setParam);
+  const current = matchingPreset(params) ?? "";
+  const choose = (label: string) => {
+    const preset = field.sections.flatMap((section) => section.presets).find((p) => p.label === label);
+    if (preset) Object.entries(preset.values).forEach(([key, value]) => setParam(key, value as never));
+  };
+  return (
+    <Row field={field}>
+      <select aria-label={field.label} value={current} onChange={(e) => choose(e.target.value)}>
+        {current === "" && <option value="">Personalizado</option>}
+        {field.sections.map((section) => (
+          <optgroup key={section.title} label={section.title}>
+            {section.presets.map((preset) => (
+              <option key={preset.label} value={preset.label}>
+                {preset.label}
+              </option>
+            ))}
+          </optgroup>
+        ))}
+      </select>
+    </Row>
+  );
+}
+
 function FieldRow({ field }: { field: Field }) {
   const value = useDesign((s) => s.params[field.key]);
   const setParam = useDesign((s) => s.setParam);
   if (field.kind === "range") return <RangeRow field={field} />;
+  if (field.kind === "preset") return <PresetRow field={field} />;
   if (field.kind === "toggle") {
     return (
       <Row field={field}>

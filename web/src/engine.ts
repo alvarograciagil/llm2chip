@@ -173,7 +173,7 @@ export interface Design {
 }
 
 export interface CellInfo {
-  config: { weight_bits: number; activation_bits: number; accumulator_bits: number; mac_stages: number; adder_stages: number; addr_bits: number };
+  config: { weight_bits: number; activation_bits: number; accumulator_bits: number; mac_stages: number; adder_stages: number; addr_bits: number; coding: string; exponent_bits: number };
   latency: number;
   counts: Record<string, number>;
 }

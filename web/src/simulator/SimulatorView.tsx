@@ -3,7 +3,8 @@ import { Segmented } from "../components/controls";
 import { scheduleDesign, type Schedule, type ScheduledStage } from "../engine";
 import { formatNumber } from "../format";
 import { useDesign } from "../store";
-import { useSimulator } from "./simulatorStore";
+import { matchingPreset } from "../params";
+import { useSimulator, type WeightFormat } from "./simulatorStore";
 
 const KIND_LABEL: Record<ScheduledStage["kind"], string> = {
   matvec: "Matriz × vector",
@@ -17,6 +18,20 @@ const KIND_CLASS: Record<ScheduledStage["kind"], string> = {
   embedding: "tl-embedding",
   link: "tl-link",
 };
+
+/** The weight format of the current design, as the engine expects it. */
+function designFormat(p: Record<string, unknown>): WeightFormat {
+  const coding = String(p.weight_coding);
+  const grouped = coding === "affine" || coding === "float";
+  return {
+    coding,
+    bits: Number(p.weight_bits),
+    exponent_bits: Number(p.weight_exponent_bits),
+    bias: p.weight_bias === true,
+    group_size: grouped ? Number(p.group_size) : 0,
+    keep_source: coding === "affine" && p.use_model_mix === true,
+  };
+}
 
 function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
   const dies = Math.max(...schedule.stages.map((s) => s.die)) + 1;
@@ -130,6 +145,8 @@ export function SimulatorView() {
 
 export function SimulatorPanel() {
   const state = useSimulator();
+  const params = useDesign((s) => s.params);
+  const formatLabel = matchingPreset(params) ?? "personalizado";
   const report = useDesign((s) => s.report);
   const { connect, set, load } = state;
 
@@ -179,7 +196,7 @@ export function SimulatorPanel() {
         <Segmented
           label="Aritmética"
           value={state.numeric}
-          options={[["float", "Coma flotante"], ["fixed", "Exponente por vector"]]}
+          options={[["float", "Coma flotante"], ["fixed", "Exponente por vector"], ["exact", "Enteros exactos"]]}
           onChange={(numeric) => set({ numeric })}
         />
         {state.numeric === "fixed" && (
@@ -196,7 +213,11 @@ export function SimulatorPanel() {
             ))}
           </div>
         )}
-        <button className="pill primary-pill" disabled={state.loading || !state.path} onClick={load}>
+        <label className="check">
+          <input type="checkbox" checked={state.useDesignFormat} onChange={(e) => set({ useDesignFormat: e.target.checked, designFormat: designFormat(params) })} />
+          Convertir los pesos al formato del chip ({formatLabel})
+        </label>
+        <button className="pill primary-pill" disabled={state.loading || !state.path} onClick={() => { set({ designFormat: designFormat(params) }); void load(); }}>
           {state.loading ? "Cargando…" : state.loaded ? "Recargar" : "Cargar modelo"}
         </button>
         {state.loaded && <p className="muted-text">Cargado: {state.loaded}</p>}

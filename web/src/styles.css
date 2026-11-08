@@ -1602,3 +1602,10 @@ input[type="range"]::-webkit-slider-thumb {
   fill: var(--group-solid);
   stroke: var(--label-3);
 }
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-direction: row;
+}

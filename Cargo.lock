@@ -933,6 +933,7 @@ dependencies = [
  "axum",
  "compiler",
  "futures-util",
+ "netlist",
  "serde",
  "serde_json",
  "sim",

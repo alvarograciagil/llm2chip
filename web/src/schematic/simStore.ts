@@ -59,6 +59,8 @@ export function parseList(text: string): bigint[] | null {
   return parts.map((p) => BigInt(p));
 }
 
+const usesShifter = (info: CellInfo) => ["float", "posit", "log"].includes(info.config.coding);
+
 const pathText = (path: string[]) => path.map((p) => `/${p}`).join("");
 const toUnsigned = (value: bigint, bits: number) => BigInt.asUintN(bits, value).toString();
 
@@ -75,7 +77,14 @@ export function expectedTotal(weights: bigint[], activations: bigint[], bits: nu
 function buildScript(info: CellInfo, weights: bigint[], activations: bigint[]): ScriptStep[] {
   const { weight_bits, activation_bits, addr_bits } = info.config;
   const off: [string, string][] = [["load_en", "0"], ["run", "0"]];
-  const steps: ScriptStep[] = [{ label: "Puesta a cero", inputs: [["clear", "1"], ...off] }];
+  const steps: ScriptStep[] = [{ label: "Puesta a cero", inputs: [["clear", "1"], ...off, ...(usesShifter(info) ? ([["exp_base", "0"]] as [string, string][]) : [])] }];
+  if (info.config.coding === "codebook") {
+    for (let i = 0; i < 2 ** info.config.weight_bits; i++) {
+      const signed = BigInt.asIntN(info.config.weight_bits, BigInt(i));
+      steps.push({ label: `Tabla ${i + 1}`, inputs: [["clear", "0"], ["table_en", "1"], ["table_addr", String(i)], ["table_data", toUnsigned(signed, 16)]] });
+    }
+    steps.push({ label: "Fin de la tabla", inputs: [["table_en", "0"]] });
+  }
   weights.forEach((w, i) =>
     steps.push({
       label: `Carga de pesos ${i + 1}/${weights.length}`,

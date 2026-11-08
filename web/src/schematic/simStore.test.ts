@@ -3,7 +3,7 @@ import { expectedTotal, parseList, toSigned, validateInputs } from "./simStore";
 import type { CellInfo } from "../engine";
 
 const info: CellInfo = {
-  config: { weight_bits: 4, activation_bits: 8, accumulator_bits: 16, mac_stages: 1, adder_stages: 1, addr_bits: 3 },
+  config: { weight_bits: 4, activation_bits: 8, accumulator_bits: 16, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: "affine", exponent_bits: 0 },
   latency: 2,
   counts: {},
 };
