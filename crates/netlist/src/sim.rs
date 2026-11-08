@@ -278,6 +278,10 @@ impl Simulator {
         self.ports.get(port).map(|bits| read(&self.values, bits) as u64)
     }
 
+    pub fn get_wide(&self, port: &str) -> Option<u128> {
+        self.ports.get(port).map(|bits| read(&self.values, bits))
+    }
+
     pub fn cycle(&self) -> u64 {
         self.cycle
     }

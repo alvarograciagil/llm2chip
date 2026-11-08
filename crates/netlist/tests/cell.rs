@@ -1,15 +1,16 @@
 //! The generated gates must compute exactly what the arithmetic says they should.
 
+use netlist::format::WeightCoding;
 use netlist::{cell_design, to_verilog, to_vhdl, verilog_testbench, vhdl_testbench, CellConfig, Simulator, TestStep};
 use std::process::Command;
 
 const CONFIGS: [CellConfig; 6] = [
-    CellConfig { weight_bits: 4, activation_bits: 8, accumulator_bits: 24, mac_stages: 1, adder_stages: 1, addr_bits: 4 },
-    CellConfig { weight_bits: 4, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 5 },
-    CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 6 },
-    CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 4, adder_stages: 3, addr_bits: 6 },
-    CellConfig { weight_bits: 3, activation_bits: 12, accumulator_bits: 20, mac_stages: 3, adder_stages: 1, addr_bits: 3 },
-    CellConfig { weight_bits: 6, activation_bits: 16, accumulator_bits: 12, mac_stages: 1, adder_stages: 2, addr_bits: 4 },
+    CellConfig { weight_bits: 4, activation_bits: 8, accumulator_bits: 24, mac_stages: 1, adder_stages: 1, addr_bits: 4, coding: WeightCoding::Affine, exponent_bits: 0 },
+    CellConfig { weight_bits: 4, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 5, coding: WeightCoding::Affine, exponent_bits: 0 },
+    CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 6, coding: WeightCoding::Affine, exponent_bits: 0 },
+    CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 4, adder_stages: 3, addr_bits: 6, coding: WeightCoding::Affine, exponent_bits: 0 },
+    CellConfig { weight_bits: 3, activation_bits: 12, accumulator_bits: 20, mac_stages: 3, adder_stages: 1, addr_bits: 3, coding: WeightCoding::Affine, exponent_bits: 0 },
+    CellConfig { weight_bits: 6, activation_bits: 16, accumulator_bits: 12, mac_stages: 1, adder_stages: 2, addr_bits: 4, coding: WeightCoding::Affine, exponent_bits: 0 },
 ];
 
 struct Rng(u64);
@@ -140,7 +141,7 @@ fn pipeline_stages_change_latency_but_not_the_answer() {
     let activations = [1000, 250, -77];
     let mut results = Vec::new();
     for stages in 1..=4 {
-        let c = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: stages, adder_stages: stages, addr_bits: 3 };
+        let c = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: stages, adder_stages: stages, addr_bits: 3, coding: WeightCoding::Affine, exponent_bits: 0 };
         let mut sim = Simulator::new(&cell_design(c)).unwrap();
         clear(&mut sim);
         load(&mut sim, c, &weights);

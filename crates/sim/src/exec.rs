@@ -191,6 +191,10 @@ impl Engine {
         self.position
     }
 
+    pub fn buffer(&self, index: usize) -> &[f32] {
+        &self.buffers[index]
+    }
+
     pub fn program(&self) -> &Program {
         &self.program
     }

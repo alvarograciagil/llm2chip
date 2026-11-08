@@ -5,7 +5,7 @@ use netlist::block::tables;
 use netlist::demo::read_block_value;
 use netlist::{die_design, CellConfig, DieConfig, DieProgram, Simulator};
 use sim::lower::Layout;
-use sim::{Engine, Numeric, Weights};
+use sim::{ExactEngine, Engine, Numeric, Weights};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -23,7 +23,7 @@ const CONFIG: &str = r#"{
 fn die_config() -> DieConfig {
     DieConfig {
         cells: 1,
-        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3 },
+        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0 },
         scale_bits: 16,
         reg_bits: 9,
         index_bits: 9,
@@ -160,7 +160,7 @@ fn tiny_model_runs_whole_on_the_gates() {
     }
 
     let c = die_config();
-    let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), c).unwrap();
+    let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), c, true).unwrap();
     let mut sim = Simulator::new(&die_design(c)).unwrap();
     sim.set("start", 1).unwrap();
     sim.tick();
@@ -212,5 +212,19 @@ fn tiny_model_runs_whole_on_the_gates() {
     let spread: f32 = expected.iter().map(|v| v.abs()).sum::<f32>() / 8.0;
     let error: f32 = got.iter().zip(&expected).map(|(a, b)| (a - b).abs()).sum::<f32>() / 8.0;
     assert!(error < 0.08 * spread.max(0.2), "error medio {error}, magnitud {spread}");
+
+    // The fast machine must reach the same bits as the gates, in every buffer.
+    let mut vm = ExactEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap()).unwrap();
+    for (position, token) in tokens.iter().enumerate() {
+        vm.step(*token, position + 1 == tokens.len()).unwrap();
+    }
+    for (buffer, length) in program.buffers.iter().enumerate() {
+        let gates = layout.register_of(buffer);
+        let fast = vm.register_of(buffer);
+        for index in 0..*length as u32 {
+            let (mantissa, _) = read_block_value(&mut sim, c, gates, index);
+            assert_eq!(mantissa, vm.mantissa(fast, index), "búfer {buffer}, elemento {index}");
+        }
+    }
     std::fs::remove_dir_all(&dir).ok();
 }

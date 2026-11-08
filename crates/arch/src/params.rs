@@ -1,3 +1,5 @@
+use netlist::format::{WeightCoding, WeightFormat, TABLE_BITS};
+use netlist::CellConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -66,7 +68,12 @@ pub struct ChipParams {
     pub adder_stages: u32,
     pub noc_stages: u32,
 
+    pub weight_coding: WeightCoding,
     pub weight_bits: u32,
+    /// Float: exponent bits. Posit: `es`. Logarithmic: fraction bits.
+    pub weight_exponent_bits: u32,
+    /// Whether each group also stores a bias, as MLX does; GGUF's Q4_0 does not.
+    pub weight_bias: bool,
     /// Keeps the model's own 8-bit tensors, as real mixed checkpoints do.
     pub use_model_mix: bool,
     /// Weights sharing one scale and bias. 0 means no per-group affine terms.
@@ -110,7 +117,10 @@ impl Default for ChipParams {
             mac_stages: 2,
             adder_stages: 2,
             noc_stages: 1,
+            weight_coding: WeightCoding::Affine,
             weight_bits: 4,
+            weight_exponent_bits: 5,
+            weight_bias: true,
             use_model_mix: true,
             group_size: 32,
             scale_bits: 16,
@@ -137,5 +147,73 @@ impl Default for ChipParams {
 impl ChipParams {
     pub fn has(&self, optimization: &str) -> bool {
         self.optimizations.contains(optimization)
+    }
+
+    /// True when per-group factors exist in this format.
+    pub fn uses_groups(&self) -> bool {
+        self.group_size > 0 && matches!(self.weight_coding, WeightCoding::Affine | WeightCoding::Float)
+    }
+
+    /// Stored bits per weight that the group's factors add.
+    pub fn group_overhead_bits(&self, group: u32) -> f64 {
+        if !self.uses_groups() || group == 0 {
+            return 0.0;
+        }
+        let factors = if self.weight_coding == WeightCoding::Affine && self.weight_bias { 2.0 } else { 1.0 };
+        factors * self.scale_bits as f64 / group as f64
+    }
+
+    pub fn mixes_widths(&self) -> bool {
+        self.use_model_mix && self.weight_coding == WeightCoding::Affine
+    }
+
+    /// Width of the cell's stored code.
+    pub fn cell_weight_bits(&self) -> u32 {
+        if self.mixes_widths() {
+            self.weight_bits.max(8)
+        } else {
+            self.weight_bits
+        }
+    }
+
+    /// The accumulator the format needs, never narrower than the one requested.
+    pub fn effective_accumulator(&self) -> u32 {
+        self.cell_config(1).accumulator_bits
+    }
+
+    pub fn cell_config(&self, addr_bits: u32) -> CellConfig {
+        let weight_bits = self.cell_weight_bits().clamp(2, 32);
+        let mut config = CellConfig {
+            weight_bits,
+            activation_bits: self.activation_bits,
+            accumulator_bits: self.accumulator_bits,
+            mac_stages: self.mac_stages,
+            adder_stages: self.adder_stages,
+            addr_bits,
+            coding: self.weight_coding,
+            exponent_bits: self.weight_coding.legal_exponent_bits(weight_bits, self.weight_exponent_bits),
+        };
+        config.accumulator_bits = config.accumulator_bits.max(config.required_accumulator());
+        config
+    }
+
+    /// Bits of the lookup table each cell needs, for formats that have one.
+    pub fn cell_table_bits(&self) -> f64 {
+        if self.weight_coding == WeightCoding::Codebook {
+            (1u64 << self.cell_weight_bits().min(16)) as f64 * TABLE_BITS as f64
+        } else {
+            0.0
+        }
+    }
+
+    pub fn weight_format(&self) -> WeightFormat {
+        WeightFormat {
+            coding: self.weight_coding,
+            bits: self.weight_bits.clamp(1, 32),
+            exponent_bits: self.weight_coding.legal_exponent_bits(self.weight_bits.max(2), self.weight_exponent_bits),
+            bias: self.weight_bias,
+            group_size: if self.uses_groups() { self.group_size } else { 0 },
+            keep_source: self.mixes_widths(),
+        }
     }
 }

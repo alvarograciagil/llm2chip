@@ -1,15 +1,15 @@
 //! Attention and the delta rule, run as microprograms on the gates. Each result is
 //! checked against the integer behavioural model and against ordinary floating point.
 
-use netlist::block::{exponent_register, tables, Alu, Assembly, AttentionRegs, Behavior, DeltaRegs, FN_SIGMOID, FN_SOFTPLUS};
-use netlist::die::{OP_ACCUMULATOR, OP_ADD, OP_FUNCTION, OP_IMMEDIATE, OP_LZC, OP_MAX, OP_MOV, OP_MUL, OP_PARITY, OP_SHIFT_LEFT, OP_SUB};
+use netlist::block::{exponent_register, tables, Alu, Assembly, AttentionRegs, Behavior, BlockOps, DeltaRegs, FN_SIGMOID, FN_SOFTPLUS};
+use netlist::die::{OP_ADD, OP_FUNCTION, OP_IMMEDIATE, OP_LZC, OP_MAX, OP_MOV, OP_MUL, OP_PARITY, OP_SHIFT_LEFT, OP_SUB};
 use netlist::demo::{attention_demo, block_config, block_host_steps, delta_demo, read_block_value};
 use netlist::{to_verilog, verilog_testbench, TestStep, die_design, CellConfig, DieConfig, DieProgram, Simulator};
 
 fn config() -> DieConfig {
     DieConfig {
         cells: 1,
-        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3 },
+        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0 },
         scale_bits: 16,
         reg_bits: 4,
         index_bits: 6,
@@ -115,8 +115,8 @@ fn norms_and_function_tables_work_in_gates() {
     let mut asm = Assembly::new(&c);
     let x = [3.0, -4.0, 1.5, 0.5];
     asm.load_vector(0, &x);
-    asm.rms_normalize(0, 1, 4, (2, 3));
-    asm.l2_normalize(0, 4, 4, (5, 6));
+    asm.rms_normalize(0, 1, 4, (2, 3), None, None);
+    asm.l2_normalize(0, 4, 4, (5, 6), None);
     asm.function(FN_SIGMOID, 0, 7, 4);
     asm.function(FN_SOFTPLUS, 0, 8, 4);
 
@@ -253,7 +253,9 @@ fn every_single_operation_matches_the_model() {
         mk(OP_LZC, (0, 0), (0, 0), 14),
         { let mut s = mk(OP_MOV, (0, 0), (1, 0), 15); s.accumulator_clear = true; s.accumulate = true; s.write = false; s },
         { let mut s = mk(OP_MOV, (0, 1), (1, 1), 16); s.accumulate = true; s.write = false; s },
-        { let mut s = mk(OP_ACCUMULATOR, (0, 0), (0, 0), 17); s.shift = 10; s },
+        { let mut s = mk(OP_MOV, (0, 0), (0, 0), 17); s.wide_write = true; s.write = false; s.dst = (0, 4); s },
+        { let mut s = mk(OP_MOV, (0, 4), (0, 0), 17); s.wide_clear = true; s.wide_scan = true; s.write = false; s },
+        mk(netlist::die::OP_WIDE_LZC, (0, 0), (0, 0), 17),
     ];
     steps.retain(|_| true);
     asm.steps = steps;

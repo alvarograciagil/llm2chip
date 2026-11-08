@@ -73,17 +73,9 @@ fn cell_config(config: &str, params: &str) -> Result<CellConfig, JsError> {
     let model = ModelGraph::from_config_json("modelo", config).map_err(|e| JsError::new(&e.0))?;
     let p: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&e.to_string()))?;
     let report = estimate(&model, &p).map_err(|e| JsError::new(&e))?;
-    let weight_bits = if p.use_model_mix { p.weight_bits.max(8) } else { p.weight_bits };
     let cell_bits = report.metric("cell_sram_kb").unwrap_or(1.0) * 8_000.0;
-    let words = (cell_bits / weight_bits as f64).ceil().max(2.0);
-    Ok(CellConfig {
-        weight_bits,
-        activation_bits: p.activation_bits,
-        accumulator_bits: p.accumulator_bits,
-        mac_stages: p.mac_stages,
-        adder_stages: p.adder_stages,
-        addr_bits: (words.log2().ceil() as u32).clamp(1, 20),
-    })
+    let words = (cell_bits / p.cell_weight_bits() as f64).ceil().max(2.0);
+    Ok(p.cell_config((words.log2().ceil() as u32).clamp(1, 20)))
 }
 
 #[wasm_bindgen]
@@ -202,7 +194,7 @@ impl DieSimulation {
         let config = if kind == "mlp" {
             DieConfig {
                 cells: 3,
-                cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: p.mac_stages, adder_stages: p.adder_stages, addr_bits: 4 },
+                cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: p.mac_stages, adder_stages: p.adder_stages, addr_bits: 4, coding: Default::default(), exponent_bits: 0 },
                 scale_bits: 16,
                 reg_bits: 3,
                 index_bits: 4,

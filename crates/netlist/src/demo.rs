@@ -1,7 +1,7 @@
 //! A worked example the die executes: one gated MLP layer with a residual.
 //! Used by the tests and shown live in the app.
 
-use crate::block::{exponent_register, tables, Assembly, AttentionRegs, DeltaRegs};
+use crate::block::{exponent_register, tables, Assembly, AttentionRegs, BlockOps, DeltaRegs};
 use crate::verilog::TestStep;
 use crate::{CellConfig, ControlWord, DieConfig, DieProgram, Simulator};
 
@@ -67,7 +67,7 @@ pub fn reference(e: &Example) -> Vec<i64> {
     let gate = matvec_ref(&e.matrices[0], &e.factors[0], e.groups[0], &e.x, 2);
     let up = matvec_ref(&e.matrices[1], &e.factors[1], e.groups[1], &e.x, 2);
     let silu: Vec<i64> = gate.iter().map(|v| table_value(((mask(*v, 16) >> 8) & 0xFF) as usize)).collect();
-    let product: Vec<i64> = silu.iter().zip(&up).map(|(a, b)| wrap((*a as i128 * *b as i128) >> 8, 16)).collect();
+    let product: Vec<i64> = silu.iter().zip(&up).map(|(a, b)| crate::block::round_right(*a as i128 * *b as i128, 8, 16)).collect();
     let down = matvec_ref(&e.matrices[2], &e.factors[2], e.groups[2], &product, 3);
     down.iter().zip(&e.x).map(|(a, b)| wrap(*a as i128 + *b as i128, 16)).collect()
 }
@@ -153,7 +153,7 @@ pub struct BlockDemo {
 pub fn block_config() -> DieConfig {
     DieConfig {
         cells: 1,
-        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3 },
+        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0 },
         scale_bits: 16,
         reg_bits: 4,
         index_bits: 6,

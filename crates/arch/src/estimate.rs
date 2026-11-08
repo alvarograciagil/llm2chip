@@ -2,6 +2,7 @@ use crate::floorplan::{build_floorplan, Floorplan};
 use crate::optim::catalog;
 use crate::params::{ChipParams, KvBackend, LinkKind, WeightBackend};
 use crate::tech::{node, TechNode};
+use netlist::format::WeightCoding;
 use netlist::{cell_design, CellConfig};
 use model_ir::{Block, ModelGraph, StageKind, WeightTensor};
 use serde::Serialize;
@@ -95,6 +96,17 @@ impl Report {
     }
 }
 
+fn coding_name(coding: WeightCoding) -> &'static str {
+    match coding {
+        WeightCoding::Fixed => "punto fijo",
+        WeightCoding::Affine => "formato afín",
+        WeightCoding::Float => "coma flotante",
+        WeightCoding::Posit => "posit",
+        WeightCoding::Log => "formato logarítmico",
+        WeightCoding::Codebook => "libro de códigos",
+    }
+}
+
 struct Storage {
     /// Weight bits held by the chip for the chosen budget.
     chip_bits: f64,
@@ -121,32 +133,26 @@ fn is_small_float(t: &WeightTensor) -> bool {
         || t.name.ends_with("conv1d")
 }
 
-fn overhead_bits(p: &ChipParams, group: u32) -> f64 {
-    if group == 0 {
-        0.0
-    } else {
-        2.0 * p.scale_bits as f64 / group as f64
-    }
-}
-
 fn storage(model: &ModelGraph, p: &ChipParams, budget_params: f64) -> Storage {
     let mut model_bits = 0.0;
     let mut external_bits = 0.0;
     let mut read_bits = 0.0;
     let mut read_weights = 0.0;
     let mut has_wide = false;
+    // Small float tensors never lose precision below what the weights themselves keep.
+    let small_bits = 16.0f64.max(if p.weight_coding.shifts() || p.weight_coding == WeightCoding::Fixed { p.weight_bits as f64 } else { 0.0 });
 
     for t in model.tensors.iter().filter(|t| tensor_included(t, p)) {
         let params = t.params() as f64;
         if is_small_float(t) {
-            model_bits += params * 16.0;
+            model_bits += params * small_bits;
             continue;
         }
-        let per_weight = if p.use_model_mix && t.wide {
+        let per_weight = if p.mixes_widths() && t.wide {
             has_wide = true;
-            8.0 + overhead_bits(p, p.group_size * 2)
+            8.0 + p.group_overhead_bits(p.group_size * 2)
         } else {
-            p.weight_bits as f64 + overhead_bits(p, p.group_size)
+            p.weight_bits as f64 + p.group_overhead_bits(p.group_size)
         };
         let mut factor = 1.0;
         if p.has("compresion_pesos") {
@@ -230,14 +236,7 @@ fn stage_totals(model: &ModelGraph, p: &ChipParams) -> StageTotals {
 
 /// Logic area of one cell, from the gates its generated netlist actually contains.
 fn netlist_cell_um2(tech: &TechNode, p: &ChipParams, widest: u32, addr_bits: u32) -> f64 {
-    let config = CellConfig {
-        weight_bits: widest,
-        activation_bits: p.activation_bits,
-        accumulator_bits: p.accumulator_bits,
-        mac_stages: p.mac_stages,
-        adder_stages: p.adder_stages,
-        addr_bits,
-    };
+    let config = CellConfig { weight_bits: widest, ..p.cell_config(addr_bits) };
     cell_design(config)
         .flat_counts()
         .iter()
@@ -264,12 +263,14 @@ struct Multiplier {
 }
 
 fn weight_multiplier(tech: &TechNode, p: &ChipParams, widest: u32, cell_bits: f64) -> Multiplier {
-    let products = widest as f64 * p.activation_bits as f64;
+    let significand = CellConfig { weight_bits: widest, ..p.cell_config(1) }.significand_bits();
+    let products = significand as f64 * p.activation_bits as f64;
     let addr_bits = (cell_bits / widest as f64).max(2.0).log2().ceil() as u32;
     let cell_logic = netlist_cell_um2(tech, p, widest, addr_bits);
-    let accumulator = p.accumulator_bits as f64 * (tech.fa_um2 + tech.ff_um2);
+    let accumulator_bits = p.effective_accumulator() as f64;
+    let accumulator = accumulator_bits * (tech.fa_um2 + tech.ff_um2);
     let mut area = (cell_logic - accumulator).max(0.0);
-    let mut energy = (products + p.accumulator_bits as f64) * tech.e_fa_pj;
+    let mut energy = (products + accumulator_bits) * tech.e_fa_pj;
     let mut delay_factor = 1.0;
     let mut cycle_factor = 1.0;
     if p.has("sin_multiplicadores") {
@@ -362,8 +363,14 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     push("cell_macs", "Celdas: multiplicadores", n * mult.area_um2 * um2 * ROUTING_OVERHEAD,
         "Multiplican peso por activación y acumulan la suma de cada fila.");
 
-    if p.group_size > 0 {
-        let unit = (p.scale_bits * p.accumulator_bits) as f64 * tech.fa_um2;
+    if p.cell_table_bits() > 0.0 {
+        let density = tech.sram_density((p.cell_table_bits() / 1e3).max(1.0));
+        push("weight_tables", "Tablas de pesos", n * p.cell_table_bits() * sram_margin(p) / 1e6 / density,
+            "Cada celda guarda los valores reales a los que apuntan sus códigos.");
+    }
+
+    if p.uses_groups() {
+        let unit = (p.scale_bits * p.effective_accumulator()) as f64 * tech.fa_um2;
         push("scale_units", "Escala y sesgo por grupo", n * unit * um2 * ROUTING_OVERHEAD,
             "Aplican la escala y el sesgo que comparten los pesos de cada grupo.");
     }
@@ -436,7 +443,7 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
 
 fn category_of(id: &str) -> Category {
     match id {
-        "cell_weights" => Category::Memoria,
+        "cell_weights" | "weight_tables" => Category::Memoria,
         "cell_macs" | "scale_units" => Category::Calculo,
         "activation_noc" | "links" => Category::Interconexion,
         "vector_units" | "function_units" => Category::Vectorial,
@@ -447,8 +454,9 @@ fn category_of(id: &str) -> Category {
 
 fn driven_by(id: &str) -> &'static [&'static str] {
     match id {
-        "cell_weights" => &["max_params_g", "weight_bits", "group_size", "weight_backend"],
-        "cell_macs" => &["macs_per_die", "weight_bits", "activation_bits", "mac_stages"],
+        "cell_weights" => &["max_params_g", "weight_coding", "weight_bits", "group_size", "weight_backend"],
+        "weight_tables" => &["weight_coding", "weight_bits"],
+        "cell_macs" => &["macs_per_die", "weight_coding", "weight_bits", "weight_exponent_bits", "activation_bits", "mac_stages"],
         "scale_units" => &["group_size", "scale_bits"],
         "activation_noc" => &["macs_per_die", "activation_bits", "noc_stages"],
         "vector_units" => &["vector_lanes_per_die", "vector_bits"],
@@ -504,11 +512,19 @@ fn check_optimizations(p: &ChipParams, out: &mut Vec<Violation>) {
             out.push(error(&format!("«{a}» y «{b}» son incompatibles."), "Elige una de las dos."));
         }
     }
-    if p.has("sin_multiplicadores") && (p.weight_bits > 4 || p.use_model_mix) {
+    if p.has("sin_multiplicadores") && (p.weight_bits > 4 || p.mixes_widths() || p.weight_coding.shifts()) {
         out.push(aviso(
             "«sin_multiplicadores» solo rinde lo anunciado con pesos de 4 bits o menos.",
             "Baja los bits de peso y desactiva la mezcla de 8 bits.",
         ));
+    }
+    if p.effective_accumulator() > p.accumulator_bits {
+        out.push(Violation {
+            severity: Severity::Aviso,
+            message: format!("Este formato de pesos necesita un acumulador de {} bits; se usa ese ancho en lugar de {}.", p.effective_accumulator(), p.accumulator_bits),
+            fix: "Sube los bits de acumulador o usa un formato más estrecho.".into(),
+            field: Some("accumulator_bits"),
+        });
     }
     if p.weight_backend == WeightBackend::Rom {
         out.push(aviso(
@@ -613,7 +629,10 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
     let total_area = die_area * d;
 
     // Timing: each token visits every stage in order, so stage times add up.
-    let logic_ns = (store.widest_weight_bits + p.activation_bits) as f64 * tech.fa_delay_ns * mult.delay_factor;
+    let cell = CellConfig { weight_bits: store.widest_weight_bits, ..p.cell_config(1) };
+    // Decoding and placing a floating product take a subtraction and a shifter's levels.
+    let decode_levels = if cell.shifts() { cell.exponent_width() + 8 } else { (cell.coding == WeightCoding::Codebook) as u32 };
+    let logic_ns = (cell.significand_bits() + p.activation_bits + decode_levels) as f64 * tech.fa_delay_ns * mult.delay_factor;
     let fmax = tech.fmax_ghz.min(1.0 / (logic_ns / p.mac_stages.max(1) as f64 + tech.ff_overhead_ns));
     let freq = p.freq_ghz.min(fmax);
     if p.freq_ghz > fmax {
@@ -626,7 +645,7 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
     }
     let tree_levels = n.log2().ceil().max(1.0);
     let matvec_latency = (p.mac_stages + p.adder_stages) as f64 + 2.0 * tree_levels * p.noc_stages.max(1) as f64;
-    let group_overhead = if p.group_size > 0 { 1.0 + 1.0 / p.group_size as f64 } else { 1.0 };
+    let group_overhead = if p.uses_groups() { 1.0 + 1.0 / p.group_size as f64 } else { 1.0 };
     let weight_cycles = totals.weights / n * group_overhead * mult.cycle_factor;
     let lanes = p.vector_lanes_per_die.max(1) as f64;
     let vector_latency = 6.0;
@@ -702,8 +721,8 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
     let e_state = e_kv + e_delta;
     let hop_mm = die_area.sqrt() * 0.02;
     let e_noc = totals.weights * p.activation_bits as f64 * tech.e_wire_pj_bit_mm * hop_mm;
-    let e_scale = if p.group_size > 0 {
-        totals.weights / p.group_size as f64 * (p.scale_bits * p.accumulator_bits) as f64 * tech.e_fa_pj
+    let e_scale = if p.uses_groups() {
+        totals.weights / p.group_size as f64 * (p.scale_bits * p.effective_accumulator()) as f64 * tech.e_fa_pj
     } else {
         0.0
     };
@@ -738,7 +757,9 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
             "cell_weights" => (weight_share, e_read, read_bytes,
                 format!("{:.1} KB por celda con {} celdas por die, a unos {density:.0} Mbit/mm².", cell_bytes / 1e3, p.macs_per_die)),
             "cell_macs" => (weight_share, e_mac, 0.0,
-                format!("{} multiplicadores de {} × {} bits, de {:.0} µm² cada uno.", p.macs_per_die, store.widest_weight_bits, p.activation_bits, mult.area_um2)),
+                format!("{} multiplicadores de {} × {} bits para pesos de {} bits en {}, de {:.0} µm² cada uno.", p.macs_per_die, cell.significand_bits(), p.activation_bits, store.widest_weight_bits, coding_name(p.weight_coding), mult.area_um2)),
+            "weight_tables" => (weight_share, 0.0, 0.0,
+                format!("{:.1} Kbit de tabla por celda.", p.cell_table_bits() / 1e3)),
             "scale_units" => (weight_share, e_scale, 0.0,
                 format!("Una unidad por celda, usada una vez cada {} pesos.", p.group_size)),
             "activation_noc" => (weight_share, e_noc, noc_bytes,

@@ -53,6 +53,10 @@ pub struct ControlWord {
     pub accumulate: bool,
     pub accumulator_clear: bool,
     pub link_send: bool,
+    pub wide_write: bool,
+    pub wide_scan: bool,
+    pub wide_clear: bool,
+    pub load_wide_shift: bool,
     pub read_step: bool,
     pub read_reset: bool,
     pub write_en: bool,
@@ -82,6 +86,9 @@ pub const OP_ACCUMULATOR: u32 = 9;
 pub const OP_IMMEDIATE: u32 = 10;
 pub const OP_PARITY: u32 = 11;
 pub const OP_LINK: u32 = 12;
+pub const OP_WIDE_LZC: u32 = 13;
+pub const OP_WIDE_OUT: u32 = 14;
+pub const OP_EQUAL: u32 = 15;
 const OP_BITS: u32 = 4;
 const SHIFT_REG_BITS: u32 = 6;
 
@@ -105,6 +112,10 @@ fn field_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("accumulate", 1),
         ("accumulator_clear", 1),
         ("link_send", 1),
+        ("wide_write", 1),
+        ("wide_scan", 1),
+        ("wide_clear", 1),
+        ("load_wide_shift", 1),
         ("read_step", 1),
         ("read_reset", 1),
         ("write_en", 1),
@@ -141,6 +152,10 @@ impl ControlWord {
             self.accumulate as u128,
             self.accumulator_clear as u128,
             self.link_send as u128,
+            self.wide_write as u128,
+            self.wide_scan as u128,
+            self.wide_clear as u128,
+            self.load_wide_shift as u128,
             self.read_step as u128,
             self.read_reset as u128,
             self.write_en as u128,
@@ -329,7 +344,6 @@ impl Gen {
         let mux_addr = self.mux_bus(addr_bits);
         let mult = self.multiplier(a, a, 1);
         let add = self.ripple_adder(a);
-        let mux_product = self.mux_bus(2 * a);
 
         let mut b = Builder::new("llm2chip_die", "Die", "Secuenciador, banco de vectores, unidad vectorial, tabla de funciones, red de activaciones y celdas.");
         let start = b.input("start", 1)[0];
@@ -502,7 +516,7 @@ impl Gen {
         let sum = b.wire("sum", a);
         let unused = b.wire("sum_carry", 1);
         b.inst("adder", &add, &[("a", aligned_a.clone()), ("b", flipped), ("cin", vec![subtract]), ("sum", sum.clone()), ("cout", unused)]);
-        let shifted = barrel_right(&mut b, &mux_product, "product_shift", &product, &fields["shift"]);
+        let shifted = self.rounded_right(&mut b, "product_shift", &product, &fields["shift"], a as usize);
 
         b.group("Comparador");
         let inverted = b.wire("cmp_inverted", a);
@@ -541,10 +555,10 @@ impl Gen {
             b.and_to(keep_magnitude, merged, magnitude_d[i]);
         }
         b.inst("magnitude_reg", &reg_a, &[("d", magnitude_d), ("q", magnitude.clone())]);
-        let leading = leading_zeros(&mut b, &magnitude[..top], a);
+        let leading = leading_zeros(&mut b, "lzc", &magnitude[..top], a);
 
         b.group("Acumulador vectorial");
-        let accumulator_bits = 2 * a + 8;
+        let accumulator_bits = 2 * a + 16;
         let acc_adder = self.ripple_adder(accumulator_bits);
         let acc_reg = self.register(accumulator_bits);
         let acc_mux = self.mux_bus(accumulator_bits);
@@ -566,6 +580,34 @@ impl Gen {
         }
         b.inst("accumulator_reg", &acc_reg, &[("d", acc_d), ("q", accumulator.clone())]);
         let acc_shifted = barrel_right(&mut b, &acc_mux, "acc_shift", &accumulator, &fields["shift"]);
+
+        // Each output's full-precision sum waits here until the largest one is known.
+        b.group("Memoria ancha");
+        let wide_write = ctl("wide_write", &mut b, &fields);
+        let wide_scan = ctl("wide_scan", &mut b, &fields);
+        let wide_clear = ctl("wide_clear", &mut b, &fields);
+        let load_wide_shift = ctl("load_wide_shift", &mut b, &fields);
+        let wide_read = b.wire("wide_read", accumulator_bits);
+        b.ram2p("wide_memory", c.index_bits, accumulator_bits, &[("raddr", index_a.clone()), ("waddr", index_w.clone()), ("we", vec![wide_write]), ("wdata", accumulator.clone()), ("rdata", wide_read.clone())]);
+        let wide_top = accumulator_bits as usize - 1;
+        let wide_magnitude = b.wire("wide_magnitude", accumulator_bits - 1);
+        let keep_wide = b.wire("wide_keep", 1)[0];
+        b.not_to(wide_clear, keep_wide);
+        let wide_magnitude_d = b.wire("wide_magnitude_d", accumulator_bits - 1);
+        for i in 0..wide_top {
+            let differs = b.wire(&format!("wide_differs{i}"), 1)[0];
+            b.xor_to(wide_read[i], wide_read[wide_top], differs);
+            let seen = b.wire(&format!("wide_seen{i}"), 1)[0];
+            b.and_to(wide_scan, differs, seen);
+            let merged = b.wire(&format!("wide_merged{i}"), 1)[0];
+            b.or_to(wide_magnitude[i], seen, merged);
+            b.and_to(keep_wide, merged, wide_magnitude_d[i]);
+        }
+        let wide_magnitude_reg = self.register(accumulator_bits - 1);
+        b.inst("wide_magnitude_reg", &wide_magnitude_reg, &[("d", wide_magnitude_d), ("q", wide_magnitude.clone())]);
+        let wide_leading = leading_zeros(&mut b, "wide_lzc", &wide_magnitude, a);
+        let wide_shift = held_shift(&mut b, "wide_shift", load_wide_shift, &low);
+        let wide_shifted = self.rounded_right(&mut b, "wide_right", &wide_read, &wide_shift, a as usize);
 
         b.group("Desplazamiento a la izquierda");
         let left_bits = 2 * a;
@@ -589,10 +631,20 @@ impl Gen {
         let immediate: Vec<Bit> = (0..a as usize).map(|i| fields["literal_b"].get(i).copied().unwrap_or(immediate_sign)).collect();
         let mut parity = vec![Bit::Zero; a as usize];
         parity[0] = read_a[0];
-        let zero = vec![Bit::Zero; a as usize];
+        // All-ones-but-the-sign when the two aligned operands match, zero otherwise.
+        let mut any_difference = Bit::Zero;
+        for (i, bit) in difference.iter().enumerate() {
+            let next = b.wire(&format!("eq_any{i}"), 1)[0];
+            b.or_to(any_difference, *bit, next);
+            any_difference = next;
+        }
+        let same = b.wire("eq_same", 1)[0];
+        b.not_to(any_difference, same);
+        let mut equal = vec![same; a as usize];
+        equal[a as usize - 1] = Bit::Zero;
         let leaves: Vec<Vec<Bit>> = vec![
             sum.clone(),
-            shifted[..a as usize].to_vec(),
+            shifted,
             table_out,
             chain_shifted[..a as usize].to_vec(),
             sum,
@@ -604,9 +656,9 @@ impl Gen {
             immediate,
             parity,
             link_in,
-            zero.clone(),
-            zero.clone(),
-            zero,
+            wide_leading,
+            wide_shifted,
+            equal,
         ];
         let result = mux_tree(&mut b, &mux_a, leaves, &op);
         b.inst("result_reg", &reg_a, &[("d", result), ("q", write_data.clone())]);
@@ -689,8 +741,33 @@ fn barrel_right(b: &mut Builder, mux: &str, name: &str, value: &[Bit], amount: &
     current
 }
 
+impl Gen {
+    /// Arithmetic right shift to `width` bits that rounds to nearest. The largest
+    /// positive value does not round up, since it would wrap around to negative.
+    fn rounded_right(&mut self, b: &mut Builder, name: &str, value: &[Bit], amount: &[Bit], width: usize) -> Vec<Bit> {
+        let mut extended = vec![Bit::Zero];
+        extended.extend_from_slice(value);
+        let mux = self.mux_bus(extended.len() as u32);
+        let shifted = barrel_right(b, &mux, name, &extended, amount);
+        let truncated = shifted[1..=width].to_vec();
+        let mut largest = b.wire(&format!("{name}_positive"), 1)[0];
+        b.not_to(truncated[width - 1], largest);
+        for (i, bit) in truncated.iter().take(width - 1).enumerate() {
+            let next = b.wire(&format!("{name}_full{i}"), 1)[0];
+            b.and_to(largest, *bit, next);
+            largest = next;
+        }
+        let carry = and_not(b, shifted[0], largest, &format!("{name}_carry"));
+        let adder = self.ripple_adder(width as u32);
+        let rounded = b.wire(&format!("{name}_rounded"), width as u32);
+        let unused = b.wire(&format!("{name}_cout"), 1);
+        b.inst(&format!("{name}_round"), &adder, &[("a", truncated), ("b", vec![Bit::Zero; width]), ("cin", vec![carry]), ("sum", rounded.clone()), ("cout", unused)]);
+        rounded
+    }
+}
+
 /// Arithmetic-free left shift by the 6-bit `amount`, filling with zeros.
-fn barrel_left(b: &mut Builder, mux: &str, name: &str, value: &[Bit], amount: &[Bit]) -> Vec<Bit> {
+pub(crate) fn barrel_left(b: &mut Builder, mux: &str, name: &str, value: &[Bit], amount: &[Bit]) -> Vec<Bit> {
     let width = value.len();
     let mut current = value.to_vec();
     for (level, select) in amount.iter().enumerate() {
@@ -726,13 +803,13 @@ fn saturate(b: &mut Builder, value: &[Bit], width: u32) -> Vec<Bit> {
 }
 
 /// How many leading zeros `bits` has, from the most significant bit, as a `width`-bit value.
-fn leading_zeros(b: &mut Builder, bits: &[Bit], width: u32) -> Vec<Bit> {
+pub(crate) fn leading_zeros(b: &mut Builder, name: &str, bits: &[Bit], width: u32) -> Vec<Bit> {
     let count_bits = (usize::BITS - bits.len().leading_zeros()) as usize;
     let mut result: Vec<Bit> = bits.len().to_le_bytes().iter().flat_map(|byte| (0..8).map(move |i| if byte >> i & 1 == 1 { Bit::One } else { Bit::Zero })).take(count_bits).collect();
     // From the least significant bit up, each set bit overrides the earlier answer.
     for (index, bit) in bits.iter().enumerate() {
         let count = bits.len() - 1 - index;
-        let chosen = b.wire(&format!("lzc_{index}"), count_bits as u32);
+        let chosen = b.wire(&format!("{name}_{index}"), count_bits as u32);
         for k in 0..count_bits {
             let literal = if count >> k & 1 == 1 { Bit::One } else { Bit::Zero };
             b.mux_to(*bit, result[k], literal, chosen[k]);
@@ -743,7 +820,7 @@ fn leading_zeros(b: &mut Builder, bits: &[Bit], width: u32) -> Vec<Bit> {
 }
 
 /// Selects one of `leaves` with the binary `select`, one level of selectors per bit.
-fn mux_tree(b: &mut Builder, mux: &str, leaves: Vec<Vec<Bit>>, select: &[Bit]) -> Vec<Bit> {
+pub(crate) fn mux_tree(b: &mut Builder, mux: &str, leaves: Vec<Vec<Bit>>, select: &[Bit]) -> Vec<Bit> {
     let width = leaves[0].len() as u32;
     let mut level = leaves;
     for (depth, bit) in select.iter().enumerate() {
@@ -859,6 +936,7 @@ impl DieProgram {
             w.literal_b = step.b.1;
             w.magnitude_clear = step.magnitude_clear;
             w.accumulator_clear = step.accumulator_clear;
+            w.wide_clear = step.wide_clear;
         }
         {
             let w = self.slot(t0 + 1);
@@ -872,6 +950,11 @@ impl DieProgram {
             w.function = step.function;
             w.magnitude_scan = step.magnitude_scan;
             w.accumulate = step.accumulate;
+            w.wide_scan = step.wide_scan;
+            w.wide_write = step.wide_write;
+            if step.wide_write {
+                w.literal_dst = step.dst.1;
+            }
         }
         if extra == 1 {
             let w = self.slot(t0 + 2);
@@ -891,6 +974,7 @@ impl DieProgram {
         w.load_shift_b = step.load_shift_b;
         w.load_shift_left = step.load_shift_left;
         w.link_send = step.link_send;
+        w.load_wide_shift = step.load_wide_shift;
     }
 
     /// Leaves the die idle for `cycles`, for example while a link settles.

@@ -1,6 +1,7 @@
 //! Generates the compute cell: weight memory, multiplier and accumulator.
 //! Weights and activations are signed two's complement.
 
+use crate::format::WeightCoding;
 use crate::{Bit, Builder, Design, Module};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -14,22 +15,30 @@ pub struct CellConfig {
     pub adder_stages: u32,
     /// log2 of the number of weights the cell's memory holds.
     pub addr_bits: u32,
+    /// How the stored codes are turned into numbers. See `format`.
+    pub coding: WeightCoding,
+    /// Float: exponent bits. Posit: `es`. Logarithmic: fraction bits. Otherwise unused.
+    pub exponent_bits: u32,
 }
 
 impl CellConfig {
     /// Cycles from presenting an input until the accumulator has absorbed it.
     pub fn latency(&self) -> u32 {
-        1 + (self.mac_stages.min(self.weight_bits).max(1) - 1) + (self.adder_stages.max(1) - 1) + 1
+        let table = (self.coding == WeightCoding::Codebook) as u32;
+        1 + table + (self.mac_stages.min(self.significand_bits()).max(1) - 1) + (self.adder_stages.max(1) - 1) + 1
     }
 
     pub(crate) fn checked(self) -> Self {
+        let weight_bits = self.weight_bits.clamp(2, 32);
         Self {
-            weight_bits: self.weight_bits.clamp(2, 32),
+            weight_bits,
             activation_bits: self.activation_bits.clamp(2, 64),
-            accumulator_bits: self.accumulator_bits.clamp(2, 64),
+            accumulator_bits: self.accumulator_bits.clamp(2, 128),
             mac_stages: self.mac_stages.clamp(1, 6),
             adder_stages: self.adder_stages.clamp(1, 6),
             addr_bits: self.addr_bits.clamp(1, 20),
+            coding: self.coding,
+            exponent_bits: self.coding.legal_exponent_bits(weight_bits, self.exponent_bits),
         }
     }
 }
@@ -286,12 +295,13 @@ impl Gen {
 
     pub(crate) fn cell(&mut self, c: CellConfig) -> String {
         let (w, a, acc) = (c.weight_bits, c.activation_bits, c.accumulator_bits);
-        let product_bits = w + a;
-        let mac_stages = c.mac_stages.min(w).max(1);
+        let significand = c.significand_bits();
+        let product_bits = significand + a;
+        let mac_stages = c.mac_stages.min(significand).max(1);
         let counter = self.address_counter(c.addr_bits);
         let addr_mux = self.mux_bus(c.addr_bits);
         let x_reg = self.register(a);
-        let multiplier = self.multiplier(w, a, mac_stages);
+        let multiplier = self.multiplier(significand, a, mac_stages);
         let acc_reg = self.register(acc);
         let accumulator = self.accumulator(acc);
 
@@ -308,6 +318,8 @@ impl Gen {
         let run = b.input("run", 1)[0];
         let x = b.input("x", a);
         let total = b.output("total", acc);
+        let table_ports = (c.coding == WeightCoding::Codebook).then(|| (b.input("table_en", 1)[0], b.input("table_addr", w), b.input("table_data", significand)));
+        let exp_base = c.shifts().then(|| b.input("exp_base", c.exponent_width()));
 
         b.group("Direcciones");
         let address = b.wire("address", c.addr_bits);
@@ -319,24 +331,51 @@ impl Gen {
         let weight = b.wire("weight", w);
         b.sram("weight_sram", c.addr_bits, w, &[("addr", mem_addr), ("we", load_en), ("wdata", load_data), ("rdata", weight.clone())]);
 
+        b.group("Decodificación del formato");
+        let decoded = self.decode(&mut b, &c, weight, table_ports);
+
         b.group("Alineación");
         let x_aligned = b.wire("x_aligned", a);
         b.inst("x_reg", &x_reg, &[("d", x), ("q", x_aligned.clone())]);
         let mut valid = b.wire("valid0", 1)[0];
         b.dff_to(run, valid);
+        let x_aligned = if c.coding == WeightCoding::Codebook {
+            let second = b.wire("x_table", a);
+            b.inst("x_table_reg", &x_reg, &[("d", x_aligned), ("q", second.clone())]);
+            let next = b.wire("valid_table", 1)[0];
+            b.dff_to(valid, next);
+            valid = next;
+            second
+        } else {
+            x_aligned
+        };
+        let window = exp_base.map(|base| self.exponent_window(&mut b, &c, &decoded.exponent, &base));
 
         b.group("Multiplicador");
         let product = b.wire("product", product_bits);
-        b.inst("multiplier", &multiplier, &[("weight", weight), ("x", x_aligned), ("product", product.clone())]);
+        b.inst("multiplier", &multiplier, &[("weight", decoded.significand), ("x", x_aligned), ("product", product.clone())]);
+        let mut window = window;
         for stage in 1..mac_stages {
             let next = b.wire(&format!("valid_mul{stage}"), 1)[0];
             b.dff_to(valid, next);
             valid = next;
+            window = window.map(|(amount, under)| {
+                let q = b.wire(&format!("amount_mul{stage}"), amount.len() as u32);
+                for (d, out) in amount.iter().zip(&q) {
+                    b.dff_to(*d, *out);
+                }
+                let q_under = b.wire(&format!("under_mul{stage}"), 1)[0];
+                b.dff_to(under, q_under);
+                (q, q_under)
+            });
         }
 
         b.group("Etapas de suma");
         let sign = *product.last().expect("producto sin bits");
         let mut value: Vec<Bit> = (0..acc as usize).map(|i| product.get(i).copied().unwrap_or(sign)).collect();
+        if let Some((amount, under)) = window {
+            value = self.place_product(&mut b, acc, value, &amount, under);
+        }
         for stage in 1..c.adder_stages {
             let q = b.wire(&format!("value_q{stage}"), acc);
             b.inst(&format!("value_reg{stage}"), &acc_reg, &[("d", value), ("q", q.clone())]);

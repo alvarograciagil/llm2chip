@@ -2,6 +2,7 @@
 //! The schematic, the simulator and the Verilog export all read this one structure.
 
 pub mod block;
+pub mod format;
 mod cell;
 pub mod demo;
 pub mod die;

@@ -7,7 +7,7 @@ use std::process::Command;
 fn config() -> DieConfig {
     DieConfig {
         cells: 3,
-        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 4 },
+        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 4, coding: Default::default(), exponent_bits: 0 },
         scale_bits: 16,
         reg_bits: 3,
         index_bits: 4,
