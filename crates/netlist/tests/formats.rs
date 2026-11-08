@@ -335,7 +335,7 @@ fn exported_project_simulates_and_synthesises() {
     let compile = Command::new("iverilog").current_dir(&dir).args(["-g2005", "-s", "testbench", "-o", "build/tb.vvp", "rtl/compute_cell.v", "tb/testbench.v"]).output().unwrap();
     assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
     let run = Command::new("vvp").current_dir(&dir).arg("build/tb.vvp").output().unwrap();
-    let last = String::from_utf8_lossy(&run.stdout).lines().filter(|l| l.parse::<u64>().is_ok()).last().unwrap().parse::<u64>().unwrap();
+    let last = String::from_utf8_lossy(&run.stdout).lines().rfind(|l| l.parse::<u64>().is_ok()).unwrap().parse::<u64>().unwrap();
     assert_eq!(last, 2100, "7 × 300");
     let synth = Command::new("yosys").current_dir(&dir).args(["-q", "-s", "synth/fpga.ys"]).output().unwrap();
     assert!(synth.status.success(), "{}", String::from_utf8_lossy(&synth.stderr));
