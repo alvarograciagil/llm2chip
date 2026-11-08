@@ -1,6 +1,8 @@
 //! Every weight format's gates must agree with its reference arithmetic.
 
+use netlist::export::{project_files, ProjectOptions};
 use netlist::format::{log_table, WeightCoding};
+use netlist::multiplier::MultiplierKind;
 use netlist::{cell_design, to_verilog, verilog_testbench, CellConfig, Simulator, TestStep};
 use std::process::Command;
 
@@ -16,7 +18,7 @@ impl Rng {
 }
 
 fn config(coding: WeightCoding, weight_bits: u32, exponent_bits: u32, mac_stages: u32) -> CellConfig {
-    let mut c = CellConfig { weight_bits, activation_bits: 16, accumulator_bits: 32, mac_stages, adder_stages: 1, addr_bits: 4, coding, exponent_bits };
+    let mut c = CellConfig { weight_bits, activation_bits: 16, accumulator_bits: 32, mac_stages, adder_stages: 1, addr_bits: 4, coding, exponent_bits, multiplier: netlist::multiplier::MultiplierKind::Array };
     c.accumulator_bits = c.required_accumulator().max(32);
     c
 }
@@ -248,5 +250,95 @@ fn exported_float_cell_matches_the_simulator() {
     let run = Command::new("vvp").arg(&binary).output().unwrap();
     let theirs: Vec<String> = String::from_utf8_lossy(&run.stdout).lines().filter(|l| l.parse::<u64>().is_ok()).map(str::to_string).collect();
     assert_eq!(ours, theirs);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn every_multiplier_matches_reference_arithmetic() {
+    let mut rng = Rng(0x5A5A_1234_F00D_BEEF);
+    for kind in [MultiplierKind::Array, MultiplierKind::Wallace, MultiplierKind::Booth] {
+        for (bits, stages) in [(2, 1), (3, 1), (4, 1), (4, 2), (5, 3), (8, 1), (8, 3), (11, 2), (16, 4), (24, 3), (32, 1)] {
+            let mut c = config(WeightCoding::Fixed, bits, 0, stages);
+            c.multiplier = kind;
+            for _ in 0..6 {
+                let list = codes(&mut rng, bits);
+                check(c, &list, 0, &mut rng);
+            }
+        }
+        // Every 4-bit weight against the extreme activations.
+        let c = CellConfig { multiplier: kind, ..config(WeightCoding::Fixed, 4, 0, 1) };
+        let mut sim = Simulator::new(&cell_design(c)).unwrap();
+        for code in 0..16u64 {
+            for x in [-32768i64, 32767, -1, 1, 0, 12345] {
+                sim.set("clear", 1).unwrap();
+                sim.tick();
+                sim.set("clear", 0).unwrap();
+                sim.set("load_en", 1).unwrap();
+                sim.set("load_addr", 0).unwrap();
+                sim.set("load_data", code).unwrap();
+                sim.tick();
+                sim.set("load_en", 0).unwrap();
+                sim.set("clear", 1).unwrap();
+                sim.tick();
+                sim.set("clear", 0).unwrap();
+                sim.set("run", 1).unwrap();
+                sim.set("x", x as u64 & 0xFFFF).unwrap();
+                sim.tick();
+                sim.set("run", 0).unwrap();
+                for _ in 0..c.latency() {
+                    sim.tick();
+                }
+                let signed = ((code as i64) << 60) >> 60;
+                assert_eq!(sim.get_wide("total").unwrap(), wrap((signed * x) as i128, c.accumulator_bits), "{kind:?} {signed} × {x}");
+            }
+        }
+    }
+}
+
+#[test]
+fn trees_are_faster_than_the_ripple_array() {
+    let delay = |kind| {
+        let c = CellConfig { multiplier: kind, ..config(WeightCoding::Fixed, 16, 0, 1) };
+        Simulator::new(&cell_design(c)).unwrap().critical_path([0.25, 0.25, 0.5, 0.12, 0.4])
+    };
+    let (array, wallace, booth) = (delay(MultiplierKind::Array), delay(MultiplierKind::Wallace), delay(MultiplierKind::Booth));
+    assert!(wallace < array * 0.75, "{wallace} frente a {array}");
+    assert!(booth < array * 0.75, "{booth} frente a {array}");
+}
+
+#[test]
+fn exported_project_simulates_and_synthesises() {
+    let c = CellConfig { multiplier: MultiplierKind::Booth, ..config(WeightCoding::Fixed, 8, 0, 2) };
+    let design = cell_design(c);
+    let mut steps = vec![TestStep { inputs: vec![("clear".into(), 1)] }];
+    steps.push(TestStep { inputs: vec![("clear".into(), 0), ("load_en".into(), 1), ("load_addr".into(), 0), ("load_data".into(), 7)] });
+    steps.push(TestStep { inputs: vec![("load_en".into(), 0), ("clear".into(), 1)] });
+    steps.push(TestStep { inputs: vec![("clear".into(), 0), ("run".into(), 1), ("x".into(), 300)] });
+    for _ in 0..c.latency() {
+        steps.push(TestStep { inputs: vec![("run".into(), 0)] });
+    }
+    let options = ProjectOptions { name: "Celda", description: "Prueba", clock_ns: 1.0, watch: "total", report: "{}".into() };
+    let files = project_files(&design, &steps, &options);
+    assert!(files.contains_key("rtl/compute_cell.vhd") && files.contains_key("synth/vivado.tcl") && files.contains_key("Makefile"));
+
+    if Command::new("iverilog").arg("-V").output().is_err() || Command::new("yosys").arg("-V").output().is_err() {
+        eprintln!("faltan iverilog o yosys: se omite");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("llm2chip-project-{}", std::process::id()));
+    for (path, text) in &files {
+        let target = dir.join(path);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, text).unwrap();
+    }
+    std::fs::create_dir_all(dir.join("build")).unwrap();
+    let compile = Command::new("iverilog").current_dir(&dir).args(["-g2005", "-s", "testbench", "-o", "build/tb.vvp", "rtl/compute_cell.v", "tb/testbench.v"]).output().unwrap();
+    assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+    let run = Command::new("vvp").current_dir(&dir).arg("build/tb.vvp").output().unwrap();
+    let last = String::from_utf8_lossy(&run.stdout).lines().filter(|l| l.parse::<u64>().is_ok()).last().unwrap().parse::<u64>().unwrap();
+    assert_eq!(last, 2100, "7 × 300");
+    let synth = Command::new("yosys").current_dir(&dir).args(["-q", "-s", "synth/fpga.ys"]).output().unwrap();
+    assert!(synth.status.success(), "{}", String::from_utf8_lossy(&synth.stderr));
+    assert!(dir.join("build/compute_cell_xilinx.json").exists());
     std::fs::remove_dir_all(&dir).ok();
 }

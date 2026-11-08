@@ -2,6 +2,7 @@
 //! Weights and activations are signed two's complement.
 
 use crate::format::WeightCoding;
+use crate::multiplier::MultiplierKind;
 use crate::{Bit, Builder, Design, Module};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -19,6 +20,7 @@ pub struct CellConfig {
     pub coding: WeightCoding,
     /// Float: exponent bits. Posit: `es`. Logarithmic: fraction bits. Otherwise unused.
     pub exponent_bits: u32,
+    pub multiplier: MultiplierKind,
 }
 
 impl CellConfig {
@@ -39,6 +41,7 @@ impl CellConfig {
             addr_bits: self.addr_bits.clamp(1, 20),
             coding: self.coding,
             exponent_bits: self.coding.legal_exponent_bits(weight_bits, self.exponent_bits),
+            multiplier: self.multiplier,
         }
     }
 }
@@ -54,7 +57,7 @@ impl Gen {
         name
     }
 
-    fn full_adder(&mut self) -> String {
+    pub(crate) fn full_adder(&mut self) -> String {
         if self.modules.contains_key("full_adder") {
             return "full_adder".into();
         }
@@ -233,15 +236,17 @@ impl Gen {
         self.add(b.finish())
     }
 
-    pub(crate) fn accumulator(&mut self, width: u32) -> String {
-        let name = format!("accumulator_{width}");
+    /// `fast` swaps the ripple adder for a parallel-prefix one.
+    pub(crate) fn accumulator(&mut self, width: u32, fast: bool) -> String {
+        let name = format!("accumulator_{width}{}", if fast { "_fast" } else { "" });
         if self.modules.contains_key(&name) {
             return name;
         }
-        let adder = self.ripple_adder(width);
+        let adder = if fast { self.prefix_adder(width) } else { self.ripple_adder(width) };
         let mux = self.mux_bus(width);
         let reg = self.register(width);
         let mut b = Builder::new(&name, &format!("Acumulador de {width} bits"), "Suma cada producto válido al total. «clear» lo devuelve a cero.");
+        let mut sum_ports: Vec<(&str, Vec<Bit>)> = Vec::new();
         let clear = b.input("clear", 1)[0];
         let valid = b.input("valid", 1)[0];
         let value = b.input("value", width);
@@ -253,7 +258,11 @@ impl Gen {
         let next = b.wire("next", width);
 
         b.group("Suma");
-        b.inst("adder", &adder, &[("a", total.clone()), ("b", value), ("cin", vec![Bit::Zero]), ("sum", sum.clone()), ("cout", unused)]);
+        sum_ports.extend([("a", total.clone()), ("b", value), ("sum", sum.clone())]);
+        if !fast {
+            sum_ports.extend([("cin", vec![Bit::Zero]), ("cout", unused)]);
+        }
+        b.inst("adder", &adder, &sum_ports);
         b.group("Decisión");
         b.inst("select", &mux, &[("s", vec![valid]), ("a", total.clone()), ("b", sum), ("y", chosen.clone())]);
         b.not_to(clear, not_clear);
@@ -301,9 +310,12 @@ impl Gen {
         let counter = self.address_counter(c.addr_bits);
         let addr_mux = self.mux_bus(c.addr_bits);
         let x_reg = self.register(a);
-        let multiplier = self.multiplier(significand, a, mac_stages);
+        let multiplier = match c.multiplier {
+            MultiplierKind::Array => self.multiplier(significand, a, mac_stages),
+            kind => self.tree_multiplier(kind, significand, a, mac_stages),
+        };
         let acc_reg = self.register(acc);
-        let accumulator = self.accumulator(acc);
+        let accumulator = self.accumulator(acc, c.multiplier != MultiplierKind::Array);
 
         let mut b = Builder::new(
             "compute_cell",

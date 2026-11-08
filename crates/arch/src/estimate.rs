@@ -3,7 +3,7 @@ use crate::optim::catalog;
 use crate::params::{ChipParams, KvBackend, LinkKind, WeightBackend};
 use crate::tech::{node, TechNode};
 use netlist::format::WeightCoding;
-use netlist::{cell_design, CellConfig};
+use netlist::{cell_design, CellConfig, Simulator};
 use model_ir::{Block, ModelGraph, StageKind, WeightTensor};
 use serde::Serialize;
 
@@ -95,6 +95,9 @@ impl Report {
         self.metrics.iter().find(|m| m.id == id).map(|m| m.value)
     }
 }
+
+/// AND, OR, XOR, NOT and MUX delays as a fraction of one full adder's carry path.
+const GATE_DELAYS: [f64; 5] = [0.25, 0.25, 0.5, 0.12, 0.4];
 
 fn coding_name(coding: WeightCoding) -> &'static str {
     match coding {
@@ -463,7 +466,7 @@ fn driven_by(id: &str) -> &'static [&'static str] {
     match id {
         "cell_weights" => &["max_params_g", "weight_coding", "weight_bits", "group_size", "weight_backend"],
         "weight_tables" => &["weight_coding", "weight_bits"],
-        "cell_macs" => &["macs_per_die", "weight_coding", "weight_bits", "weight_exponent_bits", "activation_bits", "mac_stages"],
+        "cell_macs" => &["macs_per_die", "multiplier_kind", "weight_coding", "weight_bits", "weight_exponent_bits", "activation_bits", "mac_stages"],
         "scale_units" => &["group_size", "scale_bits"],
         "activation_noc" => &["macs_per_die", "activation_bits", "noc_stages"],
         "vector_units" => &["vector_lanes_per_die", "vector_bits"],
@@ -644,10 +647,10 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
 
     // Timing: each token visits every stage in order, so stage times add up.
     let cell = CellConfig { weight_bits: store.widest_weight_bits, ..p.cell_config(1) };
-    // Decoding and placing a floating product take a subtraction and a shifter's levels.
-    let decode_levels = if cell.shifts() { cell.exponent_width() + 8 } else { (cell.coding == WeightCoding::Codebook) as u32 };
-    let logic_ns = (cell.significand_bits() + p.activation_bits + decode_levels) as f64 * tech.fa_delay_ns * mult.delay_factor;
-    let fmax = tech.fmax_ghz.min(1.0 / (logic_ns / p.mac_stages.max(1) as f64 + tech.ff_overhead_ns));
+    // Static timing on the generated gates, already cut by its pipeline stages.
+    let path = Simulator::new(&cell_design(cell)).map_err(|e| e.0)?.critical_path(GATE_DELAYS);
+    let logic_ns = path * tech.fa_delay_ns * mult.delay_factor;
+    let fmax = tech.fmax_ghz.min(1.0 / (logic_ns + tech.ff_overhead_ns));
     let freq = p.freq_ghz.min(fmax);
     if p.freq_ghz > fmax {
         violations.push(Violation {

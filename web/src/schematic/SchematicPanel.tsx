@@ -1,4 +1,6 @@
 import { Segmented } from "../components/controls";
+import { useDesign } from "../store";
+import { makeZip } from "../zip";
 import { formatNumber } from "../format";
 import { currentModule, toSigned, useCellSim, validateInputs, type DieDemo } from "./simStore";
 
@@ -20,6 +22,15 @@ const COVERAGE: [string, boolean][] = [
 ];
 
 const GATE_NAMES: Record<string, string> = { and: "AND", or: "OR", xor: "XOR", not: "NOT", mux: "Selectores", dff: "Biestables", sram: "Memorias" };
+
+function downloadBytes(bytes: Uint8Array, name: string) {
+  const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: "application/zip" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 function download(text: string, name: string) {
   const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
@@ -159,6 +170,7 @@ export function SchematicPanel() {
 }
 
 function CellPanel({ selector }: { selector: React.ReactNode }) {
+  const frequency = useDesign((s) => s.report?.metrics.find((m) => m.id === "freq_ghz")?.value ?? 1);
   const info = useCellSim((s) => s.info);
   const handle = useCellSim((s) => s.handle);
   const script = useCellSim((s) => s.script);
@@ -270,6 +282,9 @@ function CellPanel({ selector }: { selector: React.ReactNode }) {
           <dd>{formatNumber(2 ** info.config.addr_bits)} × {info.config.weight_bits} bits</dd>
         </div>
       </dl>
+      <button className="plain" onClick={() => downloadBytes(makeZip(JSON.parse(handle.project(1 / Math.max(frequency, 0.001)))), "llm2chip_celda.zip")}>
+        Exportar proyecto completo
+      </button>
       <button className="plain" onClick={() => download(handle.verilog(), "llm2chip_celda.v")}>
         Exportar a Verilog
       </button>

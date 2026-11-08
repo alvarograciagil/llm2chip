@@ -1,4 +1,5 @@
 use netlist::format::{WeightCoding, WeightFormat, TABLE_BITS};
+use netlist::multiplier::MultiplierKind;
 use netlist::CellConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -64,6 +65,7 @@ pub struct ChipParams {
     pub macs_per_die: u64,
     pub freq_ghz: f64,
 
+    pub multiplier_kind: MultiplierKind,
     pub mac_stages: u32,
     pub adder_stages: u32,
     pub noc_stages: u32,
@@ -116,6 +118,7 @@ impl Default for ChipParams {
             die_max_mm2: 815.0,
             macs_per_die: 136_000,
             freq_ghz: 1.0,
+            multiplier_kind: MultiplierKind::Wallace,
             mac_stages: 2,
             adder_stages: 2,
             noc_stages: 1,
@@ -200,6 +203,7 @@ impl ChipParams {
             addr_bits,
             coding: self.weight_coding,
             exponent_bits: self.weight_coding.legal_exponent_bits(weight_bits, self.weight_exponent_bits),
+            multiplier: self.multiplier_kind,
         };
         config.accumulator_bits = config.accumulator_bits.max(config.required_accumulator());
         config

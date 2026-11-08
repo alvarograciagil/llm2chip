@@ -178,6 +178,7 @@ export const PARAM_GROUPS: Group[] = [
     title: "Etapas",
     open: false,
     fields: [
+      { kind: "select", key: "multiplier_kind", label: "Tipo de multiplicador", options: [["wallace", "Wallace"], ["booth", "Booth radix-4"], ["array", "Array"]], help: "Wallace y Booth reducen los productos con sumadores sin propagación y son mucho más rápidos. El array es más simple y compacto a baja frecuencia." },
       { kind: "range", key: "mac_stages", label: "Multiplicador", min: 1, max: 6, step: 1, integer: true, help: "Más etapas permiten mayor frecuencia a cambio de área y latencia." },
       { kind: "range", key: "adder_stages", label: "Árbol de suma", min: 1, max: 6, step: 1, integer: true },
       { kind: "range", key: "noc_stages", label: "Red de activaciones", min: 1, max: 4, step: 1, integer: true },

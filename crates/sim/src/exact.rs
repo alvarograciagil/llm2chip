@@ -12,7 +12,7 @@ use std::sync::Arc;
 fn exact_config() -> DieConfig {
     DieConfig {
         cells: 1,
-        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0 },
+        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array },
         scale_bits: 16,
         reg_bits: 24,
         index_bits: 24,

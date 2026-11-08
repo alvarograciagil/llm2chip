@@ -3,8 +3,10 @@
 
 pub mod block;
 pub mod format;
+pub mod multiplier;
 mod cell;
 pub mod demo;
+pub mod export;
 pub mod die;
 mod sim;
 mod verilog;

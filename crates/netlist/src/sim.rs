@@ -278,6 +278,24 @@ impl Simulator {
         self.ports.get(port).map(|bits| read(&self.values, bits) as u64)
     }
 
+    /// The slowest combinational path, given the delay of an AND, OR, XOR, NOT and MUX.
+    pub fn critical_path(&self, delays: [f64; 5]) -> f64 {
+        let mut arrival = vec![0f64; self.values.len()];
+        let mut worst = 0f64;
+        for g in &self.gates {
+            let (delay, input) = match g.op {
+                Op::And => (delays[0], arrival[g.a].max(arrival[g.b])),
+                Op::Or => (delays[1], arrival[g.a].max(arrival[g.b])),
+                Op::Xor => (delays[2], arrival[g.a].max(arrival[g.b])),
+                Op::Not => (delays[3], arrival[g.a]),
+                Op::Mux => (delays[4], arrival[g.a].max(arrival[g.b]).max(arrival[g.c])),
+            };
+            arrival[g.y] = input + delay;
+            worst = worst.max(arrival[g.y]);
+        }
+        worst
+    }
+
     pub fn get_wide(&self, port: &str) -> Option<u128> {
         self.ports.get(port).map(|bits| read(&self.values, bits))
     }
