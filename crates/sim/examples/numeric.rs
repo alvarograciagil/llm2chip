@@ -1,5 +1,5 @@
 //! Measures how much fixed-point precision the model tolerates, with teacher forcing.
-//! `cargo run --release -p sim --example numeric -- <carpeta> [tokens]`
+//! `cargo run --release -p sim --example numeric -- <carpeta> [tokens] [bits,estado,tablas ...]`
 
 use compiler::compile_qwen3_5;
 use sim::{Engine, Numeric, Weights};
@@ -41,7 +41,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("activacion estado | acuerdo_top1 KL_medio KL_max saturaciones");
 
-    let configs = [(16, 16, 16), (16, 16, 12), (16, 16, 10), (16, 16, 8), (16, 16, 6), (14, 16, 10), (14, 14, 10), (14, 12, 8)];
+    let mut configs = vec![(16, 16, 16), (16, 16, 12), (16, 16, 10), (16, 16, 8), (16, 16, 6), (14, 16, 10), (14, 14, 10), (14, 12, 8)];
+    // Extra arguments such as `20,20,12` replace the list of configurations.
+    if args.len() > 3 {
+        configs = args[3..].iter().map(|a| { let v: Vec<u32> = a.split(',').map(|n| n.parse().unwrap()).collect(); (v[0], v[1], v[2]) }).collect();
+    }
     for (ab, sb, tb) in configs {
         let numeric = Numeric::Block { activation_bits: ab, state_bits: sb, table_bits: Some(tb) };
         let mut engine = Engine::new(compile_qwen3_5(&config)?, Weights::open(dir)?, numeric)?;

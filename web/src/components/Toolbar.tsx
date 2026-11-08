@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useDesign, type Appearance } from "../store";
+import { datasheet } from "../datasheet";
 import { IconButton, Segmented } from "./controls";
 
 const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round" } as const;
@@ -119,6 +120,16 @@ export function Toolbar() {
   const pinBaseline = useDesign((s) => s.pinBaseline);
   const clearBaseline = useDesign((s) => s.clearBaseline);
   const [saving, setSaving] = useState(false);
+  const exportDatasheet = () => {
+    const { report, designName, model, params } = useDesign.getState();
+    if (!report || !model) return;
+    const url = URL.createObjectURL(new Blob([datasheet(designName, model.name, report, params as unknown as Record<string, unknown>)], { type: "text/markdown" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${designName.replace(/[^\p{L}\p{N}]+/gu, "_")}_hoja_de_datos.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <header className="toolbar">
@@ -138,6 +149,9 @@ export function Toolbar() {
         onChange={setView}
       />
       <div className="toolbar-side end">
+        <IconButton label="Exportar hoja de datos" onClick={exportDatasheet}>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2h6l3 3v9H4zM10 2v3h3M6 8.5h5M6 11h5" {...stroke} /></svg>
+        </IconButton>
         <IconButton label="Deshacer" disabled={!canUndo} onClick={undo}>
           <path d="M7.5 5 4 8.5 7.5 12M4.5 8.5H12a4 4 0 0 1 0 8h-1.5" {...stroke} />
         </IconButton>

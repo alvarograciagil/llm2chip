@@ -1609,3 +1609,23 @@ input[type="range"]::-webkit-slider-thumb {
   gap: 8px;
   flex-direction: row;
 }
+
+.format-table {
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.format-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel, var(--bg));
+}
+
+.format-table tbody tr {
+  cursor: pointer;
+}
+
+.format-table tbody tr:hover,
+.format-table tbody tr.selected-row {
+  background: var(--accent-soft, rgba(10, 132, 255, 0.14));
+}

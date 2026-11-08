@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import { estimateDesign, sweepDesign, type ChipParams, type SweepResult } from "../engine";
 import { formatNumber } from "../format";
+import { matchingPreset, WEIGHT_PRESETS } from "../params";
 import { useDesign } from "../store";
+import { FORMAT_QUALITY } from "./formatQuality";
 
 interface Axis {
   key: string;
@@ -194,6 +196,7 @@ export function ExplorerView() {
             </tbody>
           </table>
         </div>
+        <FormatComparison />
       </div>
     </section>
   );
@@ -227,6 +230,57 @@ const REFERENCES: Reference[] = [
     checks: [["weight_bandwidth", "Ancho de banda usado", 0, 100, "TB/s"]],
   },
 ];
+
+function FormatComparison() {
+  const model = useDesign((s) => s.model);
+  const params = useDesign((s) => s.params);
+  const setParam = useDesign((s) => s.setParam);
+  const rows = useMemo(() => {
+    if (!model) return [];
+    const presets = WEIGHT_PRESETS.flatMap((section) => section.presets.map((preset) => ({ ...preset, family: section.title })));
+    const results: SweepResult[] = sweepDesign(model, params, presets.map((p) => p.values));
+    return presets.map((preset, i) => ({ preset, metrics: results[i].metrics, errors: results[i].errors })).sort((a, b) => a.metrics.total_area_mm2 - b.metrics.total_area_mm2);
+  }, [model, params]);
+  const current = matchingPreset(params as unknown as Record<string, unknown>);
+  return (
+    <div className="card">
+      <div className="card-title">
+        <h2>Formatos de pesos</h2>
+      </div>
+      <p className="muted-text plot-sub">El circuito de cada formato con este diseño, de menor a mayor área. Clic en una fila para usarlo. La calidad se mide con pesos reales de Qwen3.8.</p>
+      <div className="format-table">
+        <table className="front">
+          <thead>
+            <tr><th>Formato</th><th>Área</th><th>Velocidad</th><th>Potencia</th><th>Energía</th><th>Top-1</th></tr>
+          </thead>
+          <tbody>
+            {rows.map(({ preset, metrics, errors }) => {
+              const quality = FORMAT_QUALITY[preset.label];
+              return (
+                <tr
+                  key={preset.label}
+                  className={preset.label === current ? "selected-row" : ""}
+                  tabIndex={0}
+                  onClick={() => Object.entries(preset.values).forEach(([key, value]) => setParam(key, value))}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") Object.entries(preset.values).forEach(([key, value]) => setParam(key, value));
+                  }}
+                >
+                  <td>{preset.label}{errors > 0 ? " ⚠" : ""}</td>
+                  <td>{formatNumber(metrics.total_area_mm2)} mm²</td>
+                  <td>{formatNumber(metrics.tok_s)} tok/s</td>
+                  <td>{formatNumber(metrics.power_w)} W</td>
+                  <td>{formatNumber(metrics.energy_token_mj)} mJ</td>
+                  <td>{quality ? `${formatNumber(quality.top1)} %` : "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
 export function CalibrationPanel() {
   const models = useDesign((s) => s.models);
