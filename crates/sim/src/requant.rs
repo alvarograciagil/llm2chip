@@ -119,8 +119,11 @@ fn quantize_values(format: &WeightFormat, min: f32, max: f32, table: &[f32], val
             let range = (1i64 << format.exponent_bits.min(30)) - 2;
             let lowest = -(range.min(FLOAT_WINDOW as i64) as i32);
             let flushes = range > FLOAT_WINDOW as i64;
+            let top_mantissa = power(fraction + 1) - 1.0;
+            // A fine scale stretches the group so its largest weight uses the whole range.
+            let gain = if format.fine_scale { power(top) * (1.0 - power(-fraction - 1)) / largest } else { 1.0 };
             for v in values.iter_mut() {
-                let x = *v as f64;
+                let x = *v as f64 * gain;
                 let Some(exponent) = binary_exponent(x) else { continue };
                 let relative = exponent - 1 - top + 1;
                 if relative < lowest && flushes {
@@ -128,7 +131,8 @@ fn quantize_values(format: &WeightFormat, min: f32, max: f32, table: &[f32], val
                     continue;
                 }
                 let at = relative.max(lowest) + top - 1 - fraction;
-                *v = ((x / power(at)).round() * power(at)) as f32;
+                let mantissa = (x / power(at)).round().clamp(-top_mantissa, top_mantissa);
+                *v = (mantissa * power(at) / gain) as f32;
             }
         }
         WeightCoding::Posit => {
@@ -176,7 +180,7 @@ mod tests {
     use super::*;
 
     fn format(coding: WeightCoding, bits: u32, exponent_bits: u32) -> WeightFormat {
-        WeightFormat { coding, bits, exponent_bits, bias: true, group_size: 0, keep_source: false }
+        WeightFormat { coding, bits, exponent_bits, bias: true, group_size: 0, fine_scale: false, keep_source: false }
     }
 
     fn reference(values: &[f32]) -> Reference {
@@ -258,6 +262,20 @@ mod tests {
         quantize(&format(WeightCoding::Codebook, 4, 0), &reference, &mut book);
         quantize(&format(WeightCoding::Fixed, 4, 0), &reference, &mut grid);
         assert!(rms(&values, &book) < rms(&values, &grid));
+    }
+
+    #[test]
+    fn a_fine_scale_beats_a_power_of_two() {
+        let values: Vec<f32> = (0..64).map(|i| 0.9 * (i as f32 * 0.7).sin() * if i % 2 == 0 { 0.8 } else { 0.3 }).collect();
+        let reference = reference(&values);
+        let mut coarse = format(WeightCoding::Float, 4, 2);
+        coarse.group_size = 16;
+        let mut fine = coarse;
+        fine.fine_scale = true;
+        let (mut a, mut b) = (values.clone(), values.clone());
+        quantize(&coarse, &reference, &mut a);
+        quantize(&fine, &reference, &mut b);
+        assert!(rms(&values, &b) < rms(&values, &a), "{} {}", rms(&values, &b), rms(&values, &a));
     }
 
     #[test]

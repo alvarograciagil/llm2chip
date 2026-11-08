@@ -53,6 +53,9 @@ pub struct WeightFormat {
     pub exponent_bits: u32,
     pub bias: bool,
     pub group_size: u32,
+    /// The group scale is a full float (NVFP4) rather than a power of two (MXFP4).
+    #[serde(default)]
+    pub fine_scale: bool,
     /// Keeps the checkpoint's own quantisation whenever it can.
     pub keep_source: bool,
 }

@@ -16,6 +16,7 @@ export interface WeightFormat {
   exponent_bits: number;
   bias: boolean;
   group_size: number;
+  fine_scale: boolean;
   keep_source: boolean;
 }
 

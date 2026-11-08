@@ -12,8 +12,8 @@ const PROMPT: &str = "Explain step by step how a CPU cache works, why it speeds 
 
 fn parse(name: &str) -> Option<WeightFormat> {
     let digits = |text: &str| text.parse::<u32>().ok();
-    let plain = |coding, bits, exponent_bits| Some(WeightFormat { coding, bits, exponent_bits, bias: true, group_size: 0, keep_source: false });
-    let grouped = |coding, bits, exponent_bits, bias, group_size| Some(WeightFormat { coding, bits, exponent_bits, bias, group_size, keep_source: false });
+    let plain = |coding, bits, exponent_bits| Some(WeightFormat { coding, bits, exponent_bits, bias: true, group_size: 0, fine_scale: false, keep_source: false });
+    let grouped = |coding, bits, exponent_bits, bias, group_size| Some(WeightFormat { coding, bits, exponent_bits, bias, group_size, fine_scale: false, keep_source: false });
     match name {
         "fp8" => plain(WeightCoding::Float, 8, 4),
         "fp16" => plain(WeightCoding::Float, 16, 5),
@@ -23,6 +23,7 @@ fn parse(name: &str) -> Option<WeightFormat> {
         "mxfp4" => grouped(WeightCoding::Float, 4, 2, false, 32),
         "mxfp6" => grouped(WeightCoding::Float, 6, 2, false, 32),
         "mxfp8" => grouped(WeightCoding::Float, 8, 4, false, 32),
+        "nvfp4" => grouped(WeightCoding::Float, 4, 2, false, 16).map(|f| WeightFormat { fine_scale: true, ..f }),
         "posit8" => plain(WeightCoding::Posit, 8, 1),
         "posit16" => plain(WeightCoding::Posit, 16, 1),
         "log8" => plain(WeightCoding::Log, 8, 4),

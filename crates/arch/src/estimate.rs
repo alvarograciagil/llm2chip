@@ -291,6 +291,11 @@ fn weight_multiplier(tech: &TechNode, p: &ChipParams, widest: u32, cell_bits: f6
     if p.has("salto_ceros") {
         energy *= 0.9;
     }
+    if p.has("pesos_csd") && p.weight_backend == WeightBackend::Rom {
+        area *= 0.23;
+        energy *= 0.5;
+        delay_factor *= 0.7;
+    }
     let decoder = if p.has("compresion_pesos") { 8.0 } else { 0.0 };
     Multiplier {
         area_um2: area + accumulator + decoder,
@@ -370,7 +375,9 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     }
 
     if p.uses_groups() {
-        let unit = (p.scale_bits * p.effective_accumulator()) as f64 * tech.fa_um2;
+        let width = p.effective_accumulator() as f64;
+        // A power-of-two scale is a barrel shifter, not a multiplier.
+        let unit = if p.scale_is_multiplied() { p.scale_bits as f64 * width * tech.fa_um2 } else { width * width.log2().ceil() * tech.mux_um2 };
         push("scale_units", "Escala y sesgo por grupo", n * unit * um2 * ROUTING_OVERHEAD,
             "Aplican la escala y el sesgo que comparten los pesos de cada grupo.");
     }
@@ -526,6 +533,12 @@ fn check_optimizations(p: &ChipParams, out: &mut Vec<Violation>) {
             field: Some("accumulator_bits"),
         });
     }
+    if p.has("pesos_csd") && p.weight_backend != WeightBackend::Rom {
+        out.push(aviso(
+            "Los pesos CSD solo ahorran área si están grabados en ROM: con memoria cargable la celda necesita un multiplicador general.",
+            "Elige ROM como memoria de pesos.",
+        ));
+    }
     if p.weight_backend == WeightBackend::Rom {
         out.push(aviso(
             "Con ROM el chip solo sirve para este modelo.",
@@ -577,7 +590,8 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
         });
     }
 
-    let kv_bits = model.state.kv_values_per_token as f64 * context * p.kv_bits as f64;
+    let kv_compression = if p.has("compresion_kv") { 0.5 } else { 1.0 };
+    let kv_bits = model.state.kv_values_per_token as f64 * context * p.kv_bits as f64 * kv_compression;
     let state_bits = model.state.delta_values as f64 * p.delta_state_bits as f64
         + model.state.conv_values as f64 * p.activation_bits as f64;
     let depth = if p.mtp_enabled { p.mtp_depth.min(3) } else { 0 };
@@ -722,7 +736,9 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
     let hop_mm = die_area.sqrt() * 0.02;
     let e_noc = totals.weights * p.activation_bits as f64 * tech.e_wire_pj_bit_mm * hop_mm;
     let e_scale = if p.uses_groups() {
-        totals.weights / p.group_size as f64 * (p.scale_bits * p.effective_accumulator()) as f64 * tech.e_fa_pj
+        let width = p.effective_accumulator() as f64;
+        let bits = if p.scale_is_multiplied() { p.scale_bits as f64 * width } else { width * width.log2().ceil() * 0.5 };
+        totals.weights / p.group_size as f64 * bits * tech.e_fa_pj
     } else {
         0.0
     };

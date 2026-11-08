@@ -29,6 +29,7 @@ function designFormat(p: Record<string, unknown>): WeightFormat {
     exponent_bits: Number(p.weight_exponent_bits),
     bias: p.weight_bias === true,
     group_size: grouped ? Number(p.group_size) : 0,
+    fine_scale: p.weight_fine_scale === true,
     keep_source: coding === "affine" && p.use_model_mix === true,
   };
 }

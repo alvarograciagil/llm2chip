@@ -74,6 +74,8 @@ pub struct ChipParams {
     pub weight_exponent_bits: u32,
     /// Whether each group also stores a bias, as MLX does; GGUF's Q4_0 does not.
     pub weight_bias: bool,
+    /// Float groups: a full float scale (NVFP4) instead of a power of two (MXFP4).
+    pub weight_fine_scale: bool,
     /// Keeps the model's own 8-bit tensors, as real mixed checkpoints do.
     pub use_model_mix: bool,
     /// Weights sharing one scale and bias. 0 means no per-group affine terms.
@@ -121,6 +123,7 @@ impl Default for ChipParams {
             weight_bits: 4,
             weight_exponent_bits: 5,
             weight_bias: true,
+            weight_fine_scale: false,
             use_model_mix: true,
             group_size: 32,
             scale_bits: 16,
@@ -161,6 +164,11 @@ impl ChipParams {
         }
         let factors = if self.weight_coding == WeightCoding::Affine && self.weight_bias { 2.0 } else { 1.0 };
         factors * self.scale_bits as f64 / group as f64
+    }
+
+    /// Whether each group's scale needs a multiplier, not just a shifter.
+    pub fn scale_is_multiplied(&self) -> bool {
+        self.weight_coding != WeightCoding::Float || self.weight_fine_scale
     }
 
     pub fn mixes_widths(&self) -> bool {
@@ -213,6 +221,7 @@ impl ChipParams {
             exponent_bits: self.weight_coding.legal_exponent_bits(self.weight_bits.max(2), self.weight_exponent_bits),
             bias: self.weight_bias,
             group_size: if self.uses_groups() { self.group_size } else { 0 },
+            fine_scale: self.weight_fine_scale,
             keep_source: self.mixes_widths(),
         }
     }

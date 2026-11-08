@@ -29,7 +29,16 @@ export interface Group {
 
 const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
 const fixed = (bits: number): Params => ({ weight_coding: "fixed", weight_bits: bits, use_model_mix: false, group_size: 0 });
-const float = (bits: number, exponent: number, group = 0): Params => ({ weight_coding: "float", weight_bits: bits, weight_exponent_bits: exponent, use_model_mix: false, group_size: group, weight_bias: false });
+const float = (bits: number, exponent: number, group = 0, fine = false): Params => ({
+  weight_coding: "float",
+  weight_bits: bits,
+  weight_exponent_bits: exponent,
+  use_model_mix: false,
+  group_size: group,
+  weight_bias: false,
+  weight_fine_scale: fine,
+  ...(group > 0 ? { scale_bits: 8 } : {}),
+});
 const affine = (bits: number, group: number, bias: boolean): Params => ({ weight_coding: "affine", weight_bits: bits, use_model_mix: false, group_size: group, weight_bias: bias });
 
 export const WEIGHT_PRESETS: PresetSection[] = [
@@ -69,7 +78,7 @@ export const WEIGHT_PRESETS: PresetSection[] = [
     title: "Microescalado",
     presets: [
       { label: "MXFP4 (E2M1 / 32)", values: float(4, 2, 32) },
-      { label: "NVFP4 (E2M1 / 16)", values: float(4, 2, 16) },
+      { label: "NVFP4 (E2M1 / 16, escala fina)", values: float(4, 2, 16, true) },
       { label: "MXFP6 (E2M3 / 32)", values: float(6, 2, 32) },
       { label: "MXFP6 (E3M2 / 32)", values: float(6, 3, 32) },
       { label: "MXFP8 (E4M3 / 32)", values: float(8, 4, 32) },
@@ -156,6 +165,7 @@ export const PARAM_GROUPS: Group[] = [
       { kind: "range", key: "weight_exponent_bits", label: "Bits de exponente", min: 1, max: 15, step: 1, integer: true, help: "En coma flotante, los bits de exponente. En posit, «es». En logarítmico, los bits de fracción.", when: (p) => ["float", "posit", "log"].includes(String(p.weight_coding)) },
       { kind: "toggle", key: "use_model_mix", label: "Mantener tensores de 8 bits", help: "Reproduce la mezcla de 4 y 8 bits de los pesos reales de Qwen.", when: (p) => p.weight_coding === "affine" },
       { kind: "toggle", key: "weight_bias", label: "Sesgo por grupo", help: "MLX guarda escala y sesgo por grupo; GGUF Q4_0 solo escala.", when: (p) => p.weight_coding === "affine" },
+      { kind: "toggle", key: "weight_fine_scale", label: "Escala fina por grupo", help: "Una escala en coma flotante como NVFP4 necesita un multiplicador. Una potencia de dos como MXFP4 solo un desplazador, pero pierde precisión.", when: (p) => p.weight_coding === "float" && Number(p.group_size) > 0 },
       { kind: "range", key: "group_size", label: "Pesos por grupo", min: 0, max: 256, step: 8, integer: true, help: "Comparten escala y sesgo. 0 los elimina.", when: (p) => p.weight_coding === "affine" || p.weight_coding === "float" },
       { kind: "range", key: "scale_bits", label: "Bits de escala y sesgo", min: 8, max: 32, step: 1, integer: true, when: (p) => Number(p.group_size) > 0 && (p.weight_coding === "affine" || p.weight_coding === "float") },
       { kind: "range", key: "activation_bits", label: "Bits de activación", min: 8, max: 32, step: 1, integer: true },
