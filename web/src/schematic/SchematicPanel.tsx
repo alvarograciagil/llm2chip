@@ -19,7 +19,7 @@ const COVERAGE: [string, boolean][] = [
   ["Enlaces entre dies", true],
   ["Un modelo Qwen3.5 completo, compilado y ejecutado en puertas", true],
   ["Varios carriles vectoriales en paralelo", false],
-  ["Mezcla de expertos y cabeza MTP en puertas", false],
+  ["Mezcla de expertos y cabeza MTP en puertas", true],
 ];
 
 const GATE_NAMES: Record<string, string> = { and: "AND", or: "OR", xor: "XOR", not: "NOT", mux: "Selectores", dff: "Biestables", sram: "Memorias" };

@@ -1,7 +1,7 @@
 //! A complete Qwen3.5-shaped model, weights and all, executed on the gates.
 
 use compiler::compile_qwen3_5;
-use netlist::block::tables;
+use netlist::block::{tables, Assembly};
 use netlist::demo::read_block_value;
 use netlist::{die_design, CellConfig, DieConfig, DieProgram, Simulator};
 use sim::lower::Layout;
@@ -168,6 +168,33 @@ fn make_moe_checkpoint(dir: &Path) {
     w.write(&dir.join("model.safetensors"));
 }
 
+fn run_assembly(sim: &mut Simulator, c: &DieConfig, assembly: &Assembly) {
+    let mut microcode = DieProgram::new(*c);
+    for step in &assembly.steps {
+        microcode.alu(step);
+    }
+    let words = microcode.finish();
+    assert!(words.len() < 1 << c.microcode_bits, "{} palabras", words.len());
+    sim.set("start", 1).unwrap();
+    sim.tick();
+    sim.set("load_code", 1).unwrap();
+    for (i, word) in words.iter().enumerate() {
+        sim.set("code_addr", i as u64).unwrap();
+        sim.set_wide("code_data", word.encode(c)).unwrap();
+        sim.tick();
+    }
+    sim.set("load_code", 0).unwrap();
+    load_assembly(sim, c, &assembly.initial);
+    sim.tick();
+    sim.set("start", 0).unwrap();
+    let mut cycles = 0u64;
+    while sim.get("halted").unwrap() == 0 {
+        sim.tick();
+        cycles += 1;
+        assert!(cycles < 20_000_000, "el secuenciador no se detiene");
+    }
+}
+
 fn gates_after(program: &compiler::Program, dir: &Path, c: DieConfig, tokens: &[u32]) -> (Simulator, Layout) {
     let layout = Layout::new(program, &Weights::open(dir).unwrap(), c, true).unwrap();
     let mut sim = Simulator::new(&die_design(c)).unwrap();
@@ -183,30 +210,7 @@ fn gates_after(program: &compiler::Program, dir: &Path, c: DieConfig, tokens: &[
     sim.set("load_fn", 0).unwrap();
     for (position, token) in tokens.iter().enumerate() {
         let assembly = layout.token(program, *token, position, position + 1 == tokens.len()).unwrap();
-        let mut microcode = DieProgram::new(c);
-        for step in &assembly.steps {
-            microcode.alu(step);
-        }
-        let words = microcode.finish();
-        assert!(words.len() < 1 << c.microcode_bits, "{} palabras", words.len());
-        sim.set("start", 1).unwrap();
-        sim.tick();
-        sim.set("load_code", 1).unwrap();
-        for (i, word) in words.iter().enumerate() {
-            sim.set("code_addr", i as u64).unwrap();
-            sim.set_wide("code_data", word.encode(&c)).unwrap();
-            sim.tick();
-        }
-        sim.set("load_code", 0).unwrap();
-        load_assembly(&mut sim, &c, &assembly.initial);
-        sim.tick();
-        sim.set("start", 0).unwrap();
-        let mut cycles = 0u64;
-        while sim.get("halted").unwrap() == 0 {
-            sim.tick();
-            cycles += 1;
-            assert!(cycles < 20_000_000, "el secuenciador no se detiene");
-        }
+        run_assembly(&mut sim, &c, &assembly);
     }
     (sim, layout)
 }
@@ -224,6 +228,66 @@ fn assert_vm_matches_gates(program: &compiler::Program, config: &str, dir: &Path
             assert_eq!(mantissa, vm.mantissa(fast, index), "búfer {buffer}, elemento {index}");
         }
     }
+}
+
+#[test]
+fn draft_head_runs_on_the_gates() {
+    let config = CONFIG.replacen(r#""model_type": "qwen3_5_text","#, r#""model_type": "qwen3_5_text", "mtp_num_hidden_layers": 1,"#, 1);
+    let dir = std::env::temp_dir().join(format!("llm2chip-mtp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let mut rng = Rng(0xABCD_0123_4567_89EF);
+    let mut w = Writer::default();
+    for name in ["mtp.pre_fc_norm_embedding", "mtp.pre_fc_norm_hidden", "mtp.norm", "mtp.layers.0.input_layernorm", "mtp.layers.0.post_attention_layernorm", "mtp.layers.0.self_attn.q_norm", "mtp.layers.0.self_attn.k_norm"] {
+        w.floats(&format!("{name}.weight"), &[1.0; 8]);
+    }
+    w.matrix("mtp.fc", 8, 16, &mut rng);
+    let p = |s: &str| format!("mtp.layers.0.{s}");
+    w.matrix(&p("self_attn.q_proj"), 32, 8, &mut rng);
+    w.matrix(&p("self_attn.k_proj"), 8, 8, &mut rng);
+    w.matrix(&p("self_attn.v_proj"), 8, 8, &mut rng);
+    w.matrix(&p("self_attn.o_proj"), 8, 16, &mut rng);
+    w.matrix(&p("mlp.gate_proj"), 16, 8, &mut rng);
+    w.matrix(&p("mlp.up_proj"), 16, 8, &mut rng);
+    w.matrix(&p("mlp.down_proj"), 8, 16, &mut rng);
+    w.write(&dir.join("mtp.safetensors"));
+
+    let program = compile_qwen3_5(&config).unwrap();
+    let tokens = [3u32, 7];
+    let next = 5u32;
+    let mut reference = Engine::new(compile_qwen3_5(&config).unwrap(), Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
+    for (i, t) in tokens.iter().enumerate() {
+        reference.step(*t, i + 1 == tokens.len()).unwrap();
+    }
+    reference.feed_draft_from_main();
+    let expected = reference.draft(next, true).unwrap().unwrap().to_vec();
+
+    let c = DieConfig { reg_bits: 10, index_bits: 9, microcode_bits: 19, ..die_config() };
+    let (mut sim, layout) = gates_after(&program, &dir, c, &tokens);
+    let mut assembly = Assembly::new(&c);
+    layout.feed_draft(&mut assembly, &program, true);
+    layout.run_draft(&mut assembly, &program, next, 0, true).unwrap();
+    run_assembly(&mut sim, &c, &assembly);
+
+    let draft = program.draft.as_ref().unwrap();
+    let got: Vec<f32> = (0..8).map(|i| read_block_value(&mut sim, c, layout.register_of(draft.logits), i).1 as f32).collect();
+    let best = |v: &[f32]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+    assert_eq!(best(&got), best(&expected), "{got:?} {expected:?}");
+    let spread: f32 = expected.iter().map(|v| v.abs()).sum::<f32>() / 8.0;
+    let error: f32 = got.iter().zip(&expected).map(|(a, b)| (a - b).abs()).sum::<f32>() / 8.0;
+    assert!(error < 0.1 * spread.max(0.2), "error medio {error}, magnitud {spread}");
+
+    let mut vm = ExactEngine::new(compile_qwen3_5(&config).unwrap(), Weights::open(&dir).unwrap()).unwrap();
+    for (position, token) in tokens.iter().enumerate() {
+        vm.step(*token, position + 1 == tokens.len()).unwrap();
+    }
+    vm.feed_draft_from_main();
+    vm.draft(next, true).unwrap();
+    for index in 0..8 {
+        let (mantissa, _) = read_block_value(&mut sim, c, layout.register_of(draft.logits), index);
+        assert_eq!(mantissa, vm.mantissa(vm.register_of(draft.logits), index), "elemento {index}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
