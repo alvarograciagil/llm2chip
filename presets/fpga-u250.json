@@ -1,0 +1,17 @@
+{
+ "id": "fpga-u250",
+ "name": "Qwen3.8-27B en FPGA U250",
+ "model": "qwen3.8-27b",
+ "description": "El modelo completo en una FPGA con DDR4: lento, pero construible.",
+ "params": {
+  "node": "fpga_u250",
+  "max_params_g": 28,
+  "context_tokens": 2048,
+  "macs_per_die": 1024,
+  "vector_lanes_per_die": 256,
+  "freq_ghz": 0.25,
+  "die_max_mm2": 858,
+  "weight_backend": "external_ddr",
+  "kv_backend": "external_ddr"
+ }
+}

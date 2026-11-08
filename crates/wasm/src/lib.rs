@@ -1,0 +1,295 @@
+//! Browser bindings. Values cross the boundary as JSON strings.
+
+use arch::{catalog, estimate, nodes, ChipParams};
+use model_ir::ModelGraph;
+use netlist::block::Behavior;
+use netlist::demo;
+use netlist::{cell_design, die_design, to_verilog, to_vhdl, CellConfig, Design, DieConfig, Simulator};
+use wasm_bindgen::prelude::*;
+
+const BUILTIN_MODELS: [(&str, &str, &str); 6] = [
+    ("qwen3.8-27b", "Qwen3.8-27B", include_str!("../../../models/qwen3.8-27b.json")),
+    ("qwen3.6-35b-a3b", "Qwen3.6-35B-A3B (MoE)", include_str!("../../../models/qwen3.6-35b-a3b.json")),
+    ("llama-3.1-8b", "Llama 3.1 8B", include_str!("../../../models/llama-3.1-8b.json")),
+    ("stories110m", "stories110M", include_str!("../../../models/stories110m.json")),
+    ("stories15m", "stories15M", include_str!("../../../models/stories15m.json")),
+    ("stories260k", "stories260K", include_str!("../../../models/stories260k.json")),
+];
+
+const PRESETS: [&str; 4] = [
+    include_str!("../../../presets/qwen-sram.json"),
+    include_str!("../../../presets/llama-rom.json"),
+    include_str!("../../../presets/fpga-u250.json"),
+    include_str!("../../../presets/stories-180nm.json"),
+];
+
+fn to_js<T: serde::Serialize>(value: &T) -> Result<String, JsError> {
+    serde_json::to_string(value).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen]
+pub fn builtin_models() -> Result<String, JsError> {
+    let list: Vec<_> = BUILTIN_MODELS
+        .iter()
+        .map(|(id, name, config)| serde_json::json!({ "id": id, "name": name, "config": config }))
+        .collect();
+    to_js(&list)
+}
+
+#[wasm_bindgen]
+pub fn presets() -> Result<String, JsError> {
+    let list: Vec<serde_json::Value> = PRESETS
+        .iter()
+        .map(|p| serde_json::from_str(p).map_err(|e| JsError::new(&e.to_string())))
+        .collect::<Result<_, _>>()?;
+    to_js(&list)
+}
+
+#[wasm_bindgen]
+pub fn default_params() -> Result<String, JsError> {
+    to_js(&ChipParams::default())
+}
+
+#[wasm_bindgen]
+pub fn optimization_catalog() -> Result<String, JsError> {
+    to_js(&catalog())
+}
+
+#[wasm_bindgen]
+pub fn tech_nodes() -> Result<String, JsError> {
+    to_js(&nodes())
+}
+
+#[wasm_bindgen]
+pub fn estimate_design(name: &str, config: &str, params: &str) -> Result<String, JsError> {
+    let model = ModelGraph::from_config_json(name, config).map_err(|e| JsError::new(&e.0))?;
+    let params: ChipParams =
+        serde_json::from_str(params).map_err(|e| JsError::new(&format!("parámetros inválidos: {e}")))?;
+    let report = estimate(&model, &params).map_err(|e| JsError::new(&e))?;
+    to_js(&report)
+}
+
+fn cell_config(config: &str, params: &str) -> Result<CellConfig, JsError> {
+    let model = ModelGraph::from_config_json("modelo", config).map_err(|e| JsError::new(&e.0))?;
+    let p: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&e.to_string()))?;
+    let report = estimate(&model, &p).map_err(|e| JsError::new(&e))?;
+    let weight_bits = if p.use_model_mix { p.weight_bits.max(8) } else { p.weight_bits };
+    let cell_bits = report.metric("cell_sram_kb").unwrap_or(1.0) * 8_000.0;
+    let words = (cell_bits / weight_bits as f64).ceil().max(2.0);
+    Ok(CellConfig {
+        weight_bits,
+        activation_bits: p.activation_bits,
+        accumulator_bits: p.accumulator_bits,
+        mac_stages: p.mac_stages,
+        adder_stages: p.adder_stages,
+        addr_bits: (words.log2().ceil() as u32).clamp(1, 20),
+    })
+}
+
+#[wasm_bindgen]
+pub fn schedule_design(name: &str, config: &str, params: &str) -> Result<String, JsError> {
+    let model = ModelGraph::from_config_json(name, config).map_err(|e| JsError::new(&e.0))?;
+    let p: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&e.to_string()))?;
+    let report = estimate(&model, &p).map_err(|e| JsError::new(&e))?;
+    let factor = if p.has("aritmetica_distribuida") { 4.0 } else { 1.0 };
+    let ghz = report.metric("freq_ghz").unwrap_or(1.0);
+    to_js(&compiler::schedule(&model, &p, &report.floorplan, ghz, factor))
+}
+
+/// Evaluates one design per entry in the JSON array `variants`, each merged over `params`.
+#[wasm_bindgen]
+pub fn sweep_design(name: &str, config: &str, params: &str, variants: &str) -> Result<String, JsError> {
+    let model = ModelGraph::from_config_json(name, config).map_err(|e| JsError::new(&e.0))?;
+    let base: serde_json::Value = serde_json::from_str(params).map_err(|e| JsError::new(&e.to_string()))?;
+    let variants: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(variants).map_err(|e| JsError::new(&e.to_string()))?;
+    let mut results = Vec::with_capacity(variants.len());
+    for overrides in variants {
+        let mut merged = base.clone();
+        for (key, value) in overrides {
+            merged[key] = value;
+        }
+        let p: ChipParams = serde_json::from_value(merged).map_err(|e| JsError::new(&e.to_string()))?;
+        let report = estimate(&model, &p).map_err(|e| JsError::new(&e))?;
+        let values: serde_json::Map<String, serde_json::Value> = report.metrics.iter().map(|m| (m.id.to_string(), serde_json::json!(m.value))).collect();
+        let errors = report.violations.iter().filter(|v| v.severity == arch::Severity::Error).count();
+        results.push(serde_json::json!({ "metrics": values, "errors": errors }));
+    }
+    to_js(&results)
+}
+
+/// A live gate-level simulation of the design's compute cell.
+#[wasm_bindgen]
+pub struct CellSimulation {
+    design: Design,
+    config: CellConfig,
+    sim: Simulator,
+}
+
+#[wasm_bindgen]
+impl CellSimulation {
+    #[wasm_bindgen(constructor)]
+    pub fn new(config: &str, params: &str) -> Result<CellSimulation, JsError> {
+        let config = cell_config(config, params)?;
+        let design = cell_design(config);
+        let sim = Simulator::new(&design).map_err(|e| JsError::new(&e.0))?;
+        Ok(CellSimulation { design, config, sim })
+    }
+
+    pub fn design(&self) -> Result<String, JsError> {
+        to_js(&self.design)
+    }
+
+    pub fn config(&self) -> Result<String, JsError> {
+        to_js(&serde_json::json!({
+            "config": self.config,
+            "latency": self.config.latency(),
+            "counts": self.design.flat_counts(),
+        }))
+    }
+
+    pub fn verilog(&self) -> String {
+        to_verilog(&self.design)
+    }
+
+    pub fn vhdl(&self) -> String {
+        to_vhdl(&self.design)
+    }
+
+    /// `value` is a decimal string so 64-bit inputs keep every bit.
+    pub fn set(&mut self, port: &str, value: &str) -> Result<(), JsError> {
+        let parsed: u64 = value.parse().map_err(|_| JsError::new("valor inválido"))?;
+        self.sim.set(port, parsed).map_err(|e| JsError::new(&e.0))
+    }
+
+    pub fn tick(&mut self) {
+        self.sim.tick();
+    }
+
+    pub fn settle(&mut self) {
+        self.sim.settle();
+    }
+
+    pub fn cycle(&self) -> f64 {
+        self.sim.cycle() as f64
+    }
+
+    pub fn snapshot(&self, path: &str) -> Result<String, JsError> {
+        to_js(&self.sim.snapshot(path))
+    }
+}
+
+/// The reduced die running one worked example, gate by gate.
+#[wasm_bindgen]
+pub struct DieSimulation {
+    design: Design,
+    config: DieConfig,
+    sim: Simulator,
+    demo: Demo,
+    started: bool,
+}
+
+enum Demo {
+    Mlp(demo::Example),
+    Block(demo::BlockDemo),
+}
+
+#[wasm_bindgen]
+impl DieSimulation {
+    /// `kind` is "mlp", "attention" or "delta".
+    #[wasm_bindgen(constructor)]
+    pub fn new(params: &str, kind: &str) -> Result<DieSimulation, JsError> {
+        let p: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&e.to_string()))?;
+        let config = if kind == "mlp" {
+            DieConfig {
+                cells: 3,
+                cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: p.mac_stages, adder_stages: p.adder_stages, addr_bits: 4 },
+                scale_bits: 16,
+                reg_bits: 3,
+                index_bits: 4,
+                microcode_bits: 9,
+                broadcast_stages: p.noc_stages + 1,
+                function_bits: 8,
+                function_select_bits: 3,
+            }
+        } else {
+            demo::block_config()
+        };
+        let design = die_design(config);
+        let mut sim = Simulator::new(&design).map_err(|e| JsError::new(&e.0))?;
+        let demo = match kind {
+            "mlp" => {
+                let example = demo::example();
+                demo::load(&mut sim, config, &example);
+                Demo::Mlp(example)
+            }
+            "attention" | "delta" => {
+                let built = if kind == "attention" { demo::attention_demo(&config) } else { demo::delta_demo(&config) };
+                for step in demo::block_host_steps(config, &built.assembly) {
+                    for (name, value) in &step.inputs {
+                        sim.set_wide(name, *value).map_err(|e| JsError::new(&e.0))?;
+                    }
+                    sim.tick();
+                }
+                Demo::Block(built)
+            }
+            other => return Err(JsError::new(&format!("demostración desconocida: {other}"))),
+        };
+        Ok(DieSimulation { design, config, sim, demo, started: false })
+    }
+
+    pub fn design(&self) -> Result<String, JsError> {
+        to_js(&self.design)
+    }
+
+    pub fn counts(&self) -> Result<String, JsError> {
+        to_js(&self.design.flat_counts())
+    }
+
+    pub fn verilog(&self) -> String {
+        to_verilog(&self.design)
+    }
+
+    pub fn vhdl(&self) -> String {
+        to_vhdl(&self.design)
+    }
+
+    /// One clock edge. Returns true once the program has halted.
+    pub fn tick(&mut self) -> Result<bool, JsError> {
+        if !self.started {
+            self.sim.set("start", 0).map_err(|e| JsError::new(&e.0))?;
+            self.started = true;
+        }
+        self.sim.tick();
+        Ok(self.sim.get("halted") == Some(1))
+    }
+
+    pub fn cycle(&self) -> f64 {
+        self.sim.cycle() as f64
+    }
+
+    pub fn snapshot(&self, path: &str) -> Result<String, JsError> {
+        to_js(&self.sim.snapshot(path))
+    }
+
+    pub fn results(&mut self) -> Result<String, JsError> {
+        match &self.demo {
+            Demo::Mlp(example) => {
+                let expected = demo::reference(example);
+                let got: Vec<i64> = (0..demo::RESULT_LEN).map(|i| demo::read_register(&mut self.sim, self.config, demo::RESULT_REG, i)).collect();
+                let exact = got == expected;
+                to_js(&serde_json::json!({ "got": got, "expected": expected, "exact": exact, "tolerance": 0.0 }))
+            }
+            Demo::Block(built) => {
+                let mut model = Behavior::new(&self.config, &built.assembly.initial);
+                model.run(&built.assembly.steps);
+                let (mut got, mut exact) = (Vec::new(), true);
+                for i in 0..built.output_len {
+                    let (mantissa, value) = demo::read_block_value(&mut self.sim, self.config, built.output_reg, i);
+                    exact &= mantissa == model.mantissa((built.output_reg, i));
+                    got.push(value);
+                }
+                to_js(&serde_json::json!({ "got": got, "expected": built.expected, "exact": exact, "tolerance": built.tolerance }))
+            }
+        }
+    }
+}

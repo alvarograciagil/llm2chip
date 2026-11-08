@@ -1,0 +1,8 @@
+target/
+app/src-tauri/gen/
+node_modules/
+web/dist/
+web/src/wasm/
+*.chipimg
+.DS_Store
+.venv/

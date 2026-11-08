@@ -1,0 +1,216 @@
+//! A complete Qwen3.5-shaped model, weights and all, executed on the gates.
+
+use compiler::compile_qwen3_5;
+use netlist::block::tables;
+use netlist::demo::read_block_value;
+use netlist::{die_design, CellConfig, DieConfig, DieProgram, Simulator};
+use sim::lower::Layout;
+use sim::{Engine, Numeric, Weights};
+use std::collections::BTreeMap;
+use std::path::Path;
+
+const CONFIG: &str = r#"{
+  "model_type": "qwen3_5_text",
+  "hidden_size": 8, "intermediate_size": 16, "vocab_size": 8,
+  "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 8,
+  "linear_num_key_heads": 1, "linear_key_head_dim": 4,
+  "linear_num_value_heads": 2, "linear_value_head_dim": 4,
+  "linear_conv_kernel_dim": 4, "partial_rotary_factor": 0.25,
+  "layer_types": ["linear_attention", "full_attention"],
+  "rope_parameters": { "rope_theta": 10000.0 }
+}"#;
+
+fn die_config() -> DieConfig {
+    DieConfig {
+        cells: 1,
+        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3 },
+        scale_bits: 16,
+        reg_bits: 9,
+        index_bits: 9,
+        microcode_bits: 18,
+        broadcast_stages: 1,
+        function_bits: 12,
+        function_select_bits: 3,
+    }
+}
+
+struct Rng(u64);
+
+impl Rng {
+    fn unit(&mut self) -> f32 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0
+    }
+}
+
+#[derive(Default)]
+struct Writer {
+    header: BTreeMap<String, serde_json::Value>,
+    data: Vec<u8>,
+}
+
+impl Writer {
+    fn tensor(&mut self, name: &str, dtype: &str, shape: &[usize], bytes: Vec<u8>) {
+        let start = self.data.len();
+        self.data.extend(bytes);
+        self.header.insert(name.to_string(), serde_json::json!({ "dtype": dtype, "shape": shape, "data_offsets": [start, self.data.len()] }));
+    }
+
+    fn floats(&mut self, name: &str, values: &[f32]) {
+        let bytes = values.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect();
+        self.tensor(name, "F16", &[values.len()], bytes);
+    }
+
+    /// One matrix in MLX's affine format: 4-bit codes in groups of two columns.
+    fn matrix(&mut self, name: &str, rows: usize, cols: usize, rng: &mut Rng) {
+        const GROUP: usize = 2;
+        let groups = cols / GROUP;
+        let mut codes = Vec::with_capacity(rows * cols);
+        let (mut scales, mut biases) = (Vec::new(), Vec::new());
+        for _ in 0..rows {
+            for _ in 0..groups {
+                scales.extend(half::f16::from_f32(0.02 + 0.03 * rng.unit().abs()).to_le_bytes());
+                biases.extend(half::f16::from_f32(-0.2 * rng.unit().abs() - 0.05).to_le_bytes());
+                for _ in 0..GROUP {
+                    codes.push(((rng.unit() + 1.0) * 7.5) as u8 & 0xF);
+                }
+            }
+        }
+        let mut packed = vec![0u8; rows * cols.div_ceil(8) * 4];
+        for (i, code) in codes.iter().enumerate() {
+            packed[i / 2] |= code << (4 * (i & 1));
+        }
+        self.tensor(&format!("{name}.weight"), "U32", &[rows, cols.div_ceil(8)], packed);
+        self.tensor(&format!("{name}.scales"), "F16", &[rows, groups], scales);
+        self.tensor(&format!("{name}.biases"), "F16", &[rows, groups], biases);
+    }
+
+    fn write(self, path: &Path) {
+        let header = serde_json::to_vec(&self.header).unwrap();
+        let mut file = (header.len() as u64).to_le_bytes().to_vec();
+        file.extend(header);
+        file.extend(self.data);
+        std::fs::write(path, file).unwrap();
+    }
+}
+
+fn make_checkpoint(dir: &Path) {
+    let mut rng = Rng(0x1234_5678_9ABC_DEF1);
+    let mut w = Writer::default();
+    w.matrix("model.embed_tokens", 8, 8, &mut rng);
+    w.matrix("lm_head", 8, 8, &mut rng);
+    w.floats("model.norm.weight", &[1.0; 8]);
+    for (layer, full) in [(0, false), (1, true)] {
+        let p = |s: &str| format!("model.layers.{layer}.{s}");
+        w.floats(&p("input_layernorm.weight"), &[1.0; 8]);
+        w.floats(&p("post_attention_layernorm.weight"), &[1.0; 8]);
+        w.matrix(&p("mlp.gate_proj"), 16, 8, &mut rng);
+        w.matrix(&p("mlp.up_proj"), 16, 8, &mut rng);
+        w.matrix(&p("mlp.down_proj"), 8, 16, &mut rng);
+        if full {
+            w.matrix(&p("self_attn.q_proj"), 32, 8, &mut rng);
+            w.matrix(&p("self_attn.k_proj"), 8, 8, &mut rng);
+            w.matrix(&p("self_attn.v_proj"), 8, 8, &mut rng);
+            w.matrix(&p("self_attn.o_proj"), 8, 16, &mut rng);
+            w.floats(&p("self_attn.q_norm.weight"), &[1.0; 8]);
+            w.floats(&p("self_attn.k_norm.weight"), &[1.0; 8]);
+        } else {
+            w.matrix(&p("linear_attn.in_proj_qkv"), 16, 8, &mut rng);
+            w.matrix(&p("linear_attn.in_proj_z"), 8, 8, &mut rng);
+            w.matrix(&p("linear_attn.in_proj_a"), 2, 8, &mut rng);
+            w.matrix(&p("linear_attn.in_proj_b"), 2, 8, &mut rng);
+            w.matrix(&p("linear_attn.out_proj"), 8, 8, &mut rng);
+            let taps: Vec<f32> = (0..64).map(|i| if i % 4 == 3 { 0.9 } else { 0.05 }).collect();
+            w.floats(&p("linear_attn.conv1d.weight"), &taps);
+            w.floats(&p("linear_attn.A_log"), &[-1.0, -0.5]);
+            w.floats(&p("linear_attn.dt_bias"), &[1.0, 1.0]);
+            w.floats(&p("linear_attn.norm.weight"), &[1.0; 4]);
+        }
+    }
+    w.write(&dir.join("model.safetensors"));
+}
+
+fn load_assembly(sim: &mut Simulator, c: &DieConfig, initial: &std::collections::HashMap<(u32, u32), i64>) {
+    sim.set("load_vec", 1).unwrap();
+    for ((reg, index), value) in initial {
+        sim.set("vec_addr", ((*reg as u64) << c.index_bits) | *index as u64).unwrap();
+        sim.set("vec_data", *value as u64 & 0xFFFF).unwrap();
+        sim.tick();
+    }
+    sim.set("load_vec", 0).unwrap();
+}
+
+#[test]
+fn tiny_model_runs_whole_on_the_gates() {
+    let dir = std::env::temp_dir().join(format!("llm2chip-tiny-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+
+    let tokens = [3u32, 7, 1];
+    let mut reference = Engine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
+    let mut expected = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        let (logits, _) = reference.step(*t, i + 1 == tokens.len()).unwrap();
+        if let Some(l) = logits {
+            expected = l.to_vec();
+        }
+    }
+
+    let c = die_config();
+    let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), c).unwrap();
+    let mut sim = Simulator::new(&die_design(c)).unwrap();
+    sim.set("start", 1).unwrap();
+    sim.tick();
+    load_assembly(&mut sim, &c, &layout.setup().initial);
+    sim.set("load_fn", 1).unwrap();
+    for (address, value) in tables(&c).iter().enumerate() {
+        sim.set("fn_addr", address as u64).unwrap();
+        sim.set("cell_data", *value as u64 & 0xFFFF).unwrap();
+        sim.tick();
+    }
+    sim.set("load_fn", 0).unwrap();
+
+    let mut total_cycles = 0u64;
+    for (position, token) in tokens.iter().enumerate() {
+        let assembly = layout.token(&program, *token, position, position + 1 == tokens.len()).unwrap();
+        let mut microcode = DieProgram::new(c);
+        for step in &assembly.steps {
+            microcode.alu(step);
+        }
+        let words = microcode.finish();
+        assert!(words.len() < 1 << c.microcode_bits, "{} palabras", words.len());
+
+        sim.set("start", 1).unwrap();
+        sim.tick();
+        sim.set("load_code", 1).unwrap();
+        for (i, word) in words.iter().enumerate() {
+            sim.set("code_addr", i as u64).unwrap();
+            sim.set_wide("code_data", word.encode(&c)).unwrap();
+            sim.tick();
+        }
+        sim.set("load_code", 0).unwrap();
+        load_assembly(&mut sim, &c, &assembly.initial);
+        sim.tick();
+        sim.set("start", 0).unwrap();
+        let mut cycles = 0u64;
+        while sim.get("halted").unwrap() == 0 {
+            sim.tick();
+            cycles += 1;
+            assert!(cycles < 20_000_000, "el secuenciador no se detiene");
+        }
+        total_cycles += cycles;
+    }
+
+    let logits_reg = layout.logits_register(&program);
+    let got: Vec<f32> = (0..8).map(|i| read_block_value(&mut sim, c, logits_reg, i).1 as f32).collect();
+    let best = |v: &[f32]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+    eprintln!("ciclos: {total_cycles}\nreferencia: {expected:?}\npuertas:    {got:?}");
+    assert_eq!(best(&got), best(&expected), "el token más probable debe coincidir");
+    let spread: f32 = expected.iter().map(|v| v.abs()).sum::<f32>() / 8.0;
+    let error: f32 = got.iter().zip(&expected).map(|(a, b)| (a - b).abs()).sum::<f32>() / 8.0;
+    assert!(error < 0.08 * spread.max(0.2), "error medio {error}, magnitud {spread}");
+    std::fs::remove_dir_all(&dir).ok();
+}

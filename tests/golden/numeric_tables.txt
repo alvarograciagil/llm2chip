@@ -1,0 +1,9 @@
+activacion estado | acuerdo_top1 KL_medio KL_max saturaciones
+bloque 16 bits, estado 16 bits, tablas 16 bits | 97.5% 0.0012 0.006 0
+bloque 16 bits, estado 16 bits, tablas 12 bits | 97.5% 0.0011 0.007 0
+bloque 16 bits, estado 16 bits, tablas 10 bits | 97.5% 0.0026 0.018 0
+bloque 16 bits, estado 16 bits, tablas 8 bits | 90.0% 0.0411 0.665 0
+bloque 16 bits, estado 16 bits, tablas 6 bits | 87.5% 0.2257 2.342 0
+bloque 14 bits, estado 16 bits, tablas 10 bits | 97.5% 0.0061 0.039 0
+bloque 14 bits, estado 14 bits, tablas 10 bits | 100.0% 0.0060 0.038 0
+bloque 14 bits, estado 12 bits, tablas 8 bits | 92.5% 0.0370 0.366 0

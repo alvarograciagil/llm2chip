@@ -1,0 +1,10 @@
+[package]
+name = "compiler"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+arch = { path = "../arch" }
+model-ir = { path = "../model-ir" }
+serde.workspace = true
+serde_json.workspace = true

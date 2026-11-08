@@ -1,0 +1,15 @@
+{
+ "id": "llama-rom",
+ "name": "Llama 8B en ROM, tipo HC1",
+ "model": "llama-3.1-8b",
+ "description": "Modelo grabado en ROM, parecido al enfoque de Taalas.",
+ "params": {
+  "max_params_g": 8.1,
+  "weight_backend": "rom",
+  "use_model_mix": false,
+  "group_size": 0,
+  "weight_bits": 4,
+  "context_tokens": 1024,
+  "vector_lanes_per_die": 65536
+ }
+}

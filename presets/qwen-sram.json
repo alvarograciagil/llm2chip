@@ -1,0 +1,2 @@
+{ "id": "qwen-sram", "name": "Qwen3.8-27B en SRAM", "model": "qwen3.8-27b",
+  "description": "La arquitectura base: pesos cargables en celdas repartidas por el chip.", "params": {} }

@@ -1,0 +1,27 @@
+[package]
+name = "sim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+compiler = { path = "../compiler" }
+netlist = { path = "../netlist" }
+half = "2"
+memmap2 = "0.9"
+rayon = "1"
+serde.workspace = true
+serde_json.workspace = true
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+
+[[example]]
+name = "generate"
+
+[[example]]
+name = "numeric"
+
+[[example]]
+name = "mtp"
+
+[dev-dependencies]
+half = "2"
+serde_json.workspace = true
