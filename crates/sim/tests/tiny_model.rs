@@ -142,6 +142,130 @@ fn load_assembly(sim: &mut Simulator, c: &DieConfig, initial: &std::collections:
     sim.set("load_vec", 0).unwrap();
 }
 
+fn make_moe_checkpoint(dir: &Path) {
+    let mut rng = Rng(0x0FED_CBA9_8765_4321);
+    let mut w = Writer::default();
+    w.matrix("model.embed_tokens", 8, 8, &mut rng);
+    w.matrix("lm_head", 8, 8, &mut rng);
+    w.floats("model.norm.weight", &[1.0; 8]);
+    let p = |s: &str| format!("model.layers.0.{s}");
+    w.floats(&p("input_layernorm.weight"), &[1.0; 8]);
+    w.floats(&p("post_attention_layernorm.weight"), &[1.0; 8]);
+    w.matrix(&p("self_attn.q_proj"), 32, 8, &mut rng);
+    w.matrix(&p("self_attn.k_proj"), 8, 8, &mut rng);
+    w.matrix(&p("self_attn.v_proj"), 8, 8, &mut rng);
+    w.matrix(&p("self_attn.o_proj"), 8, 16, &mut rng);
+    w.floats(&p("self_attn.q_norm.weight"), &[1.0; 8]);
+    w.floats(&p("self_attn.k_norm.weight"), &[1.0; 8]);
+    w.matrix(&p("mlp.gate"), 4, 8, &mut rng);
+    w.matrix(&p("mlp.switch_mlp.gate_proj"), 32, 8, &mut rng);
+    w.matrix(&p("mlp.switch_mlp.up_proj"), 32, 8, &mut rng);
+    w.matrix(&p("mlp.switch_mlp.down_proj"), 32, 8, &mut rng);
+    w.matrix(&p("mlp.shared_expert.gate_proj"), 8, 8, &mut rng);
+    w.matrix(&p("mlp.shared_expert.up_proj"), 8, 8, &mut rng);
+    w.matrix(&p("mlp.shared_expert.down_proj"), 8, 8, &mut rng);
+    w.matrix(&p("mlp.shared_expert_gate"), 1, 8, &mut rng);
+    w.write(&dir.join("model.safetensors"));
+}
+
+fn gates_after(program: &compiler::Program, dir: &Path, c: DieConfig, tokens: &[u32]) -> (Simulator, Layout) {
+    let layout = Layout::new(program, &Weights::open(dir).unwrap(), c, true).unwrap();
+    let mut sim = Simulator::new(&die_design(c)).unwrap();
+    sim.set("start", 1).unwrap();
+    sim.tick();
+    load_assembly(&mut sim, &c, &layout.setup().initial);
+    sim.set("load_fn", 1).unwrap();
+    for (address, value) in tables(&c).iter().enumerate() {
+        sim.set("fn_addr", address as u64).unwrap();
+        sim.set("cell_data", *value as u64 & 0xFFFF).unwrap();
+        sim.tick();
+    }
+    sim.set("load_fn", 0).unwrap();
+    for (position, token) in tokens.iter().enumerate() {
+        let assembly = layout.token(program, *token, position, position + 1 == tokens.len()).unwrap();
+        let mut microcode = DieProgram::new(c);
+        for step in &assembly.steps {
+            microcode.alu(step);
+        }
+        let words = microcode.finish();
+        assert!(words.len() < 1 << c.microcode_bits, "{} palabras", words.len());
+        sim.set("start", 1).unwrap();
+        sim.tick();
+        sim.set("load_code", 1).unwrap();
+        for (i, word) in words.iter().enumerate() {
+            sim.set("code_addr", i as u64).unwrap();
+            sim.set_wide("code_data", word.encode(&c)).unwrap();
+            sim.tick();
+        }
+        sim.set("load_code", 0).unwrap();
+        load_assembly(&mut sim, &c, &assembly.initial);
+        sim.tick();
+        sim.set("start", 0).unwrap();
+        let mut cycles = 0u64;
+        while sim.get("halted").unwrap() == 0 {
+            sim.tick();
+            cycles += 1;
+            assert!(cycles < 20_000_000, "el secuenciador no se detiene");
+        }
+    }
+    (sim, layout)
+}
+
+fn assert_vm_matches_gates(program: &compiler::Program, config: &str, dir: &Path, c: DieConfig, tokens: &[u32], sim: &mut Simulator, layout: &Layout) {
+    let mut vm = ExactEngine::new(compile_qwen3_5(config).unwrap(), Weights::open(dir).unwrap()).unwrap();
+    for (position, token) in tokens.iter().enumerate() {
+        vm.step(*token, position + 1 == tokens.len()).unwrap();
+    }
+    for (buffer, length) in program.buffers.iter().enumerate() {
+        let gates = layout.register_of(buffer);
+        let fast = vm.register_of(buffer);
+        for index in 0..*length as u32 {
+            let (mantissa, _) = read_block_value(sim, c, gates, index);
+            assert_eq!(mantissa, vm.mantissa(fast, index), "búfer {buffer}, elemento {index}");
+        }
+    }
+}
+
+#[test]
+fn mixture_of_experts_runs_on_the_gates() {
+    const MOE: &str = r#"{
+      "model_type": "qwen3_5_moe_text",
+      "hidden_size": 8, "vocab_size": 8,
+      "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 8,
+      "linear_num_key_heads": 1, "linear_key_head_dim": 4,
+      "linear_num_value_heads": 2, "linear_value_head_dim": 4,
+      "linear_conv_kernel_dim": 4, "partial_rotary_factor": 0.25,
+      "layer_types": ["full_attention"],
+      "num_experts": 4, "num_experts_per_tok": 2,
+      "moe_intermediate_size": 8, "shared_expert_intermediate_size": 8,
+      "rope_parameters": { "rope_theta": 10000.0 }
+    }"#;
+    let dir = std::env::temp_dir().join(format!("llm2chip-moe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_moe_checkpoint(&dir);
+    let program = compile_qwen3_5(MOE).unwrap();
+    let tokens = [2u32, 5];
+
+    let mut reference = Engine::new(compile_qwen3_5(MOE).unwrap(), Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
+    let mut expected = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if let (Some(l), _) = reference.step(*t, i + 1 == tokens.len()).unwrap() {
+            expected = l.to_vec();
+        }
+    }
+
+    let c = DieConfig { reg_bits: 10, index_bits: 9, ..die_config() };
+    let (mut sim, layout) = gates_after(&program, &dir, c, &tokens);
+    let got: Vec<f32> = (0..8).map(|i| read_block_value(&mut sim, c, layout.logits_register(&program), i).1 as f32).collect();
+    let best = |v: &[f32]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+    assert_eq!(best(&got), best(&expected), "{got:?} {expected:?}");
+    let spread: f32 = expected.iter().map(|v| v.abs()).sum::<f32>() / 8.0;
+    let error: f32 = got.iter().zip(&expected).map(|(a, b)| (a - b).abs()).sum::<f32>() / 8.0;
+    assert!(error < 0.08 * spread.max(0.2), "error medio {error}, magnitud {spread}");
+    assert_vm_matches_gates(&program, MOE, &dir, c, &tokens, &mut sim, &layout);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn tiny_model_runs_whole_on_the_gates() {
     let dir = std::env::temp_dir().join(format!("llm2chip-tiny-{}", std::process::id()));
