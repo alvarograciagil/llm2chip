@@ -1,3 +1,5 @@
+import { download } from "../download";
+import { floorplanDef, floorplanSvg } from "../floorplanExport";
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { Rect, Report } from "../engine";
 import { formatNumber } from "../format";
@@ -374,6 +376,12 @@ export function FloorplanView() {
       <div className="hud bottom">
         <Legend report={report} overlay={overlay} />
         <div className="zoom">
+          <IconButton label="Exportar plano en SVG" onClick={() => download(floorplanSvg(report), "llm2chip_plano.svg", "image/svg+xml")}>
+            <path d="M6 3h6l3 3v11H6zM12 3v3h3M8 11l2 2 2-2M10 8v5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+          </IconButton>
+          <IconButton label="Exportar colocación en DEF" onClick={() => download(floorplanDef(report.floorplan, "llm2chip"), "llm2chip_plano.def")}>
+            <path d="M4 4h12v12H4zM4 10h12M10 4v12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+          </IconButton>
           <IconButton label="Alejar" onClick={() => zoomAt(0.6, width / 2, height / 2)}>
             <path d="M5 10h10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
           </IconButton>

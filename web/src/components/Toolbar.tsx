@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useDesign, type Appearance } from "../store";
 import { datasheet } from "../datasheet";
+import { download } from "../download";
 import { IconButton, Segmented } from "./controls";
 
 const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round" } as const;
@@ -123,12 +124,7 @@ export function Toolbar() {
   const exportDatasheet = () => {
     const { report, designName, model, params } = useDesign.getState();
     if (!report || !model) return;
-    const url = URL.createObjectURL(new Blob([datasheet(designName, model.name, report, params as unknown as Record<string, unknown>)], { type: "text/markdown" }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${designName.replace(/[^\p{L}\p{N}]+/gu, "_")}_hoja_de_datos.md`;
-    a.click();
-    URL.revokeObjectURL(url);
+    download(datasheet(designName, model.name, report, params as unknown as Record<string, unknown>), `${designName.replace(/[^\p{L}\p{N}]+/gu, "_")}_hoja_de_datos.md`, "text/markdown");
   };
 
   return (
