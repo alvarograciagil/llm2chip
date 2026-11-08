@@ -85,8 +85,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut engine = Engine::new(compile_qwen3_5(&config)?, weights, Numeric::Float)?;
         let started = Instant::now();
         let (mut matches, mut kl, mut index) = (0, 0.0, 0);
-        for i in 0..ids.len() + count - 1 {
-            if let Some(l) = engine.step(sequence[i], i + 1 >= ids.len())?.0 {
+        for (i, token) in sequence.iter().enumerate().take(ids.len() + count - 1) {
+            if let Some(l) = engine.step(*token, i + 1 >= ids.len())?.0 {
                 let p = softmax(l);
                 matches += (best(&p) == best(&reference[index])) as usize;
                 kl += reference[index].iter().zip(&p).filter(|(a, _)| **a > 1e-12).map(|(a, b)| a * (a / b.max(1e-30)).ln()).sum::<f64>();

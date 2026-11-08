@@ -502,7 +502,7 @@ fn affine_integers(scale: f32, bias: f32, factor: f64) -> (i32, i32) {
 
 #[inline]
 fn affine_weight(q: u8, scale: i32, bias: i32) -> i64 {
-    (((q as i64 * scale as i64 + bias as i64) >> AFFINE_EXTRA)).clamp(-MANTISSA_LIMIT, MANTISSA_LIMIT)
+    ((q as i64 * scale as i64 + bias as i64) >> AFFINE_EXTRA).clamp(-MANTISSA_LIMIT, MANTISSA_LIMIT)
 }
 
 /// `Σ ((q·scale + bias) >> 4) · x`, written so the compiler can vectorise it.
