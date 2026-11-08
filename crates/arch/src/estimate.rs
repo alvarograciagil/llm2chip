@@ -965,13 +965,16 @@ mod tests {
 
     #[test]
     fn every_optimization_changes_the_design() {
-        let base = serde_json::to_string(&estimate(&qwen(), &ChipParams::default()).unwrap().metrics).unwrap();
         for option in catalog() {
-            let mut p = ChipParams::default();
+            // Hardwired weights are the only place this optimization applies.
+            let start = ChipParams { weight_backend: if option.id == "pesos_csd" { WeightBackend::Rom } else { WeightBackend::Sram }, ..Default::default() };
+            let base_report = estimate(&qwen(), &start).unwrap();
+            let base = serde_json::to_string(&base_report.metrics).unwrap();
+            let mut p = start.clone();
             p.optimizations.insert(option.id.to_string());
             let report = estimate(&qwen(), &p).unwrap();
             let blocks = report.blocks.iter().map(|b| b.per_die_mm2).sum::<f64>();
-            let default_blocks = estimate(&qwen(), &ChipParams::default()).unwrap().die_area_mm2;
+            let default_blocks = base_report.die_area_mm2;
             let metrics = serde_json::to_string(&report.metrics).unwrap();
             assert!(metrics != base || (blocks - default_blocks).abs() > 1e-9, "{} no cambia nada", option.id);
         }
