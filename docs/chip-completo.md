@@ -92,7 +92,7 @@ Qwen3.8 tiene 27.000 millones de pesos, y simularlos en puertas no es viable. La
 
 Hoy los pesos se escriben directamente en la memoria simulada. El cambio central es que la simulación lea de lo que el chip ha cargado.
 
-**Imagen del chip (`.chipimg`).** El compilador genera un archivo con cabecera y versión, mapa de memoria, firmware, microcódigo, tablas de función, tokenizador, y pesos por celda en el formato del chip, con ECC y CRC por segmento. Los pesos quedan alineados, lo que permite usarlos desde la GPU sin copias, y un formato recodificado se calcula una sola vez y se guarda.
+**Imagen del chip.** Firmware, microcódigo, tablas y tokenizador forman la imagen que recorre el controlador. Para el modelo real, un manifiesto en `~/.llm2chip/images` guarda el destino y el CRC de cada tensor, y los pesos se leen del checkpoint para no duplicar sus 19 GB. Falta escribir una imagen de pesos por celda en el formato del chip.
 
 **Tres niveles para la misma carga:**
 

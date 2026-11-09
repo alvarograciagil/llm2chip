@@ -85,18 +85,18 @@ function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
 
 type Profile = "fast" | "arithmetic" | "flow" | "custom";
 
-const PROFILES: Record<Exclude<Profile, "custom">, { numeric: Numeric; useGpu: boolean; firmware: boolean; samplerUnit: boolean; firmwareTokenizer: boolean }> = {
-  fast: { numeric: "float", useGpu: true, firmware: false, samplerUnit: false, firmwareTokenizer: false },
-  arithmetic: { numeric: "exact", useGpu: true, firmware: false, samplerUnit: false, firmwareTokenizer: false },
-  flow: { numeric: "exact", useGpu: true, firmware: true, samplerUnit: true, firmwareTokenizer: true },
+const PROFILES: Record<Exclude<Profile, "custom">, { numeric: Numeric; useGpu: boolean; firmware: boolean; samplerUnit: boolean; firmwareTokenizer: boolean; transactionLoad: boolean }> = {
+  fast: { numeric: "float", useGpu: true, firmware: false, samplerUnit: false, firmwareTokenizer: false, transactionLoad: false },
+  arithmetic: { numeric: "exact", useGpu: true, firmware: false, samplerUnit: false, firmwareTokenizer: false, transactionLoad: false },
+  flow: { numeric: "exact", useGpu: true, firmware: true, samplerUnit: true, firmwareTokenizer: true, transactionLoad: true },
 };
 
 const NUMERIC_NAME: Record<Numeric, string> = { float: "Coma flotante", fixed: "Exponente por vector", exact: "Enteros exactos" };
 
 const loadedNumeric = (s: { numeric: Numeric; numericLoaded: Numeric | null }) => s.numericLoaded ?? s.numeric;
 
-function profileOf(s: { numeric: Numeric; useGpu: boolean; firmware: boolean; samplerUnit: boolean; firmwareTokenizer: boolean }): Profile {
-  const same = (p: (typeof PROFILES)[keyof typeof PROFILES]) => p.numeric === s.numeric && p.useGpu === s.useGpu && p.firmware === s.firmware && p.samplerUnit === s.samplerUnit && p.firmwareTokenizer === s.firmwareTokenizer;
+function profileOf(s: { numeric: Numeric; useGpu: boolean; firmware: boolean; samplerUnit: boolean; firmwareTokenizer: boolean; transactionLoad: boolean }): Profile {
+  const same = (p: (typeof PROFILES)[keyof typeof PROFILES]) => p.numeric === s.numeric && p.useGpu === s.useGpu && p.firmware === s.firmware && p.samplerUnit === s.samplerUnit && p.firmwareTokenizer === s.firmwareTokenizer && p.transactionLoad === s.transactionLoad;
   return (Object.keys(PROFILES) as (keyof typeof PROFILES)[]).find((k) => same(PROFILES[k])) ?? "custom";
 }
 
@@ -277,11 +277,16 @@ export function SimulatorPanel() {
           <input type="checkbox" checked={state.firmware && state.firmwareTokenizer} disabled={!state.firmware} onChange={(e) => set({ firmwareTokenizer: e.target.checked })} />
           Tokenizador en el firmware
         </label>
+        <label className="check">
+          <input type="checkbox" checked={state.transactionLoad} onChange={(e) => set({ transactionLoad: e.target.checked })} />
+          Comprobar la carga de la imagen
+        </label>
+        <p className="muted-text">Al cargar, recorre todos los bloques como el controlador real, verifica su CRC y cuenta los ciclos. Hay que recargar el modelo.</p>
         <p className="muted-text">El firmware convierte el texto en tokens y los tokens en bytes, y se compara con la biblioteca de referencia.</p>
         <dl className="metrics">
           <div><dt>Núcleo de inferencia</dt><dd>{NUMERIC_NAME[state.numeric]}{state.useGpu ? " · GPU" : ""}</dd></div>
           <div><dt>Tokenizador</dt><dd>{state.firmware && state.firmwareTokenizer ? "En el firmware" : "Fuera del chip"}</dd></div>
-          <div><dt>Carga de pesos</dt><dd>{params.weight_backend === "rom" ? "Grabados en el chip (ROM)" : "Directa del checkpoint"}</dd></div>
+          <div><dt>Carga de pesos</dt><dd>{params.weight_backend === "rom" ? "Grabados en el chip (ROM)" : state.transactionLoad ? "Por transacciones" : "Directa del checkpoint"}</dd></div>
         </dl>
         {state.numeric !== loadedNumeric(state) && state.loaded && <p className="muted-text">Recarga el modelo para aplicar la aritmética elegida.</p>}
       </div>
@@ -309,6 +314,9 @@ export function SimulatorPanel() {
         <div><dt>Simulación</dt><dd>{mean ? `${formatNumber(mean)} s/token` : "—"}</dd></div>
         <div><dt>Este chip, estimado</dt><dd>{formatNumber(chipRate)} tok/s</dd></div>
         <div><dt>Más rápido que simularlo</dt><dd>{mean ? `×${formatNumber(chipRate * mean)}` : "—"}</dd></div>
+        {state.loadReport && <div><dt>Imagen: bloques</dt><dd>{formatNumber(state.loadReport.segments)}{state.loadReport.created ? " (creada)" : ""}</dd></div>}
+        {state.loadReport && <div><dt>Imagen: ciclos de carga</dt><dd>{formatNumber(state.loadReport.cycles)}</dd></div>}
+        {state.loadReport && <div><dt>Imagen: errores de CRC</dt><dd>{state.loadReport.crc_errors.length}</dd></div>}
         {state.chip && <div><dt>Ciclos del chip, con firmware</dt><dd>{formatNumber(state.chip.cycles)}</dd></div>}
         {state.chip?.tokenizerMatch != null && <div><dt>Tokenizador frente a la referencia</dt><dd>{state.chip.tokenizerMatch ? "Coincide" : "Difiere"}</dd></div>}
         {state.chip && <div><dt>Fuera del die (CPU y muestreo)</dt><dd>{formatNumber(state.chip.cycles - state.chip.dieCycles)} ciclos</dd></div>}

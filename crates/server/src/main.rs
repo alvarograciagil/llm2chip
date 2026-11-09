@@ -20,6 +20,7 @@ use netlist::soc::{FirmwareImage, SocBus, SocConfig};
 use netlist::{CellConfig, DieConfig, Microprogram, Parameter};
 use sim::chip::{RunnerEngine, FLOW_REGISTER_BITS, FLOW_INDEX_BITS};
 use sim::lower::{ENTRY_LOGITS, ENTRY_TOKEN};
+use sim::image::{load_or_build, verify, LoadReport};
 use sim::tokenizer::TokenizerTables;
 use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,7 @@ struct Loaded {
     dir: PathBuf,
     /// The firmware's tokenizer tables, built the first time they are needed.
     firmware_tables: Option<Vec<u32>>,
+    load_report: Option<LoadReport>,
 }
 
 #[derive(Clone)]
@@ -119,6 +121,9 @@ struct LoadRequest {
     /// Runs the large matrix products on this system's GPU when it has one.
     #[serde(default)]
     gpu: bool,
+    /// Walks the whole image as the load controller would and checks its checksums.
+    #[serde(default)]
+    transaction: bool,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -129,7 +134,7 @@ struct NumericRequest {
 }
 
 fn load_model(request: LoadRequest) -> Result<Loaded, String> {
-    let LoadRequest { path, numeric, exact, format, gpu } = request;
+    let LoadRequest { path, numeric, exact, format, gpu, transaction } = request;
     let path = path.as_str();
     let dir = Path::new(path);
     let entry = scan_models().into_iter().find(|m| m.path == path).ok_or("el modelo no está en las carpetas conocidas")?;
@@ -145,24 +150,33 @@ fn load_model(request: LoadRequest) -> Result<Loaded, String> {
     let weights = Weights::open(dir)?.with_format(format);
     let weights = if gpu { weights.with_gpu() } else { weights };
     let accelerator = weights.accelerator_name();
+    let load_report = if transaction {
+        let manifest_path = home().join(".llm2chip/images").join(format!("{}.json", entry.name));
+        let (manifest, created) = load_or_build(&weights, &manifest_path)?;
+        let mut report = verify(&weights, &manifest, false);
+        report.created = created;
+        Some(report)
+    } else {
+        None
+    };
     let engine: Box<dyn Runner> = if exact {
         Box::new(ExactEngine::new(compile_qwen3_5(&config)?, weights, numeric.map_or(16, |n| n.activation_bits.clamp(8, 24)))?)
     } else {
         Box::new(Engine::new(compile_qwen3_5(&config)?, weights, mode)?)
     };
-    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator, dir: dir.to_path_buf(), firmware_tables: None })
+    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator, dir: dir.to_path_buf(), firmware_tables: None, load_report })
 }
 
 async fn load(State(app): State<App>, Json(request): Json<LoadRequest>) -> Response {
     let result = tokio::task::spawn_blocking(move || {
         let loaded = load_model(request)?;
-        let reply = (loaded.name.clone(), loaded.accelerator.clone());
+        let reply = (loaded.name.clone(), loaded.accelerator.clone(), loaded.load_report.clone());
         *app.loaded.lock().unwrap() = Some(loaded);
         Ok::<_, String>(reply)
     })
     .await;
     match result {
-        Ok(Ok((name, accelerator))) => Json(serde_json::json!({ "loaded": name, "accelerator": accelerator })).into_response(),
+        Ok(Ok((name, accelerator, load_report))) => Json(serde_json::json!({ "loaded": name, "accelerator": accelerator, "load_report": load_report })).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

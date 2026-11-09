@@ -40,6 +40,8 @@ interface SimulatorState {
   firmware: boolean;
   samplerUnit: boolean;
   firmwareTokenizer: boolean;
+  transactionLoad: boolean;
+  loadReport: { segments: number; words: number; cycles: number; seconds: number; created: boolean; crc_errors: string[] } | null;
   chip: { cycles: number; dieCycles: number; tokenizerMatch: boolean | null } | null;
   acceptance: { hits: number[]; tries: number[] };
   prompt: string;
@@ -87,6 +89,8 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   firmware: false,
   samplerUnit: false,
   firmwareTokenizer: false,
+  transactionLoad: false,
+  loadReport: null,
   chip: null,
   acceptance: { hits: [], tries: [] },
   prompt: "¿Cuál es la capital de Francia? Responde en una frase.",
@@ -120,7 +124,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   set: (patch) => set(patch),
 
   async load() {
-    const { path, numeric, activationBits, stateBits, tableBits, useDesignFormat, designFormat, useGpu } = get();
+    const { path, numeric, activationBits, stateBits, tableBits, useDesignFormat, designFormat, useGpu, transactionLoad } = get();
     set({ loading: true, error: null });
     const body = {
       path,
@@ -128,12 +132,13 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
       exact: numeric === "exact",
       format: useDesignFormat ? designFormat : null,
       gpu: useGpu,
+      transaction: transactionLoad,
     };
     try {
       const response = await fetch("/api/load", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       if (!response.ok) throw new Error(await message(response));
-      const { loaded, accelerator } = await response.json();
-      set({ loaded, accelerator, loading: false, numericLoaded: numeric });
+      const { loaded, accelerator, load_report: loadReport } = await response.json();
+      set({ loaded, accelerator, loadReport: loadReport ?? null, loading: false, numericLoaded: numeric });
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e), loading: false });
     }

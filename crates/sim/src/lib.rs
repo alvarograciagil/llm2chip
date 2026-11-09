@@ -4,6 +4,7 @@ pub mod accel;
 pub mod chip;
 mod exact;
 mod exec;
+pub mod image;
 pub mod lower;
 pub mod tokenizer;
 mod requant;
