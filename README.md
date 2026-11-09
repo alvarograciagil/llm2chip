@@ -154,3 +154,7 @@ Es un diseño de arquitectura y lógica, no un layout fabricable: no hay colocac
 | `app` | Aplicación de escritorio |
 | `tech`, `models`, `presets` | Nodos tecnológicos, modelos y diseños de partida |
 | `tools` | Referencia en Python y comparación con Yosys |
+
+## Licencia
+
+[MIT](LICENSE).
