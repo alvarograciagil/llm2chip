@@ -1,15 +1,22 @@
 //! Local engine for the app. Listens on 127.0.0.1 and requires the session token.
 
+mod catalog;
+mod hub;
+mod prompt;
+
 use axum::{
-    extract::{ws::{Message, WebSocket}, Request, State, WebSocketUpgrade},
+    extract::{ws::{Message, WebSocket}, Query, Request, State, WebSocketUpgrade},
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
-use compiler::compile_qwen3_5;
-use serde::{Deserialize, Serialize};
+use catalog::{Catalog, ModelEntry, Settings};
+use compiler::compile_model;
+use hub::Hub;
+use prompt::PromptStyle;
+use serde::Deserialize;
 use netlist::format::WeightFormat;
 use netlist::block::encode_vector;
 use netlist::chip::{chip_info, ChipModel, GenerationSetup};
@@ -23,13 +30,13 @@ use sim::lower::{ENTRY_LOGITS, ENTRY_TOKEN};
 use sim::image::{load_or_build, verify, LoadReport};
 use sim::tokenizer::TokenizerTables;
 use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokenizers::Tokenizer;
 use tokio::sync::mpsc;
 
 const PORT: u16 = 7878;
-const STOP_TOKENS: [u32; 2] = [248046, 248044];
 const FIRMWARE: &[u8] = include_bytes!("../../../firmware/prebuilt/firmware.elf");
 const FLOW_LOGITS_REGISTER: u32 = 1;
 
@@ -42,6 +49,7 @@ struct Loaded {
     /// The firmware's tokenizer tables, built the first time they are needed.
     firmware_tables: Option<Vec<u32>>,
     load_report: Option<LoadReport>,
+    prompt: PromptStyle,
 }
 
 #[derive(Clone)]
@@ -49,58 +57,100 @@ struct App {
     token: Arc<String>,
     loaded: Arc<Mutex<Option<Loaded>>>,
     dist: Option<Arc<PathBuf>>,
-}
-
-#[derive(Serialize)]
-struct ModelEntry {
-    name: String,
-    path: String,
-    architecture: String,
-    supported: bool,
-    size_gb: f64,
+    catalog: Arc<Catalog>,
+    hub: Arc<Hub>,
 }
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default())
 }
 
-fn describe(dir: &Path) -> Option<ModelEntry> {
-    let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).ok()?).ok()?;
-    let mut size = 0u64;
-    let mut has_weights = false;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        if entry.path().extension().is_some_and(|e| e == "safetensors") {
-            has_weights = true;
-            size += entry.metadata().map_or(0, |m| m.len());
-        }
+async fn models(State(app): State<App>, Query(query): Query<HashMap<String, String>>) -> Json<Vec<ModelEntry>> {
+    if query.contains_key("refresh") {
+        app.catalog.forget();
     }
-    if !has_weights || !dir.join("tokenizer.json").exists() {
-        return None;
-    }
-    let architecture = config.get("model_type").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-    let name = dir.file_name()?.to_string_lossy().replace("Youssofal--", "");
-    Some(ModelEntry { name, path: dir.to_string_lossy().into(), supported: matches!(architecture.as_str(), "qwen3_5" | "qwen3_5_moe"), architecture, size_gb: size as f64 / 1e9 })
+    Json(tokio::task::spawn_blocking(move || app.catalog.models()).await.unwrap_or_default())
 }
 
-fn scan_models() -> Vec<ModelEntry> {
-    let mut found = Vec::new();
-    let mtplx = home().join(".mtplx/models");
-    if let Ok(entries) = std::fs::read_dir(mtplx) {
-        found.extend(entries.flatten().filter_map(|e| describe(&e.path())));
-    }
-    if let Ok(entries) = std::fs::read_dir(home().join(".cache/huggingface/hub")) {
-        for model in entries.flatten() {
-            if let Ok(snapshots) = std::fs::read_dir(model.path().join("snapshots")) {
-                found.extend(snapshots.flatten().filter_map(|s| describe(&s.path())));
-            }
-        }
-    }
-    found.sort_by(|a, b| b.supported.cmp(&a.supported).then(a.name.cmp(&b.name)));
-    found
+fn refused(message: String) -> Response {
+    (StatusCode::BAD_REQUEST, message).into_response()
 }
 
-async fn models() -> Json<Vec<ModelEntry>> {
-    Json(tokio::task::spawn_blocking(scan_models).await.unwrap_or_default())
+async fn read_settings(State(app): State<App>) -> Response {
+    Json(app.catalog.view()).into_response()
+}
+
+async fn write_settings(State(app): State<App>, Json(settings): Json<Settings>) -> Response {
+    match tokio::task::spawn_blocking(move || app.catalog.update(settings)).await {
+        Ok(Ok(view)) => Json(view).into_response(),
+        Ok(Err(message)) => refused(message),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn hub_search(State(app): State<App>, Query(query): Query<HashMap<String, String>>) -> Response {
+    match app.hub.search(query.get("q").map_or("", String::as_str)).await {
+        Ok(hits) => Json(hits).into_response(),
+        Err(message) => refused(message),
+    }
+}
+
+async fn hub_details(State(app): State<App>, Query(query): Query<HashMap<String, String>>) -> Response {
+    match app.hub.details(query.get("id").map_or("", String::as_str), &app.catalog.download_dir()).await {
+        Ok(details) => Json(details).into_response(),
+        Err(message) => refused(message),
+    }
+}
+
+#[derive(Deserialize)]
+struct RepoRequest {
+    id: String,
+}
+
+async fn hub_download(State(app): State<App>, Json(request): Json<RepoRequest>) -> Response {
+    let catalog = app.catalog.clone();
+    match app.hub.start(request.id, app.catalog.download_dir(), move || catalog.forget()).await {
+        Ok(job) => Json(job).into_response(),
+        Err(message) => refused(message),
+    }
+}
+
+async fn hub_jobs(State(app): State<App>) -> Response {
+    Json(app.hub.jobs()).into_response()
+}
+
+async fn hub_cancel(State(app): State<App>, Json(request): Json<RepoRequest>) -> Response {
+    Json(serde_json::json!({ "cancelled": app.hub.cancel(&request.id) })).into_response()
+}
+
+async fn hub_discard(State(app): State<App>, Json(request): Json<RepoRequest>) -> Response {
+    match app.hub.discard(&request.id, &app.catalog.download_dir()).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(message) => refused(message),
+    }
+}
+
+async fn hub_token(State(app): State<App>) -> Response {
+    Json(app.hub.token_status()).into_response()
+}
+
+#[derive(Deserialize)]
+struct TokenRequest {
+    token: String,
+}
+
+async fn hub_set_token(State(app): State<App>, Json(request): Json<TokenRequest>) -> Response {
+    match app.hub.set_token(&request.token) {
+        Ok(()) => Json(app.hub.token_status()).into_response(),
+        Err(message) => refused(message),
+    }
+}
+
+async fn hub_clear_token(State(app): State<App>) -> Response {
+    match app.hub.clear_token() {
+        Ok(()) => Json(app.hub.token_status()).into_response(),
+        Err(message) => refused(message),
+    }
 }
 
 async fn status(State(app): State<App>) -> Json<serde_json::Value> {
@@ -133,13 +183,14 @@ struct NumericRequest {
     table_bits: Option<u32>,
 }
 
-fn load_model(request: LoadRequest) -> Result<Loaded, String> {
+fn load_model(catalog: &Catalog, request: LoadRequest) -> Result<Loaded, String> {
     let LoadRequest { path, numeric, exact, format, gpu, transaction } = request;
     let path = path.as_str();
     let dir = Path::new(path);
-    let entry = scan_models().into_iter().find(|m| m.path == path).ok_or("el modelo no está en las carpetas conocidas")?;
+    let entry = catalog.find(path).ok_or("el modelo no está en las carpetas conocidas")?;
     if !entry.supported {
-        return Err(format!("la arquitectura «{}» todavía no se puede ejecutar", entry.architecture));
+        let reason = entry.adaptation.reason.unwrap_or_else(|| format!("la arquitectura «{}» todavía no se puede ejecutar", entry.architecture));
+        return Err(format!("{}: {reason}", entry.name));
     }
     let config = std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?;
     let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| e.to_string())?;
@@ -151,7 +202,7 @@ fn load_model(request: LoadRequest) -> Result<Loaded, String> {
     let weights = if gpu { weights.with_gpu() } else { weights };
     let accelerator = weights.accelerator_name();
     let load_report = if transaction {
-        let manifest_path = home().join(".llm2chip/images").join(format!("{}.json", entry.name));
+        let manifest_path = home().join(".llm2chip/images").join(format!("{}.json", entry.name.replace('/', "--")));
         let (manifest, created) = load_or_build(&weights, &manifest_path)?;
         let mut report = verify(&weights, &manifest, false);
         report.created = created;
@@ -159,17 +210,19 @@ fn load_model(request: LoadRequest) -> Result<Loaded, String> {
     } else {
         None
     };
+    let program = compile_model(&config)?;
+    let prompt = PromptStyle::read(dir, &program.family, &tokenizer);
     let engine: Box<dyn Runner> = if exact {
-        Box::new(ExactEngine::new(compile_qwen3_5(&config)?, weights, numeric.map_or(16, |n| n.activation_bits.clamp(8, 24)))?)
+        Box::new(ExactEngine::new(program, weights, numeric.map_or(16, |n| n.activation_bits.clamp(8, 24)))?)
     } else {
-        Box::new(Engine::new(compile_qwen3_5(&config)?, weights, mode)?)
+        Box::new(Engine::new(program, weights, mode)?)
     };
-    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator, dir: dir.to_path_buf(), firmware_tables: None, load_report })
+    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator, dir: dir.to_path_buf(), firmware_tables: None, load_report, prompt })
 }
 
 async fn load(State(app): State<App>, Json(request): Json<LoadRequest>) -> Response {
     let result = tokio::task::spawn_blocking(move || {
-        let loaded = load_model(request)?;
+        let loaded = load_model(&app.catalog, request)?;
         let reply = (loaded.name.clone(), loaded.accelerator.clone(), loaded.load_report.clone());
         *app.loaded.lock().unwrap() = Some(loaded);
         Ok::<_, String>(reply)
@@ -328,7 +381,7 @@ fn run_firmware(loaded: &mut Loaded, text: &str, ids: &[u32], request: &Generate
         temperature: (request.temperature.max(0.0) * 256.0).round().max(1.0) as u32,
         seed,
         raw_tokens: !request.fidelity.tokenizer,
-        stop: STOP_TOKENS,
+        stop: loaded.prompt.stop_pair(),
     };
     let info = chip_info(&die, &code, FLOW_LOGITS_REGISTER, vocabulary as u32, &setup);
     let use_tables = request.fidelity.tokenizer;
@@ -402,9 +455,8 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     use std::sync::atomic::Ordering::Relaxed;
     let mut guard = app.loaded.lock().unwrap();
     let loaded = guard.as_mut().ok_or("carga un modelo primero")?;
-    let think = if request.thinking { "<think>\n" } else { "<think>\n\n</think>\n\n" };
-    let text = format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n{think}", request.prompt);
-    let ids = loaded.tokenizer.encode(text.as_str(), false).map_err(|e| e.to_string())?.get_ids().to_vec();
+    let (text, add_special) = loaded.prompt.render(&request.prompt, request.thinking)?;
+    let ids = loaded.tokenizer.encode(text.as_str(), add_special).map_err(|e| e.to_string())?.get_ids().to_vec();
     loaded.engine.reset();
     let _ = sender.blocking_send(serde_json::json!({ "type": "start", "prompt_tokens": ids.len() }));
     if request.fidelity.firmware {
@@ -443,7 +495,7 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     let (mut hits, mut tries) = (vec![0u32; request.mtp_depth], vec![0u32; request.mtp_depth]);
     let mut pending: Vec<(usize, Vec<u32>)> = Vec::new();
     for _ in 0..request.max_tokens {
-        if cancelled.load(Relaxed) || STOP_TOKENS.contains(&next) {
+        if cancelled.load(Relaxed) || loaded.prompt.stop.contains(&next) {
             break;
         }
         output.push(next);
@@ -556,10 +608,17 @@ fn session_token() -> String {
 
 #[tokio::main]
 async fn main() {
-    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new) };
+    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()) };
     let routes = Router::new()
         .route("/api/models", get(models))
         .route("/api/status", get(status))
+        .route("/api/settings", get(read_settings).put(write_settings))
+        .route("/api/hf/search", get(hub_search))
+        .route("/api/hf/model", get(hub_details))
+        .route("/api/hf/downloads", get(hub_jobs).post(hub_download))
+        .route("/api/hf/cancel", post(hub_cancel))
+        .route("/api/hf/discard", post(hub_discard))
+        .route("/api/hf/token", put(hub_set_token).get(hub_token).delete(hub_clear_token))
         .route("/api/load", post(load))
         .route("/api/generate", get(generate_socket))
         .layer(middleware::from_fn_with_state(app.clone(), guard))

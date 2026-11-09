@@ -6,10 +6,16 @@ edition.workspace = true
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 compiler = { path = "../compiler" }
+fs4 = "1"
 futures-util = "0.3"
+minijinja = "2"
+minijinja-contrib = { version = "2", features = ["pycompat"] }
+model-ir = { path = "../model-ir" }
 netlist = { path = "../netlist" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 sim = { path = "../sim" }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
-tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["fs", "macros", "io-util", "rt-multi-thread", "sync", "time"] }
