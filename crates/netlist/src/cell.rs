@@ -347,11 +347,11 @@ impl Gen {
     /// Whole words arrive already encoded, so the encoder can be shared by many cells.
     #[allow(clippy::too_many_arguments)]
     fn protected_memory(&mut self, b: &mut Builder, c: &CellConfig, address: Vec<Bit>, load_en: Bit, load_addr: Vec<Bit>, load_data: Vec<Bit>, weight: Vec<Bit>) {
-        let lane_bits = c.ecc_lanes().trailing_zeros() as usize;
-        let w = c.weight_bits as usize;
-        let word_bits = c.ecc_lanes() * c.weight_bits;
-        let check_width = crate::reliability::check_bits(word_bits);
-        let decoder = self.secded_decoder(word_bits);
+        let lanes = c.ecc_lanes();
+        let lane_bits = lanes.trailing_zeros() as usize;
+        let word_bits = lanes * c.weight_bits;
+        let check_width = crate::reliability::lane_check_bits(lanes, c.weight_bits);
+        let corrector = self.lane_corrector(lanes, c.weight_bits);
         let corrected_out = b.output("ecc_corrected", 1);
         let failed_out = b.output("ecc_failed", 1);
         let stored_check = b.wire("stored_check", check_width);
@@ -368,15 +368,8 @@ impl Gen {
         let mut full_read = stored_word.clone();
         full_read.extend(&stored_check);
         b.sram("weight_sram", c.addr_bits - lane_bits as u32, word_bits + check_width, &[("addr", word_address), ("we", vec![load_en]), ("wdata", load_data), ("rdata", full_read)]);
-        let corrected = b.wire("corrected_word", word_bits);
         b.group("Corrección de errores");
-        b.inst("ecc_decoder", &decoder, &[("data", stored_word), ("check", stored_check), ("corrected", corrected.clone()), ("fixed", corrected_out), ("failed", failed_out)]);
-        let mut l = crate::rv32::Logic { b, next: 1000 };
-        let leaves: Vec<Vec<Bit>> = corrected.chunks(w).map(|lane| lane.to_vec()).collect();
-        let chosen = l.select(&lane_now, &leaves);
-        for (from, to) in chosen.iter().zip(&weight) {
-            l.b.or_to(*from, Bit::Zero, *to);
-        }
+        b.inst("ecc_corrector", &corrector, &[("data", stored_word), ("check", stored_check), ("lane", lane_now), ("weight", weight), ("fixed", corrected_out), ("failed", failed_out)]);
     }
 
     /// Computes 1×, 3×, 5×… of an activation and registers them, for many cells to share.
@@ -467,7 +460,7 @@ impl Gen {
         let protected = c.has_ecc();
         let (load_addr_bits, load_data_bits) = if protected {
             let word = c.ecc_lanes() * w;
-            (c.addr_bits - c.ecc_lanes().trailing_zeros(), word + crate::reliability::check_bits(word))
+            (c.addr_bits - c.ecc_lanes().trailing_zeros(), word + crate::reliability::lane_check_bits(c.ecc_lanes(), w))
         } else {
             (c.addr_bits, w)
         };

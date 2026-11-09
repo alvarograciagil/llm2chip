@@ -115,6 +115,25 @@ function applyAppearance(appearance: Appearance) {
   else document.documentElement.dataset.theme = appearance;
 }
 
+const ADDED_MODELS_KEY = "llm2chip-added-models";
+
+/** Models chosen from a config or from Hugging Face, kept between visits. */
+function readAddedModels(): ModelSource[] {
+  try {
+    return JSON.parse(localStorage.getItem(ADDED_MODELS_KEY) ?? "[]");
+  } catch {
+    return [];
+  }
+}
+
+function writeAddedModels(models: ModelSource[]) {
+  try {
+    localStorage.setItem(ADDED_MODELS_KEY, JSON.stringify(models.filter((m) => m.id.startsWith("archivo:"))));
+  } catch {
+    // Without storage they simply last until the page reloads.
+  }
+}
+
 function readHash(): { model: string; params: ChipParams } | null {
   const match = location.hash.match(/^#d=(.+)$/);
   if (!match) return null;
@@ -189,7 +208,7 @@ export const useDesign = create<DesignState>((set, get) => {
     revealed: null,
 
     bootstrap() {
-      const models = builtinModels();
+      const models = [...builtinModels(), ...readAddedModels()];
       const defaults = defaultParams();
       const shared = readHash();
       const model = models.find((m) => m.id === shared?.model) ?? models[0];
@@ -229,8 +248,10 @@ export const useDesign = create<DesignState>((set, get) => {
 
     addModel(name, config) {
       const model = { id: `archivo:${name}`, name, config };
+      const added = [...get().models.filter((m) => m.id !== model.id), model];
+      writeAddedModels(added);
       set({
-        models: [...get().models.filter((m) => m.id !== model.id), model],
+        models: added,
         model,
         selection: null,
         ...run(model, get().params),

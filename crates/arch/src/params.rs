@@ -46,6 +46,8 @@ pub enum KvBackend {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkKind {
+    /// UCIe inside each package and SerDes between packages, as the area requires.
+    Auto,
     Ucie,
     Serdes,
 }
@@ -183,7 +185,7 @@ impl Default for ChipParams {
             stacked_dram_tbps: 100.0,
             ddr_gbps: 77.0,
             ddr_capacity_gb: 64.0,
-            link: LinkKind::Ucie,
+            link: LinkKind::Auto,
             load_interface: LoadInterface::Nvme,
             optimizations: BTreeSet::new(),
         }

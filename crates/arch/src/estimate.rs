@@ -370,6 +370,41 @@ fn check_envelope(model: &ModelGraph, p: &ChipParams, out: &mut Vec<Violation>) 
 }
 
 /// The largest measured, Llama 3.2's; a test keeps real tables under it. Qwen uses half.
+/// The largest multi-die package in volume, about five and a half reticles.
+const PACKAGE_MAX_MM2: f64 = 4700.0;
+const UCIE_ENDPOINT_MM2: f64 = 2.0;
+const SERDES_ENDPOINT_MM2: f64 = 6.0;
+const UCIE_HOP_NS: f64 = 10.0;
+const SERDES_HOP_NS: f64 = 150.0;
+
+/// How a ring of dies is cut into packages, and what each hop travels over.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinkPlan {
+    pub packages: u32,
+    pub ucie_hops: u32,
+    pub serdes_hops: u32,
+}
+
+impl LinkPlan {
+    pub fn delay_ns(&self) -> f64 {
+        self.ucie_hops as f64 * UCIE_HOP_NS + self.serdes_hops as f64 * SERDES_HOP_NS
+    }
+}
+
+/// Fills each package before opening the next; a ring needs one board hop per package.
+pub fn link_plan(link: LinkKind, dies: u32, die_area_mm2: f64) -> LinkPlan {
+    let per_package = ((PACKAGE_MAX_MM2 / die_area_mm2.max(1.0)).floor() as u32).max(1);
+    let packages = dies.div_ceil(per_package).max(1);
+    match link {
+        LinkKind::Serdes => LinkPlan { packages: dies, ucie_hops: 0, serdes_hops: dies },
+        LinkKind::Ucie => LinkPlan { packages: 1, ucie_hops: dies, serdes_hops: 0 },
+        LinkKind::Auto if packages == 1 => LinkPlan { packages, ucie_hops: dies, serdes_hops: 0 },
+        LinkKind::Auto => LinkPlan { packages, ucie_hops: dies - packages, serdes_hops: packages },
+    }
+}
+
+/// Measured on the generated cell, for words of 64 weight bits.
+const ECC_GATES_PER_CELL: f64 = 430.0;
 pub const TOKENIZER_BITS_PER_TOKEN: f64 = 500.0;
 /// The CPU's program memory, the firmware's size rounded up to a power of two.
 pub const FIRMWARE_PROGRAM_BYTES: u32 = 1 << 15;
@@ -451,6 +486,10 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     };
     push("cell_weights", "Celdas: memoria de pesos", weights_mm2,
         "Cada celda guarda un trozo de cada matriz junto a su multiplicador, para que los pesos nunca viajen.");
+    if p.weight_backend == WeightBackend::Sram && !p.has("sin_ecc_con_refresco") {
+        push("cell_ecc", "Celdas: corrección ECC", n * ECC_GATES_PER_CELL * 0.5 * tech.fa_um2 * um2 * ROUTING_OVERHEAD,
+            "Comprueba cada palabra de pesos y corrige el peso que se está leyendo.");
+    }
     push("cell_macs", "Celdas: multiplicadores", n * mult.area_um2 * um2 * ROUTING_OVERHEAD,
         "Multiplican peso por activación y acumulan la suma de cada fila.");
 
@@ -545,10 +584,9 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
             "Tokenizador, muestreo y volcado de pesos desde la imagen."
         });
     if dies > 1 {
-        let endpoint = match p.link {
-            LinkKind::Ucie => 2.0,
-            LinkKind::Serdes => 6.0,
-        };
+        // Sized for the worst each die can be, since its own area depends on this.
+        let plan = link_plan(p.link, dies, p.die_max_mm2.min(tech.die_max_mm2));
+        let endpoint = (plan.ucie_hops as f64 * UCIE_ENDPOINT_MM2 + plan.serdes_hops as f64 * SERDES_ENDPOINT_MM2) / d;
         push("links", "Enlaces entre dies", endpoint, "Pasan un vector de activación entre capas consecutivas.");
     }
     if p.has("checkpoint_estado") || p.has("embedding_externo") {
@@ -565,7 +603,7 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
 fn category_of(id: &str) -> Category {
     match id {
         "cell_weights" | "weight_tables" => Category::Memoria,
-        "cell_macs" | "scale_units" => Category::Calculo,
+        "cell_macs" | "cell_ecc" | "scale_units" => Category::Calculo,
         "activation_noc" | "links" => Category::Interconexion,
         "vector_units" | "function_units" => Category::Vectorial,
         "activation_buffers" | "kv_sram" | "delta_state" | "mtp_rollback" => Category::Estado,
@@ -578,6 +616,7 @@ fn driven_by(id: &str) -> &'static [&'static str] {
         "cell_weights" => &["max_params_g", "weight_coding", "weight_bits", "group_size", "weight_backend"],
         "weight_tables" => &["weight_coding", "weight_bits"],
         "cpu_memory" => &["context_tokens"],
+        "cell_ecc" => &["macs_per_die"],
         "cell_macs" => &["macs_per_die", "multiplier_kind", "weight_coding", "weight_bits", "weight_exponent_bits", "activation_bits", "mac_stages"],
         "scale_units" => &["group_size", "scale_bits"],
         "activation_noc" => &["macs_per_die", "activation_bits", "noc_stages"],
@@ -974,11 +1013,16 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     let vector_latency = 6.0;
     let vector_cycles = totals.vector_ops / lanes;
     let latency_cycles = totals.matvec_stages * matvec_latency + totals.vector_stages * vector_latency;
-    let hop_ns = match p.link {
-        LinkKind::Ucie => 10.0,
-        LinkKind::Serdes => 150.0,
-    };
-    let link_cycles = if dies > 1 { d * hop_ns * freq } else { 0.0 };
+    let plan = link_plan(p.link, dies, die_area);
+    if p.link == LinkKind::Ucie && dies > 1 && total_area > PACKAGE_MAX_MM2 {
+        violations.push(Violation {
+            severity: Severity::Aviso,
+            message: format!("{total_area:.0} mm² de silicio no caben en un encapsulado de {PACKAGE_MAX_MM2:.0} mm²."),
+            fix: "Elige el enlace automático, que reparte los dies en varios encapsulados unidos por SerDes.".into(),
+            field: Some("link"),
+        });
+    }
+    let link_cycles = if dies > 1 { plan.delay_ns() * freq } else { 0.0 };
     let total_cycles = weight_cycles + vector_cycles + latency_cycles + link_cycles;
     let compute_time = total_cycles / (freq * 1e9);
 
@@ -1108,7 +1152,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             "tokenizer_tables" => (0.0, 0.0, 0.0, format!("{:.0} Mbit para un vocabulario de {} tokens.", model.vocab_size as f64 * TOKENIZER_BITS_PER_TOKEN / 1e6, model.vocab_size)),
             "cpu_memory" => (0.0, 0.0, 0.0, format!("Para prompts de hasta {} tokens.", p.context_tokens)),
             "sampler" => (0.0, 0.0, 0.0, format!("{} carriles de filtro y {} candidatos.", p.sampler_lanes, SAMPLER_ENTRIES)),
-            "links" => (link_cycles / total_cycles, 0.0, link_bytes, "Un punto de enlace por die.".into()),
+            "links" => (link_cycles / total_cycles, 0.0, link_bytes, format!("{} enlaces UCIe y {} SerDes, en {} encapsulados.", plan.ucie_hops, plan.serdes_hops, plan.packages)),
             _ => (0.0, 0.0, 0.0, "Área fija estimada.".into()),
         };
         b.activity = activity.clamp(0.0, 1.0);
@@ -1134,6 +1178,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
         if p.weight_backend == WeightBackend::Rom { "Los pesos vienen grabados en el chip y no se cargan.".into() } else { "Tamaño de la imagen dividido por la interfaz de carga.".into() });
 
     m("dies", "Silicio", "Dies", d, "", Supuesta, "El mínimo que cumple el área máxima por die.".into());
+    m("packages", "Silicio", "Encapsulados", plan.packages as f64, "", Supuesta, format!("Hasta {PACKAGE_MAX_MM2:.0} mm² de silicio en cada uno."));
     m("die_area_mm2", "Silicio", "Área por die", die_area, "mm²", Supuesta, "Suma de los bloques del die.".into());
     m("total_area_mm2", "Silicio", "Área total", total_area, "mm²", Supuesta, "Área por die por número de dies.".into());
     m("macs_total", "Silicio", "Multiplicadores de pesos en total", n * d, "", Derivada,
@@ -1423,6 +1468,13 @@ mod tests {
         let entries = u16::from_le_bytes(elf[44..46].try_into().unwrap()) as usize;
         let at_address_zero = (0..entries).map(|i| word(28) + 32 * i).find(|at| word(*at) == 1 && word(*at + 8) == 0).unwrap();
         assert!(word(at_address_zero + 16) <= FIRMWARE_PROGRAM_BYTES as usize);
+    }
+
+    #[test]
+    fn links_follow_the_packages_the_area_needs() {
+        assert_eq!(link_plan(LinkKind::Auto, 4, 800.0), LinkPlan { packages: 1, ucie_hops: 4, serdes_hops: 0 });
+        assert_eq!(link_plan(LinkKind::Auto, 12, 800.0), LinkPlan { packages: 3, ucie_hops: 9, serdes_hops: 3 });
+        assert_eq!(link_plan(LinkKind::Ucie, 12, 800.0).serdes_hops, 0);
     }
 
     #[test]

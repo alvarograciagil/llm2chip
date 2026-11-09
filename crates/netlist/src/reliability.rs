@@ -33,6 +33,41 @@ pub fn encode(data: u128, data_bits: u32) -> u32 {
     check | parity << hamming
 }
 
+/// Index bits of a data bit in a word of `lanes` weights of `weight_bits` each.
+fn lane_index_bits(lanes: u32, weight_bits: u32) -> (u32, u32) {
+    (lanes.ilog2(), u32::BITS - (weight_bits.max(1) - 1).leading_zeros())
+}
+
+/// Check bits of a word stored as lanes: the index of a bit, two markers and a parity.
+/// One more than plain Hamming, in exchange for correcting a lane without the rest.
+pub fn lane_check_bits(lanes: u32, weight_bits: u32) -> u32 {
+    let (lane, bit) = lane_index_bits(lanes, weight_bits);
+    lane + bit + 3
+}
+
+/// What a data bit contributes to the check bits: its own index, so the syndrome of a
+/// single error reads as lane and bit. All columns have odd weight of at least three,
+/// which keeps them apart from each other, from errors in the check bits and from pairs.
+fn lane_column(lane: u32, bit: u32, lanes: u32, weight_bits: u32) -> u32 {
+    let (lane_bits, bit_bits) = lane_index_bits(lanes, weight_bits);
+    let index = lane << bit_bits | bit;
+    let width = lane_bits + bit_bits;
+    index | 0b11 << width | (index.count_ones() & 1 ^ 1) << (width + 2)
+}
+
+/// The check bits of a word of `lanes` weights, its first lane in the low bits.
+pub fn lane_encode(word: u128, lanes: u32, weight_bits: u32) -> u32 {
+    let mut check = 0;
+    for lane in 0..lanes {
+        for bit in 0..weight_bits {
+            if word >> (lane * weight_bits + bit) & 1 == 1 {
+                check ^= lane_column(lane, bit, lanes, weight_bits);
+            }
+        }
+    }
+    check
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Decoded {
     pub data: u128,
@@ -134,6 +169,96 @@ impl Gen {
             l.b.or_to(bad, Bit::Zero, failed);
             let good = l.not(bad);
             let single = l.and(odd, good);
+            l.b.or_to(single, Bit::Zero, fixed);
+        }
+        self.add(b.finish())
+    }
+
+    /// Corrects only the lane being read: the check is computed on the whole word, but
+    /// turning its syndrome into a correction takes a handful of gates per weight bit.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn lane_corrector(&mut self, lanes: u32, weight_bits: u32) -> String {
+        let name = format!("lane_corrector_{lanes}_{weight_bits}");
+        if self.modules.contains_key(&name) {
+            return name;
+        }
+        let (lane_bits, bit_bits) = lane_index_bits(lanes, weight_bits);
+        let width = lane_bits + bit_bits;
+        let total = lane_check_bits(lanes, weight_bits);
+        let word = lanes * weight_bits;
+        let mut b = Builder::new(&name, "Corrector ECC por carril", "Comprueba la palabra entera y corrige solo el peso que se está leyendo.");
+        let data = b.input("data", word);
+        let stored = b.input("check", total);
+        let lane_now = b.input("lane", lane_bits);
+        let weight = b.output("weight", weight_bits);
+        let fixed = b.output("fixed", 1)[0];
+        let failed = b.output("failed", 1)[0];
+        {
+            let mut l = Logic { b: &mut b, next: 0 };
+            let covered = |k: u32| -> Vec<Bit> {
+                let mut bits = Vec::new();
+                for lane in 0..lanes {
+                    for bit in 0..weight_bits {
+                        if lane_column(lane, bit, lanes, weight_bits) >> k & 1 == 1 {
+                            bits.push(data[(lane * weight_bits + bit) as usize]);
+                        }
+                    }
+                }
+                bits
+            };
+            let mut fresh: Vec<Bit> = (0..width).map(|k| parity_of(&mut l, &covered(k))).collect();
+            // Both markers cover every data bit, so one parity tree serves them.
+            let markers = parity_of(&mut l, &covered(width));
+            fresh.extend([markers, markers]);
+            fresh.push(parity_of(&mut l, &covered(width + 2)));
+            let syndrome: Vec<Bit> = fresh.iter().zip(&stored).map(|(a, c)| l.xor(*a, *c)).collect();
+            let odd = parity_of(&mut l, &syndrome);
+            let marked = l.and(syndrome[width as usize], syndrome[width as usize + 1]);
+            let same_lane: Vec<Bit> = syndrome[bit_bits as usize..width as usize].iter().zip(&lane_now).map(|(a, c)| {
+                let differs = l.xor(*a, *c);
+                l.not(differs)
+            }).collect();
+            let in_lane = same_lane.iter().fold(l.and(marked, odd), |all, bit| l.and(all, *bit));
+            let leaves: Vec<Vec<Bit>> = data.chunks(weight_bits as usize).map(|lane| lane.to_vec()).collect();
+            let raw = l.select(&lane_now, &leaves);
+            for (bit, value) in raw.iter().enumerate() {
+                let here = l.equals(&syndrome[..bit_bits as usize], bit as u32);
+                let flip = l.and(in_lane, here);
+                let out = l.xor(*value, flip);
+                l.b.or_to(out, Bit::Zero, weight[bit]);
+            }
+            // A lone set bit is an error in the check bits themselves, which harms nothing.
+            let (mut one, mut two) = (Bit::Zero, Bit::Zero);
+            for bit in &syndrome {
+                let both = l.and(one, *bit);
+                two = l.or(two, both);
+                one = l.or(one, *bit);
+            }
+            let single_check = {
+                let not_two = l.not(two);
+                l.and(one, not_two)
+            };
+            let in_range = (weight_bits..1 << bit_bits).fold(Bit::One, |all, unused| {
+                let bad = l.equals(&syndrome[..bit_bits as usize], unused);
+                let fine = l.not(bad);
+                l.and(all, fine)
+            });
+            let column = l.and(marked, in_range);
+            let known = l.or(column, single_check);
+            let even = l.not(odd);
+            let double = l.and(one, even);
+            let unknown = l.not(known);
+            let wild = {
+                let t = l.and(one, odd);
+                l.and(t, unknown)
+            };
+            let bad = l.or(double, wild);
+            l.b.or_to(bad, Bit::Zero, failed);
+            let good = l.not(bad);
+            let single = {
+                let t = l.and(one, odd);
+                l.and(t, good)
+            };
             l.b.or_to(single, Bit::Zero, fixed);
         }
         self.add(b.finish())

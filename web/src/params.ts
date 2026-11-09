@@ -205,7 +205,7 @@ export const PARAM_GROUPS: Group[] = [
     title: "Sistema",
     open: false,
     fields: [
-      { kind: "select", key: "link", label: "Enlace entre dies", options: [["ucie", "UCIe"], ["serdes", "SerDes en placa"]] },
+      { kind: "select", key: "link", label: "Enlace entre dies", options: [["auto", "Automático según encapsulado"], ["ucie", "UCIe"], ["serdes", "SerDes en placa"]] },
       { kind: "select", key: "load_interface", label: "Carga de pesos", options: [["nvme", "NVMe"], ["pcie5", "PCIe 5.0 x16"], ["uart", "UART"]], help: "Solo afecta al tiempo de arranque.", when: (p) => p.weight_backend !== "rom" },
     ],
   },

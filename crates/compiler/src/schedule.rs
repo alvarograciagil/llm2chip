@@ -41,7 +41,10 @@ pub fn schedule(model: &ModelGraph, p: &ChipParams, plan: &Floorplan, effective_
     let tree = n.log2().ceil().max(1.0);
     let matvec_latency = (p.mac_stages + p.adder_stages) as f64 + 2.0 * tree * p.noc_stages.max(1) as f64;
     let group = if p.group_size > 0 { 1.0 + 1.0 / p.group_size as f64 } else { 1.0 };
-    let hop_ns = if p.link == arch::LinkKind::Ucie { 10.0 } else { 150.0 };
+    // A hop's cost is the ring's average, since only some of them leave the package.
+    let dies = plan.dies.len().max(1) as u32;
+    let die_area = plan.dies.first().map_or(1.0, |d| d.rect.w * d.rect.h);
+    let hop_ns = arch::link_plan(p.link, dies, die_area).delay_ns() / dies as f64;
     let hop_cycles = hop_ns * effective_ghz;
 
     let mut stages = Vec::new();

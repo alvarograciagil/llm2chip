@@ -2,7 +2,7 @@
 
 use netlist::format::WeightCoding;
 use netlist::multiplier::MultiplierKind;
-use netlist::reliability::{check_bits, decode, encode, repairable_memory_design, secded_design};
+use netlist::reliability::{check_bits, decode, encode, lane_check_bits, lane_encode, repairable_memory_design, secded_design};
 use netlist::{cell_design, CellConfig, Simulator};
 
 struct Noise(u64);
@@ -66,6 +66,20 @@ fn the_gates_match_the_code() {
     }
 }
 
+#[test]
+fn every_single_error_in_a_lane_word_has_its_own_syndrome() {
+    let total = 64 + lane_check_bits(8, 8);
+    let word = 0x0123_4567_89AB_CDEFu128;
+    let good = lane_encode(word, 8, 8);
+    let mut seen = std::collections::HashSet::new();
+    for bit in 0..total {
+        let syndrome = if bit < 64 { lane_encode(word ^ 1 << bit, 8, 8) ^ good } else { 1 << (bit - 64) };
+        assert_eq!(syndrome.count_ones() & 1, 1, "un error deja paridad impar");
+        assert!(seen.insert(syndrome), "bit {bit}");
+    }
+    assert_eq!(lane_check_bits(8, 8), 9);
+}
+
 fn protected_cell() -> CellConfig {
     CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 5, coding: WeightCoding::default(), exponent_bits: 0, multiplier: MultiplierKind::Array, fixed_weights: false, ecc: true, skip_zeros: false }
 }
@@ -78,7 +92,7 @@ fn loaded_cell(weights: &[u64]) -> Simulator {
     for (i, word) in weights.chunks(8).enumerate() {
         let data = word.iter().rev().fold(0u128, |all, w| all << 8 | *w as u128);
         sim.set("load_addr", i as u64).unwrap();
-        sim.set_wide("load_data", data | (encode(data, 64) as u128) << 64).unwrap();
+        sim.set_wide("load_data", data | (lane_encode(data, 8, 8) as u128) << 64).unwrap();
         sim.tick();
     }
     sim.set("load_en", 0).unwrap();
