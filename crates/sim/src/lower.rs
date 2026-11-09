@@ -124,6 +124,15 @@ impl Layout {
     /// and a RoPE table for that many tokens go into registers for the gates; otherwise
     /// the weights stay in the checkpoint and RoPE is computed directly.
     pub fn new(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: Option<usize>) -> Result<Self, String> {
+        Self::build(program, weights, config, chip_tokens, true)
+    }
+
+    /// As a real chip is laid out: matrices live in the cells, not in vector registers.
+    pub fn for_image(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: usize) -> Result<Self, String> {
+        Self::build(program, weights, config, Some(chip_tokens), false)
+    }
+
+    fn build(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: Option<usize>, matrices_in_registers: bool) -> Result<Self, String> {
         let next = Cell::new(1u32);
         let alloc = |count: u32| next.replace(next.get() + count);
         let buffers: Vec<u32> = program.buffers.iter().map(|_| alloc(1)).collect();
@@ -153,7 +162,7 @@ impl Layout {
                 if let Entry::Vacant(slot) = matrices.entry(name.clone()) {
                     let reg = alloc(1);
                     slot.insert(reg);
-                    if chip_tokens.is_some() {
+                    if chip_tokens.is_some() && matrices_in_registers {
                         if rows * cols > 1 << config.index_bits {
                             return Err(format!("la matriz {name} tiene {} elementos y el direccionamiento solo llega a {}", rows * cols, 1usize << config.index_bits));
                         }

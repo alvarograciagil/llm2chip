@@ -48,6 +48,15 @@ export interface Job {
   target: string;
 }
 
+export interface ImageStatus {
+  state: "idle" | "writing" | "done" | "error";
+  name?: string;
+  done?: number;
+  total?: number;
+  error?: string;
+  report?: { path: string; bytes: number; chips: number[]; tensors: number; seconds: number };
+}
+
 export type Source = "local" | "hub";
 
 interface ModelsState {
@@ -65,6 +74,7 @@ interface ModelsState {
   speeds: Record<string, number>;
   error: string | null;
   settingsError: string | null;
+  image: ImageStatus;
 
   set: (patch: Partial<ModelsState>) => void;
   loadSettings: () => Promise<void>;
@@ -77,6 +87,9 @@ interface ModelsState {
   cancel: (id: string) => Promise<void>;
   discard: (id: string) => Promise<void>;
   pollJobs: () => Promise<Job[]>;
+  startImage: (path: string, chips: number[], context: number, cells: number, bits: number) => Promise<void>;
+  cancelImage: () => Promise<void>;
+  pollImage: () => Promise<void>;
 }
 
 const json = { "content-type": "application/json" };
@@ -105,8 +118,31 @@ export const useModels = create<ModelsState>((set, get) => ({
   speeds: {},
   error: null,
   settingsError: null,
+  image: { state: "idle" },
 
   set: (patch) => set(patch),
+
+  async startImage(path, chips, context, cells, bits) {
+    try {
+      await call("/api/image", { method: "POST", headers: json, body: JSON.stringify({ path, chips, context_tokens: context, cells, activation_bits: bits }) });
+      set({ error: null });
+      await get().pollImage();
+    } catch (e) {
+      set({ error: text(e) });
+    }
+  },
+
+  async cancelImage() {
+    await call("/api/image/cancel", { method: "POST" });
+  },
+
+  async pollImage() {
+    try {
+      set({ image: await call<ImageStatus>("/api/image") });
+    } catch {
+      // The status comes back on the next poll.
+    }
+  },
 
   async loadSettings() {
     try {

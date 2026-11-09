@@ -44,3 +44,73 @@ fn a_damaged_image_is_reported() {
     assert_eq!(damaged.crc_errors, [manifest.segments[0].name.clone()]);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+mod chip_image {
+    use netlist::soc::FirmwareImage;
+    use sim::image::{write_chip_image, ChipImage, ImageRequest};
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    fn firmware() -> FirmwareImage {
+        FirmwareImage::from_elf(include_bytes!("../../../firmware/prebuilt/firmware.elf")).unwrap()
+    }
+
+    fn fixture(label: &str) -> std::path::PathBuf {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/plain/llama");
+        let dir = std::env::temp_dir().join(format!("llm2chip-chip-image-{label}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in ["config.json", "model.safetensors"] {
+            std::fs::copy(source.join(file), dir.join(file)).unwrap();
+        }
+        let tokenizer = r#"{"added_tokens":[],"normalizer":null,"pre_tokenizer":null,"post_processor":null,"decoder":{"type":"Fuse"},"model":{"type":"BPE","vocab":{"a":0,"b":1},"merges":[]}}"#;
+        std::fs::write(dir.join("tokenizer.json"), tokenizer).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_image_holds_every_chip_count_and_each_cells_weights() {
+        let dir = fixture("whole");
+        let out = dir.join("modelo.chipimg");
+        let request = ImageRequest { chips: vec![1, 2], context_tokens: 64, cells: 3, activation_bits: 16, add_special: false, stop: vec![2] };
+        let (done, total, cancel) = (AtomicU64::new(0), AtomicU64::new(0), AtomicBool::new(false));
+        let report = write_chip_image(&dir, &firmware(), &request, &out, &done, &total, &cancel).unwrap();
+        assert_eq!(report.chips, [1, 2]);
+        assert_eq!(done.into_inner(), total.into_inner());
+
+        let mut image = ChipImage::open(&out).unwrap();
+        assert!(image.verify().unwrap().is_empty());
+        assert!(!image.boot().unwrap().is_empty());
+
+        // The rows every cell receives, put back in order, are the original matrix.
+        let weights = sim::Weights::open(&dir).unwrap();
+        let name = "lm_head.weight";
+        let original = weights.raw_tensors().into_iter().find(|t| t.0 == name).unwrap().2.to_vec();
+        let shape = weights.shape(name).unwrap().to_vec();
+        let row_bytes = original.len() / shape[0];
+        let mut rebuilt = vec![0u8; original.len()];
+        for cell in 0..3usize {
+            let bytes = image.cell_weights(name, cell as u64).unwrap();
+            for (index, row) in bytes.chunks(row_bytes).enumerate() {
+                let at = (cell + 3 * index) * row_bytes;
+                rebuilt[at..at + row_bytes].copy_from_slice(row);
+            }
+        }
+        assert_eq!(rebuilt, original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn damage_to_the_file_is_found() {
+        let dir = fixture("damage");
+        let out = dir.join("danada.chipimg");
+        let request = ImageRequest { chips: vec![1], context_tokens: 64, cells: 2, activation_bits: 16, add_special: false, stop: vec![] };
+        let (done, total, cancel) = (AtomicU64::new(0), AtomicU64::new(0), AtomicBool::new(false));
+        write_chip_image(&dir, &firmware(), &request, &out, &done, &total, &cancel).unwrap();
+        let offset = ChipImage::open(&out).unwrap().manifest.tensors[0].offset as usize;
+        let mut bytes = std::fs::read(&out).unwrap();
+        bytes[offset] ^= 1;
+        std::fs::write(&out, bytes).unwrap();
+        assert_eq!(ChipImage::open(&out).unwrap().verify().unwrap().len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

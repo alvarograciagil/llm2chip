@@ -27,11 +27,12 @@ use netlist::soc::{FirmwareImage, SocBus, SocConfig};
 use netlist::{CellConfig, DieConfig, Microprogram, Parameter};
 use sim::chip::{RunnerEngine, FLOW_REGISTER_BITS, FLOW_INDEX_BITS};
 use sim::lower::{ENTRY_LOGITS, ENTRY_TOKEN};
-use sim::image::{load_or_build, verify, LoadReport};
+use sim::image::{load_or_build, verify, write_chip_image, ImageRequest, LoadReport};
 use sim::tokenizer::TokenizerTables;
 use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use tokenizers::Tokenizer;
 use tokio::sync::mpsc;
@@ -60,6 +61,7 @@ struct App {
     dist: Option<Arc<PathBuf>>,
     catalog: Arc<Catalog>,
     hub: Arc<Hub>,
+    image: Arc<Mutex<Option<Arc<ImageJob>>>>,
 }
 
 fn home() -> PathBuf {
@@ -152,6 +154,78 @@ async fn hub_clear_token(State(app): State<App>) -> Response {
         Ok(()) => Json(app.hub.token_status()).into_response(),
         Err(message) => refused(message),
     }
+}
+
+/// A chip image being written in the background.
+#[derive(Default)]
+struct ImageJob {
+    name: Mutex<String>,
+    done: Arc<AtomicU64>,
+    total: Arc<AtomicU64>,
+    cancel: Arc<AtomicBool>,
+    outcome: Mutex<Option<Result<serde_json::Value, String>>>,
+}
+
+#[derive(Deserialize)]
+struct ImageStart {
+    path: String,
+    chips: Vec<usize>,
+    context_tokens: u64,
+    cells: usize,
+    activation_bits: u32,
+}
+
+async fn image_status(State(app): State<App>) -> Response {
+    let job = app.image.lock().unwrap().clone();
+    let Some(job) = job else { return Json(serde_json::json!({ "state": "idle" })).into_response() };
+    let outcome = job.outcome.lock().unwrap().clone();
+    let name = job.name.lock().unwrap().clone();
+    let (done, total) = (job.done.load(Relaxed), job.total.load(Relaxed));
+    Json(match outcome {
+        None => serde_json::json!({ "state": "writing", "name": name, "done": done, "total": total }),
+        Some(Ok(report)) => serde_json::json!({ "state": "done", "name": name, "report": report }),
+        Some(Err(message)) => serde_json::json!({ "state": "error", "name": name, "error": message }),
+    })
+    .into_response()
+}
+
+async fn image_cancel(State(app): State<App>) -> Response {
+    if let Some(job) = app.image.lock().unwrap().as_ref() {
+        job.cancel.store(true, Relaxed);
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Writes the chip image of a model next to the others, in the background.
+async fn image_start(State(app): State<App>, Json(request): Json<ImageStart>) -> Response {
+    let running = app.image.lock().unwrap().as_ref().is_some_and(|job| job.outcome.lock().unwrap().is_none());
+    if running {
+        return refused("ya se está generando una imagen".into());
+    }
+    let catalog = app.catalog.clone();
+    let Some(entry) = catalog.find(&request.path) else { return refused("el modelo no está en las carpetas conocidas".into()) };
+    if !entry.supported {
+        return refused(entry.adaptation.reason.unwrap_or_else(|| "esta arquitectura todavía no se puede ejecutar".into()));
+    }
+    let job = Arc::new(ImageJob { name: Mutex::new(entry.name.clone()), ..Default::default() });
+    *app.image.lock().unwrap() = Some(job.clone());
+    tokio::task::spawn_blocking(move || {
+        let dir = PathBuf::from(&entry.path);
+        let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json"));
+        let outcome = tokenizer.map_err(|e| e.to_string()).and_then(|tokenizer| {
+            let family = compile_model(&entry.config)?.family;
+            let prompt = PromptStyle::read(&dir, &family, &tokenizer);
+            let firmware = FirmwareImage::from_elf(FIRMWARE)?;
+            let out = home().join(".llm2chip/images").join(format!("{}.chipimg", entry.name.replace('/', "--")));
+            // A chip's image has one framing of the text: with its template, nothing is added.
+            let add_special = prompt.render("", false)?.1;
+            let image = ImageRequest { chips: request.chips, context_tokens: request.context_tokens.max(1), cells: request.cells.max(1), activation_bits: request.activation_bits, add_special, stop: prompt.stop.clone() };
+            let report = write_chip_image(&dir, &firmware, &image, &out, &job.done, &job.total, &job.cancel)?;
+            Ok(serde_json::json!({ "path": out.to_string_lossy(), "bytes": report.bytes, "chips": report.chips, "tensors": report.tensors, "boot_words": report.boot_words, "seconds": report.seconds }))
+        });
+        *job.outcome.lock().unwrap() = Some(outcome);
+    });
+    StatusCode::ACCEPTED.into_response()
 }
 
 async fn status(State(app): State<App>) -> Json<serde_json::Value> {
@@ -622,7 +696,7 @@ fn session_token() -> String {
 
 #[tokio::main]
 async fn main() {
-    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()) };
+    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)) };
     let routes = Router::new()
         .route("/api/models", get(models))
         .route("/api/status", get(status))
@@ -632,6 +706,8 @@ async fn main() {
         .route("/api/hf/downloads", get(hub_jobs).post(hub_download))
         .route("/api/hf/cancel", post(hub_cancel))
         .route("/api/hf/discard", post(hub_discard))
+        .route("/api/image", get(image_status).post(image_start))
+        .route("/api/image/cancel", post(image_cancel))
         .route("/api/hf/token", put(hub_set_token).get(hub_token).delete(hub_clear_token))
         .route("/api/load", post(load))
         .route("/api/generate", get(generate_socket))

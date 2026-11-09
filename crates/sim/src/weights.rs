@@ -110,6 +110,11 @@ impl Weights {
         Ok(Self { accelerator: None, files, tensors, format: None, references: Mutex::new(HashMap::new()), recoded: Mutex::new(HashMap::new()), recode_budget: AtomicUsize::new(default_recode_budget()), gpu_products: AtomicUsize::new(0), largest: Mutex::new(HashMap::new()) })
     }
 
+    /// How many entries a tensor has along each axis.
+    pub fn shape(&self, name: &str) -> Option<&[usize]> {
+        self.tensors.get(name).map(|t| t.shape.as_slice())
+    }
+
     /// Every tensor as stored in the checkpoint: name, data type and bytes, by name.
     pub fn raw_tensors(&self) -> Vec<(&str, &str, &[u8])> {
         let mut list: Vec<(&str, &str, &[u8])> = self.tensors.iter().map(|(name, t)| (name.as_str(), t.dtype.as_str(), &self.files[t.file][t.start..t.end])).collect();

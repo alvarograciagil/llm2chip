@@ -27,6 +27,14 @@ function LocalList() {
   const setSimulator = useSimulator((s) => s.set);
   const setView = useDesign((s) => s.setView);
   const toDesigner = useToDesigner();
+  const startImage = useModels((s) => s.startImage);
+  const writing = useModels((s) => s.image.state === "writing");
+  // One image boots on every chip count up to what the current design needs.
+  const makeImage = (m: ServerModel) => {
+    const { params, report } = useDesign.getState();
+    const dies = Math.max(1, Math.round(report?.dies ?? 1));
+    void startImage(m.path, Array.from({ length: dies }, (_, i) => i + 1), Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits));
+  };
   const simulate = (m: ServerModel) => {
     setSimulator({ path: m.path });
     setView("simulador");
@@ -54,6 +62,7 @@ function LocalList() {
           <div className="model-actions">
             <button className="pill" disabled={!m.adaptation.design} onClick={() => toDesigner(m.name, m.config, m.adaptation)}>Diseñar chip</button>
             <button className="pill" disabled={!m.supported} onClick={() => simulate(m)}>Simular</button>
+            <button className="pill" disabled={!m.supported || writing} onClick={() => makeImage(m)}>Generar imagen</button>
           </div>
         </li>
       ))}
@@ -160,6 +169,7 @@ export function ModelsView() {
   const set = useModels((s) => s.set);
   const loadSettings = useModels((s) => s.loadSettings);
   const pollJobs = useModels((s) => s.pollJobs);
+  const pollImage = useModels((s) => s.pollImage);
   const connect = useSimulator((s) => s.connect);
   const online = useSimulator((s) => s.online);
   const finished = useRef(new Set<string>());
@@ -168,6 +178,7 @@ export function ModelsView() {
     void connect();
     void loadSettings();
     const tick = async () => {
+      void pollImage();
       const jobs = await pollJobs();
       const done = jobs.filter((j) => j.state === "done" && !finished.current.has(j.id));
       if (done.length) {
@@ -178,7 +189,7 @@ export function ModelsView() {
     void tick();
     const timer = setInterval(() => void tick(), 1000);
     return () => clearInterval(timer);
-  }, [connect, loadSettings, pollJobs]);
+  }, [connect, loadSettings, pollJobs, pollImage]);
 
   return (
     <section className="stage models-stage">
@@ -224,7 +235,7 @@ function JobRow({ job }: { job: Job }) {
 }
 
 export function ModelsPanel() {
-  const { settings, tokenSource, jobs, settingsError, saveSettings, saveToken, forgetToken } = useModels();
+  const { settings, tokenSource, jobs, settingsError, saveSettings, saveToken, forgetToken, image, cancelImage } = useModels();
   const connect = useSimulator((s) => s.connect);
   const [folder, setFolder] = useState("");
   const [download, setDownload] = useState<string | null>(null);
@@ -309,6 +320,22 @@ export function ModelsPanel() {
         {tokenSource === "app" && <button className="pill" onClick={() => void forgetToken()}>Borrar token</button>}
         {!local && <p className="model-reason">Estás conectado por la red local sin cifrar: escribe el token desde el propio equipo.</p>}
       </div>
+
+      {image.state !== "idle" && (
+        <>
+          <h3>Imagen del chip</h3>
+          <div className="inset padded form job">
+            <div className="job-head">
+              <strong title={image.name}>{image.name}</strong>
+              {image.state === "writing" && <button className="pill" onClick={() => void cancelImage()}>Detener</button>}
+            </div>
+            {image.state === "writing" && <progress max={image.total || 1} value={image.done ?? 0} aria-label="Progreso de la imagen" />}
+            {image.state === "writing" && <p className="muted-text">{formatBytes(image.done ?? 0)} de {formatBytes(image.total ?? 0)}</p>}
+            {image.state === "done" && image.report && <p className="muted-text">{formatBytes(image.report.bytes)}, para {image.report.chips.join(", ")} chips. Guardada en {image.report.path}</p>}
+            {image.state === "error" && <p className="model-reason">{image.error}</p>}
+          </div>
+        </>
+      )}
 
       {jobs.length > 0 && (
         <>
