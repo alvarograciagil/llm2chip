@@ -340,6 +340,37 @@ fn a_die_built_for_its_program_runs_it_identically_with_less_logic() {
 
 #[test]
 #[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
+fn parallel_lanes_compute_the_same_bits_in_fewer_cycles() {
+    let dir = std::env::temp_dir().join(format!("llm2chip-lanes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+    let c = die_config();
+    let mut one = gates_after(&program, &dir, c, &[3, 5]);
+    let register = one.layout.logits_register(&program);
+    let read = |run: &mut GateRun, config: &DieConfig| -> Vec<u64> {
+        (0..8u32).map(|i| {
+            run.sim.set("vec_addr", (register as u64) << config.index_bits | i as u64).unwrap();
+            run.sim.tick();
+            run.sim.settle();
+            run.sim.get("vec_out").unwrap()
+        }).collect()
+    };
+    let expected = read(&mut one, &c);
+    let mut cycles = vec![one.cycles];
+    for lane_bits in [1, 2] {
+        let wider = DieConfig { features: c.features.with_lane_bits(lane_bits), ..c };
+        let mut run = gates_after(&program, &dir, wider, &[3, 5]);
+        assert_eq!(read(&mut run, &wider), expected, "logits con {} carriles", 1 << lane_bits);
+        cycles.push(run.cycles);
+    }
+    eprintln!("ciclos con 1, 2 y 4 carriles: {cycles:?}");
+    assert!(cycles[1] < cycles[0] && cycles[2] < cycles[1], "{cycles:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
 fn sliding_windows_and_biases_run_on_the_gates() {
     for family in ["gemma3_text", "qwen2", "deepseek_v3"] {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/plain").join(family);

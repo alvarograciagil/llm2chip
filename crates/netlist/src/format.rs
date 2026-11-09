@@ -224,7 +224,7 @@ impl Gen {
                 let mantissa = log_mantissa(c.exponent_bits) as usize;
                 let leaves: Vec<Vec<Bit>> = log_table(c.exponent_bits).iter().map(|v| literal(*v, mantissa + 1)).collect();
                 let mux = self.mux_bus(mantissa as u32 + 1);
-                let value = mux_tree(b, &mux, leaves, &fraction);
+                let value = mux_tree(b, &mux, "op", leaves, &fraction);
                 let mut magnitude = b.wire("log_magnitude", mantissa as u32 + 1);
                 for (bit, out) in value.iter().zip(magnitude.clone()) {
                     b.and_to(nonzero, *bit, out);

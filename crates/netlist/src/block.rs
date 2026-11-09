@@ -393,6 +393,10 @@ pub struct Alu<N = u32> {
     pub window_a: bool,
     pub window_b: bool,
     pub window_dst: bool,
+    /// One element per lane at once; the indices are those of the first lane.
+    pub vector: bool,
+    pub broadcast_a: bool,
+    pub broadcast_b: bool,
     pub shift: u32,
     pub function: u32,
     pub literal: Option<u32>,
@@ -426,6 +430,9 @@ impl<N: Default> Alu<N> {
             window_a: false,
             window_b: false,
             window_dst: false,
+            vector: false,
+            broadcast_a: false,
+            broadcast_b: false,
             shift: 0,
             function: 0,
             literal: None,
@@ -470,6 +477,9 @@ impl Alu<Expr> {
             window_a: self.window_a,
             window_b: self.window_b,
             window_dst: self.window_dst,
+            vector: self.vector,
+            broadcast_a: self.broadcast_a,
+            broadcast_b: self.broadcast_b,
             shift: self.shift,
             function: self.function,
             literal: self.literal,
@@ -542,11 +552,12 @@ pub struct Assembly {
     exponents: u32,
     scratch: u32,
     loops: u32,
+    lane_bits: u32,
 }
 
 impl Assembly {
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0 }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -576,6 +587,20 @@ impl Assembly {
             self.immediate(value - part, self.sc(17));
             self.binary(OP_ADD, self.sc(16), self.sc(17), dst);
         }
+    }
+
+    /// Runs `emit` for each element, whole blocks at a time where the die has lanes.
+    /// A block needs a known length and operands that start on a block boundary, and
+    /// none of its elements may change an operand another lane is taking whole.
+    fn elements(&mut self, len: Expr, starts: &[Expr], independent: bool, mut emit: impl FnMut(&mut Self, Expr, bool)) {
+        let lanes = 1u32 << self.lane_bits;
+        let aligned = starts.iter().all(|s| s.is_constant() && s.constant().is_multiple_of(lanes));
+        if lanes == 1 || !independent || !aligned || !len.is_constant() || len.constant() < lanes {
+            return self.each(len, |s, i| emit(s, i, false));
+        }
+        let (blocks, rest) = (len.constant() / lanes, len.constant() % lanes);
+        self.each(blocks.into(), |s, i| emit(s, i * lanes, true));
+        self.each(rest.into(), |s, i| emit(s, i + (blocks * lanes).into(), false));
     }
 
     fn binary(&mut self, op: u32, a: At<Expr>, b: At<Expr>, dst: At<Expr>) {
@@ -690,11 +715,12 @@ impl Assembly {
         first.write = false;
         first.magnitude_clear = true;
         self.push(first);
-        self.each(len, |s, i| {
+        self.elements(len, &[], true, |s, i, vector| {
             let mut scan = alu(OP_MOV);
             scan.a = (reg, i);
             scan.magnitude_scan = true;
             scan.write = false;
+            scan.vector = vector;
             s.push(scan);
         });
     }
@@ -738,7 +764,11 @@ impl BlockOps for Assembly {
             return body(self, step.constant());
         }
         let outer = std::mem::take(&mut self.steps);
+        // A window moves the register, not the index, but stays one element at a time
+        // so that every block is still written to a boundary its register keeps.
+        let lane_bits = std::mem::replace(&mut self.lane_bits, 0);
         body(self, 0);
+        self.lane_bits = lane_bits;
         let mut inner = std::mem::replace(&mut self.steps, outer);
         mark_window(&mut inner, step, windowed, self.exponents);
         self.steps.extend(inner);
@@ -783,10 +813,11 @@ impl BlockOps for Assembly {
         count.dst = self.sc(0);
         self.push(count);
         self.load_shifts(None, None, Some(self.sc(0)));
-        self.each(len, |s, i| {
+        self.elements(len, &[], true, |s, i, vector| {
             let mut shift = alu(OP_SHIFT_LEFT);
             shift.a = (reg, i);
             shift.dst = (reg, i);
+            shift.vector = vector;
             s.push(shift);
         });
         self.binary(OP_SUB, self.exponent(reg), self.sc(0), self.exponent(reg));
@@ -803,7 +834,12 @@ impl BlockOps for Assembly {
         self.binary(OP_SUB, self.sc(3), eb, self.sc(5));
         self.load_shifts(Some(self.sc(4)), Some(self.sc(5)), None);
         let op = if subtract { OP_SUB } else { OP_ADD };
-        self.each(len, |s, i| s.binary(op, (a.0, a.1 + i), (b.0, b.1 + i * b_stride), (dst, i)));
+        self.elements(len, &[a.1, b.1], b_stride != 0 || b.0 != dst, |s, i, vector| {
+            let mut step = alu(op);
+            (step.a, step.b, step.dst) = ((a.0, a.1 + i), (b.0, b.1 + i * b_stride), (dst, i));
+            (step.vector, step.broadcast_b) = (vector, vector && b_stride == 0);
+            s.push(step);
+        });
         self.clear_shifts();
         self.binary(OP_MOV, self.sc(3), self.sc(15), self.exponent(dst));
         self.normalize(dst, len);
@@ -811,12 +847,13 @@ impl BlockOps for Assembly {
 
     fn multiply(&mut self, a: u32, b: u32, dst: u32, len: Expr) {
         let shift = self.bits - 1;
-        self.each(len, |s, i| {
+        self.elements(len, &[], true, |s, i, vector| {
             let mut product = alu(OP_MUL);
             product.a = (a, i);
             product.b = (b, i);
             product.dst = (dst, i);
             product.shift = shift;
+            product.vector = vector;
             s.push(product);
         });
         self.product_exponent(a, b, dst, 0);
@@ -825,12 +862,13 @@ impl BlockOps for Assembly {
 
     fn scale(&mut self, s_reg: u32, a: u32, dst: u32, len: Expr) {
         let shift = self.bits - 1;
-        self.each(len, |s, i| {
+        self.elements(len, &[], s_reg != dst, |s, i, vector| {
             let mut product = alu(OP_MUL);
             product.a = (s_reg, 0.into());
             product.b = (a, i);
             product.dst = (dst, i);
             product.shift = shift;
+            (product.vector, product.broadcast_a) = (vector, vector);
             s.push(product);
         });
         self.product_exponent(s_reg, a, dst, 0);
@@ -917,7 +955,11 @@ impl BlockOps for Assembly {
     fn function(&mut self, function: u32, src: u32, dst: u32, len: Expr) {
         let scratch = self.scratch;
         self.align_to(src, 0.into(), TABLE_INPUT_EXPONENT, scratch, 32.into(), len);
-        self.each(len, |s, i| s.table_input(function, (scratch, i + 32.into()), (dst, i)));
+        self.elements(len, &[32.into()], true, |s, i, vector| {
+            let mut step = alu(OP_FUNCTION);
+            (step.a, step.function, step.dst, step.vector) = ((scratch, i + 32.into()), function, (dst, i), vector);
+            s.push(step);
+        });
         let exponent = if function == FN_SOFTPLUS { SOFTPLUS_OUTPUT_EXPONENT } else { UNIT_OUTPUT_EXPONENT };
         self.immediate(exponent, self.exponent(dst));
         self.normalize(dst, len);
@@ -954,7 +996,12 @@ impl BlockOps for Assembly {
     fn copy_part(&mut self, src: u32, from: Expr, dst: u32, to: Expr, len: Expr) {
         self.clear_shifts();
         let zero = self.sc(15);
-        self.each(len, |s, i| s.binary(OP_MOV, (src, from + i), zero, (dst, to + i)));
+        self.elements(len, &[from, to], true, |s, i, vector| {
+            let mut step = alu(OP_MOV);
+            (step.a, step.b, step.dst) = ((src, from + i), zero, (dst, to + i));
+            (step.vector, step.broadcast_b) = (vector, vector);
+            s.push(step);
+        });
         self.binary(OP_MOV, self.exponent(src), zero, self.exponent(dst));
     }
 
@@ -971,7 +1018,12 @@ impl BlockOps for Assembly {
             self.binary(OP_SUB, largest, self.exponent(*reg), shift);
             self.load_shifts(Some(shift), None, None);
             let at: Expr = offset.into();
-            self.each((*len).into(), |s, i| s.binary(OP_MOV, (*reg, i), zero, (dst, at + i)));
+            self.elements((*len).into(), &[at], true, |s, i, vector| {
+                let mut step = alu(OP_MOV);
+                (step.a, step.b, step.dst) = ((*reg, i), zero, (dst, at + i));
+                (step.vector, step.broadcast_b) = (vector, vector);
+                s.push(step);
+            });
             self.clear_shifts();
             offset += len;
         }
@@ -988,14 +1040,16 @@ impl BlockOps for Assembly {
         self.binary(OP_SUB, self.sc(8), e, self.sc(12));
         self.binary(OP_MAX, self.sc(12), self.sc(10), self.sc(13));
         self.load_shifts(Some(self.sc(13)), None, Some(self.sc(11)));
-        self.each(len, |s, i| {
+        self.elements(len, &[from, to], true, |s, i, vector| {
             let mut right = alu(OP_MOV);
             right.a = (src, from + i);
             right.dst = (dst, to + i);
+            right.vector = vector;
             s.push(right);
             let mut left = alu(OP_SHIFT_LEFT);
             left.a = (dst, to + i);
             left.dst = (dst, to + i);
+            left.vector = vector;
             s.push(left);
         });
         self.clear_shifts();
@@ -1044,6 +1098,7 @@ impl BlockOps for Assembly {
 
 /// Executes the steps directly on integers, with no reference to the circuit.
 pub struct Behavior {
+    lanes: u32,
     exponents: u32,
     bits: u32,
     index_bits: u32,
@@ -1069,6 +1124,7 @@ fn wrap(value: i128, bits: u32) -> i64 {
 impl Behavior {
     pub fn new(c: &DieConfig, initial: &HashMap<Place, i64>) -> Self {
         Self {
+            lanes: 1 << c.features.lane_bits,
             exponents: exponent_register(c),
             bits: c.cell.activation_bits,
             index_bits: c.index_bits,
@@ -1122,7 +1178,11 @@ impl Behavior {
             match step {
                 Step::One(alu) => {
                     let bound = alu.map_indices(|e| value(loops, e));
-                    self.step(&bound);
+                    // A block is the same thing as its elements one after another.
+                    let (lanes, moved) = (if bound.vector { self.lanes } else { 1 }, |at: At<u32>, on: bool, j: u32| (at.0, at.1 + if on { j } else { 0 }));
+                    for j in 0..lanes {
+                        self.step(&Alu { a: moved(bound.a, !bound.broadcast_a, j), b: moved(bound.b, !bound.broadcast_b, j), dst: moved(bound.dst, true, j), ..bound });
+                    }
                 }
                 Step::Repeat { variable, count, body } => {
                     for i in 0..value(loops, *count) {

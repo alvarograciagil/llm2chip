@@ -33,7 +33,7 @@ function LocalList() {
   const makeImage = (m: ServerModel) => {
     const { params, report } = useDesign.getState();
     const dies = Math.max(1, Math.round(report?.dies ?? 1));
-    void startImage(m.path, Array.from({ length: dies }, (_, i) => i + 1), Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits));
+    void startImage(m.path, Array.from({ length: dies }, (_, i) => i + 1), Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits), Number(params.vector_lanes_per_die));
   };
   const simulate = (m: ServerModel) => {
     setSimulator({ path: m.path });

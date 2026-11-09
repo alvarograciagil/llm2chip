@@ -87,7 +87,7 @@ interface ModelsState {
   cancel: (id: string) => Promise<void>;
   discard: (id: string) => Promise<void>;
   pollJobs: () => Promise<Job[]>;
-  startImage: (path: string, chips: number[], context: number, cells: number, bits: number) => Promise<void>;
+  startImage: (path: string, chips: number[], context: number, cells: number, bits: number, lanes: number) => Promise<void>;
   cancelImage: () => Promise<void>;
   pollImage: () => Promise<void>;
 }
@@ -122,9 +122,9 @@ export const useModels = create<ModelsState>((set, get) => ({
 
   set: (patch) => set(patch),
 
-  async startImage(path, chips, context, cells, bits) {
+  async startImage(path, chips, context, cells, bits, lanes) {
     try {
-      await call("/api/image", { method: "POST", headers: json, body: JSON.stringify({ path, chips, context_tokens: context, cells, activation_bits: bits }) });
+      await call("/api/image", { method: "POST", headers: json, body: JSON.stringify({ path, chips, context_tokens: context, cells, activation_bits: bits, vector_lanes: lanes }) });
       set({ error: null });
       await get().pollImage();
     } catch (e) {

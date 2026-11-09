@@ -123,6 +123,8 @@ pub struct ImageRequest {
     /// Cells that share the rows of each matrix.
     pub cells: usize,
     pub activation_bits: u32,
+    /// log2 of the elements the die computes per cycle.
+    pub lane_bits: u32,
     pub add_special: bool,
     pub stop: Vec<u32>,
 }
@@ -166,7 +168,7 @@ fn bits_for(count: u64) -> u32 {
 /// The smallest die that holds this program for this context.
 fn fitted_die(program: &Program, weights: &Weights, request: &ImageRequest) -> Result<DieConfig, String> {
     let cell = CellConfig { weight_bits: 8, activation_bits: request.activation_bits, accumulator_bits: 2 * request.activation_bits, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false };
-    let trial = DieConfig { cells: request.cells.max(1) as u32, cell, scale_bits: 16, reg_bits: 16, index_bits: 16, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: Default::default() };
+    let trial = DieConfig { cells: request.cells.max(1) as u32, cell, scale_bits: 16, reg_bits: 16, index_bits: 16, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_lane_bits(request.lane_bits) };
     let tokens = request.context_tokens.max(1);
     let longest_store = program.kv_slots.iter().map(|s| (s.heads * s.head_dim) as u64 * tokens).max().unwrap_or(0);
     let longest_buffer = program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1);
@@ -194,7 +196,7 @@ fn boot_plans(program: &Program, weights: &Weights, die: DieConfig, request: &Im
         built.push(parts);
     }
     // The same silicon serves every count, so it needs what any of the parts uses.
-    let features = built.iter().flatten().map(|(_, code)| DieFeatures::of(code)).reduce(DieFeatures::union).unwrap_or_default();
+    let features = built.iter().flatten().map(|(_, code)| DieFeatures::of(code)).reduce(DieFeatures::union).unwrap_or_default().with_lane_bits(die.features.lane_bits);
     let words = built.iter().flatten().map(|(_, code)| code.words.len() as u64).max().unwrap_or(1);
     let die = DieConfig { features, microcode_bits: bits_for(words), ..die };
     Ok(built

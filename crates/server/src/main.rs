@@ -272,6 +272,8 @@ struct ImageStart {
     context_tokens: u64,
     cells: usize,
     activation_bits: u32,
+    #[serde(default = "one_lane")]
+    vector_lanes: u32,
 }
 
 async fn image_status(State(app): State<App>) -> Response {
@@ -318,7 +320,7 @@ async fn image_start(State(app): State<App>, Json(request): Json<ImageStart>) ->
             let out = home().join(".llm2chip/images").join(format!("{}.chipimg", entry.name.replace('/', "--")));
             // A chip's image has one framing of the text: with its template, nothing is added.
             let add_special = prompt.render("", false)?.1;
-            let image = ImageRequest { chips: request.chips, context_tokens: request.context_tokens.max(1), cells: request.cells.max(1), activation_bits: request.activation_bits, add_special, stop: prompt.stop.clone() };
+            let image = ImageRequest { chips: request.chips, context_tokens: request.context_tokens.max(1), cells: request.cells.max(1), activation_bits: request.activation_bits, lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), add_special, stop: prompt.stop.clone() };
             let report = write_chip_image(&dir, &firmware, &image, &out, &job.done, &job.total, &job.cancel)?;
             Ok(serde_json::json!({ "path": out.to_string_lossy(), "bytes": report.bytes, "chips": report.chips, "tensors": report.tensors, "boot_words": report.boot_words, "seconds": report.seconds }))
         });
@@ -514,6 +516,12 @@ fn sample(logits: &[f32], temperature: f32, top_k: usize, seed: &mut u64) -> u32
 
 const SAMPLER_ENTRIES: u32 = 64;
 const FLOW_BITS: u32 = 16;
+/// Past this the die spends more on banks than the element-wise work can use.
+const MAX_IMAGE_LANE_BITS: u32 = 5;
+
+fn one_lane() -> u32 {
+    1
+}
 
 fn sampler_model(vocabulary: usize, seed: u32, lanes: u32) -> SamplerModel {
     let config = SamplerConfig { logit_bits: FLOW_BITS, index_bits: usize::BITS - vocabulary.leading_zeros(), entries: SAMPLER_ENTRIES, lanes: lanes.max(1).next_power_of_two() };

@@ -39,17 +39,25 @@ pub struct DieFeatures {
     pub widths: [u8; FIELD_COUNT],
     /// Index registers in use, counting the always-zero first one.
     pub x_registers: u32,
+    /// log2 of the elements an element-wise operation handles per cycle.
+    pub lane_bits: u32,
 }
 
 impl Default for DieFeatures {
     fn default() -> Self {
-        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX }
+        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0 }
     }
 }
 
 impl DieFeatures {
     pub fn is_general(&self) -> bool {
         self.ops == u32::MAX
+    }
+
+    /// The same die with `lane_bits` of parallel vector lanes.
+    pub fn with_lane_bits(mut self, lane_bits: u32) -> Self {
+        self.lane_bits = lane_bits;
+        self
     }
 
     /// The general die minus register loops, for programs written one register at a time.
@@ -62,7 +70,7 @@ impl DieFeatures {
     /// Exactly what this microprogram needs.
     pub fn of(code: &Microprogram) -> Self {
         // Additions are also how the comparator and the sequencer's own results are made.
-        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1 };
+        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0 };
         let mut highest_x = 0;
         for word in &code.words {
             features.ops |= 1 << word.op;
@@ -82,7 +90,7 @@ impl DieFeatures {
     pub fn union(self, other: Self) -> Self {
         let mut widths = self.widths;
         widths.iter_mut().zip(other.widths).for_each(|(a, b)| *a = (*a).max(b));
-        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers) }
+        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits) }
     }
 
     fn uses(&self, op: u32) -> bool {
@@ -152,10 +160,15 @@ pub struct ControlWord {
     pub window_a: bool,
     pub window_b: bool,
     pub window_dst: bool,
+    /// Runs on every lane at once, over a block of elements.
+    pub vector: bool,
+    /// Every lane takes the same single element for this operand.
+    pub broadcast_a: bool,
+    pub broadcast_b: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 47;
+pub const FIELD_COUNT: usize = 50;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 
@@ -232,6 +245,9 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("window_a", 1),
         ("window_b", 1),
         ("window_dst", 1),
+        ("vector", 1),
+        ("broadcast_a", 1),
+        ("broadcast_b", 1),
     ]
 }
 
@@ -290,6 +306,9 @@ impl ControlWord {
             self.window_a as u128,
             self.window_b as u128,
             self.window_dst as u128,
+            self.vector as u128,
+            self.broadcast_a as u128,
+            self.broadcast_b as u128,
         ]
     }
 
@@ -702,13 +721,46 @@ impl Gen {
         let wdata = b.wire("wdata", a);
         b.inst("wdata_select", &mux_a, &[("s", vec![load_vec]), ("a", write_data.clone()), ("b", vec_data), ("y", wdata.clone())]);
         let we = bus_or(&mut b, write_en, load_vec, "vec_we");
-        let read_a = b.wire("read_a", a);
         let raddr_a = b.wire("raddr_a", addr_bits);
         let host_reading = bus_or(&mut b, start, halt_flag, "host_reads");
         b.inst("raddr_select", &mux_addr, &[("s", vec![host_reading]), ("a", addr_a), ("b", vec_addr), ("y", raddr_a.clone())]);
-        b.ram2p("vectors_a", addr_bits, a, &[("raddr", raddr_a), ("waddr", waddr.clone()), ("we", vec![we]), ("wdata", wdata.clone()), ("rdata", read_a.clone())]);
+
+        // Elements sit in as many banks as lanes, by the low bits of their index, so a
+        // whole block can be read and written at once and a single element still can.
+        let lane_bits = c.features.lane_bits as usize;
+        let lanes = 1usize << lane_bits;
+        let vector_flag = fields["vector"][0];
+        let lane_results: Vec<Vec<Bit>> = (0..lanes).map(|lane| if lane == 0 { write_data.clone() } else { b.wire(&format!("lane{lane}_result"), a) }).collect();
+        let (mut banks_a, mut banks_b) = (Vec::with_capacity(lanes), Vec::with_capacity(lanes));
+        {
+            let bank_bits = addr_bits - lane_bits as u32;
+            let mut l = Logic { b: &mut b, next: 40_000 };
+            let written_together = l.and(write_en, vector_flag);
+            for (lane, result) in lane_results.iter().enumerate() {
+                let here = l.equals(&waddr[..lane_bits], lane as u32);
+                let alone = l.and(we, here);
+                let write = l.or(alone, written_together);
+                let data = if lane == 0 { wdata.clone() } else { l.mux_bus(written_together, &wdata, result) };
+                let (name_a, name_b) = if lanes == 1 { ("vectors_a".to_string(), "vectors_b".to_string()) } else { (format!("vectors_a{lane}"), format!("vectors_b{lane}")) };
+                let (read_this_a, read_this_b) = (l.b.wire(&format!("{name_a}_data"), a), l.b.wire(&format!("{name_b}_data"), a));
+                l.b.ram2p(&name_a, bank_bits, a, &[("raddr", raddr_a[lane_bits..].to_vec()), ("waddr", waddr[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data.clone()), ("rdata", read_this_a.clone())]);
+                l.b.ram2p(&name_b, bank_bits, a, &[("raddr", addr_b[lane_bits..].to_vec()), ("waddr", waddr[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data), ("rdata", read_this_b.clone())]);
+                banks_a.push(read_this_a);
+                banks_b.push(read_this_b);
+            }
+        }
+        let read_a = b.wire("read_a", a);
         let read_b = b.wire("read_b", a);
-        b.ram2p("vectors_b", addr_bits, a, &[("raddr", addr_b), ("waddr", waddr), ("we", vec![we]), ("wdata", wdata), ("rdata", read_b.clone())]);
+        {
+            let mut l = Logic { b: &mut b, next: 45_000 };
+            let (bank_a, bank_b) = (l.fresh_bus(lane_bits), l.fresh_bus(lane_bits));
+            l.connect_flops(&raddr_a[..lane_bits], &bank_a);
+            l.connect_flops(&addr_b[..lane_bits], &bank_b);
+            let (chosen_a, chosen_b) = (l.select(&bank_a, &banks_a), l.select(&bank_b, &banks_b));
+            for (from, to) in chosen_a.iter().zip(&read_a).chain(chosen_b.iter().zip(&read_b)) {
+                l.b.or_to(*from, Bit::Zero, *to);
+            }
+        }
         for i in 0..a as usize {
             b.xor_to(read_a[i], Bit::Zero, vec_out[i]);
         }
@@ -772,12 +824,26 @@ impl Gen {
         let keep_magnitude = b.wire("magnitude_keep", 1)[0];
         b.not_to(magnitude_clear, keep_magnitude);
         let magnitude_d = b.wire("magnitude_d", a);
+        let block_scan = b.wire("magnitude_block", 1)[0];
+        b.and_to(scan, vector_flag, block_scan);
         for i in 0..a as usize {
             let differs = b.wire(&format!("mag_differs{i}"), 1)[0];
             if i == top {
                 b.xor_to(Bit::Zero, Bit::Zero, differs);
             } else {
-                b.xor_to(read_a[i], read_a[top], differs);
+                // A scan over a block looks at every lane; the others count only then.
+                let mut any = b.wire(&format!("mag_lane0_{i}"), 1)[0];
+                b.xor_to(read_a[i], read_a[top], any);
+                for (lane, bank) in banks_a.iter().enumerate().skip(1) {
+                    let here = b.wire(&format!("mag_lane{lane}_{i}"), 1)[0];
+                    b.xor_to(bank[i], bank[top], here);
+                    let counted = b.wire(&format!("mag_counted{lane}_{i}"), 1)[0];
+                    b.and_to(block_scan, here, counted);
+                    let merged = b.wire(&format!("mag_any{lane}_{i}"), 1)[0];
+                    b.or_to(any, counted, merged);
+                    any = merged;
+                }
+                b.or_to(any, Bit::Zero, differs);
             }
             let seen = b.wire(&format!("mag_seen{i}"), 1)[0];
             b.and_to(scan, differs, seen);
@@ -852,7 +918,7 @@ impl Gen {
         let table_out = b.wire("table_out", a);
         let mut table_index: Vec<Bit> = read_a[(a - c.function_bits) as usize..].to_vec();
         table_index.extend_from_slice(&fields["function"]);
-        b.ram2p("function_table", c.function_bits + c.function_select_bits, a, &[("raddr", table_index), ("waddr", fn_addr), ("we", vec![load_fn]), ("wdata", cell_data[..a as usize].to_vec()), ("rdata", table_out.clone())]);
+        b.ram2p("function_table", c.function_bits + c.function_select_bits, a, &[("raddr", table_index), ("waddr", fn_addr.clone()), ("we", vec![load_fn]), ("wdata", cell_data[..a as usize].to_vec()), ("rdata", table_out.clone())]);
 
         // --- Result selection ---
         b.group("Selección de resultado");
@@ -907,11 +973,58 @@ impl Gen {
             chosen_leaf(OP_WIDE_OUT, wide_shifted),
             chosen_leaf(OP_EQUAL, equal),
         ];
-        let result = mux_tree(&mut b, &mux_a, leaves, &op);
+        let result = mux_tree(&mut b, &mux_a, "op", leaves, &op);
         // While the link holds the sequencer back, the result in flight must stay put.
         let result_held = b.wire("result_held", a);
         b.inst("result_hold", &mux_a, &[("s", vec![link_stall]), ("a", result), ("b", write_data.clone()), ("y", result_held.clone())]);
         b.inst("result_reg", &reg_a, &[("d", result_held), ("q", write_data.clone())]);
+
+        // Every further lane repeats the element-wise operations on its own bank.
+        for lane in 1..lanes {
+            let name = |part: &str| format!("lane{lane}_{part}");
+            b.group(&format!("Carril {lane}"));
+            let operand_a = {
+                let y = b.wire(&name("a"), a);
+                b.inst(&name("a_select"), &mux_a, &[("s", vec![fields["broadcast_a"][0]]), ("a", banks_a[lane].clone()), ("b", read_a.clone()), ("y", y.clone())]);
+                y
+            };
+            let operand_b = {
+                let y = b.wire(&name("b"), a);
+                b.inst(&name("b_select"), &mux_a, &[("s", vec![fields["broadcast_b"][0]]), ("a", banks_b[lane].clone()), ("b", read_b.clone()), ("y", y.clone())]);
+                y
+            };
+            let lane_a = self.rounded_right(&mut b, &name("align_a"), &operand_a, &shift_a, a as usize);
+            let lane_b = self.rounded_right(&mut b, &name("align_b"), &operand_b, &shift_b, a as usize);
+            let product = b.wire(&name("product"), 2 * a);
+            b.inst(&name("multiplier"), &mult, &[("weight", operand_a.clone()), ("x", operand_b.clone()), ("product", product.clone())]);
+            let flipped = b.wire(&name("flipped"), a);
+            for i in 0..a as usize {
+                b.xor_to(lane_b[i], subtract, flipped[i]);
+            }
+            let sum = b.wire(&name("sum"), a);
+            let unused = b.wire(&name("carry"), 1);
+            b.inst(&name("adder"), &add, &[("a", lane_a.clone()), ("b", flipped), ("cin", vec![subtract]), ("sum", sum.clone()), ("cout", unused)]);
+            let shifted = self.rounded_right(&mut b, &name("product_shift"), &product, &fields["shift"], a as usize);
+            let table = b.wire(&name("table"), a);
+            let mut index: Vec<Bit> = operand_a[(a - c.function_bits) as usize..].to_vec();
+            index.extend_from_slice(&fields["function"]);
+            b.ram2p(&name("function_table"), c.function_bits + c.function_select_bits, a, &[("raddr", index), ("waddr", fn_addr.clone()), ("we", vec![load_fn]), ("wdata", cell_data[..a as usize].to_vec()), ("rdata", table.clone())]);
+            let raw_sign = operand_a[top];
+            let widened: Vec<Bit> = (0..left_bits as usize).map(|i| operand_a.get(i).copied().unwrap_or(raw_sign)).collect();
+            let moved_left = barrel_left(&mut b, &left_mux, &name("shift_left"), &widened, &shift_left);
+            let saturated = saturate(&mut b, &moved_left, a);
+            let mut leaves = vec![zero_leaf.clone(); 16];
+            leaves[OP_ADD as usize] = sum.clone();
+            for (op, leaf) in [(OP_MUL, shifted), (OP_FUNCTION, table), (OP_SUB, sum), (OP_MOV, lane_a), (OP_SHIFT_LEFT, saturated)] {
+                if c.features.uses(op) {
+                    leaves[op as usize] = leaf;
+                }
+            }
+            let chosen = mux_tree(&mut b, &mux_a, &name("op"), leaves, &op);
+            let held = b.wire(&name("held"), a);
+            b.inst(&name("hold"), &mux_a, &[("s", vec![link_stall]), ("a", chosen), ("b", lane_results[lane].clone()), ("y", held.clone())]);
+            b.inst(&name("result_reg"), &reg_a, &[("d", held), ("q", lane_results[lane].clone())]);
+        }
 
         // The sequencer waits when it needs a word that has not arrived or cannot send one.
         b.group("Enlace entre dies");
@@ -1113,7 +1226,7 @@ pub(crate) fn leading_zeros(b: &mut Builder, name: &str, bits: &[Bit], width: u3
 }
 
 /// Selects one of `leaves` with the binary `select`, one level of selectors per bit.
-pub(crate) fn mux_tree(b: &mut Builder, mux: &str, leaves: Vec<Vec<Bit>>, select: &[Bit]) -> Vec<Bit> {
+pub(crate) fn mux_tree(b: &mut Builder, mux: &str, prefix: &str, leaves: Vec<Vec<Bit>>, select: &[Bit]) -> Vec<Bit> {
     let width = leaves[0].len() as u32;
     let mut level = leaves;
     for (depth, bit) in select.iter().enumerate() {
@@ -1121,8 +1234,8 @@ pub(crate) fn mux_tree(b: &mut Builder, mux: &str, leaves: Vec<Vec<Bit>>, select
             .chunks(2)
             .enumerate()
             .map(|(i, pair)| {
-                let y = b.wire(&format!("op_mux{depth}_{i}"), width);
-                b.inst(&format!("op_select{depth}_{i}"), mux, &[("s", vec![*bit]), ("a", pair[0].clone()), ("b", pair[1].clone()), ("y", y.clone())]);
+                let y = b.wire(&format!("{prefix}_mux{depth}_{i}"), width);
+                b.inst(&format!("{prefix}_select{depth}_{i}"), mux, &[("s", vec![*bit]), ("a", pair[0].clone()), ("b", pair[1].clone()), ("y", y.clone())]);
                 y
             })
             .collect();
@@ -1473,6 +1586,7 @@ impl DieProgram {
             w.literal_b = step.b.1;
             w.offset_b = step.offset_b;
             (w.window_x, w.window_a, w.window_b) = (step.window_x, step.window_a, step.window_b);
+            (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
             w.magnitude_clear = step.magnitude_clear;
             w.accumulator_clear = step.accumulator_clear;
             w.wide_clear = step.wide_clear;
@@ -1487,6 +1601,7 @@ impl DieProgram {
             w.literal_b = step.literal.unwrap_or(step.b.1);
             w.offset_b = step.offset_b;
             (w.window_x, w.window_a, w.window_b) = (step.window_x, step.window_a, step.window_b);
+            (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
             w.op = step.op;
             w.shift = step.shift;
             w.function = step.function;
@@ -1506,6 +1621,7 @@ impl DieProgram {
             w.literal_a = step.a.1;
             w.offset_a = step.offset_a;
             (w.window_x, w.window_a) = (step.window_x, step.window_a);
+            (w.vector, w.broadcast_a) = (step.vector, step.broadcast_a);
             w.op = step.op;
             w.function = step.function;
         }
@@ -1516,6 +1632,7 @@ impl DieProgram {
         w.literal_dst = step.dst.1;
         w.offset_dst = step.offset_dst;
         (w.window_x, w.window_dst) = (step.window_x, step.window_dst);
+        w.vector = step.vector;
         w.write_en = step.write;
         w.load_shift_a = step.load_shift_a;
         w.load_shift_b = step.load_shift_b;
