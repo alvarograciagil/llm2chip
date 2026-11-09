@@ -265,7 +265,7 @@ impl Gen {
     }
 
     /// March C−: finds stuck bits and most coupling faults in about 11 cycles per word.
-    fn march_test(&mut self, addr_bits: u32, width: u32) -> String {
+    pub(crate) fn march_test(&mut self, addr_bits: u32, width: u32) -> String {
         let name = format!("march_test_{addr_bits}_{width}");
         if self.modules.contains_key(&name) {
             return name;

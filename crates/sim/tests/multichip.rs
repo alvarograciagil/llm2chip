@@ -39,7 +39,7 @@ impl Noise {
 
 /// Often enough to hit a run of a few words, rarely enough to stay correctable.
 const FLIP_EVERY: u64 = 8;
-const DOUBLE_EVERY: u64 = 12;
+const DOUBLE_EVERY: u64 = 3;
 
 /// One direction of a link on the board: wires with delay, gaps and the odd flipped bit.
 struct Wire {

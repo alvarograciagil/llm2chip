@@ -96,6 +96,23 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     let chain_rx_stall = b.input("chain_rx_stall", 1);
     let debug_select = b.input("debug_select", 3);
     let debug_value = b.output("debug_value", 32);
+    let jtag_tck = b.input("jtag_tck", 1);
+    let jtag_tms = b.input("jtag_tms", 1);
+    let jtag_tdi = b.input("jtag_tdi", 1);
+    let jtag_tdo = b.output("jtag_tdo", 1);
+    let self_test_pin = b.input("self_test", 1)[0];
+    let self_test_done = b.output("self_test_done", 1);
+    let self_test_fail = b.output("self_test_fail", 1);
+    let bist_enable = b.wire("bist_enable", 1)[0];
+    let (bist_done, bist_fail) = (b.wire("bist_done", 1)[0], b.wire("bist_fail", 1)[0]);
+    let tap = gen.jtag_tap();
+    let (tap_select, tap_override, tap_test) = (b.wire("tap_select", 3), b.wire("tap_override", 1)[0], b.wire("tap_test", 1)[0]);
+    let debug_bus = b.wire("debug_bus", 32);
+    b.group("Puerto de pruebas");
+    b.inst("jtag", &tap, &[("tck", jtag_tck), ("tms", jtag_tms), ("tdi", jtag_tdi), ("tdo", jtag_tdo), ("debug_value", debug_bus.clone()), ("test_status", vec![bist_done, bist_fail]), ("debug_select", tap_select.clone()), ("debug_override", vec![tap_override]), ("test_enable", vec![tap_test])]);
+    b.or_to(self_test_pin, tap_test, bist_enable);
+    b.or_to(bist_done, Bit::Zero, self_test_done[0]);
+    b.or_to(bist_fail, Bit::Zero, self_test_fail[0]);
 
     let load_valid = b.wire("load_valid", 1)[0];
     let load_target = b.wire("load_target", 3);
@@ -343,9 +360,11 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
             .collect();
         let mut leaves: Vec<Vec<Bit>> = counters.into_iter().chain([cpu_pc.clone()]).chain(link_counters).collect();
         leaves.resize(8, constant(0, 32));
-        let shown = l.select(&debug_select, &leaves);
-        for (from, to) in shown.iter().zip(&debug_value) {
+        let chosen_view = l.mux_bus(tap_override, &debug_select, &tap_select);
+        let shown = l.select(&chosen_view, &leaves);
+        for ((from, to), bus) in shown.iter().zip(&debug_value).zip(&debug_bus) {
             l.b.or_to(*from, Bit::Zero, *to);
+            l.b.or_to(*from, Bit::Zero, *bus);
         }
 
         l.b.group("Cadena de control");
@@ -409,7 +428,7 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
 pub fn chip_design(config: ChipConfig) -> Design {
     let mut gen = Gen { modules: BTreeMap::new() };
     let top = chip(&mut gen, config);
-    Design { top, modules: gen.modules }
+    crate::self_test::insert(Design { top, modules: gen.modules })
 }
 
 /// Runs the die's routines at software speed, on the same registers as the gates.

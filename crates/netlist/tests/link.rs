@@ -116,8 +116,8 @@ fn deliver(words: u64, double_every: u64, a_every: u64, b_every: u64) -> (Vec<u6
         if received.len() as u64 == words {
             break;
         }
-        let a_edge = noise.next() % a_every == 0;
-        let b_edge = noise.next() % b_every == 0;
+        let a_edge = noise.next().is_multiple_of(a_every);
+        let b_edge = noise.next().is_multiple_of(b_every);
         a.set("core_stall", (!a_edge) as u64).unwrap();
         b.set("core_stall", (!b_edge) as u64).unwrap();
         // The receiving half of B runs on the edges of A, whose clock comes with the data.
@@ -134,7 +134,7 @@ fn deliver(words: u64, double_every: u64, a_every: u64, b_every: u64) -> (Vec<u6
         a.set("tx_data", 0x4000 + sent).unwrap();
 
         let (valid, mut bits) = if a_edge { delayed.pop_front().unwrap() } else { (0, 0) };
-        if valid == 1 && noise.next() % double_every == 0 {
+        if valid == 1 && noise.next().is_multiple_of(double_every) {
             bits ^= 0b11 << (noise.next() % 8);
             doubles += 1;
         }

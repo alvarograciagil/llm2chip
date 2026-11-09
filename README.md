@@ -132,7 +132,6 @@ Es un diseño de arquitectura y lógica, no un layout fabricable: no hay colocac
 
 - Área, energía y velocidad son estimaciones, parte derivadas del circuito generado y parte calibradas con chips publicados. La aplicación indica el origen de cada cifra.
 - Los modelos reales no se simulan puerta a puerta, sino con una máquina verificada contra las puertas en modelos diminutos.
-- El enlace entre chips corrige errores simples, pero no retransmite; el reloj se modela común a todos los chips y falta JTAG estándar.
 - Los paquetes de Windows y Linux y el backend de Vulkan todavía no se han ejecutado en esos sistemas.
 
 ## Estructura

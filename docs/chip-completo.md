@@ -23,7 +23,7 @@ El chip recibe bytes de texto y devuelve bytes de texto. El tokenizado, la infer
 | Carriles vectoriales | Atención, delta, puertas de la MLP | En puertas, un carril |
 | Tablas de función | SiLU, sigmoide, exp, raíz | En puertas |
 | Registros vectoriales y microsecuenciador | Control de cada etapa, bucles y parámetros | En puertas, con microprograma fijo |
-| Enlace entre dies | Paso de activaciones | En puertas |
+| Enlace entre dies | Paso de activaciones, con corrección, repetición de palabras dañadas y cruce entre relojes | En puertas |
 | SRAM KV y estado DeltaNet | Memoria del modelo | Modelo funcional y área |
 | Bus interno del sistema | Une CPU, memorias y periféricos | En puertas |
 | Puerto de host y FIFO | Entrada y salida de bytes | En puertas |
@@ -31,12 +31,12 @@ El chip recibe bytes de texto y devuelve bytes de texto. El tokenizado, la infer
 | SRAM de instrucciones y datos | Firmware y vocabulario | En puertas |
 | Controlador de carga y DMA | Imagen hacia celdas, tablas y microcódigo, con arranque propio y CRC | En puertas e ISS, conectado al die |
 | Red de escritura de pesos | Lleva cada palabra a su celda | Solo puertos de carga directos |
-| ECC, CRC, BIST y reparación | Fiabilidad y celdas defectuosas | ECC en puertas en la celda, CRC en la carga; autotest y filas de reserva verificados como bloque, sin conectar a todas las memorias |
+| ECC, CRC, BIST y reparación | Fiabilidad y celdas defectuosas | ECC por carril en la celda y CRC en la carga, en puertas; autotest de marcha en todas las memorias de lectura y escritura, accesible por JTAG; filas de reserva verificadas como bloque |
 | Unidad de muestreo y RNG | Top-k y temperatura sobre los logits, con filtro de varios carriles | En puertas y modelo, conectada al die |
 | Tokenizador en firmware | Sigue las reglas del `tokenizer.json` de cada modelo mediante tablas: tokens añadidos, normalización, expresiones regulares, BPE y plantilla de tokens especiales | Comparado con la biblioteca `tokenizers` en estilos sintéticos y modelos reales; en ISS con tablas reales y en puertas con tablas diminutas. Su memoria de trabajo se dimensiona con el contexto del diseño y el estimador la cuenta |
 | Planificador de tokens y MTP | Decide qué ejecuta cada die, y deshace | En software |
 | Reloj, reset y gestión de energía | Secuencia de reset, puertas de reloj | Reset en puertas; el reloj y la energía solo se estiman, porque el simulador tiene un único reloj |
-| Depuración y contadores | Contadores y puerto de lectura; falta JTAG estándar | En puertas |
+| Depuración y contadores | Contadores, puerto de lectura y JTAG estándar | En puertas |
 
 Muestrear en la CPU no sirve en los diseños rápidos. Leer 250.000 logits cuesta unos 250 µs a 1 GHz, y a 15.000 tok/s un token dura 66 µs. Por eso el muestreo tiene unidad propia y la CPU solo recibe el resultado.
 
