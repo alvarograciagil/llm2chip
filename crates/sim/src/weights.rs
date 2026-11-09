@@ -1,6 +1,6 @@
 //! Reads MLX-quantised safetensors checkpoints without loading them into memory.
 
-use crate::requant::{quantize, train_table, Reference};
+use crate::requant::{quantize, recode, train_table, Recoded, Reference};
 use half::f16;
 use memmap2::Mmap;
 use netlist::format::{WeightCoding, WeightFormat};
@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 struct TensorRef {
@@ -25,6 +26,15 @@ pub struct Weights {
     /// The chip's format, when weights must be rewritten to match it.
     format: Option<WeightFormat>,
     references: Mutex<HashMap<String, Arc<Reference>>>,
+    recoded: Mutex<HashMap<String, Option<Arc<Recoded>>>>,
+    /// Bytes of memory that rewritten tensors may still take.
+    recode_budget: AtomicUsize,
+}
+
+/// Rewritten weights may take half of the machine's memory.
+fn default_recode_budget() -> usize {
+    let system = sysinfo::System::new_with_specifics(sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::nothing().with_ram()));
+    (system.total_memory() / 2) as usize
 }
 
 /// Tensors that real mixed checkpoints keep at 8 bits.
@@ -89,7 +99,7 @@ impl Weights {
             }
             files.push(map);
         }
-        Ok(Self { files, tensors, format: None, references: Mutex::new(HashMap::new()) })
+        Ok(Self { files, tensors, format: None, references: Mutex::new(HashMap::new()), recoded: Mutex::new(HashMap::new()), recode_budget: AtomicUsize::new(default_recode_budget()) })
     }
 
     /// Makes every matrix read back as if stored in `format`.
@@ -278,6 +288,24 @@ impl Matrix<'_> {
         Some((format, reference))
     }
 
+    /// This tensor already rewritten in the chip's format, when it is narrow enough to keep.
+    fn recoded(&self, cols: usize, format: &WeightFormat, reference: &Reference) -> Option<Arc<Recoded>> {
+        if format.bits > 8 {
+            return None;
+        }
+        let mut cache = self.owner.recoded.lock().expect("caché de pesos");
+        if let Some(found) = cache.get(&self.name) {
+            return found.clone();
+        }
+        let groups = if format.group_size > 0 { cols.div_ceil(format.group_size as usize) } else { 1 };
+        let cost = self.rows * cols + self.rows * groups * 8;
+        let budget = &self.owner.recode_budget;
+        let granted = budget.try_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(cost)).is_ok();
+        let built = if granted { recode(format, reference, self.rows, cols, |index, out| self.decode_into(index, out)).map(Arc::new) } else { None };
+        cache.insert(self.name.clone(), built.clone());
+        built
+    }
+
     fn reference(&self, cols: usize, format: &WeightFormat) -> Reference {
         let (min, max) = match &self.source {
             Source::Packed { words_per_row, groups, scales, biases, .. } => {
@@ -320,9 +348,15 @@ impl Matrix<'_> {
             return Err("fila fuera de rango".into());
         }
         let mut y = vec![0f32; out];
-        self.decode_into(index, &mut y);
         if let Some((format, reference)) = self.requant(out) {
-            quantize(&format, &reference, &mut y);
+            if let Some(recoded) = self.recoded(out, &format, &reference) {
+                recoded.decode_into(index, &mut y);
+            } else {
+                self.decode_into(index, &mut y);
+                quantize(&format, &reference, &mut y);
+            }
+        } else {
+            self.decode_into(index, &mut y);
         }
         Ok(y)
     }
@@ -336,6 +370,11 @@ impl Matrix<'_> {
     pub fn apply_rows(&self, first: usize, x: &[f32], y: &mut [f32]) {
         let cols = x.len();
         if let Some((format, reference)) = self.requant(cols) {
+            if let Some(recoded) = self.recoded(cols, &format, &reference) {
+                let sums: Vec<f32> = x.chunks(recoded.group_size).map(|c| c.iter().sum()).collect();
+                y.par_iter_mut().with_min_len(32).enumerate().for_each(|(index, out)| *out = recoded.dot(first + index, x, &sums));
+                return;
+            }
             y.par_iter_mut().with_min_len(8).enumerate().for_each_init(
                 || vec![0f32; cols],
                 |row, (index, out)| {
@@ -443,11 +482,16 @@ impl Matrix<'_> {
         let mut sums = vec![0i64; rows];
         if let Some((format, reference)) = self.requant(cols) {
             let scale = 2f64.powi(fraction - exponent as i32);
+            let recoded = self.recoded(cols, &format, &reference);
             sums.par_iter_mut().with_min_len(8).enumerate().for_each_init(
                 || vec![0f32; cols],
                 |row, (index, out)| {
-                    self.decode_into(first + index, row);
-                    quantize(&format, &reference, row);
+                    if let Some(recoded) = &recoded {
+                        recoded.decode_into(first + index, row);
+                    } else {
+                        self.decode_into(first + index, row);
+                        quantize(&format, &reference, row);
+                    }
                     *out = row.iter().zip(x).map(|(w, v)| ((*w as f64 * scale).round() as i64).clamp(-limit, limit) * *v as i64).sum();
                 },
             );

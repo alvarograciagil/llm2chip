@@ -2,6 +2,8 @@
 //! sees exactly the precision the hardware would have.
 
 use netlist::format::{WeightCoding, WeightFormat, FLOAT_WINDOW};
+use rayon::prelude::*;
+use std::collections::BTreeSet;
 
 /// What a format needs to know about a whole tensor.
 #[derive(Debug)]
@@ -175,6 +177,163 @@ fn quantize_values(format: &WeightFormat, min: f32, max: f32, table: &[f32], val
     }
 }
 
+/// Fractional bits used to compare normalised weights across groups.
+const KEY_FRACTION: i32 = 40;
+
+/// A tensor rewritten once in a narrow format: each weight is `table[code] · scale + bias`.
+pub struct Recoded {
+    pub codes: Vec<u8>,
+    pub table: Box<[f32; 256]>,
+    pub group_size: usize,
+    pub scales: Vec<f32>,
+    pub biases: Vec<f32>,
+}
+
+/// Whether a format's values are shared across groups once each group is normalised.
+fn is_framed(format: &WeightFormat, cols: usize) -> bool {
+    format.group_size > 0 && cols >= format.group_size as usize && matches!(format.coding, WeightCoding::Affine | WeightCoding::Float)
+}
+
+/// The scale and bias that `quantize` used for one group, from its original values.
+fn group_frame(format: &WeightFormat, group: &[f32]) -> (f32, f32) {
+    let (min, max) = group.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    let largest = min.abs().max(max.abs()) as f64;
+    if largest == 0.0 {
+        return (1.0, 0.0);
+    }
+    match format.coding {
+        WeightCoding::Affine if format.bias => {
+            let scale = (max as f64 - min as f64) / ((1u64 << format.bits) - 1) as f64;
+            if scale > 0.0 {
+                (scale as f32, min)
+            } else {
+                (1.0, min)
+            }
+        }
+        WeightCoding::Affine => ((largest / ((1u64 << (format.bits - 1)) - 1) as f64) as f32, 0.0),
+        _ => {
+            let top = binary_exponent(largest).unwrap_or(0);
+            let fraction = (format.bits - 1 - format.exponent_bits) as i32;
+            let gain = if format.fine_scale { power(top) * (1.0 - power(-fraction - 1)) / largest } else { 1.0 };
+            ((power(top) / gain) as f32, 0.0)
+        }
+    }
+}
+
+/// Identifies a value exactly, snapping normalised weights to the grid of their format.
+#[inline]
+fn key_of(format: &WeightFormat, framed: bool, value: f32, scale: f32, bias: f32) -> i64 {
+    if !framed {
+        return value.to_bits() as i64;
+    }
+    let normal = (value - bias) as f64 / scale as f64;
+    if format.coding == WeightCoding::Affine {
+        return normal.round() as i64 * (1i64 << KEY_FRACTION);
+    }
+    let Some(exponent) = binary_exponent(normal) else { return 0 };
+    let at = exponent - 1 - (format.bits - 1 - format.exponent_bits) as i32;
+    ((normal / power(at)).round() * power(at + KEY_FRACTION)) as i64
+}
+
+/// Rewrites a whole tensor, or returns `None` when it needs more than 256 distinct codes.
+pub fn recode(format: &WeightFormat, reference: &Reference, rows: usize, cols: usize, decode: impl Fn(usize, &mut [f32]) + Sync) -> Option<Recoded> {
+    let framed = is_framed(format, cols);
+    let group_size = if framed { format.group_size as usize } else { cols };
+    let groups = cols.div_ceil(group_size);
+    let (scale_len, bias_len) = (rows * groups, rows * groups);
+
+    let visit = |index: usize, original: &mut Vec<f32>, row: &mut Vec<f32>, mut each: Box<dyn FnMut(usize, &[f32], f32, f32) + '_>| {
+        decode(index, original);
+        row.copy_from_slice(original);
+        quantize(format, reference, row);
+        for (g, (source, values)) in original.chunks(group_size).zip(row.chunks(group_size)).enumerate() {
+            let (scale, bias) = if framed { group_frame(format, source) } else { (1.0, 0.0) };
+            each(g, values, scale, bias);
+        }
+    };
+
+    let keys: BTreeSet<i64> = (0..rows)
+        .into_par_iter()
+        .with_min_len(16)
+        .fold(
+            || (BTreeSet::new(), vec![0f32; cols], vec![0f32; cols]),
+            |(mut keys, mut original, mut row), index| {
+                visit(index, &mut original, &mut row, Box::new(|_, values, scale, bias| keys.extend(values.iter().map(|v| key_of(format, framed, *v, scale, bias)))));
+                (keys, original, row)
+            },
+        )
+        .map(|(keys, _, _)| keys)
+        .reduce(BTreeSet::new, |mut a, b| {
+            a.extend(b);
+            a
+        });
+    if keys.len() > 256 {
+        return None;
+    }
+    let keys: Vec<i64> = keys.into_iter().collect();
+
+    let mut table = Box::new([0f32; 256]);
+    for (entry, key) in table.iter_mut().zip(&keys) {
+        *entry = if framed { (*key as f64 / power(KEY_FRACTION)) as f32 } else { f32::from_bits(*key as u32) };
+    }
+
+    let mut codes = vec![0u8; rows * cols];
+    let mut scales = vec![1f32; scale_len];
+    let mut biases = vec![0f32; bias_len];
+    codes.par_chunks_mut(cols).zip(scales.par_chunks_mut(groups)).zip(biases.par_chunks_mut(groups)).enumerate().with_min_len(16).for_each_init(
+        || (vec![0f32; cols], vec![0f32; cols]),
+        |(original, row), (index, ((codes, scales), biases))| {
+            let mut at = 0;
+            visit(
+                index,
+                original,
+                row,
+                Box::new(|g, values, scale, bias| {
+                    scales[g] = scale;
+                    biases[g] = bias;
+                    for value in values {
+                        codes[at] = keys.partition_point(|k| *k < key_of(format, framed, *value, scale, bias)) as u8;
+                        at += 1;
+                    }
+                }),
+            );
+        },
+    );
+    Some(Recoded { codes, table, group_size, scales, biases })
+}
+
+impl Recoded {
+    pub fn groups(&self, cols: usize) -> usize {
+        cols.div_ceil(self.group_size)
+    }
+
+    pub fn decode_into(&self, index: usize, out: &mut [f32]) {
+        let cols = out.len();
+        let groups = self.groups(cols);
+        let codes = &self.codes[index * cols..(index + 1) * cols];
+        for (g, (values, group)) in out.chunks_mut(self.group_size).zip(codes.chunks(self.group_size)).enumerate() {
+            let (scale, bias) = (self.scales[index * groups + g], self.biases[index * groups + g]);
+            for (value, code) in values.iter_mut().zip(group) {
+                *value = self.table[*code as usize] * scale + bias;
+            }
+        }
+    }
+
+    /// `Σ w · x` over one row. `sums` holds `Σ x` per group.
+    #[inline]
+    pub fn dot(&self, index: usize, x: &[f32], sums: &[f32]) -> f32 {
+        let cols = x.len();
+        let groups = sums.len();
+        let codes = &self.codes[index * cols..(index + 1) * cols];
+        let mut total = 0f32;
+        for (g, (group, xs)) in codes.chunks(self.group_size).zip(x.chunks(self.group_size)).enumerate() {
+            let dot: f32 = group.iter().zip(xs).map(|(code, v)| self.table[*code as usize] * v).sum();
+            total += dot * self.scales[index * groups + g] + self.biases[index * groups + g] * sums[g];
+        }
+        total
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +445,39 @@ mod tests {
         let mut values = vec![1.0, -1.0, 0.01, -0.01];
         quantize(&f, &reference, &mut values);
         assert_eq!(values, vec![1.0, -1.0, 0.01, -0.01]);
+    }
+
+    fn wavy_weights(rows: usize, cols: usize) -> Vec<f32> {
+        (0..rows * cols).map(|i| ((i as f32 * 0.37).sin() * (1.0 + (i % 11) as f32)) * 0.01).collect()
+    }
+
+    #[test]
+    fn recoding_keeps_the_values_of_every_narrow_format() {
+        let (rows, cols) = (20, 64);
+        let values = wavy_weights(rows, cols);
+        let formats = [
+            format(WeightCoding::Fixed, 6, 0),
+            format(WeightCoding::Float, 8, 4),
+            format(WeightCoding::Posit, 8, 1),
+            format(WeightCoding::Log, 8, 4),
+            WeightFormat { group_size: 16, ..format(WeightCoding::Affine, 4, 0) },
+            WeightFormat { group_size: 16, bias: false, ..format(WeightCoding::Affine, 5, 0) },
+            WeightFormat { group_size: 16, bias: false, ..format(WeightCoding::Float, 4, 2) },
+            WeightFormat { group_size: 16, bias: false, fine_scale: true, ..format(WeightCoding::Float, 4, 2) },
+        ];
+        for format in formats {
+            let (min, max) = values.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+            let reference = Reference { min, max, table: Vec::new() };
+            let recoded = recode(&format, &reference, rows, cols, |index, out| out.copy_from_slice(&values[index * cols..(index + 1) * cols])).expect("cabe en 256 códigos");
+            let mut decoded = vec![0f32; cols];
+            for index in 0..rows {
+                let mut expected = values[index * cols..(index + 1) * cols].to_vec();
+                quantize(&format, &reference, &mut expected);
+                recoded.decode_into(index, &mut decoded);
+                for (a, b) in expected.iter().zip(&decoded) {
+                    assert!((a - b).abs() <= 1e-5 * a.abs().max(1e-3), "{format:?}: {a} frente a {b}");
+                }
+            }
+        }
     }
 }
