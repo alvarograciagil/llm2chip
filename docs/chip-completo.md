@@ -49,7 +49,7 @@ Cada bloque se configura por separado desde la simulación. Así se elige entre 
 |---|---|---|---|---|
 | Arranque y BIST | Sí | | ISS | CPU en puertas |
 | Carga de pesos | Pesos directos del checkpoint | | Controlador real, imagen, ECC y ciclos | Muestra o modelo diminuto |
-| Tokenizador | | En Rust, fuera del chip | Firmware en ISS | Firmware en puertas |
+| Tokenizador | | En Rust, fuera del chip (hoy) | Firmware en ISS (pendiente) | Firmware en puertas (pendiente) |
 | Núcleo de inferencia | | Coma flotante (CPU o GPU) | Enteros exactos (CPU o GPU) | Modelo diminuto |
 | Muestreo | | En Rust, fuera del chip | Unidad funcional | Puertas |
 | Destokenizador | | En Rust, fuera del chip | Firmware en ISS | Firmware en puertas |
@@ -66,6 +66,12 @@ Cada ciclo que muestra la app indica si se ha simulado o estimado, según lo que
 ## Chip completo en puertas
 
 `chip_design` une la CPU, las memorias, el controlador de carga, el die y la unidad de muestreo. Con un modelo diminuto, el firmware real recibe bytes, carga la imagen, ejecuta los tokens y devuelve bytes. El resultado y los ciclos coinciden con el nivel de instrucción (CPU en ISS y die en la máquina exacta): 525.668 ciclos en los dos.
+
+## Coste del muestreo medido
+
+Con Qwen3.8 en el flujo real, 17 tokens de prompt y 6 generados suman 7,5 millones de ciclos, y 1,5 millones quedan fuera del die. Casi todo ese sobrecoste es leer los 248.000 logits de uno en uno: unos 250.000 ciclos por token generado, frente a los 262.000 que tarda el die en inferirlo. La unidad actual casi duplica el tiempo por token.
+
+La propuesta es filtrar en paralelo: cada carril compara sus logits con el peor candidato de la lista y solo los que lo superan pasan a la lista ordenada. En 248.000 logits eso son unas 500 inserciones, muy pocas para frenar el flujo. Además, los logits pueden leerse mientras salen de `lm_head`, sin una pasada aparte.
 
 ## Por qué no todo en puertas con Qwen
 
