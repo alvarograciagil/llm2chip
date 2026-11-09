@@ -18,7 +18,7 @@ pub mod soc;
 mod verilog;
 mod vhdl;
 
-pub use cell::{cell_design, CellConfig};
+pub use cell::{cell_design, shared_unit_design, CellConfig, MAX_MULTIPLES_BITS};
 pub use die::{die_design, package_design, ControlWord, DieConfig, DieProgram, Microprogram, Parameter};
 pub use sim::{SimError, Simulator};
 pub use verilog::{to_verilog, verilog_testbench, verilog_testbench_with_rom, RomWord, TestStep};

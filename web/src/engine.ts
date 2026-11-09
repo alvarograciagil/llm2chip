@@ -97,6 +97,20 @@ export interface Report {
   metrics: Metric[];
   violations: Violation[];
   floorplan: Floorplan;
+  decisions: CircuitDecision[];
+  macs_per_die: number;
+}
+
+export interface CircuitDecision {
+  weight_bits: number;
+  share: number;
+  multiplier: "array" | "wallace" | "booth" | "multiples";
+  mac_stages: number;
+  adder_stages: number;
+  skip_zeros: boolean;
+  area_um2: number;
+  energy_pj: number;
+  fmax_ghz: number;
 }
 
 export interface Optimization {

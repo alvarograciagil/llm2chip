@@ -7,8 +7,8 @@ mod optim;
 mod params;
 mod tech;
 
-pub use estimate::{estimate, BlockArea, Category, Confidence, Metric, Report, Severity, Violation};
+pub use estimate::{estimate, resolved_params, BlockArea, CircuitDecision, Category, Confidence, Metric, Report, Severity, Violation};
 pub use floorplan::{CellPlan, CellSegment, DiePlan, Floorplan, MemoryStack, PlacedBlock, Rect};
 pub use optim::{catalog, Maturity, OptInfo, QualityRisk};
-pub use params::{ChipParams, KvBackend, LinkKind, LoadInterface, WeightBackend};
+pub use params::{ChipParams, CircuitGoal, KvBackend, LinkKind, LoadInterface, WeightBackend};
 pub use tech::{node, nodes, TechNode};

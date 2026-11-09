@@ -1,10 +1,13 @@
 use crate::floorplan::{build_floorplan, Floorplan};
 use crate::optim::catalog;
-use crate::params::{ChipParams, KvBackend, LinkKind, WeightBackend};
+use crate::params::{ChipParams, CircuitGoal, KvBackend, LinkKind, WeightBackend};
 use crate::tech::{node, TechNode};
 use netlist::format::{switching_per_mac, WeightCoding};
 use netlist::multiplier::MultiplierKind;
-use netlist::{cell_design, CellConfig, Simulator};
+use netlist::{cell_design, shared_unit_design, CellConfig, Design, Simulator, MAX_MULTIPLES_BITS};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use model_ir::{Block, ModelGraph, StageKind, WeightTensor};
 use serde::Serialize;
 
@@ -89,6 +92,11 @@ pub struct Report {
     pub metrics: Vec<Metric>,
     pub violations: Vec<Violation>,
     pub floorplan: Floorplan,
+    /// What the generator chose for these parameters, per weight width.
+    pub decisions: Vec<CircuitDecision>,
+    pub macs_per_die: u64,
+    #[serde(skip)]
+    pub resolved: ChipParams,
 }
 
 impl Report {
@@ -246,28 +254,41 @@ fn stage_totals(model: &ModelGraph, p: &ChipParams) -> StageTotals {
 fn netlist_cell_um2(tech: &TechNode, p: &ChipParams, widest: u32, addr_bits: u32) -> f64 {
     let config = CellConfig { weight_bits: widest, ..p.cell_config(addr_bits) };
     // Yosys and ABC shrink each generated multiplier by a measured factor (tests/golden/synthesis.md).
-    let optimized = match p.multiplier_kind {
+    let optimized = match config.multiplier {
         MultiplierKind::Array => 0.65,
         MultiplierKind::Wallace => 0.78,
         MultiplierKind::Booth => 0.75,
+        MultiplierKind::Multiples => MULTIPLES_SYNTHESIS,
     };
-    let area: f64 = cell_design(config)
-        .flat_counts()
-        .iter()
-        .map(|(gate, count)| {
-            *count as f64
-                * match gate.as_str() {
-                    "and" => tech.and_um2,
-                    "or" => tech.or_um2,
-                    "xor" => tech.xor_um2,
-                    "not" => tech.not_um2,
-                    "mux" => tech.mux_um2,
-                    "dff" => tech.ff_um2,
-                    _ => 0.0,
-                }
-        })
-        .sum();
-    optimized * area
+    let area_of = |design: &Design| -> f64 {
+        design
+            .flat_counts()
+            .iter()
+            .map(|(gate, count)| {
+                *count as f64
+                    * match gate.as_str() {
+                        "and" => tech.and_um2,
+                        "or" => tech.or_um2,
+                        "xor" => tech.xor_um2,
+                        "not" => tech.not_um2,
+                        "mux" => tech.mux_um2,
+                        "dff" => tech.ff_um2,
+                        _ => 0.0,
+                    }
+            })
+            .sum()
+    };
+    // The unit of shared multiples is paid once per die, not once per cell.
+    let shared = shared_unit_design(config).map_or(0.0, |unit| area_of(&unit));
+    optimized * (area_of(&cell_design(config)) - shared)
+}
+
+/// How much of a cell's synthesis shrinks when it uses precomputed multiples.
+const MULTIPLES_SYNTHESIS: f64 = 0.75;
+
+/// Share of stored codes that are zero, measured on real 4 and 8-bit checkpoints.
+fn zero_fraction(weight_bits: u32) -> f64 {
+    if weight_bits <= 4 { 0.106 } else { 0.016 }
 }
 
 struct Multiplier {
@@ -278,7 +299,7 @@ struct Multiplier {
 }
 
 fn weight_multiplier(tech: &TechNode, p: &ChipParams, widest: u32, cell_bits: f64) -> Multiplier {
-    let switching = switching_per_mac(CellConfig { weight_bits: widest, ..p.cell_config(3) });
+    let switching = switching_per_mac(CellConfig { weight_bits: widest, ..p.cell_config(5) }, zero_fraction(widest));
     let addr_bits = (cell_bits / widest as f64).max(2.0).log2().ceil() as u32;
     let cell_logic = netlist_cell_um2(tech, p, widest, addr_bits);
     let accumulator_bits = p.effective_accumulator() as f64;
@@ -287,11 +308,6 @@ fn weight_multiplier(tech: &TechNode, p: &ChipParams, widest: u32, cell_bits: f6
     let mut energy = switching * SWITCHING_TO_FULL_ADDERS * tech.e_fa_pj;
     let mut delay_factor = 1.0;
     let mut cycle_factor = 1.0;
-    if p.has("sin_multiplicadores") {
-        area *= 0.4;
-        energy *= 0.6;
-        delay_factor = 0.5;
-    }
     if p.has("aritmetica_distribuida") {
         area *= 0.15;
         energy *= 0.5;
@@ -301,9 +317,6 @@ fn weight_multiplier(tech: &TechNode, p: &ChipParams, widest: u32, cell_bits: f6
     if p.has("cim_analogico") {
         area *= 0.3;
         energy *= 0.2;
-    }
-    if p.has("salto_ceros") {
-        energy *= 0.9;
     }
     if p.has("pesos_csd") && p.weight_backend == WeightBackend::Rom {
         area *= 0.23;
@@ -346,6 +359,8 @@ struct AreaInputs<'a> {
     kv_bits: f64,
     state_bits: f64,
     rollback_bits: f64,
+    /// Bits sent to every cell for each activation.
+    broadcast_bits: f64,
 }
 
 fn sram_margin(p: &ChipParams) -> f64 {
@@ -419,7 +434,7 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     }
 
     push("activation_noc", "Red de activaciones",
-        n * p.activation_bits as f64 * tech.ff_um2 * p.noc_stages.max(1) as f64 * 4.0 * um2,
+        n * i.broadcast_bits * tech.ff_um2 * p.noc_stages.max(1) as f64 * 4.0 * um2,
         "Reparte cada vector de entrada a todas las celdas y recoge las sumas parciales.");
 
     let lane = (p.vector_bits * p.vector_bits) as f64 * tech.fa_um2
@@ -599,8 +614,186 @@ fn check_optimizations(p: &ChipParams, out: &mut Vec<Violation>) {
     }
 }
 
-/// Estimates area, speed and energy for one design running one user at a time.
+/// One internal decision the generator took for these parameters, and what it measured.
+#[derive(Clone, Debug, Serialize)]
+pub struct CircuitDecision {
+    pub weight_bits: u32,
+    /// Share of the multiplications done with weights of this width.
+    pub share: f64,
+    pub multiplier: MultiplierKind,
+    pub mac_stages: u32,
+    pub adder_stages: u32,
+    pub skip_zeros: bool,
+    pub area_um2: f64,
+    pub energy_pj: f64,
+    pub fmax_ghz: f64,
+}
+
+#[derive(Clone, Copy)]
+struct Candidate {
+    multiplier: MultiplierKind,
+    mac_stages: u32,
+    adder_stages: u32,
+    skip_zeros: bool,
+    area_um2: f64,
+    energy_pj: f64,
+    fmax_ghz: f64,
+}
+
+thread_local! {
+    /// Measured candidates: generating them costs real netlists, so each set is kept.
+    static CANDIDATES: RefCell<HashMap<String, Rc<Vec<Candidate>>>> = RefCell::new(HashMap::new());
+}
+
+fn with_choice(p: &ChipParams, multiplier: MultiplierKind, mac_stages: u32, adder_stages: u32, skip_zeros: bool) -> ChipParams {
+    let mut q = p.clone();
+    q.multiplier_kind = multiplier;
+    q.mac_stages = mac_stages;
+    q.adder_stages = adder_stages;
+    if skip_zeros {
+        q.optimizations.insert("salto_ceros".into());
+    } else {
+        q.optimizations.remove("salto_ceros");
+    }
+    q
+}
+
+/// Wire millimetres of broadcast per cell, in the die's activation tree.
+const BROADCAST_MM: f64 = 0.5;
+
+/// Every way of building this cell that the generator can offer, each one measured.
+fn candidates_for(tech: &TechNode, p: &ChipParams, weight_bits: u32, cell_bits: f64) -> Rc<Vec<Candidate>> {
+    let addr_bits = (cell_bits / weight_bits as f64).max(2.0).log2().ceil() as u32;
+    let key = format!("{}|{weight_bits}|{}|{}|{:?}|{}|{}|{:?}|{:?}|{addr_bits}|{}", p.node, p.activation_bits, p.accumulator_bits, p.weight_coding, p.weight_exponent_bits, p.noc_stages, p.weight_backend, p.optimizations, p.scale_bits);
+    if let Some(found) = CANDIDATES.with(|c| c.borrow().get(&key).cloned()) {
+        return found;
+    }
+    let forced_multiples = p.has("sin_multiplicadores");
+    let forced_skip = p.has("salto_ceros");
+    let mut list = Vec::new();
+    for multiplier in [MultiplierKind::Array, MultiplierKind::Wallace, MultiplierKind::Booth, MultiplierKind::Multiples] {
+        let is_multiples = multiplier == MultiplierKind::Multiples;
+        if forced_multiples != is_multiples && (forced_multiples || p.weight_coding == WeightCoding::Codebook) {
+            continue;
+        }
+        for mac_stages in 1..=if is_multiples { 1 } else { 3 } {
+            for adder_stages in 1..=2 {
+                for skip_zeros in [false, true] {
+                    if (skip_zeros && is_multiples) || (forced_skip && !skip_zeros) {
+                        continue;
+                    }
+                    let q = with_choice(p, multiplier, mac_stages, adder_stages, skip_zeros);
+                    let cell = CellConfig { weight_bits, ..q.cell_config(1) };
+                    if is_multiples && cell.significand_bits() > MAX_MULTIPLES_BITS {
+                        continue;
+                    }
+                    let measured = weight_multiplier(tech, &q, weight_bits, cell_bits);
+                    let Ok(sim) = Simulator::new(&cell_design(cell)) else { continue };
+                    let logic_ns = sim.critical_path(GATE_DELAYS) * tech.fa_delay_ns * measured.delay_factor;
+                    // A wider broadcast costs registers on the way to the cell and energy on its wires.
+                    let bits = cell.broadcast_bits() as f64;
+                    list.push(Candidate {
+                        multiplier,
+                        mac_stages,
+                        adder_stages,
+                        skip_zeros,
+                        area_um2: measured.area_um2 + bits * tech.ff_um2 * p.noc_stages.max(1) as f64 * 4.0,
+                        energy_pj: measured.energy_pj + bits * tech.e_wire_pj_bit_mm * BROADCAST_MM,
+                        fmax_ghz: tech.fmax_ghz.min(1.0 / (logic_ns + tech.ff_overhead_ns)),
+                    });
+                }
+            }
+        }
+    }
+    let list = Rc::new(list);
+    CANDIDATES.with(|c| c.borrow_mut().insert(key, list.clone()));
+    list
+}
+
+/// The best candidate that reaches the clock, or the fastest if none does.
+fn pick(list: &[Candidate], frequency: f64, goal: CircuitGoal) -> Option<Candidate> {
+    let score = |c: &Candidate| match goal {
+        CircuitGoal::Balanced => c.area_um2 * c.energy_pj,
+        CircuitGoal::Area => c.area_um2,
+        CircuitGoal::Energy => c.energy_pj,
+    };
+    let latency = |c: &Candidate| c.mac_stages + c.adder_stages;
+    list.iter()
+        .filter(|c| c.fmax_ghz >= frequency)
+        .min_by(|a, b| score(a).total_cmp(&score(b)).then(latency(a).cmp(&latency(b))))
+        .or_else(|| list.iter().max_by(|a, b| a.fmax_ghz.total_cmp(&b.fmax_ghz)))
+        .copied()
+}
+
+/// Share of the matrix weights that are stored at the wider width.
+fn wide_share(model: &ModelGraph, p: &ChipParams) -> f64 {
+    let matrices = |wide_only: bool| model.params_where(|t| tensor_included(t, p) && !is_small_float(t) && t.block != Block::Embedding && (!wide_only || t.wide)) as f64;
+    matrices(true) / matrices(false).max(1.0)
+}
+
+struct Resolved {
+    params: ChipParams,
+    decisions: Vec<CircuitDecision>,
+    /// The narrower cell's parameters, its width and the share of work it does.
+    narrow: Option<(ChipParams, u32, f64)>,
+}
+
+/// Chooses the circuit for these parameters, separately for each weight width.
+fn resolve_circuit(tech: &TechNode, model: &ModelGraph, p: &ChipParams, widest: u32, cell_bits: f64) -> Resolved {
+    if !p.auto_circuit {
+        return Resolved { params: p.clone(), decisions: Vec::new(), narrow: None };
+    }
+    let target = p.freq_ghz.min(tech.fmax_ghz);
+    let mut decisions = Vec::new();
+    let mut choose = |weight_bits: u32, share: f64| {
+        let choice = pick(&candidates_for(tech, p, weight_bits, cell_bits), target, p.circuit_goal)?;
+        decisions.push(CircuitDecision { weight_bits, share, multiplier: choice.multiplier, mac_stages: choice.mac_stages, adder_stages: choice.adder_stages, skip_zeros: choice.skip_zeros, area_um2: choice.area_um2, energy_pj: choice.energy_pj, fmax_ghz: choice.fmax_ghz });
+        Some(with_choice(p, choice.multiplier, choice.mac_stages, choice.adder_stages, choice.skip_zeros))
+    };
+    let mixed = p.mixes_widths() && widest > p.weight_bits;
+    let wide = if mixed { wide_share(model, p) } else { 1.0 };
+    let Some(params) = choose(widest, wide) else {
+        return Resolved { params: p.clone(), decisions: Vec::new(), narrow: None };
+    };
+    let narrow = if mixed { choose(p.weight_bits, 1.0 - wide).map(|q| (q, p.weight_bits, 1.0 - wide)) } else { None };
+    Resolved { params, decisions, narrow }
+}
+
+/// Estimates area, speed and energy. A speed target decides the multipliers per die.
 pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
+    if p.target_tok_s <= 0.0 {
+        return estimate_design(model, p);
+    }
+    let mut q = p.clone();
+    let mut report = estimate_design(model, &q)?;
+    for _ in 0..8 {
+        let ratio = p.target_tok_s / report.metric("tok_s_base").unwrap_or(p.target_tok_s).max(1e-9);
+        if (ratio - 1.0).abs() < 0.01 {
+            break;
+        }
+        q.macs_per_die = ((q.macs_per_die as f64 * ratio).ceil() as u64).clamp(1, MAX_MACS_PER_DIE);
+        report = estimate_design(model, &q)?;
+    }
+    if report.metric("tok_s_base").unwrap_or(0.0) < p.target_tok_s * 0.97 {
+        report.violations.push(Violation {
+            severity: Severity::Aviso,
+            message: "No se alcanza la velocidad objetivo solo con más multiplicadores.".into(),
+            fix: "Sube los carriles vectoriales, la frecuencia o el ancho de banda de memoria.".into(),
+            field: Some("target_tok_s"),
+        });
+    }
+    Ok(report)
+}
+
+/// The parameters the circuit is really generated from.
+pub fn resolved_params(model: &ModelGraph, p: &ChipParams) -> Result<ChipParams, String> {
+    estimate(model, p).map(|report| report.resolved)
+}
+
+/// The largest number of multipliers a die can be asked to hold.
+const MAX_MACS_PER_DIE: u64 = 64_000_000;
+
+fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
     let tech = node(&p.node).ok_or_else(|| format!("nodo tecnológico desconocido: {}", p.node))?;
     let mut violations = Vec::new();
     check_optimizations(p, &mut violations);
@@ -610,7 +803,19 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
     let store = storage(model, p, budget);
     let totals = stage_totals(model, p);
     let cell_bits_estimate = store.chip_bits / p.macs_per_die.max(1) as f64 / (p.dies.max(10) as f64);
-    let mult = weight_multiplier(tech, p, store.widest_weight_bits, cell_bits_estimate);
+    let resolved = resolve_circuit(tech, model, p, store.widest_weight_bits, cell_bits_estimate);
+    let p = &resolved.params;
+    let mut mult = weight_multiplier(tech, p, store.widest_weight_bits, cell_bits_estimate);
+    let widest_cell = CellConfig { weight_bits: store.widest_weight_bits, ..p.cell_config(1) };
+    let mut broadcast_bits = widest_cell.broadcast_bits() as f64;
+    if let Some((narrow, bits, share)) = &resolved.narrow {
+        // Dies and regions holding only narrow tensors get narrower cells.
+        let small = weight_multiplier(tech, narrow, *bits, cell_bits_estimate);
+        mult.area_um2 = mult.area_um2 * (1.0 - share) + small.area_um2 * share;
+        mult.energy_pj = mult.energy_pj * (1.0 - share) + small.energy_pj * share;
+        let narrow_cell = CellConfig { weight_bits: *bits, ..narrow.cell_config(1) };
+        broadcast_bits = broadcast_bits * (1.0 - share) + narrow_cell.broadcast_bits() as f64 * share;
+    }
     let context = p.context_tokens as f64;
 
     if included > budget {
@@ -657,6 +862,7 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
         kv_bits,
         state_bits,
         rollback_bits,
+        broadcast_bits,
     };
 
     if p.weight_backend == WeightBackend::ExternalDdr && store.chip_bits / 8e9 > p.ddr_capacity_gb {
@@ -787,7 +993,7 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
     let e_delta = 2.0 * state_bits * tech.e_sram_fj_bit / 1e3;
     let e_state = e_kv + e_delta;
     let hop_mm = die_area.sqrt() * 0.02;
-    let e_noc = totals.weights * p.activation_bits as f64 * tech.e_wire_pj_bit_mm * hop_mm;
+    let e_noc = totals.weights * broadcast_bits * tech.e_wire_pj_bit_mm * hop_mm;
     let e_scale = if p.uses_groups() {
         let width = p.effective_accumulator() as f64;
         let bits = if p.scale_is_multiplied() { p.scale_bits as f64 * width } else { width * width.log2().ceil() * 0.5 };
@@ -913,7 +1119,7 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
     m("power_w", "Energía", "Potencia generando", power_w, "W", Supuesta,
         format!("Dinámica {dynamic_w:.0} W y fugas {leakage_w:.0} W."));
 
-    Ok(Report { model: model.name.clone(), dies, die_area_mm2: die_area, total_area_mm2: total_area, blocks, metrics, violations, floorplan })
+    Ok(Report { model: model.name.clone(), dies, die_area_mm2: die_area, total_area_mm2: total_area, blocks, metrics, violations, floorplan, decisions: resolved.decisions.clone(), macs_per_die: p.macs_per_die, resolved: p.clone() })
 }
 
 #[cfg(test)]
@@ -925,6 +1131,53 @@ mod tests {
 
     fn qwen() -> ModelGraph {
         ModelGraph::from_config_json("qwen", QWEN).unwrap()
+    }
+
+    #[test]
+    fn the_generator_adapts_the_circuit_to_each_set_of_parameters() {
+        let model = qwen();
+        let cell = |p: &ChipParams| estimate(&model, p).unwrap().decisions;
+        let slow = cell(&ChipParams { freq_ghz: 0.5, use_model_mix: false, weight_bits: 4, ..Default::default() });
+        let fast = cell(&ChipParams { freq_ghz: 2.5, use_model_mix: false, weight_bits: 16, ..Default::default() });
+        let (a, b) = (slow[0].clone(), fast[0].clone());
+        assert!(a.multiplier != b.multiplier || a.mac_stages != b.mac_stages || a.adder_stages != b.adder_stages, "{a:?} {b:?}");
+        assert!(fast[0].fmax_ghz >= 2.0, "{:?}", fast[0]);
+
+        // Each width of a mixed checkpoint gets its own cell, and never a worse one.
+        let mixed = cell(&ChipParams::default());
+        assert_eq!(mixed.len(), 2);
+        assert!(mixed[0].weight_bits > mixed[1].weight_bits);
+        assert!(mixed[1].area_um2 < mixed[0].area_um2);
+        assert!((mixed[0].share + mixed[1].share - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_automatic_circuit_is_at_least_as_good_as_any_fixed_choice() {
+        let model = qwen();
+        let cost = |p: &ChipParams| {
+            let report = estimate(&model, p).unwrap();
+            let mac = report.blocks.iter().find(|b| b.id == "cell_macs").unwrap().per_die_mm2;
+            (mac, report.metric("freq_ghz").unwrap())
+        };
+        let automatic = ChipParams { circuit_goal: CircuitGoal::Area, use_model_mix: false, weight_bits: 8, ..Default::default() };
+        let (best, frequency) = cost(&automatic);
+        for multiplier_kind in [MultiplierKind::Array, MultiplierKind::Wallace, MultiplierKind::Booth] {
+            for mac_stages in 1..=3 {
+                let (area, reached) = cost(&ChipParams { auto_circuit: false, multiplier_kind, mac_stages, adder_stages: 1, ..automatic.clone() });
+                assert!(best <= area * 1.0001 || reached < frequency, "{multiplier_kind:?} × {mac_stages}: {area} frente a {best}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_speed_target_sizes_the_multipliers_for_the_model() {
+        let model = qwen();
+        let small = estimate(&model, &ChipParams { target_tok_s: 2000.0, ..Default::default() }).unwrap();
+        let fast = estimate(&model, &ChipParams { target_tok_s: 4000.0, ..Default::default() }).unwrap();
+        for (report, target) in [(&small, 2000.0), (&fast, 4000.0)] {
+            assert!((report.metric("tok_s_base").unwrap() / target - 1.0).abs() < 0.02);
+        }
+        assert!(fast.macs_per_die > small.macs_per_die * 3 / 2);
     }
 
     #[test]

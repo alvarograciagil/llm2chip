@@ -17,6 +17,9 @@ export const CATEGORY_LABEL: Record<BlockArea["category"], string> = {
 const HEADLINE = ["tok_s", "dies", "total_area_mm2", "power_w"];
 const ARRAY_IDS = ["cell_weights", "cell_macs", "scale_units", "activation_noc"];
 
+
+const MULTIPLIER_NAME = { array: "Array", wallace: "Wallace", booth: "Booth", multiples: "Múltiplos precalculados" };
+
 function bytesLabel(bytes: number) {
   if (bytes >= 1e9) return `${formatNumber(bytes / 1e9)} GB`;
   if (bytes >= 1e6) return `${formatNumber(bytes / 1e6)} MB`;
@@ -63,6 +66,21 @@ function Summary({ report }: { report: Report }) {
         ))}
       </div>
       {baseline && <p className="note">Comparando con «{baseline.name}».</p>}
+
+      {report.decisions.length > 0 && (
+        <>
+          <h3>Circuito elegido para estos parámetros</h3>
+          <dl className="inset metrics">
+            <div><dt>Multiplicadores por die</dt><dd>{formatNumber(report.macs_per_die)}</dd></div>
+            {report.decisions.map((d) => (
+              <div key={d.weight_bits} title={`${formatNumber(d.area_um2)} µm² y ${formatNumber(d.energy_pj)} pJ por multiplicación, hasta ${formatNumber(d.fmax_ghz)} GHz.`}>
+                <dt>Pesos de {d.weight_bits} bits ({formatNumber(d.share * 100)} %)</dt>
+                <dd>{MULTIPLIER_NAME[d.multiplier]}, {d.mac_stages + d.adder_stages} etapas{d.skip_zeros ? ", salta ceros" : ""}</dd>
+              </div>
+            ))}
+          </dl>
+        </>
+      )}
 
       {report.violations.length > 0 && (
         <div className="issues">

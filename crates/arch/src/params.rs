@@ -4,6 +4,16 @@ use netlist::CellConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CircuitGoal {
+    /// The product of area and energy.
+    #[default]
+    Balanced,
+    Area,
+    Energy,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WeightBackend {
@@ -65,6 +75,11 @@ pub struct ChipParams {
     pub macs_per_die: u64,
     pub freq_ghz: f64,
 
+    /// The generator picks multiplier, stages and zero skipping for these parameters.
+    pub auto_circuit: bool,
+    pub circuit_goal: CircuitGoal,
+    /// When above zero, the multipliers per die follow from this speed and the model.
+    pub target_tok_s: f64,
     pub multiplier_kind: MultiplierKind,
     pub mac_stages: u32,
     pub adder_stages: u32,
@@ -120,6 +135,9 @@ impl Default for ChipParams {
             die_max_mm2: 815.0,
             macs_per_die: 136_000,
             freq_ghz: 1.0,
+            auto_circuit: true,
+            circuit_goal: CircuitGoal::Balanced,
+            target_tok_s: 0.0,
             multiplier_kind: MultiplierKind::Wallace,
             mac_stages: 2,
             adder_stages: 2,
@@ -206,7 +224,8 @@ impl ChipParams {
             addr_bits,
             coding: self.weight_coding,
             exponent_bits: self.weight_coding.legal_exponent_bits(weight_bits, self.weight_exponent_bits),
-            multiplier: self.multiplier_kind,
+            multiplier: if self.has("sin_multiplicadores") { MultiplierKind::Multiples } else { self.multiplier_kind },
+            skip_zeros: self.has("salto_ceros"),
             fixed_weights: self.weight_backend == WeightBackend::Rom,
             ecc: self.weight_backend == WeightBackend::Sram && !self.has("sin_ecc_con_refresco"),
         };

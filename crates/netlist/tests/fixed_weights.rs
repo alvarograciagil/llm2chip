@@ -7,7 +7,7 @@ use netlist::{cell_design, die_design, to_verilog, verilog_testbench_with_rom, C
 use std::process::Command;
 
 fn cell(fixed_weights: bool) -> CellConfig {
-    CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 3, coding: WeightCoding::default(), exponent_bits: 0, multiplier: MultiplierKind::Array, fixed_weights, ecc: false }
+    CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 3, coding: WeightCoding::default(), exponent_bits: 0, multiplier: MultiplierKind::Array, fixed_weights, ecc: false, skip_zeros: false }
 }
 
 fn die(fixed_weights: bool) -> DieConfig {

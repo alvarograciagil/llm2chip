@@ -18,7 +18,7 @@ impl Rng {
 }
 
 fn config(coding: WeightCoding, weight_bits: u32, exponent_bits: u32, mac_stages: u32) -> CellConfig {
-    let mut c = CellConfig { weight_bits, activation_bits: 16, accumulator_bits: 32, mac_stages, adder_stages: 1, addr_bits: 4, coding, exponent_bits, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false };
+    let mut c = CellConfig { weight_bits, activation_bits: 16, accumulator_bits: 32, mac_stages, adder_stages: 1, addr_bits: 4, coding, exponent_bits, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false };
     c.accumulator_bits = c.required_accumulator().max(32);
     c
 }
@@ -341,4 +341,51 @@ fn exported_project_simulates_and_synthesises() {
     assert!(synth.status.success(), "{}", String::from_utf8_lossy(&synth.stderr));
     assert!(dir.join("build/compute_cell_xilinx.json").exists());
     std::fs::remove_dir_all(&dir).ok();
+}
+
+fn run_weights(c: CellConfig, codes: &[u64], activations: &[u64]) -> u64 {
+    let mut sim = Simulator::new(&cell_design(c)).unwrap();
+    sim.set("load_en", 1).unwrap();
+    for (i, code) in codes.iter().enumerate() {
+        sim.set("load_addr", i as u64).unwrap();
+        sim.set("load_data", *code).unwrap();
+        sim.tick();
+    }
+    sim.set("load_en", 0).unwrap();
+    sim.set("clear", 1).unwrap();
+    sim.tick();
+    sim.set("clear", 0).unwrap();
+    sim.set("run", 1).unwrap();
+    for x in activations {
+        sim.set("x", *x).unwrap();
+        sim.tick();
+    }
+    sim.set("run", 0).unwrap();
+    for _ in 0..c.latency() {
+        sim.tick();
+    }
+    sim.get("total").unwrap()
+}
+
+#[test]
+fn precomputed_multiples_and_skipped_zeros_match_a_real_multiplier() {
+    let mut state = 0xC0FF_EE12_3456_789Bu64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for bits in [2u32, 3, 4, 6, 8] {
+        let base = CellConfig { multiplier: MultiplierKind::Array, mac_stages: 1, adder_stages: 1, addr_bits: 4, ..config(WeightCoding::Fixed, bits, 0, 1) };
+        for _ in 0..60 {
+            let codes: Vec<u64> = (0..16).map(|_| if next() % 5 == 0 { 0 } else { next() >> (64 - bits) }).collect();
+            let activations: Vec<u64> = (0..16).map(|_| next() >> 48).collect();
+            let expected = run_weights(base, &codes, &activations);
+            let multiples = CellConfig { multiplier: MultiplierKind::Multiples, ..base };
+            assert_eq!(run_weights(multiples, &codes, &activations), expected, "múltiplos, {bits} bits");
+            let skipping = CellConfig { skip_zeros: true, ..base };
+            assert_eq!(run_weights(skipping, &codes, &activations), expected, "salto de ceros, {bits} bits");
+        }
+    }
 }

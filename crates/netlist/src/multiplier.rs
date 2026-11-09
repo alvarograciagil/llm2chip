@@ -15,6 +15,9 @@ pub enum MultiplierKind {
     Wallace,
     /// Radix-4 Booth recoding halves the rows, then the same tree.
     Booth,
+    /// No multiplier in the cell: a shared unit precomputes the odd multiples of each
+    /// activation and every weight picks one, shifts it and fixes its sign.
+    Multiples,
 }
 
 /// `value` added to the columns, modulo the product's width.

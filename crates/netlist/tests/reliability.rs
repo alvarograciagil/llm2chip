@@ -67,7 +67,7 @@ fn the_gates_match_the_code() {
 }
 
 fn protected_cell() -> CellConfig {
-    CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 5, coding: WeightCoding::default(), exponent_bits: 0, multiplier: MultiplierKind::Array, fixed_weights: false, ecc: true }
+    CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 5, coding: WeightCoding::default(), exponent_bits: 0, multiplier: MultiplierKind::Array, fixed_weights: false, ecc: true, skip_zeros: false }
 }
 
 const ACTIVATIONS: [u64; 8] = [100, 0xFFCE, 25, 8, 3, 0xFFF0, 77, 1];

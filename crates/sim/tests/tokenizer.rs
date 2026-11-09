@@ -69,7 +69,7 @@ fn the_firmware_tokenizes_like_the_reference() {
     let tables = TokenizerTables::from_file(&path).unwrap().to_words();
     eprintln!("tablas: {} palabras", tables.len());
 
-    let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false };
+    let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false };
     let die = DieConfig { cells: 1, cell, scale_bits: 16, reg_bits: 12, index_bits: 18, microcode_bits: 2, broadcast_stages: 1, function_bits: 12, function_select_bits: 3 };
     let code = Microprogram { words: Vec::new(), entries: vec![0, 1], parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0 }] };
     let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: false, stop: [u32::MAX, u32::MAX] };

@@ -25,9 +25,20 @@ pub struct CellConfig {
     pub fixed_weights: bool,
     /// Weights are stored in words with error correction. Ignored for fixed weights.
     pub ecc: bool,
+    /// Holds the multiplier's input still when the weight is zero, to save switching.
+    pub skip_zeros: bool,
 }
 
 impl CellConfig {
+    /// Bits that travel to every cell for each activation.
+    pub fn broadcast_bits(&self) -> u32 {
+        if self.multiplier == MultiplierKind::Multiples {
+            odd_multiples(self.significand_bits()) * (self.significand_bits() + self.activation_bits)
+        } else {
+            self.activation_bits
+        }
+    }
+
     /// Weights held in each protected word: about 64 bits' worth.
     pub fn ecc_lanes(&self) -> u32 {
         1 << (64 / self.weight_bits.max(1)).max(1).ilog2()
@@ -46,20 +57,34 @@ impl CellConfig {
 
     pub(crate) fn checked(self) -> Self {
         let weight_bits = self.weight_bits.clamp(2, 32);
+        let exponent_bits = self.coding.legal_exponent_bits(weight_bits, self.exponent_bits);
+        // Beyond a few bits the shared multiples would need more wires than a multiplier has gates.
+        let significand = Self { weight_bits, exponent_bits, ..self }.significand_bits();
+        let too_wide = self.coding == WeightCoding::Codebook || significand > MAX_MULTIPLES_BITS;
+        let multiplier = if self.multiplier == MultiplierKind::Multiples && too_wide { MultiplierKind::Array } else { self.multiplier };
         Self {
             weight_bits,
             activation_bits: self.activation_bits.clamp(2, 64),
             accumulator_bits: self.accumulator_bits.clamp(2, 128),
-            mac_stages: self.mac_stages.clamp(1, 6),
+            mac_stages: if multiplier == MultiplierKind::Multiples { 1 } else { self.mac_stages.clamp(1, 6) },
             adder_stages: self.adder_stages.clamp(1, 6),
             addr_bits: self.addr_bits.clamp(1, 20),
             coding: self.coding,
             exponent_bits: self.coding.legal_exponent_bits(weight_bits, self.exponent_bits),
-            multiplier: self.multiplier,
+            multiplier,
             fixed_weights: self.fixed_weights,
             ecc: self.ecc,
+            skip_zeros: self.skip_zeros && multiplier != MultiplierKind::Multiples,
         }
     }
+}
+
+/// The widest significand that may use precomputed multiples.
+pub const MAX_MULTIPLES_BITS: u32 = 8;
+
+/// How many odd multiples a signed significand of this width can need.
+pub fn odd_multiples(significand: u32) -> u32 {
+    1 << significand.max(2).saturating_sub(2)
 }
 
 pub(crate) struct Gen {
@@ -354,6 +379,68 @@ impl Gen {
         }
     }
 
+    /// Computes 1×, 3×, 5×… of an activation and registers them, for many cells to share.
+    fn multiples_unit(&mut self, significand: u32, a: u32) -> String {
+        let name = format!("multiples_unit_{significand}_{a}");
+        if self.modules.contains_key(&name) {
+            return name;
+        }
+        let (count, width) = (odd_multiples(significand) as usize, (significand + a) as usize);
+        let mut b = Builder::new(&name, "Múltiplos de la activación", "Calcula una sola vez los múltiplos impares de cada activación para que las celdas solo tengan que elegir.");
+        let x = b.input("x", a);
+        let out = b.output("multiples", (count * width) as u32);
+        {
+            let mut l = crate::rv32::Logic { b: &mut b, next: 0 };
+            let sign = *x.last().expect("activación vacía");
+            let extended: Vec<Bit> = (0..width).map(|i| x.get(i).copied().unwrap_or(sign)).collect();
+            let doubled: Vec<Bit> = std::iter::once(Bit::Zero).chain(extended[..width - 1].iter().copied()).collect();
+            let mut current = extended.clone();
+            for index in 0..count {
+                l.connect_flops(&current, &out[index * width..(index + 1) * width]);
+                current = l.adder(&current, &doubled, Bit::Zero).0;
+            }
+        }
+        self.add(b.finish())
+    }
+
+    /// The product of a signed weight and an activation, from its precomputed multiples.
+    fn pick_multiple(b: &mut Builder, weight: &[Bit], multiples: &[Bit], width: usize, product: &[Bit]) {
+        let mut l = crate::rv32::Logic { b, next: 2000 };
+        let s = weight.len();
+        let sign = weight[s - 1];
+        let flipped: Vec<Bit> = weight.iter().map(|bit| l.xor(*bit, sign)).collect();
+        let magnitude = l.adder(&flipped, &crate::rv32::constant(0, s), sign).0;
+        let nonzero = l.any(&magnitude);
+
+        // Strip trailing zeros: what remains is odd and says which multiple to take.
+        let levels = usize::BITS as usize - (s - 1).leading_zeros() as usize;
+        let mut value = magnitude;
+        let mut shifts = vec![Bit::Zero; levels];
+        for level in (0..levels).rev() {
+            let amount = 1usize << level;
+            let low: Vec<Bit> = value.iter().take(amount).copied().collect();
+            let any_low = l.any(&low);
+            let strip = l.not(any_low);
+            shifts[level] = strip;
+            let moved: Vec<Bit> = (0..s).map(|i| value.get(i + amount).copied().unwrap_or(Bit::Zero)).collect();
+            value = l.mux_bus(strip, &value, &moved);
+        }
+        let leaves: Vec<Vec<Bit>> = multiples.chunks(width).map(|m| m.to_vec()).collect();
+        let index = &value[1..1 + (s.max(2) - 2)];
+        let mut chosen = l.select(index, &leaves);
+        for (level, select) in shifts.iter().enumerate() {
+            let amount = 1usize << level;
+            let moved: Vec<Bit> = (0..width).map(|i| if i >= amount { chosen[i - amount] } else { Bit::Zero }).collect();
+            chosen = l.mux_bus(*select, &chosen, &moved);
+        }
+        let negated: Vec<Bit> = chosen.iter().map(|bit| l.xor(*bit, sign)).collect();
+        let signed = l.adder(&negated, &crate::rv32::constant(0, width), sign).0;
+        for (from, to) in signed.iter().zip(product) {
+            let gated = l.and(*from, nonzero);
+            l.b.or_to(gated, Bit::Zero, *to);
+        }
+    }
+
     pub(crate) fn cell(&mut self, c: CellConfig) -> String {
         let (w, a, acc) = (c.weight_bits, c.activation_bits, c.accumulator_bits);
         let significand = c.significand_bits();
@@ -363,8 +450,10 @@ impl Gen {
         let x_reg = self.register(a);
         let multiplier = match c.multiplier {
             MultiplierKind::Array => self.multiplier(significand, a, mac_stages),
+            MultiplierKind::Multiples => self.multiples_unit(significand, a),
             kind => self.tree_multiplier(kind, significand, a, mac_stages),
         };
+        let uses_multiples = c.multiplier == MultiplierKind::Multiples;
         let acc_reg = self.register(acc);
         let accumulator = self.accumulator(acc, c.multiplier != MultiplierKind::Array);
 
@@ -415,7 +504,14 @@ impl Gen {
 
         b.group("Alineación");
         let x_aligned = b.wire("x_aligned", a);
-        b.inst("x_reg", &x_reg, &[("d", x), ("q", x_aligned.clone())]);
+        let multiples = uses_multiples.then(|| {
+            let bus = b.wire("multiples", odd_multiples(significand) * product_bits);
+            b.inst("multiples_unit", &multiplier, &[("x", x.clone()), ("multiples", bus.clone())]);
+            bus
+        });
+        if !uses_multiples {
+            b.inst("x_reg", &x_reg, &[("d", x), ("q", x_aligned.clone())]);
+        }
         let mut valid = b.wire("valid0", 1)[0];
         b.dff_to(run, valid);
         let x_aligned = if c.coding == WeightCoding::Codebook {
@@ -432,7 +528,19 @@ impl Gen {
 
         b.group("Multiplicador");
         let product = b.wire("product", product_bits);
-        b.inst("multiplier", &multiplier, &[("weight", decoded.significand), ("x", x_aligned), ("product", product.clone())]);
+        match &multiples {
+            Some(bus) => Self::pick_multiple(&mut b, &decoded.significand, bus, product_bits as usize, &product),
+            None => {
+                let operand = if c.skip_zeros {
+                    let mut l = crate::rv32::Logic { b: &mut b, next: 3000 };
+                    let live = l.any(&decoded.significand);
+                    x_aligned.iter().map(|bit| l.and(*bit, live)).collect()
+                } else {
+                    x_aligned
+                };
+                b.inst("multiplier", &multiplier, &[("weight", decoded.significand), ("x", operand), ("product", product.clone())]);
+            }
+        }
         let mut window = window;
         for stage in 1..mac_stages {
             let next = b.wire(&format!("valid_mul{stage}"), 1)[0];
@@ -473,6 +581,16 @@ impl Gen {
 }
 
 /// The complete cell netlist for a configuration.
+/// The part of a cell that the real chip shares among all of them, if any.
+pub fn shared_unit_design(config: CellConfig) -> Option<Design> {
+    let c = config.checked();
+    (c.multiplier == MultiplierKind::Multiples).then(|| {
+        let mut gen = Gen { modules: BTreeMap::new() };
+        let top = gen.multiples_unit(c.significand_bits(), c.activation_bits);
+        Design { top, modules: gen.modules }
+    })
+}
+
 pub fn cell_design(config: CellConfig) -> Design {
     let mut gen = Gen { modules: BTreeMap::new() };
     let top = gen.cell(config.checked());

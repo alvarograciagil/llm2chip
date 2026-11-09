@@ -341,12 +341,12 @@ impl Gen {
 
 /// Average toggles per multiplication, weighted by each gate's relative capacitance,
 /// measured by running the real cell gates on pseudo-random weights and activations.
-pub fn switching_per_mac(config: CellConfig) -> f64 {
+pub fn switching_per_mac(config: CellConfig, zero_fraction: f64) -> f64 {
     // A stored weight toggles the same gates however it got into the memory.
     let config = CellConfig { fixed_weights: false, ecc: false, ..config.checked() };
     let design = crate::cell_design(config);
     let Ok(mut sim) = crate::Simulator::new(&design) else { return 0.0 };
-    const WORDS: u64 = 8;
+    const WORDS: u64 = 32;
     const CYCLES: u32 = 64;
     let mut state = 0x1F2E_3D4C_5B6A_7988u64;
     let mut next = move || {
@@ -375,7 +375,8 @@ pub fn switching_per_mac(config: CellConfig) -> f64 {
     set(&mut sim, "load_en", 1);
     for address in 0..WORDS.min(1 << config.addr_bits) {
         set(&mut sim, "load_addr", address);
-        set(&mut sim, "load_data", next() >> (64 - w));
+        let zero = (next() % 1000) as f64 / 1000.0 < zero_fraction;
+        set(&mut sim, "load_data", if zero { 0 } else { next() >> (64 - w) });
         sim.tick();
     }
     set(&mut sim, "load_en", 0);
@@ -385,5 +386,13 @@ pub fn switching_per_mac(config: CellConfig) -> f64 {
         sim.set("x", next() >> shift).expect("puerto de activación");
     });
     let weights = [1.0, 1.0, 1.6, 0.6, 1.4, 2.2];
-    counts.iter().zip(weights).map(|(count, weight)| *count as f64 * weight).sum::<f64>() / CYCLES as f64
+    let score = |counts: [u64; 6]| counts.iter().zip(weights).map(|(count, weight)| *count as f64 * weight).sum::<f64>() / CYCLES as f64;
+    let total = score(counts);
+    // A unit shared by every cell is not paid for by each multiplication.
+    let shared = crate::shared_unit_design(config).and_then(|unit| crate::Simulator::new(&unit).ok()).map_or(0.0, |mut unit| {
+        score(unit.switching_activity(CYCLES, |sim, _| {
+            sim.set("x", next() >> shift).expect("puerto de activación");
+        }))
+    });
+    (total - shared).max(0.0)
 }

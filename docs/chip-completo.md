@@ -74,6 +74,12 @@ Leer los 248.000 logits de Qwen3.8 de uno en uno costaba casi tanto como inferir
 
 Con Qwen3.8 en el flujo real y 64 carriles, los ciclos fuera del die bajan de 1.502.415 a 37.162 para 17 tokens de prompt y 6 generados, con el mismo texto. El estimador supone además que los logits se filtran mientras salen de `lm_head`, y cuenta 787 ciclos por token. El die reducido solo entrega un logit por ciclo, así que en el chip completo en puertas se usa un carril; varios carriles se verifican en la unidad por separado.
 
+## Circuito a medida
+
+Con «Circuito a medida», cada combinación de parámetros genera su propia celda. El generador construye en puertas cada variante (array, Wallace, Booth y múltiplos precalculados, con sus etapas y con o sin aislamiento de ceros), mide su área, su conmutación y su camino crítico, y se queda con la mejor que alcanza la frecuencia pedida. Los anchos distintos de un modelo mixto reciben celdas distintas. Con «Velocidad objetivo», los multiplicadores por die salen de esa velocidad y del tamaño del modelo.
+
+Los múltiplos precalculados salen perdiendo en los casos medidos: quitan el multiplicador, pero multiplican por 5 los bits que hay que repartir a cada celda. Saltar ceros tampoco compensa con los ceros reales de Qwen, un 10,6 % a 4 bits y un 1,6 % a 8.
+
 ## Pesos grabados
 
 El parámetro «Pesos» decide si el modelo se puede cambiar. Con ROM, los pesos, las escalas y los sesgos de cada celda se fijan al fabricar: la celda pierde los puertos de carga y el selector de direcciones, el die pierde la red que escribe en las celdas, y el arranque ya no los transfiere. El microprograma, las tablas y el firmware siguen siendo cargables, así que el chip se puede corregir sin máscaras nuevas, pero no cambiar de modelo.

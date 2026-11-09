@@ -53,7 +53,8 @@ pub fn presets() -> Result<String, JsError> {
 
 #[wasm_bindgen]
 pub fn default_params() -> Result<String, JsError> {
-    to_js(&ChipParams::default())
+    // A new design states the speed it wants; the multipliers follow from it and the model.
+    to_js(&ChipParams { target_tok_s: 4000.0, ..Default::default() })
 }
 
 #[wasm_bindgen]
@@ -81,7 +82,7 @@ fn cell_config(config: &str, params: &str) -> Result<CellConfig, JsError> {
     let report = estimate(&model, &p).map_err(|e| JsError::new(&e))?;
     let cell_bits = report.metric("cell_sram_kb").unwrap_or(1.0) * 8_000.0;
     let words = (cell_bits / p.cell_weight_bits() as f64).ceil().max(2.0);
-    Ok(p.cell_config((words.log2().ceil() as u32).clamp(1, 20)))
+    Ok(report.resolved.cell_config((words.log2().ceil() as u32).clamp(1, 20)))
 }
 
 #[wasm_bindgen]
@@ -91,7 +92,7 @@ pub fn schedule_design(name: &str, config: &str, params: &str) -> Result<String,
     let report = estimate(&model, &p).map_err(|e| JsError::new(&e))?;
     let factor = if p.has("aritmetica_distribuida") { 4.0 } else { 1.0 };
     let ghz = report.metric("freq_ghz").unwrap_or(1.0);
-    to_js(&compiler::schedule(&model, &p, &report.floorplan, ghz, factor))
+    to_js(&compiler::schedule(&model, &report.resolved, &report.floorplan, ghz, factor))
 }
 
 /// The operations one token goes through, as the chip will execute them.
@@ -319,7 +320,7 @@ impl DieSimulation {
         let config = if kind == "mlp" {
             DieConfig {
                 cells: 3,
-                cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: p.mac_stages, adder_stages: p.adder_stages, addr_bits: 4, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: p.weight_backend == arch::WeightBackend::Rom, ecc: false },
+                cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: p.mac_stages, adder_stages: p.adder_stages, addr_bits: 4, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: p.weight_backend == arch::WeightBackend::Rom, ecc: false, skip_zeros: false },
                 scale_bits: 16,
                 reg_bits: 3,
                 index_bits: 4,
