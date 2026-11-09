@@ -79,6 +79,16 @@ pub struct ModelGraph {
     pub state: StateInfo,
 }
 
+/// The `model_type`s a circuit can be estimated for.
+pub fn designable_family(model_type: &str) -> bool {
+    matches!(model_type, "qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text") || llama::FAMILIES.contains(&model_type)
+}
+
+/// Families estimated from their shape alone: what sets them apart is not modelled.
+pub fn approximate_family(model_type: &str) -> bool {
+    llama::APPROXIMATE.contains(&model_type)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelError(pub String);
 
@@ -98,7 +108,7 @@ impl ModelGraph {
         let model_type = config.get("model_type").and_then(Value::as_str);
         match model_type {
             Some("qwen3_5") | Some("qwen3_5_text") | Some("qwen3_5_moe") | Some("qwen3_5_moe_text") => qwen3_5::build(name, &config),
-            Some("llama") => llama::build_hf(name, &config),
+            Some(family) if llama::FAMILIES.contains(&family) => llama::build_hf(name, family, &config),
             Some(other) => Err(ModelError(format!(
                 "la arquitectura «{other}» todavía no está soportada"
             ))),
@@ -198,6 +208,19 @@ mod tests {
         assert!((total / 35e9 - 1.0).abs() < 0.08, "total {total}");
         let read: u64 = m.stages.iter().filter(|s| s.block != Block::Mtp).map(|s| if let StageKind::Matvec { weights } = s.kind { weights } else { 0 }).sum();
         assert!(read as f64 / total < 0.2, "lee {read} de {total}");
+    }
+
+    #[test]
+    fn other_architectures_take_the_shape_their_config_states() {
+        let mistral = r#"{"model_type":"mistral","hidden_size":4096,"intermediate_size":14336,"vocab_size":32000,"num_hidden_layers":32,"num_attention_heads":32,"num_key_value_heads":8}"#;
+        let m = ModelGraph::from_config_json("m", mistral).unwrap();
+        assert_eq!(m.family, "mistral");
+        assert!((m.total_params() as f64 / 7.3e9 - 1.0).abs() < 0.03, "{}", m.total_params());
+
+        let gemma = r#"{"model_type":"gemma2","hidden_size":2304,"intermediate_size":9216,"vocab_size":256000,"num_hidden_layers":26,"num_attention_heads":8,"head_dim":288}"#;
+        let g = ModelGraph::from_config_json("g", gemma).unwrap();
+        assert!(!g.tensors.iter().any(|t| t.block == Block::Head), "Gemma comparte embedding y salida salvo que el config diga otra cosa");
+        assert!(approximate_family("gemma2") && !approximate_family("mistral"));
     }
 
     #[test]

@@ -72,6 +72,8 @@ pub struct Program {
     pub delta_slots: Vec<usize>,
     pub conv_slots: Vec<(usize, usize)>,
     pub rope_theta: f32,
+    /// The small constant that keeps the RMS norms' square root defined.
+    pub rms_epsilon: f64,
     /// The hidden state after the final norm, the input of a draft step.
     pub final_hidden: Buf,
     pub draft: Option<DraftProgram>,
@@ -140,6 +142,8 @@ impl Program {
 struct Emit {
     program: Program,
     layer: Option<u32>,
+    /// What is added to each stored norm weight before it multiplies.
+    norm_offset: f32,
 }
 
 impl Emit {
@@ -160,7 +164,7 @@ impl Emit {
 
     fn norm(&mut self, name: &'static str, src: Buf, weight: String, block: usize, len: usize) -> Buf {
         let dst = self.buf(len);
-        self.op(name, Op::RmsNorm { src, weight, offset: 1.0, block, dst });
+        self.op(name, Op::RmsNorm { src, weight, offset: self.norm_offset, block, dst });
         dst
     }
 }
@@ -242,6 +246,124 @@ fn emit_layer_tail(e: &mut Emit, s: &Shape, prefix: &str, x: Buf, mixed: Buf) ->
     next
 }
 
+/// The checkpoints `compile_model` can turn into a program, by `model_type`.
+pub const SIMULATED_FAMILIES: [&str; 7] = ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "llama", "mistral", "qwen3"];
+
+/// Compiles any supported checkpoint from its `config.json`.
+pub fn compile_model(config: &str) -> Result<Program, String> {
+    let value: Value = serde_json::from_str(config).map_err(|e| e.to_string())?;
+    match value.get("model_type").and_then(Value::as_str) {
+        Some("qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text") => compile_qwen3_5(config),
+        Some("llama" | "mistral" | "qwen2" | "qwen3") => compile_llama(&value),
+        Some(other) => Err(format!("no hay compilador para la arquitectura «{other}»")),
+        None => Err("el config no indica model_type".into()),
+    }
+}
+
+fn plain_attention(e: &mut Emit, s: &Shape, prefix: &str, normed: Buf, head_norms: bool) -> Buf {
+    let p = |n: &str| format!("{prefix}.self_attn.{n}");
+    let query_len = s.heads * s.head_dim;
+    let kv_len = s.kv_heads * s.head_dim;
+    let mut query = e.matvec("Proyección Q", p("q_proj"), normed, query_len);
+    let mut key = e.matvec("Proyección K", p("k_proj"), normed, kv_len);
+    let value = e.matvec("Proyección V", p("v_proj"), normed, kv_len);
+    if head_norms {
+        query = e.norm("Normalizar Q", query, p("q_norm"), s.head_dim, query_len);
+        key = e.norm("Normalizar K", key, p("k_norm"), s.head_dim, kv_len);
+    }
+    e.op("RoPE en Q", Op::Rope { buf: query, block: s.head_dim, rotary: s.rotary });
+    e.op("RoPE en K", Op::Rope { buf: key, block: s.head_dim, rotary: s.rotary });
+    let slot = e.program.kv_slots.len();
+    e.program.kv_slots.push(KvShape { head_dim: s.head_dim, heads: s.kv_heads });
+    e.op("Guardar en caché KV", Op::KvAppend { slot, key, value });
+    let attn = e.buf(query_len);
+    e.op("Atención", Op::AttnSum { slot, query, head_dim: s.head_dim, heads: s.heads, kv_heads: s.kv_heads, dst: attn });
+    e.matvec("Proyección de salida", p("o_proj"), attn, s.hidden)
+}
+
+/// Compiles the architectures made of plain attention and a gated MLP. They differ
+/// from each other only in what a config states, and what they cannot do is refused
+/// here so that a checkpoint never runs with a different meaning than it was trained.
+fn compile_llama(config: &Value) -> Result<Program, String> {
+    let family = config["model_type"].as_str().unwrap_or("llama");
+    let hidden = dim(config, "hidden_size")?;
+    let heads = dim(config, "num_attention_heads")?;
+    let kv_heads = config.get("num_key_value_heads").and_then(Value::as_u64).map_or(heads, |v| v as usize);
+    if heads == 0 || kv_heads == 0 || heads % kv_heads != 0 {
+        return Err(format!("{heads} cabezas no se reparten en {kv_heads} grupos KV"));
+    }
+    let head_dim = config.get("head_dim").and_then(Value::as_u64).map_or(hidden / heads, |v| v as usize);
+    if head_dim == 0 || (config.get("head_dim").is_none() && hidden % heads != 0) {
+        return Err(format!("{hidden} no se reparte entre {heads} cabezas"));
+    }
+    let on = |key: &str| config.get(key).and_then(Value::as_bool).unwrap_or(false);
+    // Qwen2 has no switch for it: its attention projections always carry a bias.
+    if family == "qwen2" || on("attention_bias") {
+        return Err("usa sesgo en las proyecciones de atención y el compilador todavía no lo genera".into());
+    }
+    if on("mlp_bias") {
+        return Err("usa sesgo en la MLP y el compilador todavía no lo genera".into());
+    }
+    if on("use_sliding_window") || config.get("layer_types").and_then(Value::as_array).is_some_and(|l| l.iter().any(|t| t != "full_attention")) {
+        return Err("usa capas con ventana deslizante y el compilador todavía no las genera".into());
+    }
+    if let Some(act) = config.get("hidden_act").and_then(Value::as_str) {
+        if act != "silu" && act != "swish" {
+            return Err(format!("usa la activación «{act}» y el chip solo tiene SiLU"));
+        }
+    }
+    let rope = config.get("rope_parameters").or_else(|| config.get("rope_scaling"));
+    if let Some(kind) = rope.and_then(|r| r.get("rope_type").or_else(|| r.get("type"))).and_then(Value::as_str) {
+        if kind != "default" {
+            return Err(format!("usa un RoPE escalado («{kind}») y el compilador solo genera el estándar"));
+        }
+    }
+    let rope_theta = config.get("rope_theta").or_else(|| rope.and_then(|r| r.get("rope_theta"))).and_then(Value::as_f64).unwrap_or(10_000.0) as f32;
+    let vocab = dim(config, "vocab_size")?;
+    let layers = dim(config, "num_hidden_layers")?;
+    let shape = Shape { hidden, intermediate: dim(config, "intermediate_size")?, heads, kv_heads, head_dim, rotary: head_dim, moe: None };
+
+    let mut e = Emit { program: empty_program(family, vocab, hidden, layers, rope_theta), layer: None, norm_offset: 0.0 };
+    e.program.rms_epsilon = config.get("rms_norm_eps").and_then(Value::as_f64).unwrap_or(1e-6);
+    let mut x = e.buf(hidden);
+    e.op("Leer embedding", Op::EmbRead { table: "model.embed_tokens".into(), dst: x });
+    for i in 0..layers {
+        e.layer = Some(i as u32);
+        let prefix = format!("model.layers.{i}");
+        let normed = e.norm("Normalizar entrada", x, format!("{prefix}.input_layernorm"), hidden, hidden);
+        let mixed = plain_attention(&mut e, &shape, &prefix, normed, family == "qwen3");
+        x = emit_layer_tail(&mut e, &shape, &prefix, x, mixed);
+    }
+    e.layer = None;
+    e.program.logits_from = e.program.ops.len();
+    let normed = e.norm("Norma final", x, "model.norm".into(), hidden, hidden);
+    e.program.final_hidden = normed;
+    // With tied embeddings there is one table in memory, read both ways.
+    let head = if on("tie_word_embeddings") { "model.embed_tokens" } else { "lm_head" };
+    e.program.logits = e.matvec("Salida de vocabulario", head.into(), normed, vocab);
+    Ok(e.program)
+}
+
+fn empty_program(family: &str, vocab: usize, hidden: usize, num_layers: usize, rope_theta: f32) -> Program {
+    Program {
+        family: family.into(),
+        vocab,
+        hidden,
+        num_layers,
+        buffers: Vec::new(),
+        ops: Vec::new(),
+        logits_from: 0,
+        logits: 0,
+        kv_slots: Vec::new(),
+        delta_slots: Vec::new(),
+        conv_slots: Vec::new(),
+        rope_theta,
+        rms_epsilon: 1e-6,
+        final_hidden: 0,
+        draft: None,
+    }
+}
+
 /// Compiles a `Qwen3_5` text model, dense or with a mixture of experts. The program
 /// follows `modeling_qwen3_5.py`, always taking the per-token path of Gated DeltaNet.
 pub fn compile_qwen3_5(config: &str) -> Result<Program, String> {
@@ -284,25 +406,7 @@ pub fn compile_qwen3_5(config: &str) -> Result<Program, String> {
         moe,
     };
 
-    let mut e = Emit {
-        program: Program {
-            family: "qwen3_5".into(),
-            vocab,
-            hidden,
-            num_layers: layer_types.len(),
-            buffers: Vec::new(),
-            ops: Vec::new(),
-            logits_from: 0,
-            logits: 0,
-            kv_slots: Vec::new(),
-            delta_slots: Vec::new(),
-            conv_slots: Vec::new(),
-            rope_theta,
-            final_hidden: 0,
-            draft: None,
-        },
-        layer: None,
-    };
+    let mut e = Emit { program: empty_program("qwen3_5", vocab, hidden, layer_types.len(), rope_theta), layer: None, norm_offset: 1.0 };
 
     let mut x = e.buf(hidden);
     e.op("Leer embedding", Op::EmbRead { table: "model.embed_tokens".into(), dst: x });
@@ -404,6 +508,31 @@ mod tests {
             })
             .sum();
         assert_eq!(in_program, expected);
+    }
+
+    #[test]
+    fn plain_models_cost_what_the_estimator_counts() {
+        let config = include_str!("../../../models/llama-3.1-8b.json");
+        let mut value: Value = serde_json::from_str(config).unwrap();
+        value.as_object_mut().unwrap().remove("rope_scaling");
+        let text = value.to_string();
+        let program = compile_model(&text).unwrap();
+        let graph = ModelGraph::from_config_json("llama", &text).unwrap();
+        let expected: u64 = graph.stages.iter().map(|s| if let StageKind::Matvec { weights } = s.kind { weights } else { 0 }).sum();
+        let found: u64 = program.ops.iter().map(|i| if let Op::Matvec { src, dst, .. } = &i.op { (program.buffers[*src] * program.buffers[*dst]) as u64 } else { 0 }).sum();
+        assert_eq!(found, expected);
+        assert_eq!(program.kv_slots.len(), graph.num_layers as usize);
+    }
+
+    #[test]
+    fn what_a_checkpoint_needs_and_the_chip_lacks_is_refused() {
+        let base = r#""model_type":"llama","hidden_size":16,"num_attention_heads":2,"intermediate_size":32,"vocab_size":8,"num_hidden_layers":1"#;
+        assert!(compile_model(&format!("{{{base}}}")).is_ok());
+        for (extra, word) in [(r#""mlp_bias":true"#, "MLP"), (r#""hidden_act":"gelu""#, "gelu"), (r#""rope_scaling":{"rope_type":"llama3","factor":8.0}"#, "llama3")] {
+            let error = compile_model(&format!("{{{base},{extra}}}")).unwrap_err();
+            assert!(error.contains(word), "{error}");
+        }
+        assert!(compile_model(r#"{"model_type":"bert"}"#).unwrap_err().contains("bert"));
     }
 
     #[test]

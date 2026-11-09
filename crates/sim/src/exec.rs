@@ -152,7 +152,7 @@ impl Engine {
             for name in names {
                 let mut values = weights.floats(&name)?;
                 // MLX converters store these centred on 1; the program expects 0.
-                if matches!(inst.op, Op::RmsNorm { .. }) && values.iter().sum::<f32>() / values.len() as f32 > 0.5 {
+                if matches!(inst.op, Op::RmsNorm { offset, .. } if offset != 0.0) && values.iter().sum::<f32>() / values.len() as f32 > 0.5 {
                     values.iter_mut().for_each(|v| *v -= 1.0);
                 }
                 floats.insert(name.clone(), values);
@@ -365,10 +365,11 @@ impl Engine {
             Op::RmsNorm { src, weight, offset, block, dst } => {
                 let w = self.floats[&format!("{weight}.weight")].clone();
                 let f = self.functions;
+                let epsilon = self.program.rms_epsilon as f32;
                 let (x, y) = pair(&mut self.buffers, *src, *dst);
                 for (xs, ys) in x.chunks_exact(*block).zip(y.chunks_exact_mut(*block)) {
                     let mean = xs.iter().map(|v| v * v).sum::<f32>() / *block as f32;
-                    let inv = f.inv_sqrt(mean + EPS);
+                    let inv = f.inv_sqrt(mean + epsilon);
                     for i in 0..*block {
                         ys[i] = xs[i] * inv * (offset + w[i]);
                     }

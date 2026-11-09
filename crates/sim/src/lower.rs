@@ -15,7 +15,6 @@ const STATE_EXPONENT: i64 = 6;
 /// Expert outputs are small; a coarser exponent would leave them only a few bits.
 const EXPERT_EXPONENT: i64 = 2;
 /// Added to every squared norm, as the reference model does.
-const EPSILON: f64 = 1e-6;
 const ONES_LENGTH: usize = 512;
 const TEMPORARIES: usize = 64;
 const PARTS: usize = 128;
@@ -193,7 +192,7 @@ impl Layout {
         let minus_one = alloc(1);
         setup.load_vector(minus_one, &[-1.0]);
         let epsilon = alloc(1);
-        setup.load_vector(epsilon, &[EPSILON]);
+        setup.load_vector(epsilon, &[program.rms_epsilon]);
         let rope = alloc(1);
         let rope_half = all_ops(program).find_map(|i| if let Op::Rope { rotary, .. } = i.op { Some(rotary / 2) } else { None }).unwrap_or(0);
         let rope_table = alloc(1);

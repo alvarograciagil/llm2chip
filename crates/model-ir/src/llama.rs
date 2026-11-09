@@ -6,8 +6,14 @@ use crate::{
 };
 use serde_json::Value;
 
+/// Architectures with this adapter's layer shape, whatever they are called.
+pub(crate) const FAMILIES: [&str; 9] = ["llama", "mistral", "qwen2", "qwen3", "granite", "phi3", "gemma", "gemma2", "gemma3_text"];
+/// Those with a different activation or extra norms, which the shape does not capture.
+pub(crate) const APPROXIMATE: [&str; 5] = ["granite", "phi3", "gemma", "gemma2", "gemma3_text"];
+
 struct Dims {
     hidden: u64,
+    head_dim: u64,
     intermediate: u64,
     vocab: u64,
     layers: u64,
@@ -17,10 +23,12 @@ struct Dims {
     max_context: u64,
 }
 
-pub(crate) fn build_hf(name: &str, config: &Value) -> Result<ModelGraph, ModelError> {
+pub(crate) fn build_hf(name: &str, family: &str, config: &Value) -> Result<ModelGraph, ModelError> {
     let heads = require_u64(config, "num_attention_heads")?;
+    let hidden = require_u64(config, "hidden_size")?;
     let dims = Dims {
-        hidden: require_u64(config, "hidden_size")?,
+        hidden,
+        head_dim: config.get("head_dim").and_then(Value::as_u64).unwrap_or(hidden / heads.max(1)),
         intermediate: require_u64(config, "intermediate_size")?,
         vocab: require_u64(config, "vocab_size")?,
         layers: require_u64(config, "num_hidden_layers")?,
@@ -29,10 +37,10 @@ pub(crate) fn build_hf(name: &str, config: &Value) -> Result<ModelGraph, ModelEr
         tied_embeddings: config
             .get("tie_word_embeddings")
             .and_then(Value::as_bool)
-            .unwrap_or(false),
+            .unwrap_or(family.starts_with("gemma")),
         max_context: config.get("max_position_embeddings").and_then(Value::as_u64).unwrap_or(0),
     };
-    Ok(build(name, "llama", dims))
+    Ok(build(name, family, dims))
 }
 
 pub(crate) fn build_llama2c(name: &str, config: &Value) -> Result<ModelGraph, ModelError> {
@@ -42,6 +50,7 @@ pub(crate) fn build_llama2c(name: &str, config: &Value) -> Result<ModelGraph, Mo
     let rounded = 2 * (4 * hidden) / 3;
     let dims = Dims {
         hidden,
+        head_dim: hidden / heads.max(1),
         intermediate: multiple_of * rounded.div_ceil(multiple_of),
         vocab: require_u64(config, "vocab_size")?,
         layers: require_u64(config, "n_layers")?,
@@ -54,8 +63,8 @@ pub(crate) fn build_llama2c(name: &str, config: &Value) -> Result<ModelGraph, Mo
 }
 
 fn build(name: &str, family: &str, d: Dims) -> ModelGraph {
-    let head_dim = d.hidden / d.heads;
-    let kv = d.kv_heads * head_dim;
+    let query = d.heads * d.head_dim;
+    let kv = d.kv_heads * d.head_dim;
     let mut tensors = vec![tensor("tok_embeddings".into(), d.vocab, d.hidden, Block::Embedding, None, true)];
     let mut stages = vec![Stage {
         name: "embedding".into(),
@@ -70,10 +79,10 @@ fn build(name: &str, family: &str, d: Dims) -> ModelGraph {
         let p = |s: &str| format!("layers.{layer}.{s}");
         let a = Block::FullAttention;
         let m = Block::Mlp;
-        tensors.push(tensor(p("wq"), d.hidden, d.hidden, a, l, false));
+        tensors.push(tensor(p("wq"), d.hidden, query, a, l, false));
         tensors.push(tensor(p("wk"), d.hidden, kv, a, l, false));
         tensors.push(tensor(p("wv"), d.hidden, kv, a, l, false));
-        tensors.push(tensor(p("wo"), d.hidden, d.hidden, a, l, false));
+        tensors.push(tensor(p("wo"), query, d.hidden, a, l, false));
         tensors.push(tensor(p("w1"), d.hidden, d.intermediate, m, l, false));
         tensors.push(tensor(p("w2"), d.intermediate, d.hidden, m, l, false));
         tensors.push(tensor(p("w3"), d.hidden, d.intermediate, m, l, false));
@@ -81,10 +90,10 @@ fn build(name: &str, family: &str, d: Dims) -> ModelGraph {
         tensors.push(tensor(p("ffn_norm"), 1, d.hidden, Block::Norm, l, false));
 
         stages.push(vector("norm de entrada", l, Block::Norm, 3 * d.hidden, 0));
-        stages.push(matvec("q/k/v", l, a, d.hidden * (d.hidden + 2 * kv)));
-        stages.push(vector("RoPE", l, a, 4 * (d.hidden + kv), 0));
+        stages.push(matvec("q/k/v", l, a, d.hidden * (query + 2 * kv)));
+        stages.push(vector("RoPE", l, a, 4 * (query + kv), 0));
         stages.push(vector("atención (Q·K, softmax, suma V)", l, a, 3 * d.hidden, 2 * d.hidden));
-        stages.push(matvec("salida", l, a, d.hidden * d.hidden));
+        stages.push(matvec("salida", l, a, query * d.hidden));
         stages.push(vector("residual y norm", l, Block::Norm, 4 * d.hidden, 0));
         stages.push(matvec("gate/up", l, m, 2 * d.hidden * d.intermediate));
         stages.push(vector("SiLU(gate)·up", l, m, 2 * d.intermediate, 0));
