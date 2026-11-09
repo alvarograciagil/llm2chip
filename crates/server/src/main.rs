@@ -516,7 +516,7 @@ fn sample(logits: &[f32], temperature: f32, top_k: usize, seed: &mut u64) -> u32
 
 const SAMPLER_ENTRIES: u32 = 64;
 const FLOW_BITS: u32 = 16;
-/// Past this the die spends more on banks than the element-wise work can use.
+/// Measured on Qwen3.8: with wider blocks, more loops are too short to fill one.
 const MAX_IMAGE_LANE_BITS: u32 = 5;
 
 fn one_lane() -> u32 {

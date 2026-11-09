@@ -174,8 +174,13 @@ fn fitted_die(program: &Program, weights: &Weights, request: &ImageRequest) -> R
     let longest_buffer = program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1);
     let rope_rows = tokens * (3 * 128 + 1);
     let index_bits = bits_for(longest_store.max(longest_buffer).max(rope_rows)).min(26);
-    let registers = Layout::for_image(program, weights, DieConfig { index_bits, ..trial }, 1)?.registers_used();
-    Ok(DieConfig { reg_bits: bits_for(registers as u64 + 2), index_bits, ..trial })
+    let roomy = DieConfig { index_bits: 26, cell: CellConfig { addr_bits: 26, ..cell }, ..trial };
+    let layout = Layout::for_image(program, weights, roomy, 1)?;
+    let (depth, groups) = layout.cell_depths();
+    let (code_bits, group) = layout.cell_shape(weights)?;
+    let a = request.activation_bits;
+    let cell = CellConfig { weight_bits: code_bits, accumulator_bits: (code_bits + a + bits_for(group as u64)).max(2 * a + 4), addr_bits: bits_for(depth.max(2 * groups)), ..cell };
+    Ok(DieConfig { reg_bits: bits_for(layout.registers_used() as u64 + 2), index_bits: index_bits.max(cell.addr_bits), cell, scale_bits: a + 5, ..trial })
 }
 
 /// One boot plan per chip count, all on the same hardware.

@@ -22,6 +22,7 @@ pub struct PackedTensor<'a> {
 pub struct ExactScale {
     /// `2^shift` turns a scale or bias into an integer with four extra fractional bits.
     pub shift: i32,
+    /// Zero asks for the sum the cells make, with no limit per weight.
     pub limit: i64,
 }
 

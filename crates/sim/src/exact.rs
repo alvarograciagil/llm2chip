@@ -42,10 +42,17 @@ impl ExactEngine {
         let config = exact_config(bits);
         let weights = Arc::new(weights);
         let layout = Layout::new(&program, &weights, config, None)?;
-        let vm = BlockVm::new(&config, layout.registers_used() as usize + 8, Some(weights));
+        let mut vm = BlockVm::new(&config, layout.registers_used() as usize + 8, Some(weights));
+        vm.compute_in_cells();
         let mut engine = Self { program, layout, vm, position: 0, draft_tokens: 0, exponents: exponent_register(&config), logits: Vec::new() };
         engine.reset();
         Ok(engine)
+    }
+
+    /// Adds up matrix products weight by weight, as a die that holds them in registers.
+    pub fn with_weights_in_registers(mut self) -> Self {
+        self.vm.compute_in_registers();
+        self
     }
 
     pub fn reset(&mut self) {

@@ -149,6 +149,22 @@ impl Expr {
         Self { constant: 0, terms }
     }
 
+    /// True when `by` divides every value this index can take.
+    pub fn is_multiple_of(&self, by: u32) -> bool {
+        self.constant.is_multiple_of(by) && self.terms.iter().flatten().all(|(_, coefficient)| coefficient.is_multiple_of(by))
+    }
+
+    /// This index divided by `by`, which must divide every part of it.
+    pub fn divided_by(&self, by: u32) -> Self {
+        assert!(self.constant.is_multiple_of(by), "{} no es múltiplo de {by}", self.constant);
+        let mut terms = self.terms;
+        for (_, coefficient) in terms.iter_mut().flatten() {
+            assert!(coefficient.is_multiple_of(by), "{coefficient} no es múltiplo de {by}");
+            *coefficient /= by;
+        }
+        Self { constant: self.constant / by, terms }
+    }
+
     pub fn constant(&self) -> u32 {
         self.constant
     }
@@ -531,6 +547,26 @@ impl From<Alu<u32>> for Alu<Expr> {
 pub enum Step {
     One(Alu<Expr>),
     Repeat { variable: Var, count: Expr, body: Vec<Step> },
+    /// Moves every cell to where a matrix starts.
+    CellSeek { weights: Expr, factors: Expr },
+    /// Clears the row totals and restarts the input vector.
+    CellPass,
+    /// One group of columns through the cells.
+    CellGroup { src: u32, length: u32 },
+    /// The totals of the first `rows` cells go to the wide memory.
+    CellDrain { rows: u32 },
+}
+
+/// Fractional bits of the scale and bias the cells multiply by.
+pub const FACTOR_FRACTION: u32 = 4;
+
+/// Where the cells keep a matrix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellMatrix {
+    pub weights: u32,
+    pub factors: u32,
+    pub group: u32,
+    pub groups: u32,
 }
 
 impl From<Alu<u32>> for Step {
@@ -553,11 +589,14 @@ pub struct Assembly {
     scratch: u32,
     loops: u32,
     lane_bits: u32,
+    cells: u32,
+    /// Matrices the cells hold. Any other is computed from the vector registers.
+    pub in_cells: HashMap<String, CellMatrix>,
 }
 
 impl Assembly {
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -589,12 +628,18 @@ impl Assembly {
         }
     }
 
+    fn cell_round(&mut self, src: u32, place: CellMatrix, rows: u32) {
+        self.steps.push(Step::CellPass);
+        self.each(place.groups.into(), |s, _| s.steps.push(Step::CellGroup { src, length: place.group }));
+        self.steps.push(Step::CellDrain { rows });
+    }
+
     /// Runs `emit` for each element, whole blocks at a time where the die has lanes.
     /// A block needs a known length and operands that start on a block boundary, and
     /// none of its elements may change an operand another lane is taking whole.
     fn elements(&mut self, len: Expr, starts: &[Expr], independent: bool, mut emit: impl FnMut(&mut Self, Expr, bool)) {
         let lanes = 1u32 << self.lane_bits;
-        let aligned = starts.iter().all(|s| s.is_constant() && s.constant().is_multiple_of(lanes));
+        let aligned = starts.iter().all(|s| s.is_multiple_of(lanes));
         if lanes == 1 || !independent || !aligned || !len.is_constant() || len.constant() < lanes {
             return self.each(len, |s, i| emit(s, i, false));
         }
@@ -742,6 +787,8 @@ fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32)
                 }
             }
             Step::Repeat { body, .. } => mark_window(body, step, windowed, exponents),
+            Step::CellGroup { src, .. } => assert!(!windowed.contains(src), "las celdas leen de registros fijos"),
+            Step::CellSeek { .. } | Step::CellPass | Step::CellDrain { .. } => {}
         }
     }
 }
@@ -764,11 +811,7 @@ impl BlockOps for Assembly {
             return body(self, step.constant());
         }
         let outer = std::mem::take(&mut self.steps);
-        // A window moves the register, not the index, but stays one element at a time
-        // so that every block is still written to a boundary its register keeps.
-        let lane_bits = std::mem::replace(&mut self.lane_bits, 0);
         body(self, 0);
-        self.lane_bits = lane_bits;
         let mut inner = std::mem::replace(&mut self.steps, outer);
         mark_window(&mut inner, step, windowed, self.exponents);
         self.steps.extend(inner);
@@ -878,12 +921,13 @@ impl BlockOps for Assembly {
     fn outer_product(&mut self, a: u32, b: u32, dst: u32, rows: u32, cols: u32) {
         let shift = self.bits - 1;
         self.each(rows.into(), |s, i| {
-            s.each(cols.into(), |s, j| {
+            s.elements(cols.into(), &[i * cols], a != dst && b != dst, |s, j, vector| {
                 let mut product = alu(OP_MUL);
                 product.a = (a, i);
                 product.b = (b, j);
                 product.dst = (dst, i * cols + j);
                 product.shift = shift;
+                (product.vector, product.broadcast_a) = (vector, vector);
                 s.push(product);
             });
         });
@@ -1087,8 +1131,19 @@ impl BlockOps for Assembly {
         self.binary(OP_SUB, self.exponent(reg), self.sc(1), self.exponent(reg));
     }
 
-    fn matvec(&mut self, _name: &str, matrix: u32, first: Expr, src: u32, dst: u32, rows: u32, cols: u32) {
-        self.dots(matrix, src, dst, rows.into(), cols.into(), |r, j| ((matrix, (r + first) * cols + j), (src, j)));
+    fn matvec(&mut self, name: &str, matrix: u32, first: Expr, src: u32, dst: u32, rows: u32, cols: u32) {
+        let Some(place) = self.in_cells.get(name).copied() else {
+            return self.dots(matrix, src, dst, rows.into(), cols.into(), |r, j| ((matrix, (r + first) * cols + j), (src, j)));
+        };
+        // A matrix used a block at a time keeps each block's rows from cell 0 on.
+        let passes = rows.div_ceil(self.cells);
+        let block = first.divided_by(rows);
+        self.steps.push(Step::CellSeek { weights: Expr::from(place.weights) + block * (passes * cols), factors: Expr::from(place.factors) + block * (passes * place.groups) });
+        self.each((rows / self.cells).into(), |s, _| s.cell_round(src, place, s.cells));
+        if !rows.is_multiple_of(self.cells) {
+            self.cell_round(src, place, rows % self.cells);
+        }
+        self.narrow_sums(matrix, src, dst, rows.into());
     }
 
     fn copy_row(&mut self, _name: &str, matrix: u32, row: Expr, cols: u32, dst: u32) {
@@ -1190,6 +1245,7 @@ impl Behavior {
                         self.walk(body, token, position, loops);
                     }
                 }
+                Step::CellSeek { .. } | Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } => panic!("este modelo no guarda los pesos de las celdas"),
             }
         }
     }

@@ -2,7 +2,7 @@
 //! network, a vector lane, a function table, a vector register file and a
 //! microcoded sequencer. It executes programs built by `DieProgram`.
 
-use crate::block::{Alu, Expr, Step, Var};
+use crate::block::{Alu, Expr, Step, Var, FACTOR_FRACTION};
 use crate::cell::{CellConfig, Gen};
 use crate::rv32::Logic;
 use crate::{Bit, Builder, Design};
@@ -165,10 +165,15 @@ pub struct ControlWord {
     /// Every lane takes the same single element for this operand.
     pub broadcast_a: bool,
     pub broadcast_b: bool,
+    /// Moves every cell to the weight, or the group, at index A.
+    pub cell_seek_weights: bool,
+    pub cell_seek_factors: bool,
+    /// The wide memory takes the next total of the result chain.
+    pub wide_from_chain: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 50;
+pub const FIELD_COUNT: usize = 53;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 
@@ -248,6 +253,9 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("vector", 1),
         ("broadcast_a", 1),
         ("broadcast_b", 1),
+        ("cell_seek_weights", 1),
+        ("cell_seek_factors", 1),
+        ("wide_from_chain", 1),
     ]
 }
 
@@ -309,6 +317,9 @@ impl ControlWord {
             self.vector as u128,
             self.broadcast_a as u128,
             self.broadcast_b as u128,
+            self.cell_seek_weights as u128,
+            self.cell_seek_factors as u128,
+            self.wide_from_chain as u128,
         ]
     }
 
@@ -372,7 +383,7 @@ impl Gen {
         // The reduced die writes its weights one at a time, so it has no protected words.
         let cfg = CellConfig { ecc: false, ..c.cell };
         let (a, acc, s, wide) = (cfg.activation_bits, cfg.accumulator_bits, c.scale_bits, c.wide_bits());
-        let compute = self.cell(cfg);
+        let compute = self.cell(cfg, true);
         let scale_mul = self.multiplier(s, acc, 1);
         let adder = self.ripple_adder(acc);
         let reg_acc = self.register(acc);
@@ -384,6 +395,9 @@ impl Gen {
         let clear = b.input("clear", 1)[0];
         let clear_group = b.input("clear_group", 1)[0];
         let flush = b.input("flush", 1)[0];
+        let seek_weights = b.input("seek_weights", 1);
+        let seek_factors = b.input("seek_factors", 1)[0];
+        let seek_addr = b.input("seek_addr", cfg.addr_bits);
         let load = (!cfg.fixed_weights).then(|| (b.input("load_en", 1)[0], b.input("load_scale", 1)[0], b.input("load_addr", cfg.addr_bits), b.input("load_data", s.max(cfg.weight_bits))));
         let run = b.input("run", 1)[0];
         let x = b.input("x", a);
@@ -392,7 +406,7 @@ impl Gen {
         b.group("Celda de cálculo");
         let group_sum = b.wire("group_sum", acc);
         let clear_total = bus_or(&mut b, flush, clear_group, "clear_group_sum");
-        let mut compute_pins = vec![("clear", vec![clear]), ("clear_total", vec![clear_total]), ("run", vec![run]), ("x", x.clone()), ("total", group_sum.clone())];
+        let mut compute_pins = vec![("clear", vec![clear]), ("clear_total", vec![clear_total]), ("run", vec![run]), ("x", x.clone()), ("total", group_sum.clone()), ("seek", seek_weights), ("seek_addr", seek_addr.clone())];
         if let Some((load_en, load_scale, load_addr, load_data)) = &load {
             let load_weight = and_not(&mut b, *load_en, *load_scale, "load_weight");
             compute_pins.extend([("load_en", vec![load_weight]), ("load_addr", load_addr.clone()), ("load_data", load_data[..cfg.weight_bits as usize].to_vec())]);
@@ -426,7 +440,7 @@ impl Gen {
             b.and_to(load_en, load_scale, write_scale);
             FactorLoad { write_scale, load_data, load_addr }
         });
-        self.finish_scaled_cell(b, c, &scale_mul, &wide_adder, &reg_wide, &mux_wide, SumParts { group_sum, x_sum, load: factor_load, clear, flush, total, clear_group })
+        self.finish_scaled_cell(b, c, &scale_mul, &wide_adder, &reg_wide, &mux_wide, SumParts { group_sum, x_sum, load: factor_load, clear, flush, total, clear_group, seek_factors, seek_addr })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -437,8 +451,8 @@ impl Gen {
         // Scale and bias alternate in memory; a flush takes the scale first.
         b.group("Escala y sesgo");
         let group = b.wire("group_index", cfg.addr_bits);
-        let module_counter = format!("address_counter_{}", cfg.addr_bits);
-        b.inst("group_index_counter", &module_counter, &[("clear", vec![p.clear]), ("advance", vec![p.flush]), ("address", group.clone())]);
+        let module_counter = self.seek_counter(cfg.addr_bits);
+        b.inst("group_index_counter", &module_counter, &[("clear", vec![p.clear]), ("advance", vec![p.flush]), ("seek", vec![p.seek_factors]), ("target", p.seek_addr.clone()), ("address", group.clone())]);
         let read_addr = b.wire("factors_raddr", cfg.addr_bits);
         for i in 0..cfg.addr_bits as usize {
             b.xor_to(group[i], Bit::Zero, read_addr[i]);
@@ -616,6 +630,10 @@ impl Gen {
         let read_step = ctl("read_step", &mut b, &fields);
         let read_reset = ctl("read_reset", &mut b, &fields);
         let write_en = ctl("write_en", &mut b, &fields);
+        let wide_write = ctl("wide_write", &mut b, &fields);
+        let wide_from_chain = ctl("wide_from_chain", &mut b, &fields);
+        let cell_seek_weights = ctl("cell_seek_weights", &mut b, &fields);
+        let cell_seek_factors = ctl("cell_seek_factors", &mut b, &fields);
         let write_reset = ctl("write_reset", &mut b, &fields);
         let cell_run = ctl("cell_run", &mut b, &fields);
         let cell_clear = ctl("cell_clear", &mut b, &fields);
@@ -674,7 +692,9 @@ impl Gen {
         // --- Vector registers ---
         b.group("Banco de vectores");
         let read_index = counter(self, &mut b, "read_index", c.index_bits, read_reset, read_step);
-        let write_step = write_en;
+        let chain_write = b.wire("chain_write", 1)[0];
+        b.and_to(wide_write, wide_from_chain, chain_write);
+        let write_step = bus_or(&mut b, write_en, chain_write, "write_step");
         let write_index = counter(self, &mut b, "write_index", c.index_bits, write_reset, write_step);
         let join = |reg: &[Bit], index: &[Bit]| -> Vec<Bit> { index.iter().chain(reg).copied().collect() };
         let use_literal = fields["use_literal"][0];
@@ -880,12 +900,18 @@ impl Gen {
 
         // Each output's full-precision sum waits here until the largest one is known.
         b.group("Memoria ancha");
-        let wide_write = ctl("wide_write", &mut b, &fields);
         let wide_scan = ctl("wide_scan", &mut b, &fields);
         let wide_clear = ctl("wide_clear", &mut b, &fields);
         let load_wide_shift = ctl("load_wide_shift", &mut b, &fields);
         let wide_read = b.wire("wide_read", accumulator_bits);
-        b.ram2p("wide_memory", c.index_bits, accumulator_bits, &[("raddr", index_a.clone()), ("waddr", index_w.clone()), ("we", vec![wide_write]), ("wdata", accumulator.clone()), ("rdata", wide_read.clone())]);
+        // Sums from the cells arrive shifted, and sign-extended if the chain is narrower.
+        let chain_out = b.wire("chain_out", wide);
+        let chain_shifted = barrel_right(&mut b, &mux_wide, "chain_shift", &chain_out, &fields["shift"]);
+        let chain_sign = *chain_shifted.last().expect("cadena vacía");
+        let chain_wide: Vec<Bit> = (0..accumulator_bits as usize).map(|i| chain_shifted.get(i).copied().unwrap_or(chain_sign)).collect();
+        let wide_data = b.wire("wide_data", accumulator_bits);
+        b.inst("wide_data_select", &acc_mux, &[("s", vec![wide_from_chain]), ("a", accumulator.clone()), ("b", chain_wide), ("y", wide_data.clone())]);
+        b.ram2p("wide_memory", c.index_bits, accumulator_bits, &[("raddr", index_a.clone()), ("waddr", index_w.clone()), ("we", vec![wide_write]), ("wdata", wide_data), ("rdata", wide_read.clone())]);
         let wide_top = accumulator_bits as usize - 1;
         let wide_magnitude = b.wire("wide_magnitude", accumulator_bits - 1);
         let keep_wide = b.wire("wide_keep", 1)[0];
@@ -922,8 +948,6 @@ impl Gen {
 
         // --- Result selection ---
         b.group("Selección de resultado");
-        let chain_out = b.wire("chain_out", wide);
-        let chain_shifted = barrel_right(&mut b, &mux_wide, "chain_shift", &chain_out, &fields["shift"]);
         let immediate_sign = *fields["literal_b"].last().expect("literal vacío");
         let immediate: Vec<Bit> = (0..a as usize).map(|i| fields["literal_b"].get(i).copied().unwrap_or(immediate_sign)).collect();
         let mut parity = vec![Bit::Zero; a as usize];
@@ -1088,11 +1112,12 @@ impl Gen {
         }
 
         // --- Cells and their result chain ---
+        let cell_seek_addr: Vec<Bit> = (0..cfg.addr_bits as usize).map(|i| index_a.get(i).copied().unwrap_or(Bit::Zero)).collect();
         let mut chain_in = vec![Bit::Zero; wide as usize];
         for i in (0..c.cells as usize).rev() {
             b.group("Celdas");
             let total = b.wire(&format!("cell{i}_total"), wide);
-            let mut cell_pins = vec![("clear", vec![cell_clear]), ("clear_group", vec![cell_clear_group]), ("flush", vec![cell_flush]), ("run", vec![cell_run]), ("x", x_bus.clone()), ("total", total.clone())];
+            let mut cell_pins = vec![("clear", vec![cell_clear]), ("clear_group", vec![cell_clear_group]), ("flush", vec![cell_flush]), ("run", vec![cell_run]), ("x", x_bus.clone()), ("total", total.clone()), ("seek_weights", vec![cell_seek_weights]), ("seek_factors", vec![cell_seek_factors]), ("seek_addr", cell_seek_addr.clone())];
             if let Some((load_cell, load_scale, cell_addr)) = &cell_ports {
                 cell_pins.extend([("load_en", vec![load_cell[i]]), ("load_scale", vec![*load_scale]), ("load_addr", cell_addr.clone()), ("load_data", cell_data[..c.scale_bits.max(cfg.weight_bits) as usize].to_vec())]);
             }
@@ -1130,6 +1155,8 @@ struct SumParts {
     flush: Bit,
     total: Vec<Bit>,
     clear_group: Bit,
+    seek_factors: Bit,
+    seek_addr: Vec<Bit>,
 }
 
 /// Arithmetic right shift by the 6-bit `amount`, from selectors.
@@ -1404,6 +1431,11 @@ fn visit_indices(steps: &[Step], f: &mut impl FnMut(Expr)) {
                 f(alu.window);
             }
             Step::Repeat { body, .. } => visit_indices(body, f),
+            Step::CellSeek { weights, factors } => {
+                f(*weights);
+                f(*factors);
+            }
+            Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } => {}
         }
     }
 }
@@ -1568,8 +1600,58 @@ impl DieProgram {
                     self.alu(&bound);
                 }
                 Step::Repeat { variable, count, body } => self.compile_loop(*variable, *count, body),
+                Step::CellSeek { weights, factors } => self.cell_seek(*weights, *factors),
+                Step::CellPass => self.cell_pass(),
+                Step::CellGroup { src, length } => self.cell_group(*src, *length),
+                Step::CellDrain { rows } => self.cell_drain(*rows),
             }
         }
+    }
+
+    /// Points every cell at the first weight and the first group of a matrix.
+    fn cell_seek(&mut self, weights: Expr, factors: Expr) {
+        let (literal, offset) = self.resolve(weights);
+        let t = self.end();
+        let w = self.slot(t);
+        (w.use_literal, w.literal_a, w.offset_a, w.cell_seek_weights, w.write_reset) = (true, literal, offset, true, true);
+        let (literal, offset) = self.resolve(factors);
+        let w = self.slot(t + 1);
+        (w.use_literal, w.literal_a, w.offset_a, w.cell_seek_factors) = (true, literal, offset, true);
+        self.slot(t + 2);
+    }
+
+    /// Starts one round of the cells over the input vector.
+    fn cell_pass(&mut self) {
+        let t = self.end();
+        let w = self.slot(t);
+        (w.read_reset, w.cell_clear_group) = (true, true);
+    }
+
+    /// Streams the next `length` activations through the cells, then applies their factors.
+    fn cell_group(&mut self, src: u32, length: u32) {
+        let c = self.config;
+        let x_delay = 1 + c.broadcast_stages as usize;
+        let start = self.end();
+        for i in 0..length as usize {
+            let w = self.slot(start + i);
+            w.read_step = true;
+            w.reg_a = src;
+            self.slot(start + i + x_delay).cell_run = true;
+        }
+        let settled = start + length as usize + x_delay + c.cell.latency() as usize + 1;
+        self.slot(settled).cell_flush = true;
+        self.slot(settled + 1);
+    }
+
+    /// Moves the totals of the first `rows` cells into the wide memory.
+    fn cell_drain(&mut self, rows: u32) {
+        let t = self.end();
+        self.slot(t).chain_load = true;
+        for i in 0..rows as usize {
+            let w = self.slot(t + 1 + i);
+            (w.wide_write, w.wide_from_chain, w.chain_shift, w.shift) = (true, true, true, FACTOR_FRACTION);
+        }
+        self.slot(t + 1 + rows as usize);
     }
 
     /// One single-element operation. Nothing overlaps, so each takes a few cycles.

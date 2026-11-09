@@ -1,13 +1,12 @@
 //! Expresses a compiled program in the die's vector arithmetic, token by token.
 //! The same code drives the gates (through microcode) and the exact virtual machine.
 
-use crate::weights::Weights;
+use crate::weights::{CellRow, Weights};
 use compiler::{Inst, Op, Program, RopeScaling};
 use netlist::block::{FN_GELU, FN_GELU_TANH, FN_TANH};
-use netlist::block::{encode_vector, Assembly, AttentionRegs, BlockOps, DeltaRegs, Expr, Var, FN_EXP, FN_SIGMOID, FN_SOFTPLUS};
+use netlist::block::{encode_vector, Assembly, AttentionRegs, BlockOps, CellMatrix, DeltaRegs, Expr, Var, FN_EXP, FN_SIGMOID, FN_SOFTPLUS};
 use netlist::{DieConfig, DieProgram, Microprogram};
 use std::cell::Cell;
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
@@ -61,6 +60,42 @@ fn matrices_of(program: &Program, op: &Op) -> Vec<(String, usize, usize)> {
         }
         _ => Vec::new(),
     }
+}
+
+/// How many rows of `name` one use takes, when it does not take them all.
+fn rows_per_use(program: &Program, op: &Op, name: &str, rows: usize) -> usize {
+    match op {
+        Op::Moe { src, intermediate, .. } | Op::SigmoidMoe { src, intermediate, .. } if name.contains("switch_mlp.") => {
+            if name.ends_with("down_proj") { program.buffers[*src] } else { *intermediate }
+        }
+        Op::Mla { embed, lora, value_dim, .. } => if name == embed { *lora } else { *value_dim },
+        _ => rows,
+    }
+}
+
+/// One matrix in the cells, in the order they hold them.
+#[derive(Clone, Debug)]
+struct CellEntry {
+    name: String,
+    rows: usize,
+    cols: usize,
+    block: usize,
+    group: usize,
+    groups: usize,
+    exponent: i64,
+}
+
+/// The address of each matrix in the cells, and how deep their two memories must be.
+fn place_in_cells(plan: &[CellEntry], cells: usize) -> (HashMap<String, CellMatrix>, u64, u64) {
+    let (mut weights, mut factors) = (0u64, 0u64);
+    let mut places = HashMap::new();
+    for e in plan {
+        places.insert(e.name.clone(), CellMatrix { weights: weights as u32, factors: factors as u32, group: e.group as u32, groups: e.groups as u32 });
+        let rounds = (e.rows / e.block * e.block.div_ceil(cells)) as u64;
+        weights += rounds * e.cols as u64;
+        factors += rounds * e.groups as u64;
+    }
+    (places, weights, factors)
 }
 
 fn t_gelu(approximate: bool) -> u32 {
@@ -117,6 +152,8 @@ pub struct Layout {
     inverse_root: HashMap<usize, u32>,
     inverse_len: HashMap<usize, u32>,
     setup: Assembly,
+    cell_plan: Vec<CellEntry>,
+    in_cells: HashMap<String, CellMatrix>,
 }
 
 impl Layout {
@@ -124,20 +161,27 @@ impl Layout {
     /// and a RoPE table for that many tokens go into registers for the gates; otherwise
     /// the weights stay in the checkpoint and RoPE is computed directly.
     pub fn new(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: Option<usize>) -> Result<Self, String> {
-        Self::build(program, weights, config, chip_tokens, true)
+        Self::build(program, weights, config, chip_tokens, true, false)
+    }
+
+    /// For the gates: matrices compute in the cells and only lookup tables stay in registers.
+    pub fn with_cells(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: usize) -> Result<Self, String> {
+        Self::build(program, weights, config, Some(chip_tokens), true, true)
     }
 
     /// As a real chip is laid out: matrices live in the cells, not in vector registers.
     pub fn for_image(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: usize) -> Result<Self, String> {
-        Self::build(program, weights, config, Some(chip_tokens), false)
+        Self::build(program, weights, config, Some(chip_tokens), false, true)
     }
 
-    fn build(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: Option<usize>, matrices_in_registers: bool) -> Result<Self, String> {
+    fn build(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: Option<usize>, matrices_in_registers: bool, cells: bool) -> Result<Self, String> {
         let next = Cell::new(1u32);
         let alloc = |count: u32| next.replace(next.get() + count);
         let buffers: Vec<u32> = program.buffers.iter().map(|_| alloc(1)).collect();
         let mut setup = Assembly::new(&config);
         let mut matrices: HashMap<String, u32> = HashMap::new();
+        let mut cell_plan: Vec<CellEntry> = Vec::new();
+        let mut in_registers: HashSet<String> = HashSet::new();
         let mut small: HashMap<String, u32> = HashMap::new();
         let mut inverse_root: HashMap<usize, u32> = HashMap::new();
         let mut inverse_len: HashMap<usize, u32> = HashMap::new();
@@ -159,21 +203,26 @@ impl Layout {
 
         for inst in all_ops(program) {
             for (name, rows, cols) in matrices_of(program, &inst.op) {
-                if let Entry::Vacant(slot) = matrices.entry(name.clone()) {
-                    let reg = alloc(1);
-                    slot.insert(reg);
-                    if chip_tokens.is_some() && matrices_in_registers {
-                        if rows * cols > 1 << config.index_bits {
-                            return Err(format!("la matriz {name} tiene {} elementos y el direccionamiento solo llega a {}", rows * cols, 1usize << config.index_bits));
-                        }
-                        let matrix = weights.matrix(&name)?;
-                        let exponent = matrix.exponent(cols);
-                        let mut flat = Vec::with_capacity(rows * cols);
-                        for r in 0..rows {
-                            flat.extend(matrix.fixed_row(r, cols, exponent, config.cell.activation_bits)?);
-                        }
-                        setup.load_mantissas(reg, &flat, exponent);
+                let table = matches!(inst.op, Op::EmbRead { .. });
+                let reg = *matrices.entry(name.clone()).or_insert_with(|| alloc(1));
+                if chip_tokens.is_some() && matrices_in_registers && (!cells || table) && in_registers.insert(name.clone()) {
+                    if rows * cols > 1 << config.index_bits {
+                        return Err(format!("la matriz {name} tiene {} elementos y el direccionamiento solo llega a {}", rows * cols, 1usize << config.index_bits));
                     }
+                    let matrix = weights.matrix(&name)?;
+                    let exponent = matrix.exponent(cols);
+                    let mut flat = Vec::with_capacity(rows * cols);
+                    for r in 0..rows {
+                        flat.extend(matrix.fixed_row(r, cols, exponent, config.cell.activation_bits)?);
+                    }
+                    setup.load_mantissas(reg, &flat, exponent);
+                }
+                if cells && !table && cell_plan.iter().all(|e| e.name != name) {
+                    let matrix = weights.matrix(&name)?;
+                    let (group, groups) = matrix.cell_groups(cols);
+                    let exponent = matrix.exponent(cols);
+                    setup.load_mantissas(reg, &[], exponent);
+                    cell_plan.push(CellEntry { block: rows_per_use(program, &inst.op, &name, rows), name, rows, cols, group, groups, exponent });
                 }
             }
             if let Op::RmsNorm { block, .. } | Op::RmsGated { block, .. } = &inst.op {
@@ -281,7 +330,12 @@ impl Layout {
         if next >= (1 << config.reg_bits) - 2 {
             return Err(format!("faltan registros: se necesitan {next}"));
         }
-        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, rope, rope_table, rope_half, inverse_root, inverse_len, setup })
+        let (in_cells, cell_weights, cell_factors) = place_in_cells(&cell_plan, config.cells as usize);
+        let reach = 1u64 << config.index_bits.min(config.cell.addr_bits);
+        if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
+            return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
+        }
+        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, rope, rope_table, rope_half, inverse_root, inverse_len, setup, cell_plan, in_cells })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -307,7 +361,7 @@ impl Layout {
         let position = Expr::var(Var::Position);
         let mut code = DieProgram::new(self.config);
         let routine = |code: &mut DieProgram, build: &mut dyn FnMut(&mut Assembly) -> Result<(), String>| {
-            let mut asm = Assembly::new(&self.config);
+            let mut asm = self.assembly();
             build(&mut asm)?;
             code.assemble(&asm.steps);
             Ok::<(), String>(())
@@ -345,7 +399,7 @@ impl Layout {
         let several = plan.len() > 1;
         let mut code = DieProgram::new(self.config);
 
-        let mut asm = Assembly::new(&self.config);
+        let mut asm = self.assembly();
         if !first {
             let input = program.crossing(plan[die].start)?;
             asm.receive(self.reg(input), (program.buffers[input] as u32).into());
@@ -363,7 +417,7 @@ impl Layout {
         code.assemble(&asm.steps);
         code.next_entry();
 
-        let mut asm = Assembly::new(&self.config);
+        let mut asm = self.assembly();
         let logits_length: Expr = (program.vocab as u32).into();
         if last {
             self.run_list(&mut asm, program, &program.ops[program.logits_from..], token, position, false)?;
@@ -378,12 +432,58 @@ impl Layout {
     }
 
     /// Forgets the weights of every matrix that the given operations do not use.
+    fn assembly(&self) -> Assembly {
+        let mut asm = Assembly::new(&self.config);
+        asm.in_cells = self.in_cells.clone();
+        asm
+    }
+
+    /// How deep the weight and factor memories of each cell must be.
+    /// The widest code among the matrices in the cells, and the longest group.
+    pub fn cell_shape(&self, weights: &Weights) -> Result<(u32, usize), String> {
+        let mut shape = (2, 1);
+        for e in &self.cell_plan {
+            shape = (shape.0.max(weights.matrix(&e.name)?.cell_code_bits(e.cols, self.config.cell.activation_bits)), shape.1.max(e.group));
+        }
+        Ok(shape)
+    }
+
+    pub fn cell_depths(&self) -> (u64, u64) {
+        let (_, weights, factors) = place_in_cells(&self.cell_plan, self.config.cells as usize);
+        (weights, factors)
+    }
+
+    /// What `cell` holds: one code per weight and the scale and bias of each group.
+    pub fn cell_contents(&self, weights: &Weights, cell: u32) -> Result<CellRow, String> {
+        let cells = self.config.cells as usize;
+        let (mut codes, mut factors) = (Vec::new(), Vec::new());
+        for e in &self.cell_plan {
+            let matrix = weights.matrix(&e.name)?;
+            for block in 0..e.rows / e.block {
+                for round in 0..e.block.div_ceil(cells) {
+                    let row = round * cells + cell as usize;
+                    if row < e.block {
+                        let (w, f) = matrix.cell_row(block * e.block + row, e.cols, e.exponent, self.config.cell.activation_bits)?;
+                        codes.extend(w);
+                        factors.extend(f);
+                    } else {
+                        codes.extend(std::iter::repeat_n(0, e.cols));
+                        factors.extend(std::iter::repeat_n((0, 0), e.groups));
+                    }
+                }
+            }
+        }
+        Ok((codes, factors))
+    }
+
     pub fn keep_weights_of(&mut self, program: &Program, plan: &[Range<usize>], die: usize) {
         let last = die + 1 == plan.len();
         let tail = program.logits_from..program.ops.len();
         let used: HashSet<String> = plan[die].clone().chain(if last { tail } else { 0..0 }).flat_map(|i| matrices_of(program, &program.ops[i].op)).map(|(name, ..)| name).collect();
         let dropped: HashSet<u32> = self.weights.iter().filter(|(name, _)| !used.contains(*name)).map(|(_, reg)| *reg).collect();
         self.setup.initial.retain(|(register, _), _| !dropped.contains(register));
+        self.cell_plan.retain(|e| used.contains(&e.name));
+        self.in_cells = place_in_cells(&self.cell_plan, self.config.cells as usize).0;
     }
 
     /// Runs one routine of the microprogram directly, at software speed.

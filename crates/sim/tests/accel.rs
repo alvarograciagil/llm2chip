@@ -101,9 +101,11 @@ fn compare(gap: usize) {
                 let slow = a.exact_sums(first, ROWS - first, &x, exponent, bits);
                 let fast = b.exact_sums(first, ROWS - first, &x, exponent, bits);
                 assert_eq!(slow, fast, "{matrix} a {bits} bits, desde la fila {first}");
+                let (slow, fast) = (a.cell_sums(first, ROWS - first, &x, exponent, bits), b.cell_sums(first, ROWS - first, &x, exponent, bits));
+                assert_eq!(slow, fast, "{matrix} en celdas a {bits} bits, desde la fila {first}");
             }
         }
     }
-    assert_eq!(gpu.gpu_products(), 2 * (2 + 5 * 2), "la GPU debe ejecutar todos los productos");
+    assert_eq!(gpu.gpu_products(), 2 * (2 + 5 * 2 * 2), "la GPU debe ejecutar todos los productos");
     std::fs::remove_dir_all(dir).ok();
 }

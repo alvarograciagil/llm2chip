@@ -30,6 +30,7 @@ pub struct BlockVm {
     weights: Option<Arc<Weights>>,
     matrix_exponents: RefCell<HashMap<String, i64>>,
     wide: Vec<i64>,
+    in_cells: bool,
 }
 
 impl BlockVm {
@@ -43,7 +44,17 @@ impl BlockVm {
             weights,
             matrix_exponents: RefCell::new(HashMap::new()),
             wide: Vec::new(),
+            in_cells: false,
         }
+    }
+
+    /// From now on matrix products add up as the cells do.
+    pub fn compute_in_cells(&mut self) {
+        self.in_cells = true;
+    }
+
+    pub fn compute_in_registers(&mut self) {
+        self.in_cells = false;
     }
 
     #[inline]
@@ -367,7 +378,8 @@ impl BlockOps for BlockVm {
         let mut x = self.registers[src as usize].clone();
         x.resize(cols as usize, 0);
         let matrix = weights.matrix(name).expect("matriz del programa");
-        let sums: Vec<i64> = matrix.exact_sums(first as usize, rows as usize, &x, exponent, self.bits).iter().map(|v| self.wrap_wide(*v)).collect();
+        let sums = if self.in_cells { matrix.cell_sums(first as usize, rows as usize, &x, exponent, self.bits) } else { matrix.exact_sums(first as usize, rows as usize, &x, exponent, self.bits) };
+        let sums: Vec<i64> = sums.iter().map(|v| self.wrap_wide(*v)).collect();
         self.narrow(&sums, exponent, self.exp(src), dst);
     }
 

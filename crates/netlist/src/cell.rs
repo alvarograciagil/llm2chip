@@ -343,6 +343,40 @@ impl Gen {
         self.add(b.finish())
     }
 
+    /// An address counter that can also jump to any position.
+    pub(crate) fn seek_counter(&mut self, width: u32) -> String {
+        let name = format!("seek_counter_{width}");
+        if self.modules.contains_key(&name) {
+            return name;
+        }
+        let adder = self.ripple_adder(width);
+        let reg = self.register(width);
+        let mux = self.mux_bus(width);
+        let mut b = Builder::new(&name, &format!("Contador con salto de {width} bits"), "Avanza a la siguiente posición, vuelve a cero o salta a la que le indiquen.");
+        let clear = b.input("clear", 1)[0];
+        let advance = b.input("advance", 1)[0];
+        let seek = b.input("seek", 1)[0];
+        let target = b.input("target", width);
+        let address = b.output("address", width);
+        let sum = b.wire("sum", width);
+        let unused = b.wire("carry_out", 1);
+        let next = b.wire("next", width);
+        let chosen = b.wire("chosen", width);
+        let not_clear = b.wire("not_clear", 1)[0];
+        b.group("Incremento");
+        b.inst("adder", &adder, &[("a", address.clone()), ("b", vec![Bit::Zero; width as usize]), ("cin", vec![advance]), ("sum", sum.clone()), ("cout", unused)]);
+        b.group("Puesta a cero");
+        b.not_to(clear, not_clear);
+        for i in 0..width as usize {
+            b.and_to(not_clear, sum[i], next[i]);
+        }
+        b.group("Salto");
+        b.inst("target_select", &mux, &[("s", vec![seek]), ("a", next), ("b", target), ("y", chosen.clone())]);
+        b.group("Registro");
+        b.inst("address_reg", &reg, &[("d", chosen), ("q", address)]);
+        self.add(b.finish())
+    }
+
     /// Weight memory organised in words of several weights plus their check bits.
     /// Whole words arrive already encoded, so the encoder can be shared by many cells.
     #[allow(clippy::too_many_arguments)]
@@ -434,12 +468,13 @@ impl Gen {
         }
     }
 
-    pub(crate) fn cell(&mut self, c: CellConfig) -> String {
+    /// `seekable` adds the ports that let the sequencer point the cell at a matrix.
+    pub(crate) fn cell(&mut self, c: CellConfig, seekable: bool) -> String {
         let (w, a, acc) = (c.weight_bits, c.activation_bits, c.accumulator_bits);
         let significand = c.significand_bits();
         let product_bits = significand + a;
         let mac_stages = c.mac_stages.min(significand).max(1);
-        let counter = self.address_counter(c.addr_bits);
+        let counter = if seekable { self.seek_counter(c.addr_bits) } else { self.address_counter(c.addr_bits) };
         let x_reg = self.register(a);
         let multiplier = match c.multiplier {
             MultiplierKind::Array => self.multiplier(significand, a, mac_stages),
@@ -473,7 +508,12 @@ impl Gen {
 
         b.group("Direcciones");
         let address = b.wire("address", c.addr_bits);
-        b.inst("counter", &counter, &[("clear", vec![clear]), ("advance", vec![run]), ("address", address.clone())]);
+        let seek_ports = seekable.then(|| (b.input("seek", 1), b.input("seek_addr", c.addr_bits)));
+        let mut counter_pins = vec![("clear", vec![clear]), ("advance", vec![run]), ("address", address.clone())];
+        if let Some((seek, target)) = seek_ports {
+            counter_pins.extend([("seek", seek), ("target", target)]);
+        }
+        b.inst("counter", &counter, &counter_pins);
         let weight = b.wire("weight", w);
         match load_ports {
             Some((load_en, load_addr, load_data)) if protected => {
@@ -586,6 +626,6 @@ pub fn shared_unit_design(config: CellConfig) -> Option<Design> {
 
 pub fn cell_design(config: CellConfig) -> Design {
     let mut gen = Gen { modules: BTreeMap::new() };
-    let top = gen.cell(config.checked());
+    let top = gen.cell(config.checked(), false);
     Design { top, modules: gen.modules }
 }

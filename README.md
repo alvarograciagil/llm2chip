@@ -123,7 +123,8 @@ Windows tiene los equivalentes `.ps1`. Los pesos no se incluyen: la aplicación 
 - La máquina de enteros exactos coincide bit a bit con las puertas en todos los búferes de esos modelos.
 - Qwen3.8-27B real se ejecuta de principio a fin con el firmware del chip. El tokenizador del firmware se compila desde el `tokenizer.json` de cada modelo y coincide con la biblioteca de referencia en miles de textos difíciles, también con los archivos reales de Llama 3.2, Mistral 7B, Mistral Nemo y DeepSeek V3.
 - Todas las arquitecturas simulables con pesos aleatorios diminutos dan los mismos logits que `mlx-lm`, token a token.
-- Con carriles vectoriales en paralelo, las puertas dan los mismos bits que con un solo carril en menos ciclos.
+- Las celdas y los carriles vectoriales dan en puertas los mismos bits que la máquina exacta, en todos los búferes de un modelo diminuto.
+- Qwen3-0.6B real coincide con `mlx-lm` en coma flotante: 24 de 24 tokens y una diferencia máxima de 0,00005 en el logit elegido.
 - La imagen de un chip se genera desde la aplicación y comprueba el CRC de cada tensor. El firmware ejecuta la cabeza MTP y coincide con el bucle en software.
 - Cada formato de peso y cada multiplicador se comprueban contra la aritmética de referencia, y el Verilog y el VHDL exportados se ejecutan en simuladores externos.
 
@@ -135,7 +136,8 @@ Es un diseño de arquitectura y lógica, no un layout fabricable: no hay colocac
 
 - Área, energía y velocidad son estimaciones, parte derivadas del circuito generado y parte calibradas con chips publicados. La aplicación indica el origen de cada cifra.
 - Los modelos reales no se simulan puerta a puerta, sino con una máquina verificada contra las puertas en modelos diminutos.
-- El microprograma de un modelo real calcula cada producto matriz-vector en serie, con un solo acumulador. La matriz de celdas está en las puertas y se comprueba aparte, pero ese microprograma todavía no la usa. La velocidad del plano y del explorador sale del estimador, no de contar ciclos de ese microprograma: en Qwen3.8 los productos en serie son el 99,6 % de sus ciclos, y los carriles vectoriales solo ahorran en torno al 0,1 %.
+- Los microprogramas de modelos reales ya hacen sus productos matriz-vector en las celdas: en Qwen3.8 el token pasa de 124.000 M de ciclos en serie a 768 M con 4096 celdas y 32 carriles. Aún está lejos de la velocidad del plano y del explorador, que salen del estimador y no de contar esos ciclos.
+- La imagen del chip guarda los pesos tal como vienen, sin convertirlos al formato de las celdas, y las tablas de embeddings todavía no se calculan en ellas. El flujo real completo del chip, con su firmware, sigue con los pesos en registros.
 - Los paquetes de Windows y Linux y el backend de Vulkan todavía no se han ejecutado en esos sistemas.
 
 ## Estructura

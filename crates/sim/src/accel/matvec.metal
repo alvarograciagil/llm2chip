@@ -82,6 +82,7 @@ inline long exact_row(device const uint* row, device const uchar* scales, device
     for (uint g = 0; g < job.groups; ++g) {
         const int scale = int(round(half_at(scales, g) * job.factor));
         const int bias = int(round(half_at(biases, g) * job.factor));
+        long dot = 0, sum = 0;
         for (uint j = 0; j < blocks; ++j) {
             uint word = words.take();
             int4 activations = x[at / 4];
@@ -89,11 +90,20 @@ inline long exact_row(device const uint* row, device const uchar* scales, device
                 if (i != 0 && i % 4 == 0) {
                     activations = x[at / 4];
                 }
-                total += wide_product(exact_weight(word & mask, scale, bias, limit), activations[i % 4]);
+                if (limit == 0) {
+                    dot += wide_product(int(word & mask), activations[i % 4]);
+                    sum += long(activations[i % 4]);
+                } else {
+                    total += wide_product(exact_weight(word & mask, scale, bias, limit), activations[i % 4]);
+                }
             }
         }
+        // A limit of zero asks for the sum the cells make: factors apply to the whole group.
+        if (limit == 0) {
+            total += dot * long(scale) + sum * long(bias);
+        }
     }
-    return total;
+    return limit == 0 ? total >> 4 : total;
 }
 
 #define FLOAT_KERNEL(NAME, BITS)                                                                                     \

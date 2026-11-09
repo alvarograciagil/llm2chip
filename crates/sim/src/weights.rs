@@ -247,6 +247,9 @@ enum Source<'a> {
     Plain { format: Plain, bytes: &'a [u8], factor: f32 },
 }
 
+/// The codes of a row in the cells, and each group's scale and bias.
+pub type CellRow = (Vec<i64>, Vec<(i64, i64)>);
+
 pub struct Matrix<'a> {
     rows: usize,
     owner: &'a Weights,
@@ -539,6 +542,91 @@ impl Matrix<'_> {
                 Ok(self.row(index, cols)?.iter().map(|v| ((*v as f64 * scale).round() as i64).clamp(-limit, limit)).collect())
             }
         }
+    }
+
+    /// The bits a code of this matrix takes in the cells.
+    pub fn cell_code_bits(&self, cols: usize, bits: u32) -> u32 {
+        match &self.source {
+            Source::Packed { words_per_row, .. } if self.requant(cols).is_none() => (words_per_row * 32 / cols) as u32,
+            _ => bits,
+        }
+    }
+
+    /// The columns that share a scale and a bias in the cells: size and number of groups.
+    pub fn cell_groups(&self, cols: usize) -> (usize, usize) {
+        match &self.source {
+            Source::Packed { groups, .. } if self.requant(cols).is_none() => (cols / groups, *groups),
+            _ => (cols, 1),
+        }
+    }
+
+    /// One row as the cells keep it: a signed code for each weight and, for each group,
+    /// a scale and a bias with `FACTOR_FRACTION` extra bits.
+    pub fn cell_row(&self, index: usize, cols: usize, exponent: i64, bits: u32) -> Result<CellRow, String> {
+        if let Source::Packed { words_per_row, groups, words, scales, biases } = &self.source {
+            if self.requant(cols).is_none() {
+                let group_size = cols / groups;
+                let width = words_per_row * 32 / cols;
+                let row = &words[index * words_per_row * 4..(index + 1) * words_per_row * 4];
+                let middle = 1i64 << (width - 1);
+                let factor = fixed_factor(exponent, bits as i32 - 1);
+                let code = |at: usize| if width == 8 { row[at] } else { (row[at / 2] >> (4 * (at & 1))) & 0xF };
+                let codes = (0..cols).map(|at| code(at) as i64 - middle).collect();
+                let factors = (0..*groups)
+                    .map(|g| {
+                        let (scale, bias) = affine_integers(half_at(scales, index * groups + g), half_at(biases, index * groups + g), factor);
+                        (scale, bias + scale * middle)
+                    })
+                    .collect();
+                debug_assert_eq!(group_size * groups, cols);
+                return Ok((codes, factors));
+            }
+        }
+        Ok((self.fixed_row(index, cols, exponent, bits)?, vec![(1 << AFFINE_EXTRA, 0)]))
+    }
+
+    /// `Σ w · x` for each row as the cells add it: the factors apply to each group's
+    /// whole sum, and the extra bits go at the end, so no weight is rounded on its own.
+    pub fn cell_sums(&self, first: usize, rows: usize, x: &[i32], exponent: i64, bits: u32) -> Vec<i64> {
+        let cols = x.len();
+        let Source::Packed { words_per_row, groups, words, scales, biases } = &self.source else {
+            return self.exact_sums(first, rows, x, exponent, bits);
+        };
+        if self.requant(cols).is_some() {
+            return self.exact_sums(first, rows, x, exponent, bits);
+        }
+        let mut sums = vec![0i64; rows];
+        let fraction = bits as i32 - 1;
+        let fits_int = |largest: f32| (largest as f64) * 2f64.powi(fraction + AFFINE_EXTRA - exponent as i32) < (1u64 << 30) as f64;
+        if let Some(accelerator) = self.gpu_for(rows * cols).filter(|_| fits_int(self.largest_weight(cols))) {
+            let tensor = PackedTensor { words, scales, biases, bits: (words_per_row * 32 / cols) as u32, stride: words_per_row * 4, groups: *groups };
+            if accelerator.exact_product(&tensor, first, x, ExactScale { shift: fraction + AFFINE_EXTRA - exponent as i32, limit: 0 }, &mut sums) {
+                self.owner.gpu_products.fetch_add(1, Ordering::Relaxed);
+                return sums;
+            }
+        }
+        let group_size = cols / groups;
+        let width = words_per_row * 32 / cols;
+        let stride = words_per_row * 4;
+        let factor = fixed_factor(exponent, fraction);
+        sums.par_iter_mut().with_min_len(16).enumerate().for_each(|(index, out)| {
+            let r = first + index;
+            let row = &words[r * stride..(r + 1) * stride];
+            let mut total = 0i64;
+            for (g, xs) in x.chunks_exact(group_size).enumerate() {
+                let (scale, bias) = affine_integers(half_at(scales, r * groups + g), half_at(biases, r * groups + g), factor);
+                let (mut dot, mut sum) = (0i64, 0i64);
+                for (j, v) in xs.iter().enumerate() {
+                    let at = g * group_size + j;
+                    let q = if width == 8 { row[at] } else { (row[at / 2] >> (4 * (at & 1))) & 0xF };
+                    dot += q as i64 * *v as i64;
+                    sum += *v as i64;
+                }
+                total += scale * dot + bias * sum;
+            }
+            *out = total >> AFFINE_EXTRA;
+        });
+        sums
     }
 
     /// Full-precision `Σ w · x` for each row, using the mantissas of `fixed_row`.

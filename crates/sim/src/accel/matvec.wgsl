@@ -61,12 +61,26 @@ fn exact_product(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var g = 0u; g < job.groups; g++) {
         let scale = to_integer(half_in(row * job.groups + g, true) * job.factor);
         let bias = to_integer(half_in(row * job.groups + g, false) * job.factor);
+        var dot: i64 = 0li;
+        var sum: i64 = 0li;
         for (var j = 0u; j < job.group_size; j++) {
-            var weight = (i64(code_at(row, at)) * scale + bias) >> 4u;
-            weight = min(max(weight, -job.limit), job.limit);
-            total += weight * i64(int_x[at]);
+            if job.limit == 0li {
+                dot += i64(code_at(row, at)) * i64(int_x[at]);
+                sum += i64(int_x[at]);
+            } else {
+                var weight = (i64(code_at(row, at)) * scale + bias) >> 4u;
+                weight = min(max(weight, -job.limit), job.limit);
+                total += weight * i64(int_x[at]);
+            }
             at++;
         }
+        // A limit of zero asks for the sum the cells make: factors apply to the whole group.
+        if job.limit == 0li {
+            total += dot * scale + sum * bias;
+        }
+    }
+    if job.limit == 0li {
+        total = total >> 4u;
     }
     int_y[id.x] = total;
 }

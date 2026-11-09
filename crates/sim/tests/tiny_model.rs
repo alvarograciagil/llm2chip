@@ -122,7 +122,7 @@ fn gates_after(program: &compiler::Program, dir: &Path, c: DieConfig, tokens: &[
 }
 
 fn assert_vm_matches_gates(program: &compiler::Program, config: &str, dir: &Path, c: DieConfig, tokens: &[u32], sim: &mut Simulator, layout: &Layout) {
-    let mut vm = ExactEngine::new(compile_qwen3_5(config).unwrap(), Weights::open(dir).unwrap(), c.cell.activation_bits).unwrap();
+    let mut vm = ExactEngine::new(compile_qwen3_5(config).unwrap(), Weights::open(dir).unwrap(), c.cell.activation_bits).unwrap().with_weights_in_registers();
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }
@@ -190,7 +190,7 @@ fn draft_head_runs_on_the_gates() {
     let error: f32 = got.iter().zip(&expected).map(|(a, b)| (a - b).abs()).sum::<f32>() / 8.0;
     assert!(error < 0.1 * spread.max(0.2), "error medio {error}, magnitud {spread}");
 
-    let mut vm = ExactEngine::new(compile_qwen3_5(&config).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
+    let mut vm = ExactEngine::new(compile_qwen3_5(&config).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap().with_weights_in_registers();
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }
@@ -292,7 +292,7 @@ fn tiny_model_runs_whole_on_the_gates() {
     assert!(error < 0.08 * spread.max(0.2), "error medio {error}, magnitud {spread}");
 
     // The fast machine must reach the same bits as the gates, in every buffer.
-    let mut vm = ExactEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
+    let mut vm = ExactEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap().with_weights_in_registers();
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }
@@ -338,6 +338,87 @@ fn a_die_built_for_its_program_runs_it_identically_with_less_logic() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Runs the tokens with every matrix in the cells.
+fn gates_in_cells(program: &compiler::Program, dir: &Path, c: DieConfig, tokens: &[u32]) -> GateRun {
+    let weights = Weights::open(dir).unwrap();
+    let layout = Layout::with_cells(program, &weights, c, CHIP_TOKENS).unwrap();
+    let code = layout.microprogram(program).unwrap();
+    let mut sim = Simulator::new(&die_design(c)).unwrap();
+    load_microprogram(&mut sim, &c, &code);
+    load_assembly(&mut sim, &c, &layout.setup().initial);
+    let data_mask = (1u64 << c.scale_bits.max(c.cell.weight_bits).max(c.cell.activation_bits)) - 1;
+    sim.set("load_fn", 1).unwrap();
+    for (address, value) in tables(&c).iter().enumerate() {
+        sim.set("fn_addr", address as u64).unwrap();
+        sim.set("cell_data", *value as u64 & mask(&c)).unwrap();
+        sim.tick();
+    }
+    sim.set("load_fn", 0).unwrap();
+    let put = |sim: &mut Simulator, address: u64, value: i64| {
+        sim.set("cell_addr", address).unwrap();
+        sim.set("cell_data", value as u64 & data_mask).unwrap();
+        sim.tick();
+    };
+    for cell in 0..c.cells {
+        let (codes, factors) = layout.cell_contents(&weights, cell).unwrap();
+        assert!(codes.len() <= 1 << c.cell.addr_bits && 2 * factors.len() <= 1 << c.cell.addr_bits, "las celdas no alcanzan");
+        sim.set("load_cell", 1 << cell).unwrap();
+        sim.set("load_scale", 0).unwrap();
+        for (address, code) in codes.iter().enumerate() {
+            put(&mut sim, address as u64, *code);
+        }
+        sim.set("load_scale", 1).unwrap();
+        for (group, (scale, bias)) in factors.iter().enumerate() {
+            put(&mut sim, 2 * group as u64, *scale);
+            put(&mut sim, 2 * group as u64 + 1, *bias);
+        }
+    }
+    sim.set("load_cell", 0).unwrap();
+    sim.set("load_scale", 0).unwrap();
+    let mut cycles = 0;
+    for (position, token) in tokens.iter().enumerate() {
+        cycles += enter(&mut sim, &code, ENTRY_TOKEN, *token, position as u32);
+        if position + 1 == tokens.len() {
+            cycles += enter(&mut sim, &code, ENTRY_LOGITS, *token, position as u32);
+        }
+    }
+    GateRun { sim, layout, code, cycles }
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
+fn the_cells_reach_the_same_bits_as_the_exact_machine() {
+    let dir = std::env::temp_dir().join(format!("llm2chip-cells-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+    let tokens = [3u32, 5, 1];
+    let mut vm = ExactEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
+    for (position, token) in tokens.iter().enumerate() {
+        vm.step(*token, position + 1 == tokens.len()).unwrap();
+    }
+    let base = die_config();
+    let serial = gates_after(&program, &dir, base, &tokens).cycles;
+    let mut cycles = Vec::new();
+    for (cells, lane_bits) in [(1u32, 0u32), (2, 0), (8, 0), (8, 2)] {
+        let cell = netlist::CellConfig { accumulator_bits: 40, addr_bits: 12, ..base.cell };
+        let c = DieConfig { cells, cell, scale_bits: 21, index_bits: 12, features: base.features.with_lane_bits(lane_bits), ..base };
+        let mut run = gates_in_cells(&program, &dir, c, &tokens);
+        for (buffer, length) in program.buffers.iter().enumerate() {
+            let gates = run.layout.register_of(buffer);
+            let fast = vm.register_of(buffer);
+            for index in 0..*length as u32 {
+                let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
+                assert_eq!(mantissa, vm.mantissa(fast, index), "{cells} celdas, búfer {buffer}, elemento {index}");
+            }
+        }
+        cycles.push(run.cycles);
+    }
+    eprintln!("ciclos: {serial} en serie; con 1, 2 y 8 celdas, y con 8 y 4 carriles {cycles:?}");
+    assert!(cycles[2] < cycles[1] && cycles[1] < cycles[0], "{cycles:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 #[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
 fn parallel_lanes_compute_the_same_bits_in_fewer_cycles() {
@@ -380,7 +461,7 @@ fn sliding_windows_and_biases_run_on_the_gates() {
         let tokens = [3u32, 1, 4, 1, 5];
         let c = DieConfig { index_bits: 10, microcode_bits: 18, ..die_config() };
         let mut run = gates_after(&program, &dir, c, &tokens);
-        let mut vm = ExactEngine::new(compiler::compile_model(&config).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
+        let mut vm = ExactEngine::new(compiler::compile_model(&config).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap().with_weights_in_registers();
         for (position, token) in tokens.iter().enumerate() {
             vm.step(*token, position + 1 == tokens.len()).unwrap();
         }
