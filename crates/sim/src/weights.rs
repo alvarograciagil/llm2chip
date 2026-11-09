@@ -1,5 +1,6 @@
 //! Reads MLX-quantised safetensors checkpoints without loading them into memory.
 
+use crate::accel::{self, Accelerator, ExactScale, PackedTensor};
 use crate::requant::{quantize, recode, train_table, Recoded, Reference};
 use half::f16;
 use memmap2::Mmap;
@@ -21,6 +22,8 @@ struct TensorRef {
 }
 
 pub struct Weights {
+    // The GPU's buffers point into `files`, so it must be dropped first.
+    accelerator: Option<Box<dyn Accelerator>>,
     files: Vec<Mmap>,
     tensors: HashMap<String, TensorRef>,
     /// The chip's format, when weights must be rewritten to match it.
@@ -30,6 +33,9 @@ pub struct Weights {
     /// Bytes of memory that rewritten tensors may still take.
     recode_budget: AtomicUsize,
 }
+
+/// Smaller products finish sooner on the CPU than a GPU round trip takes.
+const GPU_MIN_WEIGHTS: usize = 1 << 20;
 
 /// Rewritten weights may take half of the machine's memory.
 fn default_recode_budget() -> usize {
@@ -99,13 +105,25 @@ impl Weights {
             }
             files.push(map);
         }
-        Ok(Self { files, tensors, format: None, references: Mutex::new(HashMap::new()), recoded: Mutex::new(HashMap::new()), recode_budget: AtomicUsize::new(default_recode_budget()) })
+        Ok(Self { accelerator: None, files, tensors, format: None, references: Mutex::new(HashMap::new()), recoded: Mutex::new(HashMap::new()), recode_budget: AtomicUsize::new(default_recode_budget()) })
     }
 
     /// Makes every matrix read back as if stored in `format`.
     pub fn with_format(mut self, format: Option<WeightFormat>) -> Self {
         self.format = format;
         self
+    }
+
+    /// Runs the large matrix products on this system's GPU, if it has a usable one.
+    pub fn with_gpu(mut self) -> Self {
+        let files: Vec<&[u8]> = self.files.iter().map(|m| &m[..]).collect();
+        self.accelerator = accel::open(&files);
+        self
+    }
+
+    /// The GPU in use, if any.
+    pub fn accelerator_name(&self) -> Option<String> {
+        self.accelerator.as_ref().map(|a| a.name())
     }
 
     fn bytes(&self, name: &str) -> Result<(&[u8], &TensorRef), String> {
@@ -361,6 +379,10 @@ impl Matrix<'_> {
         Ok(y)
     }
 
+    fn gpu_for(&self, weights: usize) -> Option<&dyn Accelerator> {
+        self.owner.accelerator.as_deref().filter(|_| weights >= GPU_MIN_WEIGHTS)
+    }
+
     /// `y = M · x`, in parallel across rows. `x.len()` is the column count.
     pub fn apply(&self, x: &[f32], y: &mut [f32]) {
         self.apply_rows(0, x, y);
@@ -387,6 +409,12 @@ impl Matrix<'_> {
         }
         match &self.source {
             Source::Packed { words_per_row, groups, words, scales, biases } => {
+                if let Some(accelerator) = self.gpu_for(y.len() * cols) {
+                    let tensor = PackedTensor { words, scales, biases, bits: (words_per_row * 32 / cols) as u32, stride: words_per_row * 4, groups: *groups };
+                    if accelerator.float_product(&tensor, first, x, y) {
+                        return;
+                    }
+                }
                 let group_size = cols / groups;
                 let bits = words_per_row * 32 / cols;
                 let sums: Vec<f32> = x.chunks_exact(group_size).map(|c| c.iter().sum()).collect();
@@ -499,6 +527,12 @@ impl Matrix<'_> {
         }
         match &self.source {
             Source::Packed { words_per_row, groups, words, scales, biases } => {
+                if let Some(accelerator) = self.gpu_for(rows * cols) {
+                    let tensor = PackedTensor { words, scales, biases, bits: (words_per_row * 32 / cols) as u32, stride: words_per_row * 4, groups: *groups };
+                    if accelerator.exact_product(&tensor, first, x, ExactScale { shift: fraction + AFFINE_EXTRA - exponent as i32, limit }, &mut sums) {
+                        return sums;
+                    }
+                }
                 let group_size = cols / groups;
                 let bits = words_per_row * 32 / cols;
                 let stride = words_per_row * 4;
