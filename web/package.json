@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "wasm": "../scripts/build-wasm.sh",
-    "dev": "../scripts/dev.sh",
+    "wasm": "node ../scripts/run.mjs build-wasm",
+    "dev": "node ../scripts/run.mjs dev",
     "build": "npm run wasm && tsc --noEmit && vite build",
     "test": "vitest run"
   },

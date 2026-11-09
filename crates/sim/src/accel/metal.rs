@@ -71,7 +71,7 @@ impl MetalAccelerator {
             let (float_4, float_8, exact_4, exact_8) = (pipeline("float_4")?, pipeline("float_8")?, pipeline("exact_4")?, pipeline("exact_8")?);
             let mut files = Vec::new();
             for bytes in mapped {
-                if bytes.as_ptr() as usize % PAGE != 0 {
+                if !(bytes.as_ptr() as usize).is_multiple_of(PAGE) {
                     return None;
                 }
                 let pointer = NonNull::new(bytes.as_ptr() as *mut c_void)?;

@@ -598,7 +598,8 @@ fn affine_weight(q: u8, scale: i64, bias: i64, limit: i64) -> i64 {
 }
 
 /// `Σ ((q·scale + bias) >> 4) · x`, written so the compiler can vectorise it.
-#[inline]
+#[cfg_attr(target_arch = "x86_64", multiversion::multiversion(targets("x86_64+avx512f", "x86_64+avx2+fma")))]
+#[cfg_attr(not(target_arch = "x86_64"), inline)]
 fn dot_affine(codes: &[u8], x: &[i32], scale: i64, bias: i64, limit: i64) -> i64 {
     let mut total = 0i64;
     for (cs, xs) in codes.chunks(8).zip(x.chunks(8)) {
@@ -612,7 +613,8 @@ fn dot_affine(codes: &[u8], x: &[i32], scale: i64, bias: i64, limit: i64) -> i64
     total
 }
 
-#[inline]
+#[cfg_attr(target_arch = "x86_64", multiversion::multiversion(targets("x86_64+avx512f", "x86_64+avx2+fma")))]
+#[cfg_attr(not(target_arch = "x86_64"), inline)]
 fn dot_bytes(q: &[u8], x: &[f32]) -> f32 {
     let mut sum = [0f32; 8];
     for (qs, xs) in q.as_chunks::<8>().0.iter().zip(x.as_chunks::<8>().0) {
@@ -624,7 +626,8 @@ fn dot_bytes(q: &[u8], x: &[f32]) -> f32 {
     sum.iter().sum::<f32>() + q[tail..].iter().zip(&x[tail..]).map(|(a, b)| *a as f32 * b).sum::<f32>()
 }
 
-#[inline]
+#[cfg_attr(target_arch = "x86_64", multiversion::multiversion(targets("x86_64+avx512f", "x86_64+avx2+fma")))]
+#[cfg_attr(not(target_arch = "x86_64"), inline)]
 fn dot_nibbles(packed: &[u8], x: &[f32]) -> f32 {
     let mut low = [0f32; 8];
     let mut high = [0f32; 8];

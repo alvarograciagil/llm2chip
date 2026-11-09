@@ -6,8 +6,11 @@ edition.workspace = true
 [dependencies]
 compiler = { path = "../compiler" }
 netlist = { path = "../netlist" }
+ash = "0.38"
 half = "2"
 memmap2 = "0.9"
+multiversion = "0.8"
+naga = { version = "30", features = ["wgsl-in", "spv-out"] }
 rayon = "1"
 serde.workspace = true
 serde_json.workspace = true

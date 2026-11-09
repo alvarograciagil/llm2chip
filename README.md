@@ -43,7 +43,7 @@ La celda se exporta como proyecto completo: Verilog, VHDL, banco de pruebas, res
 | `crates/server` | Motor local |
 | `crates/wasm` | Enlace con el navegador |
 | `web` | Interfaz |
-| `app` | Empaquetado para macOS |
+| `app` | Empaquetado para macOS, Windows y Linux |
 | `tests/golden` | Mediciones sobre pesos reales |
 | `tools/synth` | Comparación de la netlist generada con Yosys y ABC |
 | `docs` | Notas de investigación y estado del arte |

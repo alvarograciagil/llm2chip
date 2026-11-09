@@ -41,7 +41,7 @@ fn write_checkpoint(dir: &Path, gap: usize) {
         add(&format!("{name}.biases"), "F16", vec![ROWS, GROUPS], biases, &mut data);
     }
     let mut text = serde_json::to_vec(&header).unwrap();
-    while (8 + text.len()) % 8 != 0 {
+    while !(8 + text.len()).is_multiple_of(8) {
         text.push(b' ');
     }
     let mut file = (text.len() as u64).to_le_bytes().to_vec();

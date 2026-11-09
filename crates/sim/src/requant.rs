@@ -189,6 +189,8 @@ pub struct Recoded {
     pub biases: Vec<f32>,
 }
 
+type GroupVisitor<'a> = Box<dyn FnMut(usize, &[f32], f32, f32) + 'a>;
+
 /// Whether a format's values are shared across groups once each group is normalised.
 fn is_framed(format: &WeightFormat, cols: usize) -> bool {
     format.group_size > 0 && cols >= format.group_size as usize && matches!(format.coding, WeightCoding::Affine | WeightCoding::Float)
@@ -242,7 +244,7 @@ pub fn recode(format: &WeightFormat, reference: &Reference, rows: usize, cols: u
     let groups = cols.div_ceil(group_size);
     let (scale_len, bias_len) = (rows * groups, rows * groups);
 
-    let visit = |index: usize, original: &mut Vec<f32>, row: &mut Vec<f32>, mut each: Box<dyn FnMut(usize, &[f32], f32, f32) + '_>| {
+    let visit = |index: usize, original: &mut Vec<f32>, row: &mut Vec<f32>, mut each: GroupVisitor<'_>| {
         decode(index, original);
         row.copy_from_slice(original);
         quantize(format, reference, row);

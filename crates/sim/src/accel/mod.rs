@@ -3,6 +3,9 @@
 
 #[cfg(target_os = "macos")]
 mod metal;
+// Compiled everywhere so that it keeps building, but only selected outside macOS.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+mod vulkan;
 
 /// A tensor in MLX affine form: `w = q · scale + bias`, with one scale and bias per group.
 pub struct PackedTensor<'a> {
@@ -38,6 +41,6 @@ pub fn open(files: &[&[u8]]) -> Option<Box<dyn Accelerator>> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = files;
-        None
+        vulkan::VulkanAccelerator::new().map(|a| Box::new(a) as Box<dyn Accelerator>)
     }
 }
