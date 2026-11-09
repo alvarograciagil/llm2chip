@@ -279,11 +279,11 @@ pub trait BlockOps: Sized {
     /// `rows` rows of the matrix from `first`. It is held in register `matrix`, but
     /// `name` lets an implementation stream it from the checkpoint instead.
     #[allow(clippy::too_many_arguments)]
-    fn matvec(&mut self, name: &str, matrix: u32, first: u32, src: u32, dst: u32, rows: u32, cols: u32);
+    fn matvec(&mut self, name: &str, matrix: u32, first: Self::N, src: u32, dst: u32, rows: u32, cols: u32);
     /// Copies one row of an embedding-like matrix into `dst`.
     fn copy_row(&mut self, name: &str, matrix: u32, row: Self::N, cols: u32, dst: u32);
     /// True only when an implementation can prove `reg[index]` is zero and may skip work.
-    fn known_zero(&self, _reg: u32, _index: u32) -> bool {
+    fn known_zero(&self, _reg: u32, _index: Self::N) -> bool {
         false
     }
 
@@ -1033,8 +1033,8 @@ impl BlockOps for Assembly {
         self.binary(OP_SUB, self.exponent(reg), self.sc(1), self.exponent(reg));
     }
 
-    fn matvec(&mut self, _name: &str, matrix: u32, first: u32, src: u32, dst: u32, rows: u32, cols: u32) {
-        self.dots(matrix, src, dst, rows.into(), cols.into(), |r, j| ((matrix, (r + first.into()) * cols + j), (src, j)));
+    fn matvec(&mut self, _name: &str, matrix: u32, first: Expr, src: u32, dst: u32, rows: u32, cols: u32) {
+        self.dots(matrix, src, dst, rows.into(), cols.into(), |r, j| ((matrix, (r + first) * cols + j), (src, j)));
     }
 
     fn copy_row(&mut self, _name: &str, matrix: u32, row: Expr, cols: u32, dst: u32) {

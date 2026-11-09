@@ -66,9 +66,8 @@ Todos los chips de un sistema salen de la misma netlist y leen la misma imagen. 
 
 | Nivel | Arquitecturas | Qué permite |
 |---|---|---|
-| Simulable | Qwen3.5 (con y sin MoE), Llama (incluido el RoPE de Llama 3), Mistral, Qwen3 | Diseñar su chip y ejecutar sus pesos reales |
-| Solo diseño | Qwen2 | Estimar y dibujar su chip |
-| Diseño aproximado | Gemma 1 a 3, Phi-3, Granite | Estimar su chip por su forma de capas; su activación o sus normas extra no se modelan |
+| Simulable | Qwen3.5 (con y sin MoE), Llama (incluido el RoPE de Llama 3), Mistral, Qwen2, Qwen3, Gemma 1, 2 y 3, DeepSeek V3 y R1 | Diseñar su chip y ejecutar sus pesos reales |
+| Diseño aproximado | Phi-3, Granite | Estimar su chip por su forma de capas; su activación o sus normas extra no se modelan |
 
 Para diseñar un chip basta el `config.json`, así que un modelo de Hugging Face se puede evaluar sin descargar sus pesos. Si un modelo necesita algo que el chip no tiene, la aplicación dice qué es. El firmware tokeniza siguiendo las reglas del propio modelo; quedan fuera los modelos Unigram y WordPiece y los normalizadores Precompiled, BERT y NMT, que no usan los modelos de generación habituales.
 
@@ -122,7 +121,7 @@ Windows tiene los equivalentes `.ps1`. Los pesos no se incluyen: la aplicación 
 - Con una misma imagen, dos chips idénticos en una placa simulada, con retardos y bits invertidos en los enlaces, generan el mismo texto y los mismos logits que uno solo.
 - La máquina de enteros exactos coincide bit a bit con las puertas en todos los búferes de esos modelos.
 - Qwen3.8-27B real se ejecuta de principio a fin con el firmware del chip. El tokenizador del firmware se compila desde el `tokenizer.json` de cada modelo y coincide con la biblioteca de referencia en miles de textos difíciles, también con los archivos reales de Llama 3.2, Mistral 7B, Mistral Nemo y DeepSeek V3.
-- Llama, Llama 3, Mistral y Qwen3 con pesos aleatorios diminutos dan los mismos logits que `mlx-lm`, token a token.
+- Todas las arquitecturas simulables con pesos aleatorios diminutos dan los mismos logits que `mlx-lm`, token a token.
 - Cada formato de peso y cada multiplicador se comprueban contra la aritmética de referencia, y el Verilog y el VHDL exportados se ejecutan en simuladores externos.
 
 Los detalles y mediciones están en [`docs/`](docs) y [`tests/golden/`](tests/golden).

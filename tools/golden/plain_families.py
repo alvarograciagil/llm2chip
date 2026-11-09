@@ -16,6 +16,12 @@ from mlx_lm.utils import _get_classes
 TOKENS = [3, 1, 4, 1, 5, 9, 2, 6]
 HIDDEN, HEADS, VOCAB = 16, 2, 32
 CASES = {
+    "deepseek_v3": {
+        "moe_intermediate_size": 8, "max_position_embeddings": 64, "num_hidden_layers": 3, "n_shared_experts": 1, "n_routed_experts": 6,
+        "routed_scaling_factor": 2.5, "kv_lora_rank": 8, "q_lora_rank": 12, "qk_rope_head_dim": 4, "v_head_dim": 8, "qk_nope_head_dim": 6,
+        "topk_method": "noaux_tc", "scoring_func": "sigmoid", "norm_topk_prob": True, "num_experts_per_tok": 2, "moe_layer_freq": 1,
+        "first_k_dense_replace": 1, "rope_theta": 10000.0, "attention_bias": False, "rms_norm_eps": 1e-6, "num_key_value_heads": 2,
+    },
     "gemma": {"num_key_value_heads": 1, "head_dim": 8},
     "gemma2": {"num_key_value_heads": 1, "head_dim": 8, "query_pre_attn_scalar": 12},
     "gemma3_text": {"num_key_value_heads": 1, "head_dim": 8, "query_pre_attn_scalar": 12, "sliding_window": 3, "sliding_window_pattern": 2, "max_position_embeddings": 64},

@@ -41,6 +41,24 @@ fn matrices_of(program: &Program, op: &Op) -> Vec<(String, usize, usize)> {
                 (format!("{prefix}.shared_expert_gate"), 1, hidden),
             ]
         }
+        Op::Mla { embed, unembed, heads, nope, lora, value_dim, .. } => vec![(embed.clone(), heads * lora, *nope), (unembed.clone(), heads * value_dim, *lora)],
+        Op::SigmoidMoe { prefix, src, experts, intermediate, shared_intermediate, .. } => {
+            let hidden = program.buffers[*src];
+            let mut list = vec![
+                (format!("{prefix}.gate"), *experts, hidden),
+                (format!("{prefix}.switch_mlp.gate_proj"), experts * intermediate, hidden),
+                (format!("{prefix}.switch_mlp.up_proj"), experts * intermediate, hidden),
+                (format!("{prefix}.switch_mlp.down_proj"), experts * hidden, *intermediate),
+            ];
+            if *shared_intermediate > 0 {
+                list.extend([
+                    (format!("{prefix}.shared_experts.gate_proj"), *shared_intermediate, hidden),
+                    (format!("{prefix}.shared_experts.up_proj"), *shared_intermediate, hidden),
+                    (format!("{prefix}.shared_experts.down_proj"), hidden, *shared_intermediate),
+                ]);
+            }
+            list
+        }
         _ => Vec::new(),
     }
 }
@@ -136,6 +154,9 @@ impl Layout {
                     let reg = alloc(1);
                     slot.insert(reg);
                     if chip_tokens.is_some() {
+                        if rows * cols > 1 << config.index_bits {
+                            return Err(format!("la matriz {name} tiene {} elementos y el direccionamiento solo llega a {}", rows * cols, 1usize << config.index_bits));
+                        }
                         let matrix = weights.matrix(&name)?;
                         let exponent = matrix.exponent(cols);
                         let mut flat = Vec::with_capacity(rows * cols);
@@ -182,6 +203,16 @@ impl Layout {
                         store(format!("escala:{cap}"), vec![*cap as f64], &mut setup, &mut small);
                     }
                 }
+                Op::Mla { nope, rope, .. } => root_of(nope + rope, &mut setup, &mut inverse_root),
+                Op::SigmoidMoe { prefix, experts, scaling, .. } => {
+                    let name = format!("{prefix}.gate.e_score_correction_bias");
+                    // An all-zero correction has no exponent worth aligning to, so it is left out.
+                    let correction: Vec<f64> = weights.floats(&name).map_or_else(|_| vec![0.0; *experts], |v| v.iter().map(|x| *x as f64).collect());
+                    if correction.iter().any(|v| *v != 0.0) {
+                        store(name, correction, &mut setup, &mut small);
+                    }
+                    store(format!("escala:{scaling}"), vec![*scaling as f64], &mut setup, &mut small);
+                }
                 Op::SoftCap { cap, .. } => {
                     store(format!("escala:{}", 1.0 / cap), vec![1.0 / *cap as f64], &mut setup, &mut small);
                     store(format!("escala:{cap}"), vec![*cap as f64], &mut setup, &mut small);
@@ -212,7 +243,13 @@ impl Layout {
         let epsilon = alloc(1);
         setup.load_vector(epsilon, &[program.rms_epsilon]);
         let rope = [alloc(1), alloc(1)];
-        let rope_half = all_ops(program).find_map(|i| if let Op::Rope { rotary, .. } = i.op { Some(rotary / 2) } else { None }).unwrap_or(0);
+        let rope_half = all_ops(program)
+            .find_map(|i| match i.op {
+                Op::Rope { rotary, .. } => Some(rotary / 2),
+                Op::Mla { rope, .. } => Some(rope / 2),
+                _ => None,
+            })
+            .unwrap_or(0);
         let rope_table = [alloc(1), alloc(1)];
         if let (Some(tokens), true) = (chip_tokens, rope_half > 0) {
             let tables = [(program.rope_theta, program.rope_scaling), (program.local_rope_theta.unwrap_or(program.rope_theta), None)];
@@ -446,7 +483,7 @@ impl Layout {
             }
             Op::Matvec { matrix, src, dst } => {
                 let (rows, cols) = (program.buffers[*dst] as u32, program.buffers[*src] as u32);
-                ops.matvec(matrix, self.weights[matrix], 0, self.reg(*src), self.reg(*dst), rows, cols);
+                ops.matvec(matrix, self.weights[matrix], 0.into(), self.reg(*src), self.reg(*dst), rows, cols);
             }
             Op::Copy { src, dst } => ops.copy_part(self.reg(*src), zero, self.reg(*dst), zero, size(*dst)),
             Op::Add { a, b, dst } => ops.add(self.reg(*a), self.reg(*b), self.reg(*dst), size(*dst)),
@@ -456,6 +493,42 @@ impl Layout {
                 let extra = self.temporaries[39];
                 ops.function(table, self.reg(*src), extra, size(*dst));
                 ops.multiply(extra, self.reg(*src), self.reg(*dst), size(*dst));
+            }
+            Op::Slice { src, from, dst } => ops.copy_part(self.reg(*src), (*from as u32).into(), self.reg(*dst), zero, size(*dst)),
+            Op::Mla { slot, query, latent, rope_key, embed, unembed, heads, nope, rope, lora, value_dim, dst, .. } => {
+                let (nope, rope, lora, value_dim, query) = (*nope as u32, *rope as u32, *lora as u32, *value_dim as u32, self.reg(*query));
+                let (q_head, width) = (nope + rope, lora + rope);
+                let store = self.keys[*slot];
+                // Latent and rotary key sit side by side, so one dot product scores both.
+                ops.copy_part(self.reg(*rope_key), zero, t[3], zero, rope.into());
+                ops.normalize(t[3], rope.into());
+                self.rotate_pairs(ops, t[3], rope, t[0]);
+                ops.gather(&[(self.reg(*latent), lora), (t[0], rope)], t[1]);
+                ops.align_to(t[1], zero, STATE_EXPONENT, store, position * width, width.into());
+                let tokens = position + 1.into();
+                ops.copy_part(store, zero, t[2], zero, tokens * width);
+                ops.normalize(t[2], tokens * width);
+                let regs = AttentionRegs { scores: t[10], top: t[11], shifted: t[12], weights: t[13], total: t[14], inverse: t[15], probabilities: t[16], softcap: None };
+                let scale = self.inverse_root[&(q_head as usize)];
+                let first = self.parts[0];
+                ops.each((*heads as u32).into(), |ops, h| {
+                    ops.with_window(h, &[first], |ops, offset| {
+                        ops.copy_part(query, h * q_head, t[3], zero, nope.into());
+                        ops.normalize(t[3], nope.into());
+                        ops.matvec(embed, self.weights[embed], h * lora, t[3], t[4], lora, nope);
+                        ops.copy_part(query, h * q_head + nope.into(), t[5], zero, rope.into());
+                        ops.normalize(t[5], rope.into());
+                        self.rotate_pairs(ops, t[5], rope, t[6]);
+                        ops.gather(&[(t[4], lora), (t[6], rope)], t[7]);
+                        ops.attention(t[7], t[2], t[2], self.ones, t[8], width, tokens, Some(scale), regs);
+                        ops.matvec(unembed, self.weights[unembed], h * value_dim, t[8], first + offset, value_dim, lora);
+                    });
+                });
+                let parts: Vec<(u32, u32)> = (0..*heads).map(|h| (self.parts[h], value_dim)).collect();
+                ops.gather(&parts, self.reg(*dst));
+            }
+            Op::SigmoidMoe { prefix, src, dst, experts, top_k, intermediate, shared_intermediate, scaling, normalize } => {
+                self.lower_sigmoid_moe(ops, prefix, self.reg(*src), self.reg(*dst), program.hidden as u32, *experts as u32, *top_k as u32, *intermediate as u32, *shared_intermediate as u32, *scaling, *normalize);
             }
             Op::SoftCap { src, cap, dst } => {
                 let (scaled, shaped) = (self.temporaries[38], self.temporaries[39]);
@@ -653,6 +726,84 @@ impl Layout {
         Ok(())
     }
 
+    /// Rotates consecutive pairs of `reg`, DeepSeek's form of RoPE.
+    fn rotate_pairs<O: BlockOps>(&self, ops: &mut O, reg: u32, rope: u32, dst: u32) {
+        let (half, table) = (self.rope_half as u32, self.rope[0]);
+        ops.each(half.into(), |ops, j| {
+            let (first, second) = (j * 2, j * 2 + 1.into());
+            ops.sum_products(first, &[((reg, first), (table, j)), ((reg, second), (table, j + half.into()))]);
+            ops.sum_products(second, &[((reg, second), (table, j)), ((reg, first), (table, j + (2 * half).into()))]);
+        });
+        ops.narrow_sums(reg, table, dst, rope.into());
+    }
+
+    /// DeepSeek's routing, in the same static form as `lower_moe`.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_sigmoid_moe<O: BlockOps>(&self, ops: &mut O, prefix: &str, x: u32, dst: u32, hidden: u32, experts: u32, top_k: u32, intermediate: u32, shared: u32, scaling: f32, normalize: bool) {
+        let t = &self.temporaries;
+        let zero: O::N = 0.into();
+        let (experts_n, hidden_n): (O::N, O::N) = (experts.into(), hidden.into());
+        let matrix = |name: &str| format!("{prefix}.{name}");
+        let reg_of = |name: &str| self.weights[&matrix(name)];
+        let (raw, top, chances, total, inverse, work, mark, remaining, chosen, selected, scores) = (t[50], t[51], t[53], t[54], t[55], t[56], t[57], t[58], t[59], t[60], t[61]);
+        ops.matvec(&matrix("gate"), reg_of("gate"), 0.into(), x, raw, experts, hidden);
+        ops.function(FN_SIGMOID, raw, chances, experts_n);
+        match self.small.get(&matrix("gate.e_score_correction_bias")) {
+            Some(correction) => ops.add(chances, *correction, work, experts_n),
+            None => ops.copy_part(chances, zero, work, zero, experts_n),
+        }
+        for pass in 0..top_k {
+            ops.maximum(work, experts_n, top);
+            ops.mark_equal(work, top, mark, experts_n);
+            if pass == 0 {
+                ops.copy_part(mark, zero, chosen, zero, experts_n);
+            } else {
+                ops.add(chosen, mark, t[62], experts_n);
+                ops.copy_part(t[62], zero, chosen, zero, experts_n);
+            }
+            ops.add_sub(true, (self.ones, zero), (mark, zero), 1, remaining, experts_n);
+            ops.multiply(work, remaining, t[62], experts_n);
+            ops.copy_part(t[62], zero, work, zero, experts_n);
+        }
+        ops.multiply(chances, chosen, selected, experts_n);
+        if top_k > 1 && normalize {
+            let ones = self.ones;
+            ops.dots(selected, ones, total, 1.into(), experts_n, |_, e| ((selected, e), (ones, e)));
+            ops.reciprocal(total, inverse);
+            ops.scale(inverse, selected, t[52], experts_n);
+        } else {
+            ops.copy_part(selected, zero, t[52], zero, experts_n);
+        }
+        ops.scale(self.small[&format!("escala:{scaling}")], t[52], scores, experts_n);
+
+        let outputs = t[48];
+        ops.set_exponent(outputs, EXPERT_EXPONENT);
+        let (gate, up, product, down) = (t[34], t[35], t[36], t[37]);
+        ops.each(experts_n, |ops, e| {
+            if ops.known_zero(scores, e) {
+                return;
+            }
+            ops.matvec(&matrix("switch_mlp.gate_proj"), reg_of("switch_mlp.gate_proj"), e * intermediate, x, gate, intermediate, hidden);
+            ops.matvec(&matrix("switch_mlp.up_proj"), reg_of("switch_mlp.up_proj"), e * intermediate, x, up, intermediate, hidden);
+            self.silu(ops, gate, t[38], intermediate.into());
+            ops.multiply(t[38], up, product, intermediate.into());
+            ops.matvec(&matrix("switch_mlp.down_proj"), reg_of("switch_mlp.down_proj"), e * hidden, product, down, hidden, intermediate);
+            ops.align_to(down, zero, EXPERT_EXPONENT, outputs, e * hidden, hidden_n);
+        });
+        let mixed = t[47];
+        ops.dots(scores, outputs, mixed, hidden_n, experts_n, |j, e| ((scores, e), (outputs, e * hidden + j)));
+        if shared == 0 {
+            ops.copy_part(mixed, zero, dst, zero, hidden_n);
+            return;
+        }
+        ops.matvec(&matrix("shared_experts.gate_proj"), reg_of("shared_experts.gate_proj"), 0.into(), x, gate, shared, hidden);
+        ops.matvec(&matrix("shared_experts.up_proj"), reg_of("shared_experts.up_proj"), 0.into(), x, up, shared, hidden);
+        self.silu(ops, gate, t[38], shared.into());
+        ops.multiply(t[38], up, product, shared.into());
+        ops.matvec(&matrix("shared_experts.down_proj"), reg_of("shared_experts.down_proj"), 0.into(), product, down, hidden, shared);
+        ops.add(mixed, down, dst, hidden_n);
+    }
+
     /// Routes to the `top_k` experts. Selection uses only static operations, so the
     /// gates can evaluate every expert while unselected ones get a score of zero.
     #[allow(clippy::too_many_arguments)]
@@ -664,7 +815,7 @@ impl Layout {
         let reg_of = |name: &str| self.weights[&matrix(name)];
         let (raw, top, shifted, chances, total, inverse, work, mark, remaining, chosen, selected, scores) = (t[50], t[51], t[52], t[53], t[54], t[55], t[56], t[57], t[58], t[59], t[60], t[61]);
 
-        ops.matvec(&matrix("gate"), reg_of("gate"), 0, x, raw, experts, hidden);
+        ops.matvec(&matrix("gate"), reg_of("gate"), 0.into(), x, raw, experts, hidden);
         ops.maximum(raw, experts_n, top);
         ops.sub_scalar(raw, top, shifted, experts_n);
         ops.function(FN_EXP, shifted, chances, experts_n);
@@ -694,26 +845,26 @@ impl Layout {
         let outputs = t[48];
         ops.set_exponent(outputs, EXPERT_EXPONENT);
         let (gate, up, product, down) = (t[34], t[35], t[36], t[37]);
-        for e in 0..experts {
+        ops.each(experts_n, |ops, e| {
             if ops.known_zero(scores, e) {
-                continue;
+                return;
             }
             ops.matvec(&matrix("switch_mlp.gate_proj"), reg_of("switch_mlp.gate_proj"), e * intermediate, x, gate, intermediate, hidden);
             ops.matvec(&matrix("switch_mlp.up_proj"), reg_of("switch_mlp.up_proj"), e * intermediate, x, up, intermediate, hidden);
             self.silu(ops, gate, t[38], intermediate.into());
             ops.multiply(t[38], up, product, intermediate.into());
             ops.matvec(&matrix("switch_mlp.down_proj"), reg_of("switch_mlp.down_proj"), e * hidden, product, down, hidden, intermediate);
-            ops.align_to(down, zero, EXPERT_EXPONENT, outputs, (e * hidden).into(), hidden_n);
-        }
+            ops.align_to(down, zero, EXPERT_EXPONENT, outputs, e * hidden, hidden_n);
+        });
         let mixed = t[47];
         ops.dots(scores, outputs, mixed, hidden_n, experts_n, |j, e| ((scores, e), (outputs, e * hidden + j)));
 
-        ops.matvec(&matrix("shared_expert.gate_proj"), reg_of("shared_expert.gate_proj"), 0, x, gate, shared, hidden);
-        ops.matvec(&matrix("shared_expert.up_proj"), reg_of("shared_expert.up_proj"), 0, x, up, shared, hidden);
+        ops.matvec(&matrix("shared_expert.gate_proj"), reg_of("shared_expert.gate_proj"), 0.into(), x, gate, shared, hidden);
+        ops.matvec(&matrix("shared_expert.up_proj"), reg_of("shared_expert.up_proj"), 0.into(), x, up, shared, hidden);
         self.silu(ops, gate, t[38], shared.into());
         ops.multiply(t[38], up, product, shared.into());
-        ops.matvec(&matrix("shared_expert.down_proj"), reg_of("shared_expert.down_proj"), 0, product, down, hidden, shared);
-        ops.matvec(&matrix("shared_expert_gate"), reg_of("shared_expert_gate"), 0, x, t[49], 1, hidden);
+        ops.matvec(&matrix("shared_expert.down_proj"), reg_of("shared_expert.down_proj"), 0.into(), product, down, hidden, shared);
+        ops.matvec(&matrix("shared_expert_gate"), reg_of("shared_expert_gate"), 0.into(), x, t[49], 1, hidden);
         ops.function(FN_SIGMOID, t[49], t[63], 1.into());
         ops.scale(t[63], down, t[62], hidden_n);
         ops.add(mixed, t[62], dst, hidden_n);

@@ -333,13 +333,13 @@ fn a_die_built_for_its_program_runs_it_identically_with_less_logic() {
 #[test]
 #[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
 fn sliding_windows_and_biases_run_on_the_gates() {
-    for family in ["gemma3_text", "qwen2"] {
+    for family in ["gemma3_text", "qwen2", "deepseek_v3"] {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/plain").join(family);
         let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
         let program = compiler::compile_model(&config).unwrap();
         // More tokens than the window holds, so the ring wraps around.
         let tokens = [3u32, 1, 4, 1, 5];
-        let c = DieConfig { microcode_bits: 18, ..die_config() };
+        let c = DieConfig { index_bits: 10, microcode_bits: 18, ..die_config() };
         let mut run = gates_after(&program, &dir, c, &tokens);
         let mut vm = ExactEngine::new(compiler::compile_model(&config).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
         for (position, token) in tokens.iter().enumerate() {

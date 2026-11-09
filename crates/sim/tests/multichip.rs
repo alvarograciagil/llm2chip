@@ -37,6 +37,9 @@ impl Noise {
     }
 }
 
+/// Often enough to hit a run of a few words, rarely enough to stay correctable.
+const FLIP_EVERY: u64 = 8;
+
 /// One direction of a link on the board: wires with delay, gaps and the odd flipped bit.
 struct Wire {
     from: usize,
@@ -55,7 +58,7 @@ impl Wire {
     /// Drives the receiving pins with what left the other chip `WIRE_DELAY` cycles ago.
     fn drive(&mut self, chips: &mut [Simulator], noise: &mut Noise, flips: &mut u32) {
         let (mut valid, mut bits) = self.forward.pop_front().unwrap();
-        if valid == 1 && noise.next().is_multiple_of(40) {
+        if valid == 1 && noise.next().is_multiple_of(FLIP_EVERY) {
             bits ^= 1 << (noise.next() % self.width as u64);
             *flips += 1;
         }

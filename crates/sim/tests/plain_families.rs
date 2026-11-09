@@ -5,7 +5,7 @@ use serde_json::Value;
 use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
 use std::path::PathBuf;
 
-const FAMILIES: [&str; 8] = ["llama", "llama3", "mistral", "qwen2", "qwen3", "gemma", "gemma2", "gemma3_text"];
+const FAMILIES: [&str; 9] = ["deepseek_v3", "llama", "llama3", "mistral", "qwen2", "qwen3", "gemma", "gemma2", "gemma3_text"];
 
 fn case(family: &str) -> (PathBuf, String, Vec<u32>, Vec<Vec<f32>>) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/plain").join(family);

@@ -347,6 +347,105 @@ impl Engine {
         Ok(())
     }
 
+    /// DeepSeek's routing: top scores by sigmoid plus correction, weighted by plain sigmoid.
+    #[allow(clippy::too_many_arguments)]
+    fn run_sigmoid_moe(&mut self, prefix: &str, src: usize, dst: usize, experts: usize, top_k: usize, intermediate: usize, shared: usize, scaling: f32, normalize: bool) -> Result<(), String> {
+        let x = self.buffers[src].clone();
+        let hidden = x.len();
+        let f = self.functions;
+        let mut gates = vec![0f32; experts];
+        self.weights.matrix(&format!("{prefix}.gate"))?.apply(&x, &mut gates);
+        let correction = self.weights.floats(&format!("{prefix}.gate.e_score_correction_bias")).unwrap_or_else(|_| vec![0.0; experts]);
+        let plain: Vec<f32> = gates.iter().map(|g| f.sigmoid(*g)).collect();
+        let mut order: Vec<usize> = (0..experts).collect();
+        order.select_nth_unstable_by(top_k - 1, |a, b| (plain[*b] + correction[*b]).total_cmp(&(plain[*a] + correction[*a])));
+        order.truncate(top_k);
+        let total: f32 = order.iter().map(|e| plain[*e]).sum();
+
+        let gate = self.weights.matrix(&format!("{prefix}.switch_mlp.gate_proj"))?;
+        let up = self.weights.matrix(&format!("{prefix}.switch_mlp.up_proj"))?;
+        let down = self.weights.matrix(&format!("{prefix}.switch_mlp.down_proj"))?;
+        let mut result = vec![0f32; hidden];
+        let (mut gated, mut lifted) = (vec![0f32; intermediate], vec![0f32; intermediate]);
+        let mut out = vec![0f32; hidden];
+        for expert in order {
+            gate.apply_rows(expert * intermediate, &x, &mut gated);
+            up.apply_rows(expert * intermediate, &x, &mut lifted);
+            let product: Vec<f32> = gated.iter().zip(&lifted).map(|(g, u)| f.silu(*g) * u).collect();
+            down.apply_rows(expert * hidden, &product, &mut out);
+            let share = if top_k > 1 && normalize { plain[expert] / total } else { plain[expert] };
+            result.iter_mut().zip(&out).for_each(|(r, o)| *r += share * scaling * o);
+        }
+        if shared > 0 {
+            let (mut g, mut u) = (vec![0f32; shared], vec![0f32; shared]);
+            self.weights.matrix(&format!("{prefix}.shared_experts.gate_proj"))?.apply(&x, &mut g);
+            self.weights.matrix(&format!("{prefix}.shared_experts.up_proj"))?.apply(&x, &mut u);
+            let product: Vec<f32> = g.iter().zip(&u).map(|(a, b)| f.silu(*a) * b).collect();
+            self.weights.matrix(&format!("{prefix}.shared_experts.down_proj"))?.apply(&product, &mut out);
+            result.iter_mut().zip(&out).for_each(|(r, o)| *r += o);
+        }
+        self.buffers[dst].copy_from_slice(&result);
+        self.quantize(dst);
+        Ok(())
+    }
+
+    /// Rotates consecutive pairs by this position's angle for each pair.
+    fn rotate_pairs(&self, values: &mut [f32]) {
+        let dims = values.len();
+        let position = self.rope_position as f32;
+        for (i, pair) in values.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            let angle = position / self.program.rope_theta.powf((2 * i) as f32 / dims as f32);
+            let (a, b) = (pair[0], pair[1]);
+            pair[0] = a * angle.cos() - b * angle.sin();
+            pair[1] = a * angle.sin() + b * angle.cos();
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_mla(&mut self, slot: usize, query: usize, latent: usize, rope_key: usize, embed: &str, unembed: &str, heads: usize, nope: usize, rope: usize, lora: usize, value_dim: usize, scale: f32, dst: usize) -> Result<(), String> {
+        let mut key = self.buffers[rope_key].clone();
+        self.rotate_pairs(&mut key);
+        let kv = &mut self.kv[slot];
+        kv.keys.extend_from_slice(&key);
+        kv.values.extend_from_slice(&self.buffers[latent]);
+        let tokens = kv.keys.len() / rope;
+        let (keys, values) = (kv.keys.clone(), kv.values.clone());
+
+        let embed = self.weights.matrix(embed)?;
+        let unembed = self.weights.matrix(unembed)?;
+        let f = self.functions;
+        let q_head = nope + rope;
+        let q = self.buffers[query].clone();
+        let mut output = vec![0f32; heads * value_dim];
+        let mut embedded = vec![0f32; lora];
+        let mut summed = vec![0f32; lora];
+        for h in 0..heads {
+            let head = &q[h * q_head..(h + 1) * q_head];
+            let mut rotary = head[nope..].to_vec();
+            self.rotate_pairs(&mut rotary);
+            embed.apply_rows(h * lora, &head[..nope], &mut embedded);
+            let scores: Vec<f32> = (0..tokens)
+                .map(|t| {
+                    let latent_score: f32 = embedded.iter().zip(&values[t * lora..(t + 1) * lora]).map(|(a, b)| a * b).sum();
+                    let rope_score: f32 = rotary.iter().zip(&keys[t * rope..(t + 1) * rope]).map(|(a, b)| a * b).sum();
+                    (latent_score + rope_score) * scale
+                })
+                .collect();
+            let top = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let weights: Vec<f32> = scores.iter().map(|s| f.exp(*s - top)).collect();
+            let inverse = f.reciprocal(weights.iter().sum());
+            summed.iter_mut().for_each(|v| *v = 0.0);
+            for (t, weight) in weights.iter().enumerate() {
+                let share = weight * inverse;
+                summed.iter_mut().zip(&values[t * lora..(t + 1) * lora]).for_each(|(s, v)| *s += share * v);
+            }
+            unembed.apply_rows(h * value_dim, &summed, &mut output[h * value_dim..(h + 1) * value_dim]);
+        }
+        self.buffers[dst].copy_from_slice(&output);
+        self.quantize(dst);
+        Ok(())
+    }
+
     fn run_op(&mut self, op: &Op, token: u32) -> Result<(), String> {
         match op {
             Op::EmbRead { table, dst } => {
@@ -381,6 +480,17 @@ impl Engine {
                 let (x, y) = pair(&mut self.buffers, *src, *dst);
                 y.iter_mut().zip(x).for_each(|(o, v)| *o = f.gelu(*v, *approximate));
                 self.quantize(*dst);
+            }
+            Op::Slice { src, from, dst } => {
+                let length = self.buffers[*dst].len();
+                let part = self.buffers[*src][*from..*from + length].to_vec();
+                self.buffers[*dst].copy_from_slice(&part);
+            }
+            Op::Mla { slot, query, latent, rope_key, embed, unembed, heads, nope, rope, lora, value_dim, scale, dst } => {
+                self.run_mla(*slot, *query, *latent, *rope_key, embed, unembed, *heads, *nope, *rope, *lora, *value_dim, *scale, *dst)?;
+            }
+            Op::SigmoidMoe { prefix, src, dst, experts, top_k, intermediate, shared_intermediate, scaling, normalize } => {
+                self.run_sigmoid_moe(prefix, *src, *dst, *experts, *top_k, *intermediate, *shared_intermediate, *scaling, *normalize)?;
             }
             Op::SoftCap { src, cap, dst } => {
                 let f = self.functions;

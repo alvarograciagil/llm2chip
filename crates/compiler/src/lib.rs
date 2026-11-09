@@ -37,6 +37,13 @@ pub enum Op {
     DeltaStep { slot: usize, mixed: Buf, a: Buf, b: Buf, a_log: String, dt_bias: String, key_dim: usize, key_heads: usize, value_dim: usize, value_heads: usize, dst: Buf },
     RmsGated { src: Buf, z: Buf, weight: String, block: usize, dst: Buf },
     Concat { a: Buf, b: Buf, dst: Buf },
+    /// Copies the part of `src` starting at `from` that fits `dst`.
+    Slice { src: Buf, from: usize, dst: Buf },
+    /// DeepSeek's multi-head latent attention, one step: stores the token's latent and
+    /// rotary key, then attends over them all for every head.
+    Mla { slot: usize, query: Buf, latent: Buf, rope_key: Buf, embed: String, unembed: String, heads: usize, nope: usize, rope: usize, lora: usize, value_dim: usize, scale: f32, dst: Buf },
+    /// DeepSeek's mixture: experts chosen by sigmoid scores plus their correction.
+    SigmoidMoe { prefix: String, src: Buf, dst: Buf, experts: usize, top_k: usize, intermediate: usize, shared_intermediate: usize, scaling: f32, normalize: bool },
     /// Sparse mixture of experts: routes to `top_k` experts plus a shared expert.
     Moe { prefix: String, src: Buf, dst: Buf, experts: usize, top_k: usize, intermediate: usize, shared_intermediate: usize },
 }
@@ -49,6 +56,9 @@ impl Op {
             Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Gelu { src, dst, .. } | Op::Scale { src, dst, .. } | Op::SoftCap { src, dst, .. } | Op::AddWeight { src, dst, .. } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } | Op::Moe { src, dst, .. } => (vec![*src], vec![*dst]),
             Op::Add { a, b, dst } | Op::MulElem { a, b, dst } | Op::Concat { a, b, dst } => (vec![*a, *b], vec![*dst]),
             Op::SplitQueryGate { src, query, gate, .. } => (vec![*src], vec![*query, *gate]),
+            Op::Slice { src, dst, .. } => (vec![*src], vec![*dst]),
+            Op::Mla { query, latent, rope_key, dst, .. } => (vec![*query, *latent, *rope_key], vec![*dst]),
+            Op::SigmoidMoe { src, dst, .. } => (vec![*src], vec![*dst]),
             Op::Rope { buf, .. } => (vec![*buf], vec![*buf]),
             Op::KvAppend { key, value, .. } => (vec![*key, *value], vec![]),
             Op::AttnSum { query, dst, .. } => (vec![*query], vec![*dst]),
@@ -282,7 +292,7 @@ fn emit_layer_tail(e: &mut Emit, s: &Shape, prefix: &str, x: Buf, mixed: Buf) ->
 }
 
 /// The checkpoints `compile_model` can turn into a program, by `model_type`.
-pub const SIMULATED_FAMILIES: [&str; 11] = ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "llama", "mistral", "qwen2", "qwen3", "gemma", "gemma2", "gemma3_text"];
+pub const SIMULATED_FAMILIES: [&str; 12] = ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "llama", "mistral", "qwen2", "qwen3", "gemma", "gemma2", "gemma3_text", "deepseek_v3"];
 
 /// Compiles any supported checkpoint from its `config.json`.
 pub fn compile_model(config: &str) -> Result<Program, String> {
@@ -293,6 +303,7 @@ pub fn compile_model(config: &str) -> Result<Program, String> {
     match value.get("model_type").and_then(Value::as_str) {
         Some("qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text") => compile_qwen3_5(config),
         Some("llama" | "mistral" | "qwen2" | "qwen3" | "gemma" | "gemma2" | "gemma3_text") => compile_llama(&value),
+        Some("deepseek_v3") => compile_deepseek(&value),
         Some(other) => Err(format!("no hay compilador para la arquitectura «{other}»")),
         None => Err("el config no indica model_type".into()),
     }
@@ -481,6 +492,95 @@ fn compile_llama(config: &Value) -> Result<Program, String> {
         logits = capped;
     }
     e.program.logits = logits;
+    Ok(e.program)
+}
+
+/// Compiles DeepSeek V3 and R1, following their reference code.
+fn compile_deepseek(config: &Value) -> Result<Program, String> {
+    let (hidden, vocab, layers, heads) = (dim(config, "hidden_size")?, dim(config, "vocab_size")?, dim(config, "num_hidden_layers")?, dim(config, "num_attention_heads")?);
+    let (lora, rope, nope, value_dim) = (dim(config, "kv_lora_rank")?, dim(config, "qk_rope_head_dim")?, dim(config, "qk_nope_head_dim")?, dim(config, "v_head_dim")?);
+    let q_rank = config.get("q_lora_rank").and_then(Value::as_u64).map(|v| v as usize);
+    if config.get("rope_scaling").is_some_and(|r| !r.is_null()) {
+        return Err("usa un RoPE escalado que el compilador no genera en esta arquitectura".into());
+    }
+    let groups = config.get("n_group").and_then(Value::as_u64).unwrap_or(1);
+    if groups > 1 && config.get("topk_group").and_then(Value::as_u64).unwrap_or(1) != groups {
+        return Err("elige expertos por grupos y el compilador todavía no lo genera".into());
+    }
+    let wanted = |key: &str, value: &str| config.get(key).and_then(Value::as_str).is_none_or(|v| v == value);
+    if !wanted("topk_method", "noaux_tc") || !wanted("scoring_func", "sigmoid") {
+        return Err("usa un método de selección de expertos que el compilador no genera".into());
+    }
+    let bias = config.get("attention_bias").and_then(Value::as_bool).unwrap_or(false);
+    let q_head = nope + rope;
+    let intermediate = dim(config, "intermediate_size")?;
+    let routed = config.get("n_routed_experts").and_then(Value::as_u64).map(|v| v as usize);
+    let first_dense = config.get("first_k_dense_replace").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let frequency = config.get("moe_layer_freq").and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
+    let rope_theta = config.get("rope_theta").and_then(Value::as_f64).unwrap_or(10_000.0) as f32;
+    let shape = Shape { hidden, intermediate, heads, kv_heads: heads, head_dim: q_head, rotary: rope, moe: None };
+
+    let mut e = Emit { program: empty_program("deepseek_v3", vocab, hidden, layers, rope_theta), layer: None, norm_offset: 0.0 };
+    e.program.rms_epsilon = config.get("rms_norm_eps").and_then(Value::as_f64).unwrap_or(1e-6);
+    let mut x = e.buf(hidden);
+    e.op("Leer embedding", Op::EmbRead { table: "model.embed_tokens".into(), dst: x });
+    for i in 0..layers {
+        e.layer = Some(i as u32);
+        let prefix = format!("model.layers.{i}");
+        let p = |s: &str| format!("{prefix}.self_attn.{s}");
+        let normed = e.norm("Normalizar entrada", x, format!("{prefix}.input_layernorm"), hidden, hidden);
+        let query = match q_rank {
+            Some(rank) => {
+                let compact = with_bias(&mut e, "Proyección Q latente", p("q_a_proj"), normed, rank, bias);
+                let compact = e.norm("Normalizar Q latente", compact, p("q_a_layernorm"), rank, rank);
+                e.matvec("Expandir Q", p("q_b_proj"), compact, heads * q_head)
+            }
+            None => e.matvec("Proyección Q", p("q_proj"), normed, heads * q_head),
+        };
+        let compressed = with_bias(&mut e, "Proyección KV latente", p("kv_a_proj_with_mqa"), normed, lora + rope, bias);
+        let raw_latent = e.buf(lora);
+        e.op("Separar latente", Op::Slice { src: compressed, from: 0, dst: raw_latent });
+        let rope_key = e.buf(rope);
+        e.op("Separar clave rotada", Op::Slice { src: compressed, from: lora, dst: rope_key });
+        let latent = e.norm("Normalizar latente", raw_latent, p("kv_a_layernorm"), lora, lora);
+        let slot = e.program.kv_slots.len();
+        e.program.kv_slots.push(KvShape { head_dim: lora + rope, heads: 1 });
+        let attended = e.buf(heads * value_dim);
+        e.op("Atención latente", Op::Mla { slot, query, latent, rope_key, embed: p("embed_q"), unembed: p("unembed_out"), heads, nope, rope, lora, value_dim, scale: (q_head as f32).powf(-0.5), dst: attended });
+        let mixed = with_bias(&mut e, "Proyección de salida", p("o_proj"), attended, hidden, bias);
+        let after_attention = e.buf(hidden);
+        e.op("Residual", Op::Add { a: x, b: mixed, dst: after_attention });
+        let before_mlp = e.norm("Normalizar", after_attention, format!("{prefix}.post_attention_layernorm"), hidden, hidden);
+        let is_moe = i >= first_dense && i.is_multiple_of(frequency);
+        let feed = match routed.filter(|_| is_moe) {
+            Some(experts) => {
+                let dst = e.buf(hidden);
+                let moe_size = dim(config, "moe_intermediate_size")?;
+                let shared = config.get("n_shared_experts").and_then(Value::as_u64).unwrap_or(0) as usize;
+                e.op("Mezcla de expertos", Op::SigmoidMoe {
+                    prefix: format!("{prefix}.mlp"),
+                    src: before_mlp,
+                    dst,
+                    experts,
+                    top_k: config.get("num_experts_per_tok").and_then(Value::as_u64).unwrap_or(1) as usize,
+                    intermediate: moe_size,
+                    shared_intermediate: moe_size * shared,
+                    scaling: config.get("routed_scaling_factor").and_then(Value::as_f64).unwrap_or(1.0) as f32,
+                    normalize: config.get("norm_topk_prob").and_then(Value::as_bool).unwrap_or(true),
+                });
+                dst
+            }
+            None => plain_mlp(&mut e, &shape, &prefix, before_mlp, None, false),
+        };
+        let next = e.buf(hidden);
+        e.op("Residual", Op::Add { a: after_attention, b: feed, dst: next });
+        x = next;
+    }
+    e.layer = None;
+    e.program.logits_from = e.program.ops.len();
+    let normed = e.norm("Norma final", x, "model.norm".into(), hidden, hidden);
+    e.program.final_hidden = normed;
+    e.program.logits = e.matvec("Salida de vocabulario", "lm_head".into(), normed, vocab);
     Ok(e.program)
 }
 
@@ -693,6 +793,8 @@ mod tests {
                 Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Gelu { src, dst, .. } | Op::Scale { src, dst, .. } | Op::SoftCap { src, dst, .. } | Op::AddWeight { src, dst, .. } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } => (vec![*src], vec![*dst]),
                 Op::Add { a, b, dst } | Op::MulElem { a, b, dst } => (vec![*a, *b], vec![*dst]),
                 Op::SplitQueryGate { src, query, gate, .. } => (vec![*src], vec![*query, *gate]),
+                Op::Slice { src, dst, .. } | Op::SigmoidMoe { src, dst, .. } => (vec![*src], vec![*dst]),
+                Op::Mla { query, latent, rope_key, dst, .. } => (vec![*query, *latent, *rope_key], vec![*dst]),
                 Op::Rope { buf, .. } => (vec![*buf], vec![*buf]),
                 Op::KvAppend { key, value, .. } => (vec![*key, *value], vec![]),
                 Op::AttnSum { query, dst, .. } => (vec![*query], vec![*dst]),
