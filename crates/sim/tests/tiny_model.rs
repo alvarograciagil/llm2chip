@@ -329,3 +329,29 @@ fn a_die_built_for_its_program_runs_it_identically_with_less_logic() {
     assert!(netlist::word_bits(&trimmed) < netlist::word_bits(&c));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
+fn sliding_windows_and_biases_run_on_the_gates() {
+    for family in ["gemma3_text", "qwen2"] {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/plain").join(family);
+        let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
+        let program = compiler::compile_model(&config).unwrap();
+        // More tokens than the window holds, so the ring wraps around.
+        let tokens = [3u32, 1, 4, 1, 5];
+        let c = DieConfig { microcode_bits: 18, ..die_config() };
+        let mut run = gates_after(&program, &dir, c, &tokens);
+        let mut vm = ExactEngine::new(compiler::compile_model(&config).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
+        for (position, token) in tokens.iter().enumerate() {
+            vm.step(*token, position + 1 == tokens.len()).unwrap();
+        }
+        for (buffer, length) in program.buffers.iter().enumerate() {
+            let gates = run.layout.register_of(buffer);
+            let fast = vm.register_of(buffer);
+            for index in 0..*length as u32 {
+                let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
+                assert_eq!(mantissa, vm.mantissa(fast, index), "{family}, búfer {buffer}, elemento {index}");
+            }
+        }
+    }
+}

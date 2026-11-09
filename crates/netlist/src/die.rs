@@ -1375,7 +1375,7 @@ impl DieProgram {
         let mut keys = BTreeSet::new();
         let active = self.active.clone();
         visit_indices(body, &mut |index| {
-            let key = index.restricted(|v| v == variable || active.contains(&v) || matches!(v, Var::Token | Var::Position));
+            let key = index.restricted(|v| v == variable || active.contains(&v) || matches!(v, Var::Token | Var::Position | Var::WindowLength(_) | Var::WindowSlot(_)));
             if key.coefficient(variable) != 0 {
                 keys.insert(ExprKey(key));
             }
