@@ -10,7 +10,7 @@ use netlist::die::word_bits;
 use netlist::image::{build_image, Segment, Target};
 use netlist::sampler::{exponential_table, SamplerConfig};
 use netlist::soc::{FirmwareImage, SocConfig};
-use netlist::{cell_design, die_design, to_verilog, to_vhdl, CellConfig, ControlWord, Design, DieConfig, Simulator, TestStep};
+use netlist::{cell_design, die_design, to_verilog, to_vhdl, CellConfig, ControlWord, Design, DieConfig, RomWord, Simulator, TestStep};
 use wasm_bindgen::prelude::*;
 
 const BUILTIN_MODELS: [(&str, &str, &str); 6] = [
@@ -164,10 +164,18 @@ impl CellSimulation {
         let c = self.config;
         let step = |pairs: &[(&str, u128)]| TestStep { inputs: pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect() };
         let mut steps = vec![step(&[("clear", 1)])];
-        for address in 0..(1u128 << c.addr_bits.min(4)) {
-            steps.push(step(&[("clear", 0), ("load_en", 1), ("load_addr", address), ("load_data", (address + 1) & ((1 << c.weight_bits) - 1))]));
+        let weights = 1u128 << c.addr_bits.min(4);
+        let value = |address: u128| (address + 1) & ((1 << c.weight_bits) - 1);
+        let mut rom = Vec::new();
+        if c.fixed_weights {
+            rom.extend((0..weights).map(|address| RomWord { path: "weight_rom".into(), address: address as usize, value: value(address) }));
+            steps.push(step(&[("clear", 1)]));
+        } else {
+            for address in 0..weights {
+                steps.push(step(&[("clear", 0), ("load_en", 1), ("load_addr", address), ("load_data", value(address))]));
+            }
+            steps.push(step(&[("load_en", 0), ("clear", 1)]));
         }
-        steps.push(step(&[("load_en", 0), ("clear", 1)]));
         for x in 0..(1u128 << c.addr_bits.min(4)) {
             steps.push(step(&[("clear", 0), ("run", 1), ("x", x * 100 + 1)]));
         }
@@ -175,8 +183,14 @@ impl CellSimulation {
             steps.push(step(&[("run", 0)]));
         }
         let report = serde_json::json!({ "config": c, "latency": c.latency(), "counts": self.design.flat_counts() }).to_string();
-        let options = ProjectOptions { name: "Celda de cálculo", description: "Una celda de cálculo del chip generado: memoria de pesos, decodificador, multiplicador y acumulador.", clock_ns, watch: "total", report };
+        let options = ProjectOptions { name: "Celda de cálculo", description: "Una celda de cálculo del chip generado: memoria de pesos, decodificador, multiplicador y acumulador.", clock_ns, watch: "total", report, rom };
         to_js(&project_files(&self.design, &steps, &options))
+    }
+
+    /// Fixes one word of a ROM, as the mask does at manufacture.
+    pub fn burn(&mut self, memory: &str, address: u32, value: &str) -> Result<(), JsError> {
+        let parsed: u128 = value.parse().map_err(|_| JsError::new("valor inválido"))?;
+        self.sim.poke_memory(&format!("/{memory}"), address as usize, parsed).map_err(|e| JsError::new(&e.0))
     }
 
     /// `value` is a decimal string so 64-bit inputs keep every bit.
@@ -302,7 +316,7 @@ impl DieSimulation {
         let config = if kind == "mlp" {
             DieConfig {
                 cells: 3,
-                cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: p.mac_stages, adder_stages: p.adder_stages, addr_bits: 4, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array },
+                cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: p.mac_stages, adder_stages: p.adder_stages, addr_bits: 4, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: p.weight_backend == arch::WeightBackend::Rom },
                 scale_bits: 16,
                 reg_bits: 3,
                 index_bits: 4,

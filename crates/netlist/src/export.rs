@@ -1,6 +1,6 @@
 //! A ready-to-use project around a design: RTL, testbench, constraints and tool scripts.
 
-use crate::{to_verilog, to_vhdl, verilog_testbench, Design, TestStep};
+use crate::{to_verilog, to_vhdl, verilog_testbench_with_rom, Design, RomWord, TestStep};
 use std::collections::BTreeMap;
 
 pub struct ProjectOptions<'a> {
@@ -9,6 +9,8 @@ pub struct ProjectOptions<'a> {
     pub clock_ns: f64,
     pub watch: &'a str,
     pub report: String,
+    /// Contents of the ROMs, for the testbench.
+    pub rom: Vec<RomWord>,
 }
 
 fn sdc(clock_ns: f64) -> String {
@@ -41,7 +43,7 @@ fn makefile(top: &str) -> String {
 
 fn readme(options: &ProjectOptions<'_>, top: &str) -> String {
     format!(
-        "# {name}\n\n{description}\n\nGenerado por llm2chip.\n\n## Archivos\n\n- `rtl/{top}.v` y `rtl/{top}.vhd`: el circuito completo en puertas, en Verilog-2001 y VHDL-2008.\n- `tb/testbench.v`: carga pesos, ejecuta y muestra `{watch}` en cada ciclo.\n- `constr/`: reloj objetivo de {clock:.3} ns, en SDC y XDC.\n- `synth/`: guiones para Yosys y Vivado.\n- `report.json`: parámetros, puertas y latencia.\n\n## Uso\n\n```bash\nmake sim\nmake synth\nmake fpga\n```\n\nLas memorias se describen como matrices de registros. Para una tecnología concreta, sustituye `llm2chip_sram` y `llm2chip_ram2p` por las macros de memoria de esa fundición.\n",
+        "# {name}\n\n{description}\n\nGenerado por llm2chip.\n\n## Archivos\n\n- `rtl/{top}.v` y `rtl/{top}.vhd`: el circuito completo en puertas, en Verilog-2001 y VHDL-2008.\n- `tb/testbench.v`: carga pesos, ejecuta y muestra `{watch}` en cada ciclo.\n- `constr/`: reloj objetivo de {clock:.3} ns, en SDC y XDC.\n- `synth/`: guiones para Yosys y Vivado.\n- `report.json`: parámetros, puertas y latencia.\n\n## Uso\n\n```bash\nmake sim\nmake synth\nmake fpga\n```\n\nLas memorias se describen como matrices de registros. Para una tecnología concreta, sustituye `llm2chip_sram`, `llm2chip_ram2p` y `llm2chip_rom` por las macros de memoria de esa fundición.\n",
         name = options.name,
         description = options.description,
         watch = options.watch,
@@ -55,7 +57,7 @@ pub fn project_files(design: &Design, steps: &[TestStep], options: &ProjectOptio
     let mut files = BTreeMap::new();
     files.insert(format!("rtl/{top}.v"), to_verilog(design));
     files.insert(format!("rtl/{top}.vhd"), to_vhdl(design));
-    files.insert("tb/testbench.v".to_string(), verilog_testbench(design, steps, options.watch));
+    files.insert("tb/testbench.v".to_string(), verilog_testbench_with_rom(design, &options.rom, steps, options.watch));
     files.insert("constr/clock.sdc".to_string(), sdc(options.clock_ns));
     files.insert("constr/clock.xdc".to_string(), xdc(options.clock_ns));
     files.insert("synth/asic.ys".to_string(), yosys_asic(&top));

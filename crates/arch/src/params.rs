@@ -204,6 +204,7 @@ impl ChipParams {
             coding: self.weight_coding,
             exponent_bits: self.weight_coding.legal_exponent_bits(weight_bits, self.weight_exponent_bits),
             multiplier: self.multiplier_kind,
+            fixed_weights: self.weight_backend == WeightBackend::Rom,
         };
         config.accumulator_bits = config.accumulator_bits.max(config.required_accumulator());
         config

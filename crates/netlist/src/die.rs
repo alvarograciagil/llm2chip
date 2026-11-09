@@ -275,28 +275,20 @@ impl Gen {
         let clear = b.input("clear", 1)[0];
         let clear_group = b.input("clear_group", 1)[0];
         let flush = b.input("flush", 1)[0];
-        let load_en = b.input("load_en", 1)[0];
-        let load_scale = b.input("load_scale", 1)[0];
-        let load_addr = b.input("load_addr", cfg.addr_bits);
-        let load_data = b.input("load_data", s.max(cfg.weight_bits));
+        let load = (!cfg.fixed_weights).then(|| (b.input("load_en", 1)[0], b.input("load_scale", 1)[0], b.input("load_addr", cfg.addr_bits), b.input("load_data", s.max(cfg.weight_bits))));
         let run = b.input("run", 1)[0];
         let x = b.input("x", a);
         let total = b.output("total", wide);
 
         b.group("Celda de cálculo");
-        let load_weight = and_not(&mut b, load_en, load_scale, "load_weight");
         let group_sum = b.wire("group_sum", acc);
         let clear_total = bus_or(&mut b, flush, clear_group, "clear_group_sum");
-        b.inst("compute", &compute, &[
-            ("clear", vec![clear]),
-            ("clear_total", vec![clear_total]),
-            ("load_en", vec![load_weight]),
-            ("load_addr", load_addr.clone()),
-            ("load_data", load_data[..cfg.weight_bits as usize].to_vec()),
-            ("run", vec![run]),
-            ("x", x.clone()),
-            ("total", group_sum.clone()),
-        ]);
+        let mut compute_pins = vec![("clear", vec![clear]), ("clear_total", vec![clear_total]), ("run", vec![run]), ("x", x.clone()), ("total", group_sum.clone())];
+        if let Some((load_en, load_scale, load_addr, load_data)) = &load {
+            let load_weight = and_not(&mut b, *load_en, *load_scale, "load_weight");
+            compute_pins.extend([("load_en", vec![load_weight]), ("load_addr", load_addr.clone()), ("load_data", load_data[..cfg.weight_bits as usize].to_vec())]);
+        }
+        b.inst("compute", &compute, &compute_pins);
 
         b.group("Suma de activaciones");
         let sign = *x.last().expect("activación vacía");
@@ -320,9 +312,12 @@ impl Gen {
         b.inst("x_sum_reg", &reg_acc, &[("d", x_d), ("q", x_sum.clone())]);
 
         b.group("Escala y sesgo");
-        let write_scale = b.wire("write_factors", 1)[0];
-        b.and_to(load_en, load_scale, write_scale);
-        self.finish_scaled_cell(b, c, &scale_mul, &wide_adder, &reg_wide, &mux_wide, SumParts { group_sum, x_sum, write_scale, clear, flush, load_data, load_addr, total, clear_group })
+        let factor_load = load.map(|(load_en, load_scale, load_addr, load_data)| {
+            let write_scale = b.wire("write_factors", 1)[0];
+            b.and_to(load_en, load_scale, write_scale);
+            FactorLoad { write_scale, load_data, load_addr }
+        });
+        self.finish_scaled_cell(b, c, &scale_mul, &wide_adder, &reg_wide, &mux_wide, SumParts { group_sum, x_sum, load: factor_load, clear, flush, total, clear_group })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -339,16 +334,24 @@ impl Gen {
         for i in 0..cfg.addr_bits as usize {
             b.xor_to(group[i], Bit::Zero, read_addr[i]);
         }
-        // Host addresses are 2·group for the scale and 2·group + 1 for the bias.
-        let mut write_addr: Vec<Bit> = p.load_addr[1..].to_vec();
-        write_addr.push(Bit::Zero);
-        let write_bias = b.wire("write_bias", 1)[0];
-        b.and_to(p.write_scale, p.load_addr[0], write_bias);
-        let write_scale_only = and_not(&mut b, p.write_scale, p.load_addr[0], "write_scale_only");
         let scale = b.wire("scale", s);
-        b.ram2p("scale_mem", cfg.addr_bits, s, &[("raddr", read_addr.clone()), ("waddr", write_addr.clone()), ("we", vec![write_scale_only]), ("wdata", p.load_data[..s as usize].to_vec()), ("rdata", scale.clone())]);
         let bias = b.wire("bias", s);
-        b.ram2p("bias_mem", cfg.addr_bits, s, &[("raddr", read_addr), ("waddr", write_addr), ("we", vec![write_bias]), ("wdata", p.load_data[..s as usize].to_vec()), ("rdata", bias.clone())]);
+        match &p.load {
+            Some(load) => {
+                // Host addresses are 2·group for the scale and 2·group + 1 for the bias.
+                let mut write_addr: Vec<Bit> = load.load_addr[1..].to_vec();
+                write_addr.push(Bit::Zero);
+                let write_bias = b.wire("write_bias", 1)[0];
+                b.and_to(load.write_scale, load.load_addr[0], write_bias);
+                let write_scale_only = and_not(&mut b, load.write_scale, load.load_addr[0], "write_scale_only");
+                b.ram2p("scale_mem", cfg.addr_bits, s, &[("raddr", read_addr.clone()), ("waddr", write_addr.clone()), ("we", vec![write_scale_only]), ("wdata", load.load_data[..s as usize].to_vec()), ("rdata", scale.clone())]);
+                b.ram2p("bias_mem", cfg.addr_bits, s, &[("raddr", read_addr), ("waddr", write_addr), ("we", vec![write_bias]), ("wdata", load.load_data[..s as usize].to_vec()), ("rdata", bias.clone())]);
+            }
+            None => {
+                b.rom("scale_mem", cfg.addr_bits, s, &[("addr", read_addr.clone()), ("rdata", scale.clone())]);
+                b.rom("bias_mem", cfg.addr_bits, s, &[("addr", read_addr), ("rdata", bias.clone())]);
+            }
+        }
 
         let sum_scaled = b.wire("sum_scaled", acc + s);
         b.inst("scale_times_sum", scale_mul, &[("weight", scale), ("x", p.group_sum.clone()), ("product", sum_scaled.clone())]);
@@ -407,9 +410,7 @@ impl Gen {
         let vec_data = b.input("vec_data", a);
         let load_fn = b.input("load_fn", 1)[0];
         let fn_addr = b.input("fn_addr", c.function_bits + c.function_select_bits);
-        let load_cell = b.input("load_cell", c.cells);
-        let load_scale = b.input("load_scale", 1)[0];
-        let cell_addr = b.input("cell_addr", cfg.addr_bits);
+        let cell_ports = (!cfg.fixed_weights).then(|| (b.input("load_cell", c.cells), b.input("load_scale", 1)[0], b.input("cell_addr", cfg.addr_bits)));
         let cell_data = b.input("cell_data", c.scale_bits.max(cfg.weight_bits).max(a));
         let halted = b.output("halted", 1)[0];
         let vec_out = b.output("vec_out", a);
@@ -799,18 +800,11 @@ impl Gen {
         for i in (0..c.cells as usize).rev() {
             b.group("Celdas");
             let total = b.wire(&format!("cell{i}_total"), wide);
-            b.inst(&format!("cell{i}"), &cell, &[
-                ("clear", vec![cell_clear]),
-                ("clear_group", vec![cell_clear_group]),
-                ("flush", vec![cell_flush]),
-                ("load_en", vec![load_cell[i]]),
-                ("load_scale", vec![load_scale]),
-                ("load_addr", cell_addr.clone()),
-                ("load_data", cell_data[..c.scale_bits.max(cfg.weight_bits) as usize].to_vec()),
-                ("run", vec![cell_run]),
-                ("x", x_bus.clone()),
-                ("total", total.clone()),
-            ]);
+            let mut cell_pins = vec![("clear", vec![cell_clear]), ("clear_group", vec![cell_clear_group]), ("flush", vec![cell_flush]), ("run", vec![cell_run]), ("x", x_bus.clone()), ("total", total.clone())];
+            if let Some((load_cell, load_scale, cell_addr)) = &cell_ports {
+                cell_pins.extend([("load_en", vec![load_cell[i]]), ("load_scale", vec![*load_scale]), ("load_addr", cell_addr.clone()), ("load_data", cell_data[..c.scale_bits.max(cfg.weight_bits) as usize].to_vec())]);
+            }
+            b.inst(&format!("cell{i}"), &cell, &cell_pins);
 
             b.group("Cadena de resultados");
             let chosen = b.wire(&format!("chain{i}_load"), wide);
@@ -829,14 +823,19 @@ impl Gen {
     }
 }
 
+struct FactorLoad {
+    write_scale: Bit,
+    load_data: Vec<Bit>,
+    load_addr: Vec<Bit>,
+}
+
 struct SumParts {
     group_sum: Vec<Bit>,
     x_sum: Vec<Bit>,
-    write_scale: Bit,
+    /// Absent when the factors are fixed at manufacture.
+    load: Option<FactorLoad>,
     clear: Bit,
     flush: Bit,
-    load_data: Vec<Bit>,
-    load_addr: Vec<Bit>,
     total: Vec<Bit>,
     clear_group: Bit,
 }

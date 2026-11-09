@@ -130,6 +130,14 @@ fn emit(out: &mut String, design: &Design, m: &Module) {
                     bus("raddr"), bus("waddr"), one("we"), bus("wdata"), output_association(m, "rdata", &inst.conns["rdata"])
                 );
             }
+            InstKind::Prim(Prim::Rom { addr_bits, width }) => {
+                // Read-only: the contents are for the foundry's ROM macro that replaces it.
+                let _ = writeln!(
+                    out,
+                    "  {label}: entity work.llm2chip_ram2p generic map ({addr_bits}, {width}) port map (clk => clk, raddr => {}, waddr => (others => '0'), we => '0', wdata => (others => '0'), {});",
+                    bus("addr"), output_association(m, "rdata", &inst.conns["rdata"])
+                );
+            }
             InstKind::Prim(Prim::Sram { addr_bits, width }) => {
                 // A single-port memory is the two-port one with its addresses tied.
                 let _ = writeln!(

@@ -20,7 +20,7 @@ mod vhdl;
 pub use cell::{cell_design, CellConfig};
 pub use die::{die_design, package_design, ControlWord, DieConfig, DieProgram, Microprogram, Parameter};
 pub use sim::{SimError, Simulator};
-pub use verilog::{to_verilog, verilog_testbench, TestStep};
+pub use verilog::{to_verilog, verilog_testbench, verilog_testbench_with_rom, RomWord, TestStep};
 pub use vhdl::{to_vhdl, vhdl_testbench};
 
 use serde::Serialize;
@@ -57,13 +57,15 @@ pub enum Prim {
     Sram { addr_bits: u32, width: u32 },
     /// Separate read and write ports; the read result arrives the next cycle.
     Ram2p { addr_bits: u32, width: u32 },
+    /// Contents fixed at manufacture; the read result arrives the next cycle.
+    Rom { addr_bits: u32, width: u32 },
 }
 
 impl Prim {
     pub fn outputs(self) -> &'static [&'static str] {
         match self {
             Prim::Dff => &["q"],
-            Prim::Sram { .. } | Prim::Ram2p { .. } => &["rdata"],
+            Prim::Sram { .. } | Prim::Ram2p { .. } | Prim::Rom { .. } => &["rdata"],
             _ => &["y"],
         }
     }
@@ -129,6 +131,7 @@ impl Design {
                             Prim::Mux2 => "mux",
                             Prim::Dff => "dff",
                             Prim::Sram { .. } | Prim::Ram2p { .. } => "sram",
+                            Prim::Rom { .. } => "rom",
                         };
                         *out.entry(name.into()).or_default() += times;
                     }
@@ -240,6 +243,10 @@ impl Builder {
 
     pub fn sram(&mut self, name: &str, addr_bits: u32, width: u32, conns: &[(&str, Vec<Bit>)]) {
         self.add(name.into(), InstKind::Prim(Prim::Sram { addr_bits, width }), conns);
+    }
+
+    pub fn rom(&mut self, name: &str, addr_bits: u32, width: u32, conns: &[(&str, Vec<Bit>)]) {
+        self.add(name.into(), InstKind::Prim(Prim::Rom { addr_bits, width }), conns);
     }
 
     pub fn inst(&mut self, name: &str, module: &str, conns: &[(&str, Vec<Bit>)]) {

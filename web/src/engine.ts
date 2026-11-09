@@ -172,7 +172,7 @@ export interface Program {
 }
 
 export type Bit = { net: [number, number] } | "zero" | "one";
-export type PrimType = "and2" | "or2" | "xor2" | "not" | "mux2" | "dff" | "sram" | "ram2p";
+export type PrimType = "and2" | "or2" | "xor2" | "not" | "mux2" | "dff" | "sram" | "ram2p" | "rom";
 
 export interface Instance {
   name: string;
@@ -196,7 +196,7 @@ export interface Design {
 }
 
 export interface CellInfo {
-  config: { weight_bits: number; activation_bits: number; accumulator_bits: number; mac_stages: number; adder_stages: number; addr_bits: number; coding: string; exponent_bits: number };
+  config: { weight_bits: number; activation_bits: number; accumulator_bits: number; mac_stages: number; adder_stages: number; addr_bits: number; coding: string; exponent_bits: number; fixed_weights: boolean };
   latency: number;
   counts: Record<string, number>;
 }

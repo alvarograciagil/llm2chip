@@ -83,20 +83,20 @@ function buildScript(info: CellInfo, weights: bigint[], activations: bigint[]): 
   const { weight_bits, activation_bits, addr_bits } = info.config;
   const off: [string, string][] = [["load_en", "0"], ["run", "0"]];
   const steps: ScriptStep[] = [{ label: "Puesta a cero", inputs: [["clear", "1"], ...off, ...(usesShifter(info) ? ([["exp_base", "0"]] as [string, string][]) : [])] }];
-  if (info.config.coding === "codebook") {
+  if (info.config.coding === "codebook" && !info.config.fixed_weights) {
     for (let i = 0; i < 2 ** info.config.weight_bits; i++) {
       const signed = BigInt.asIntN(info.config.weight_bits, BigInt(i));
       steps.push({ label: `Tabla ${i + 1}`, inputs: [["clear", "0"], ["table_en", "1"], ["table_addr", String(i)], ["table_data", toUnsigned(signed, 16)]] });
     }
     steps.push({ label: "Fin de la tabla", inputs: [["table_en", "0"]] });
   }
-  weights.forEach((w, i) =>
+  if (!info.config.fixed_weights) weights.forEach((w, i) =>
     steps.push({
       label: `Carga de pesos ${i + 1}/${weights.length}`,
       inputs: [["clear", "0"], ["load_en", "1"], ["load_addr", toUnsigned(BigInt(i), addr_bits)], ["load_data", toUnsigned(w, weight_bits)]],
     }),
   );
-  steps.push({ label: "Fin de la carga", inputs: [["clear", "1"], ...off] });
+  steps.push({ label: info.config.fixed_weights ? "Pesos ya grabados" : "Fin de la carga", inputs: [["clear", "1"], ...off] });
   activations.forEach((x, i) =>
     steps.push({
       label: `Multiplicación ${i + 1}/${activations.length}`,
@@ -106,7 +106,8 @@ function buildScript(info: CellInfo, weights: bigint[], activations: bigint[]): 
   for (let i = 0; i < info.latency; i++) {
     steps.push({ label: `Vaciando etapas ${i + 1}/${info.latency}`, inputs: [["clear", "0"], ...off] });
   }
-  return steps;
+  // A cell with its weights in ROM has no loading ports to drive.
+  return info.config.fixed_weights ? steps.map((s) => ({ ...s, inputs: s.inputs.filter(([port]) => !port.startsWith("load_")) })) : steps;
 }
 
 export function validateInputs(info: CellInfo, weightsText: string, activationsText: string): { error: string } | { weights: bigint[]; activations: bigint[] } {
@@ -145,6 +146,13 @@ export const useCellSim = create<CellSimState>((set, get) => {
     if ("error" in result) {
       set({ script: [], index: 0, inputError: result.error });
       return;
+    }
+    const handle = get().handle;
+    if (info.config.fixed_weights && handle) {
+      result.weights.forEach((w, i) => handle.burn("weight_rom", i, toUnsigned(w, info.config.weight_bits)));
+      if (info.config.coding === "codebook") {
+        for (let i = 0; i < 2 ** info.config.weight_bits; i++) handle.burn("codebook", i, toUnsigned(BigInt.asIntN(info.config.weight_bits, BigInt(i)), 16));
+      }
     }
     set({ script: buildScript(info, result.weights, result.activations), index: 0, inputError: null });
   };

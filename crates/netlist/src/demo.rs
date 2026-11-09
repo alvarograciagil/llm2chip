@@ -99,22 +99,24 @@ pub fn host_steps(c: DieConfig, e: &Example) -> Vec<TestStep> {
         steps.push(step(vec![("load_fn", 1), ("fn_addr", index as u128), ("cell_data", mask(table_value(index), 16) as u128)]));
     }
     steps.push(step(vec![("load_fn", 0)]));
-    for row in 0..3usize {
-        let mut address = 0u64;
-        let mut group_address = 0u64;
-        for (m, matrix) in e.matrices.iter().enumerate() {
-            for w in &matrix[row] {
-                steps.push(step(vec![("load_cell", 1 << row), ("load_scale", 0), ("cell_addr", address as u128), ("cell_data", mask(*w, 8) as u128)]));
-                address += 1;
-            }
-            for (scale, bias) in &e.factors[m][row] {
-                steps.push(step(vec![("load_cell", 1 << row), ("load_scale", 1), ("cell_addr", group_address as u128 * 2), ("cell_data", mask(*scale, 16) as u128)]));
-                steps.push(step(vec![("load_cell", 1 << row), ("load_scale", 1), ("cell_addr", group_address as u128 * 2 + 1), ("cell_data", mask(*bias, 16) as u128)]));
-                group_address += 1;
+    if !c.cell.fixed_weights {
+        for row in 0..3usize {
+            let mut address = 0u64;
+            let mut group_address = 0u64;
+            for (m, matrix) in e.matrices.iter().enumerate() {
+                for w in &matrix[row] {
+                    steps.push(step(vec![("load_cell", 1 << row), ("load_scale", 0), ("cell_addr", address as u128), ("cell_data", mask(*w, 8) as u128)]));
+                    address += 1;
+                }
+                for (scale, bias) in &e.factors[m][row] {
+                    steps.push(step(vec![("load_cell", 1 << row), ("load_scale", 1), ("cell_addr", group_address as u128 * 2), ("cell_data", mask(*scale, 16) as u128)]));
+                    steps.push(step(vec![("load_cell", 1 << row), ("load_scale", 1), ("cell_addr", group_address as u128 * 2 + 1), ("cell_data", mask(*bias, 16) as u128)]));
+                    group_address += 1;
+                }
             }
         }
+        steps.push(step(vec![("load_cell", 0), ("load_scale", 0)]));
     }
-    steps.push(step(vec![("load_cell", 0), ("load_scale", 0)]));
     steps.push(step(vec![("start", 1)]));
     steps
 }
@@ -123,8 +125,33 @@ pub fn host_steps(c: DieConfig, e: &Example) -> Vec<TestStep> {
 pub const RESULT_REG: u64 = 6;
 pub const RESULT_LEN: u64 = 3;
 
+/// What a mask would fix in each cell: weights in `weight_rom`, factors in their memories.
+pub fn rom_words(e: &Example) -> Vec<(String, usize, u128)> {
+    let mut words = Vec::new();
+    for row in 0..3usize {
+        let (mut address, mut group) = (0, 0);
+        for (m, matrix) in e.matrices.iter().enumerate() {
+            for w in &matrix[row] {
+                words.push((format!("/cell{row}/compute/weight_rom"), address, mask(*w, 8) as u128));
+                address += 1;
+            }
+            for (scale, bias) in &e.factors[m][row] {
+                words.push((format!("/cell{row}/scale_mem"), group, mask(*scale, 16) as u128));
+                words.push((format!("/cell{row}/bias_mem"), group, mask(*bias, 16) as u128));
+                group += 1;
+            }
+        }
+    }
+    words
+}
+
 /// Applies the loading steps, leaving the die ready to run once `start` falls.
 pub fn load(sim: &mut Simulator, config: DieConfig, example: &Example) {
+    if config.cell.fixed_weights {
+        for (path, address, value) in rom_words(example) {
+            sim.poke_memory(&path, address, value).expect("memoria del die");
+        }
+    }
     for step in host_steps(config, example) {
         for (name, value) in &step.inputs {
             sim.set_wide(name, *value).expect("puerto del die");
@@ -154,7 +181,7 @@ pub struct BlockDemo {
 pub fn block_config() -> DieConfig {
     DieConfig {
         cells: 1,
-        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: crate::multiplier::MultiplierKind::Array },
+        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: crate::multiplier::MultiplierKind::Array, fixed_weights: false },
         scale_bits: 16,
         reg_bits: 4,
         index_bits: 6,

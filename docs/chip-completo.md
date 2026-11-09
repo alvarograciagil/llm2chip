@@ -73,6 +73,12 @@ Con Qwen3.8 en el flujo real, 17 tokens de prompt y 6 generados suman 7,5 millon
 
 La propuesta es filtrar en paralelo: cada carril compara sus logits con el peor candidato de la lista y solo los que lo superan pasan a la lista ordenada. En 248.000 logits eso son unas 500 inserciones, muy pocas para frenar el flujo. Además, los logits pueden leerse mientras salen de `lm_head`, sin una pasada aparte.
 
+## Pesos grabados
+
+El parámetro «Pesos» decide si el modelo se puede cambiar. Con ROM, los pesos, las escalas y los sesgos de cada celda se fijan al fabricar: la celda pierde los puertos de carga y el selector de direcciones, el die pierde la red que escribe en las celdas, y el arranque ya no los transfiere. El microprograma, las tablas y el firmware siguen siendo cargables, así que el chip se puede corregir sin máscaras nuevas, pero no cambiar de modelo.
+
+El mayor ahorro no viene de la lógica sino de la densidad de la ROM frente a la SRAM. Para sintetizarlo en una tecnología real hay que sustituir `llm2chip_rom` por la macro de ROM de la fundición, con el contenido de cada celda.
+
 ## Por qué no todo en puertas con Qwen
 
 Qwen3.8 tiene 27.000 millones de pesos, y simularlos en puertas no es viable. La estrategia es la misma que ya funciona para el núcleo:

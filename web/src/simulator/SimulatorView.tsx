@@ -276,7 +276,7 @@ export function SimulatorPanel() {
         <dl className="metrics">
           <div><dt>Núcleo de inferencia</dt><dd>{NUMERIC_NAME[state.numeric]}{state.useGpu ? " · GPU" : ""}</dd></div>
           <div><dt>Tokenizador</dt><dd>Fuera del chip</dd></div>
-          <div><dt>Carga de pesos</dt><dd>Directa del checkpoint</dd></div>
+          <div><dt>Carga de pesos</dt><dd>{params.weight_backend === "rom" ? "Grabados en el chip (ROM)" : "Directa del checkpoint"}</dd></div>
         </dl>
         {state.numeric !== loadedNumeric(state) && state.loaded && <p className="muted-text">Recarga el modelo para aplicar la aritmética elegida.</p>}
       </div>

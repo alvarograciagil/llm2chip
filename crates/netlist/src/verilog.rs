@@ -25,6 +25,18 @@ module llm2chip_sram #(parameter ADDR_BITS = 8, parameter WIDTH = 8) (
   end
 endmodule
 
+module llm2chip_rom #(parameter ADDR_BITS = 8, parameter WIDTH = 8) (
+  input clk, input [ADDR_BITS-1:0] addr, output reg [WIDTH-1:0] rdata
+);
+  reg [WIDTH-1:0] memory [0:(1<<ADDR_BITS)-1];
+  integer i;
+  initial begin
+    rdata = 0;
+    for (i = 0; i < (1<<ADDR_BITS); i = i + 1) memory[i] = 0;
+  end
+  always @(posedge clk) rdata <= memory[addr];
+endmodule
+
 module llm2chip_ram2p #(parameter ADDR_BITS = 8, parameter WIDTH = 8) (
   input clk, input [ADDR_BITS-1:0] raddr, input [ADDR_BITS-1:0] waddr, input we,
   input [WIDTH-1:0] wdata, output reg [WIDTH-1:0] rdata
@@ -129,6 +141,9 @@ fn emit_module(out: &mut String, m: &Module) {
                     pin("rdata")
                 );
             }
+            InstKind::Prim(Prim::Rom { addr_bits, width }) => {
+                let _ = writeln!(out, "  llm2chip_rom #(.ADDR_BITS({addr_bits}), .WIDTH({width})) {} (.clk(clk), .addr({}), .rdata({}));", inst.name, pin("addr"), pin("rdata"));
+            }
             InstKind::Prim(Prim::Ram2p { addr_bits, width }) => {
                 let _ = writeln!(
                     out,
@@ -180,8 +195,21 @@ pub struct TestStep {
     pub inputs: Vec<(String, u128)>,
 }
 
+/// One word of a ROM, as the mask would fix it. `path` is relative to the top module.
+#[derive(Clone, Debug)]
+pub struct RomWord {
+    pub path: String,
+    pub address: usize,
+    pub value: u128,
+}
+
 /// A testbench that applies `steps` and prints `watch` after every rising edge.
 pub fn verilog_testbench(design: &Design, steps: &[TestStep], watch: &str) -> String {
+    verilog_testbench_with_rom(design, &[], steps, watch)
+}
+
+/// The same, with the contents of the design's ROMs written before the first clock.
+pub fn verilog_testbench_with_rom(design: &Design, rom: &[RomWord], steps: &[TestStep], watch: &str) -> String {
     let top = &design.modules[&design.top];
     let mut out = String::from("`timescale 1ns/1ns\nmodule testbench;\n  reg clk = 0;\n");
     let mut pins = vec![".clk(clk)".to_string()];
@@ -193,6 +221,12 @@ pub fn verilog_testbench(design: &Design, steps: &[TestStep], watch: &str) -> St
     }
     let _ = writeln!(out, "  {} dut ({});", top.name, pins.join(", "));
     out.push_str("  initial begin\n");
+    if !rom.is_empty() {
+        out.push_str("    #0;\n");
+    }
+    for word in rom {
+        let _ = writeln!(out, "    dut.{}.memory[{}] = {};", word.path.replace('/', "."), word.address, word.value);
+    }
     for step in steps {
         for (name, value) in &step.inputs {
             let width = top.ports.iter().find(|p| &p.name == name).map_or(128, |p| top.nets[p.net].width);

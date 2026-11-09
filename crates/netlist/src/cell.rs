@@ -21,6 +21,8 @@ pub struct CellConfig {
     /// Float: exponent bits. Posit: `es`. Logarithmic: fraction bits. Otherwise unused.
     pub exponent_bits: u32,
     pub multiplier: MultiplierKind,
+    /// The weights are fixed at manufacture: the cell reads a ROM and has no way to write it.
+    pub fixed_weights: bool,
 }
 
 impl CellConfig {
@@ -42,6 +44,7 @@ impl CellConfig {
             coding: self.coding,
             exponent_bits: self.coding.legal_exponent_bits(weight_bits, self.exponent_bits),
             multiplier: self.multiplier,
+            fixed_weights: self.fixed_weights,
         }
     }
 }
@@ -308,7 +311,6 @@ impl Gen {
         let product_bits = significand + a;
         let mac_stages = c.mac_stages.min(significand).max(1);
         let counter = self.address_counter(c.addr_bits);
-        let addr_mux = self.mux_bus(c.addr_bits);
         let x_reg = self.register(a);
         let multiplier = match c.multiplier {
             MultiplierKind::Array => self.multiplier(significand, a, mac_stages),
@@ -324,24 +326,30 @@ impl Gen {
         );
         let clear = b.input("clear", 1)[0];
         let clear_total = b.input("clear_total", 1)[0];
-        let load_en = b.input("load_en", 1);
-        let load_addr = b.input("load_addr", c.addr_bits);
-        let load_data = b.input("load_data", w);
+        let load_ports = (!c.fixed_weights).then(|| (b.input("load_en", 1), b.input("load_addr", c.addr_bits), b.input("load_data", w)));
         let run = b.input("run", 1)[0];
         let x = b.input("x", a);
         let total = b.output("total", acc);
-        let table_ports = (c.coding == WeightCoding::Codebook).then(|| (b.input("table_en", 1)[0], b.input("table_addr", w), b.input("table_data", significand)));
+        let table_ports = (c.coding == WeightCoding::Codebook && !c.fixed_weights).then(|| (b.input("table_en", 1)[0], b.input("table_addr", w), b.input("table_data", significand)));
         let exp_base = c.shifts().then(|| b.input("exp_base", c.exponent_width()));
 
         b.group("Direcciones");
         let address = b.wire("address", c.addr_bits);
         b.inst("counter", &counter, &[("clear", vec![clear]), ("advance", vec![run]), ("address", address.clone())]);
-        let mem_addr = b.wire("mem_addr", c.addr_bits);
-        b.inst("address_select", &addr_mux, &[("s", load_en.clone()), ("a", address), ("b", load_addr), ("y", mem_addr.clone())]);
-
-        b.group("Memoria de pesos");
         let weight = b.wire("weight", w);
-        b.sram("weight_sram", c.addr_bits, w, &[("addr", mem_addr), ("we", load_en), ("wdata", load_data), ("rdata", weight.clone())]);
+        match load_ports {
+            Some((load_en, load_addr, load_data)) => {
+                let addr_mux = self.mux_bus(c.addr_bits);
+                let mem_addr = b.wire("mem_addr", c.addr_bits);
+                b.inst("address_select", &addr_mux, &[("s", load_en.clone()), ("a", address), ("b", load_addr), ("y", mem_addr.clone())]);
+                b.group("Memoria de pesos");
+                b.sram("weight_sram", c.addr_bits, w, &[("addr", mem_addr), ("we", load_en), ("wdata", load_data), ("rdata", weight.clone())]);
+            }
+            None => {
+                b.group("Memoria de pesos");
+                b.rom("weight_rom", c.addr_bits, w, &[("addr", address), ("rdata", weight.clone())]);
+            }
+        }
 
         b.group("Decodificación del formato");
         let decoded = self.decode(&mut b, &c, weight, table_ports);

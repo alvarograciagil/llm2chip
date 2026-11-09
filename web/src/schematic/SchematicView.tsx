@@ -100,7 +100,7 @@ function BoxSymbol({ node, selected, value }: { node: Node; selected: boolean; v
   const clickable = node.instance?.kind.kind === "module";
   return (
     <g>
-      <rect className={`${selected ? "box selected" : "box"} ${node.prim === "sram" || node.prim === "ram2p" ? "box-memory" : ""}`} width={node.w} height={node.h} rx={8} />
+      <rect className={`${selected ? "box selected" : "box"} ${node.prim === "sram" || node.prim === "ram2p" || node.prim === "rom" ? "box-memory" : ""}`} width={node.w} height={node.h} rx={8} />
       <text className="box-title" x={10} y={17}>{node.title}</text>
       {node.subtitle && <text className="box-sub" x={10} y={31}>{node.subtitle}</text>}
       {clickable && (
@@ -214,7 +214,7 @@ function Diagram({ module, layout, snapshot }: { module: NetlistModule; layout: 
             <AreaSymbol node={node} />
           ) : node.kind !== "instance" ? (
             <PortSymbol node={node} value={pinValue(node, node.pins[0])} />
-          ) : node.prim && node.prim !== "sram" && node.prim !== "ram2p" ? (
+          ) : node.prim && node.prim !== "sram" && node.prim !== "ram2p" && node.prim !== "rom" ? (
             <GateSymbol node={node} selected={selected === node.id} />
           ) : (
             <BoxSymbol node={node} selected={selected === node.id} value={(pin) => pinValue(node, pin)} />

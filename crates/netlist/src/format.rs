@@ -235,12 +235,16 @@ impl Gen {
                 Decoded { significand, exponent: integer }
             }
             WeightCoding::Codebook => {
-                let (enable, addr, data) = table.expect("el libro de códigos necesita sus puertos");
-                let mux = self.mux_bus(c.weight_bits);
-                let chosen = b.wire("table_select", c.weight_bits);
-                b.inst("table_address", &mux, &[("s", vec![enable]), ("a", code), ("b", addr), ("y", chosen.clone())]);
                 let significand = b.wire("table_value", TABLE_BITS);
-                b.sram("codebook", c.weight_bits, TABLE_BITS, &[("addr", chosen), ("we", vec![enable]), ("wdata", data), ("rdata", significand.clone())]);
+                match table {
+                    Some((enable, addr, data)) => {
+                        let mux = self.mux_bus(c.weight_bits);
+                        let chosen = b.wire("table_select", c.weight_bits);
+                        b.inst("table_address", &mux, &[("s", vec![enable]), ("a", code), ("b", addr), ("y", chosen.clone())]);
+                        b.sram("codebook", c.weight_bits, TABLE_BITS, &[("addr", chosen), ("we", vec![enable]), ("wdata", data), ("rdata", significand.clone())]);
+                    }
+                    None => b.rom("codebook", c.weight_bits, TABLE_BITS, &[("addr", code), ("rdata", significand.clone())]),
+                }
                 Decoded { significand, exponent: Vec::new() }
             }
         }
@@ -338,7 +342,8 @@ impl Gen {
 /// Average toggles per multiplication, weighted by each gate's relative capacitance,
 /// measured by running the real cell gates on pseudo-random weights and activations.
 pub fn switching_per_mac(config: CellConfig) -> f64 {
-    let config = config.checked();
+    // A stored weight toggles the same gates however it got into the memory.
+    let config = CellConfig { fixed_weights: false, ..config.checked() };
     let design = crate::cell_design(config);
     let Ok(mut sim) = crate::Simulator::new(&design) else { return 0.0 };
     const WORDS: u64 = 8;

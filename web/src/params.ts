@@ -147,7 +147,7 @@ export const PARAM_GROUPS: Group[] = [
     title: "Memoria",
     open: true,
     fields: [
-      { kind: "select", key: "weight_backend", label: "Pesos", options: [["sram", "SRAM cargable"], ["rom", "ROM fija"], ["stacked_dram", "DRAM apilada"], ["hbm4", "HBM4"], ["external_ddr", "Memoria externa"]], help: "Con SRAM el chip admite otros modelos. Con ROM queda fijado a uno." },
+      { kind: "select", key: "weight_backend", label: "Pesos", options: [["sram", "SRAM (modelo intercambiable)"], ["rom", "ROM (modelo grabado)"], ["stacked_dram", "DRAM apilada"], ["hbm4", "HBM4"], ["external_ddr", "Memoria externa"]], help: "Con SRAM el chip admite otros modelos. Con ROM los pesos se graban al fabricarlo: desaparecen la escritura de pesos y su tiempo de carga, pero cambiar de modelo exige otras máscaras." },
       { kind: "select", key: "kv_backend", label: "Caché y estado", options: [["sram", "SRAM"], ["hbm4", "HBM4"], ["external_ddr", "Memoria externa"]], help: "Dónde viven la caché KV y el estado recurrente." },
       { kind: "range", key: "hbm_stacks", label: "Pilas HBM4", min: 1, max: 16, step: 1, integer: true, when: usesHbm },
       { kind: "range", key: "stacked_dram_tbps", label: "Ancho de banda DRAM", min: 10, max: 400, log: true, unit: "TB/s", when: (p) => p.weight_backend === "stacked_dram" },
@@ -198,7 +198,7 @@ export const PARAM_GROUPS: Group[] = [
     open: false,
     fields: [
       { kind: "select", key: "link", label: "Enlace entre dies", options: [["ucie", "UCIe"], ["serdes", "SerDes en placa"]] },
-      { kind: "select", key: "load_interface", label: "Carga de pesos", options: [["nvme", "NVMe"], ["pcie5", "PCIe 5.0 x16"], ["uart", "UART"]], help: "Solo afecta al tiempo de arranque." },
+      { kind: "select", key: "load_interface", label: "Carga de pesos", options: [["nvme", "NVMe"], ["pcie5", "PCIe 5.0 x16"], ["uart", "UART"]], help: "Solo afecta al tiempo de arranque.", when: (p) => p.weight_backend !== "rom" },
     ],
   },
 ];

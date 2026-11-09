@@ -121,6 +121,15 @@ impl Elaborator<'_> {
                     rdata: conns["rdata"].clone(),
                     cells: vec![0; 1usize << addr_bits],
                 }),
+                InstKind::Prim(Prim::Rom { addr_bits, .. }) => self.memories.push(Memory {
+                    path: format!("{path}/{}", inst.name),
+                    write_addr: conns["addr"].clone(),
+                    addr: conns["addr"].clone(),
+                    we: ZERO,
+                    wdata: Vec::new(),
+                    rdata: conns["rdata"].clone(),
+                    cells: vec![0; 1usize << addr_bits],
+                }),
                 InstKind::Prim(Prim::Sram { addr_bits, .. }) => self.memories.push(Memory {
                     path: format!("{path}/{}", inst.name),
                     write_addr: conns["addr"].clone(),

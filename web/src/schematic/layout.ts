@@ -62,8 +62,9 @@ const PRIM_INPUTS: Record<PrimType, string[]> = {
   dff: ["d"],
   sram: ["addr", "we", "wdata"],
   ram2p: ["raddr", "waddr", "we", "wdata"],
+  rom: ["addr"],
 };
-const PRIM_OUTPUT: Record<PrimType, string> = { and2: "y", or2: "y", xor2: "y", not: "y", mux2: "y", dff: "q", sram: "rdata", ram2p: "rdata" };
+const PRIM_OUTPUT: Record<PrimType, string> = { and2: "y", or2: "y", xor2: "y", not: "y", mux2: "y", dff: "q", sram: "rdata", ram2p: "rdata", rom: "rdata" };
 
 const PIN_STEP = 18;
 const BOX_W = 164;
@@ -84,7 +85,7 @@ function pinsOf(inst: Instance, design: Design): { inputs: [string, number][]; o
 
 function makeNode(inst: Instance, design: Design): Node {
   const { inputs, outputs } = pinsOf(inst, design);
-  if (inst.kind.kind === "prim" && inst.kind.of.type !== "sram" && inst.kind.of.type !== "ram2p") {
+  if (inst.kind.kind === "prim" && inst.kind.of.type !== "sram" && inst.kind.of.type !== "ram2p" && inst.kind.of.type !== "rom") {
     const type = inst.kind.of.type;
     const h = type === "mux2" ? 60 : GATE.h;
     const step = h / (inputs.length + 1);
@@ -108,7 +109,7 @@ function makeNode(inst: Instance, design: Design): Node {
   const rows = Math.max(inputs.length, outputs.length, 1);
   const h = 40 + rows * PIN_STEP + 6;
   const isSram = inst.kind.kind === "prim";
-  const title = isSram ? "Memoria SRAM" : design.modules[(inst.kind as { of: string }).of].title;
+  const title = isSram ? ((inst.kind.of as { type: PrimType }).type === "rom" ? "Memoria ROM" : "Memoria SRAM") : design.modules[(inst.kind as { of: string }).of].title;
   const prim = inst.kind.kind === "prim" ? inst.kind.of : null;
   return {
     id: inst.name,

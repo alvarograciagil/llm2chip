@@ -383,8 +383,12 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
         "Multiplican peso por activación y acumulan la suma de cada fila.");
 
     if p.cell_table_bits() > 0.0 {
-        let density = tech.sram_density((p.cell_table_bits() / 1e3).max(1.0));
-        push("weight_tables", "Tablas de pesos", n * p.cell_table_bits() * sram_margin(p) / 1e6 / density,
+        let table_mm2 = if p.weight_backend == WeightBackend::Rom {
+            n * p.cell_table_bits() / 1e6 / tech.rom_mbit_mm2
+        } else {
+            n * p.cell_table_bits() * sram_margin(p) / 1e6 / tech.sram_density((p.cell_table_bits() / 1e3).max(1.0))
+        };
+        push("weight_tables", "Tablas de pesos", table_mm2,
             "Cada celda guarda los valores reales a los que apuntan sus códigos.");
     }
 
@@ -443,7 +447,11 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     push("control", "Secuenciador y microprograma", 0.8,
         "Ejecuta el microprograma que dirige cada etapa.");
     push("system", "CPU de control y carga", (tech.cpu_mm2 + tech.io_mm2) / d,
-        "Tokenizador, muestreo y volcado de pesos desde la imagen.");
+        if p.weight_backend == WeightBackend::Rom {
+            "Tokenizador, muestreo y carga del microprograma. Los pesos ya vienen grabados."
+        } else {
+            "Tokenizador, muestreo y volcado de pesos desde la imagen."
+        });
     if dies > 1 {
         let endpoint = match p.link {
             LinkKind::Ucie => 2.0,
@@ -555,7 +563,7 @@ fn check_optimizations(p: &ChipParams, out: &mut Vec<Violation>) {
     }
     if p.weight_backend == WeightBackend::Rom {
         out.push(aviso(
-            "Con ROM el chip solo sirve para este modelo.",
+            "Con ROM el chip solo sirve para este modelo: cambiarlo exige fabricar máscaras nuevas.",
             "Usa SRAM para poder cargar otros pesos.",
         ));
     }
@@ -772,7 +780,8 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
     let dynamic_w = energy_token_mj * 1e-3 * stream_rate;
     let power_w = dynamic_w + leakage_w;
 
-    let image_bytes = (store.model_bits + store.external_bits) / 8.0;
+    // Weights in ROM are part of the silicon; only what lives elsewhere still has to arrive.
+    let image_bytes = if p.weight_backend == WeightBackend::Rom { store.external_bits / 8.0 } else { (store.model_bits + store.external_bits) / 8.0 };
     let load_seconds = image_bytes / p.load_interface.bytes_per_second();
 
     let cell_bytes = store.chip_bits / (d * n) / 8.0;
@@ -828,7 +837,7 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
     m("chip_capacity_gb", "Modelo", "Capacidad de pesos del chip", store.chip_bits / 8e9, "GB", Derivada,
         "El chip se dimensiona para el máximo de parámetros, no solo para este modelo.".into());
     m("load_seconds", "Modelo", "Tiempo de carga de la imagen", load_seconds, "s", Derivada,
-        "Tamaño de la imagen dividido por la interfaz de carga.".into());
+        if p.weight_backend == WeightBackend::Rom { "Los pesos vienen grabados en el chip y no se cargan.".into() } else { "Tamaño de la imagen dividido por la interfaz de carga.".into() });
 
     m("dies", "Silicio", "Dies", d, "", Supuesta, "El mínimo que cumple el área máxima por die.".into());
     m("die_area_mm2", "Silicio", "Área por die", die_area, "mm²", Supuesta, "Suma de los bloques del die.".into());
@@ -936,6 +945,8 @@ mod tests {
         let sram = estimate(&qwen(), &ChipParams::default()).unwrap();
         let rom = estimate(&qwen(), &ChipParams { weight_backend: WeightBackend::Rom, ..Default::default() }).unwrap();
         assert!(rom.total_area_mm2 < sram.total_area_mm2);
+        let metric = |report: &Report, id: &str| report.metrics.iter().find(|m| m.id == id).unwrap().value;
+        assert!(metric(&rom, "load_seconds") < metric(&sram, "load_seconds") / 100.0, "los pesos grabados no se cargan");
     }
 
     #[test]

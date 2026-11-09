@@ -18,7 +18,7 @@ impl Rng {
 }
 
 fn config(coding: WeightCoding, weight_bits: u32, exponent_bits: u32, mac_stages: u32) -> CellConfig {
-    let mut c = CellConfig { weight_bits, activation_bits: 16, accumulator_bits: 32, mac_stages, adder_stages: 1, addr_bits: 4, coding, exponent_bits, multiplier: netlist::multiplier::MultiplierKind::Array };
+    let mut c = CellConfig { weight_bits, activation_bits: 16, accumulator_bits: 32, mac_stages, adder_stages: 1, addr_bits: 4, coding, exponent_bits, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false };
     c.accumulator_bits = c.required_accumulator().max(32);
     c
 }
@@ -317,7 +317,7 @@ fn exported_project_simulates_and_synthesises() {
     for _ in 0..c.latency() {
         steps.push(TestStep { inputs: vec![("run".into(), 0)] });
     }
-    let options = ProjectOptions { name: "Celda", description: "Prueba", clock_ns: 1.0, watch: "total", report: "{}".into() };
+    let options = ProjectOptions { name: "Celda", description: "Prueba", clock_ns: 1.0, watch: "total", report: "{}".into(), rom: Vec::new() };
     let files = project_files(&design, &steps, &options);
     assert!(files.contains_key("rtl/compute_cell.vhd") && files.contains_key("synth/vivado.tcl") && files.contains_key("Makefile"));
 

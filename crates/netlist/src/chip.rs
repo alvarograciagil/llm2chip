@@ -182,16 +182,20 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
         let load_code = load_to(&mut l, crate::image::Target::Microcode);
         let load_vec = load_to(&mut l, crate::image::Target::Vector);
         let load_fn = load_to(&mut l, crate::image::Target::Function);
-        let weight_load = load_to(&mut l, crate::image::Target::CellWeight);
-        let scale_load = load_to(&mut l, crate::image::Target::CellScale);
         let table_write = load_to(&mut l, crate::image::Target::SamplerTable);
-        let cell_load = l.or(weight_load, scale_load);
-        let load_cell: Vec<Bit> = (0..c.die.cells)
-            .map(|i| {
-                let selected = l.equals(&load_unit, i);
-                l.and(selected, cell_load)
-            })
-            .collect();
+        // Weights fixed at manufacture need no network to reach their cells.
+        if !c.die.cell.fixed_weights {
+            let weight_load = load_to(&mut l, crate::image::Target::CellWeight);
+            let scale_load = load_to(&mut l, crate::image::Target::CellScale);
+            let cell_load = l.or(weight_load, scale_load);
+            let load_cell: Vec<Bit> = (0..c.die.cells)
+                .map(|i| {
+                    let selected = l.equals(&load_unit, i);
+                    l.and(selected, cell_load)
+                })
+                .collect();
+            die_pins.extend([("load_cell", load_cell), ("load_scale", vec![scale_load]), ("cell_addr", load_addr[..c.die.cell.addr_bits as usize].to_vec())]);
+        }
         let idle_address = l.mux_bus(streaming, &cpu_vector_address, &stream_address);
         let vector_address = l.mux_bus(load_vec, &idle_address, &load_addr[..vector_bits]);
 
@@ -209,9 +213,6 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
             ("vec_data", load_data[..activation].to_vec()),
             ("load_fn", vec![load_fn]),
             ("fn_addr", load_addr[..function_address].to_vec()),
-            ("load_cell", load_cell),
-            ("load_scale", vec![scale_load]),
-            ("cell_addr", load_addr[..c.die.cell.addr_bits as usize].to_vec()),
             ("cell_data", load_data[..cell_bits].to_vec()),
             ("link_in", vec![Bit::Zero; activation]),
         ]);

@@ -25,7 +25,7 @@ const COVERAGE: [string, boolean][] = [
   ["ECC, BIST y reparación", false],
 ];
 
-const GATE_NAMES: Record<string, string> = { and: "AND", or: "OR", xor: "XOR", not: "NOT", mux: "Selectores", dff: "Biestables", sram: "Memorias" };
+const GATE_NAMES: Record<string, string> = { and: "AND", or: "OR", xor: "XOR", not: "NOT", mux: "Selectores", dff: "Biestables", sram: "Memorias", rom: "ROM" };
 
 function Selected() {
   const design = useCellSim((s) => s.design);
@@ -36,7 +36,7 @@ function Selected() {
   const inst = module?.instances.find((i) => i.name === selected);
   if (!inst || !design) return null;
   const child = inst.kind.kind === "module" ? design.modules[inst.kind.of] : null;
-  const primNames: Record<string, string> = { and2: "Puerta AND", or2: "Puerta OR", xor2: "Puerta XOR", not: "Inversor", mux2: "Selector", dff: "Biestable D", sram: "Memoria SRAM síncrona" };
+  const primNames: Record<string, string> = { and2: "Puerta AND", or2: "Puerta OR", xor2: "Puerta XOR", not: "Inversor", mux2: "Selector", dff: "Biestable D", sram: "Memoria SRAM síncrona", rom: "Memoria ROM, grabada al fabricar" };
   return (
     <>
       <h3>Selección</h3>
