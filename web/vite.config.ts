@@ -15,6 +15,7 @@ function sessionToken(): string {
 
 export default defineConfig({
   plugins: [react()],
+  worker: { format: "es" },
   server: {
     port: 5173,
     strictPort: true,

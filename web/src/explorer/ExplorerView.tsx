@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { estimateDesign, sweepDesign, type ChipParams, type SweepResult } from "../engine";
+import { estimateDesign, type ChipParams } from "../engine";
+import { useSweep, type Sweep } from "./useSweep";
 import { formatNumber } from "../format";
 import { matchingPreset, WEIGHT_PRESETS } from "../params";
 import { useDesign } from "../store";
@@ -105,6 +106,19 @@ function Plot({ points, xLabel, yLabel, xLog, yLog, line, onPick }: { points: Po
   );
 }
 
+/** Sweeping the multipliers means no longer deriving them from a speed target. */
+const MANUAL_MACS = { target_tok_s: 0 };
+
+const PARETO_VARIANTS = [34000, 68000, 136000, 272000, 544000, 1088000].flatMap((macs) => [3, 4, 6, 8].map((bits) => ({ macs_per_die: macs, weight_bits: bits, use_model_mix: false, target_tok_s: 0 })));
+
+const FORMAT_PRESETS = WEIGHT_PRESETS.flatMap((section) => section.presets.map((preset) => ({ ...preset, family: section.title })));
+const FORMAT_VARIANTS = FORMAT_PRESETS.map((preset) => preset.values);
+
+function SweepProgress<V extends Record<string, unknown>>({ sweep }: { sweep: Sweep<V> }) {
+  if (sweep.total === 0 || sweep.done >= sweep.total) return null;
+  return <p className="note" role="status">Generando circuitos: {sweep.done} de {sweep.total}</p>;
+}
+
 export function ExplorerView() {
   const model = useDesign((s) => s.model);
   const params = useDesign((s) => s.params);
@@ -114,37 +128,37 @@ export function ExplorerView() {
   const axis = AXES.find((a) => a.key === xKey)!;
   const metric = METRICS.find((m) => m[0] === yKey)!;
 
-  const curve = useMemo(() => {
-    if (!model) return [];
-    const values = samples(axis);
-    const results = sweepDesign(model, params, values.map((v) => ({ [axis.key]: v })));
-    return values.map((v, i): Point => ({
-      x: v,
-      y: results[i].metrics[yKey],
-      ok: results[i].errors === 0,
-      label: `${axis.label}: ${formatNumber(v)} · ${metric[1]}: ${formatNumber(results[i].metrics[yKey])} ${metric[2]}`,
-    }));
-  }, [model, params, axis, yKey, metric]);
+  const curveVariants = useMemo(() => samples(axis).map((v): Record<string, number> => ({ [axis.key]: v, ...(axis.key === "macs_per_die" ? MANUAL_MACS : {}) })), [axis]);
+  const curveSweep = useSweep("curve", model, params, curveVariants);
+  const curve = useMemo(
+    () =>
+      (curveSweep.results ?? []).map((r, i): Point => {
+        const v = curveSweep.variants[i][axis.key];
+        return {
+          x: v,
+          y: r.metrics[yKey],
+          ok: r.errors === 0,
+          label: `${axis.label}: ${formatNumber(v)} · ${metric[1]}: ${formatNumber(r.metrics[yKey])} ${metric[2]}`,
+        };
+      }),
+    [curveSweep, axis, yKey, metric],
+  );
 
+  const paretoSweep = useSweep("pareto", model, params, PARETO_VARIANTS);
   const pareto = useMemo(() => {
-    if (!model) return { all: [] as (Point & { macs: number; bits: number })[], front: [] as (Point & { macs: number; bits: number })[] };
-    const macs = [34000, 68000, 136000, 272000, 544000, 1088000];
-    const bits = [3, 4, 6, 8];
-    const variants = macs.flatMap((m) => bits.map((b) => ({ macs_per_die: m, weight_bits: b, use_model_mix: false })));
-    const results: SweepResult[] = sweepDesign(model, params, variants);
-    const all = results
+    const all = (paretoSweep.results ?? [])
       .map((r, i) => ({
         x: r.metrics.total_area_mm2,
         y: r.metrics.tok_s,
         ok: r.errors === 0,
-        macs: variants[i].macs_per_die,
-        bits: variants[i].weight_bits,
-        label: `${formatNumber(variants[i].macs_per_die)} mult. · ${variants[i].weight_bits} bits · ${formatNumber(r.metrics.tok_s)} tok/s`,
+        macs: paretoSweep.variants[i].macs_per_die,
+        bits: paretoSweep.variants[i].weight_bits,
+        label: `${formatNumber(paretoSweep.variants[i].macs_per_die)} mult. · ${paretoSweep.variants[i].weight_bits} bits · ${formatNumber(r.metrics.tok_s)} tok/s`,
       }))
       .filter((p) => p.ok);
     const front = all.filter((p) => !all.some((o) => o !== p && o.x <= p.x && o.y >= p.y && (o.x < p.x || o.y > p.y))).sort((a, b) => a.x - b.x);
     return { all, front };
-  }, [model, params]);
+  }, [paretoSweep]);
 
   return (
     <section className="stage explorer-stage">
@@ -163,8 +177,12 @@ export function ExplorerView() {
             </div>
           </div>
           <p className="muted-text plot-sub">{metric[1]}{metric[2] ? ` (${metric[2]})` : ""}. Clic en un punto para aplicarlo al diseño.</p>
+          <SweepProgress sweep={curveSweep} />
           {curve.length > 1 && (
-            <Plot points={curve} xLabel={axis.label} yLabel={metric[1]} xLog={axis.log} yLog={yKey !== "dies"} line onPick={(p) => setParam(axis.key, p.x)} />
+            <Plot points={curve} xLabel={axis.label} yLabel={metric[1]} xLog={axis.log} yLog={yKey !== "dies"} line onPick={(p) => {
+              if (axis.key === "macs_per_die") setParam("target_tok_s", 0);
+              setParam(axis.key, p.x);
+            }} />
           )}
         </div>
         <div className="card">
@@ -172,10 +190,12 @@ export function ExplorerView() {
             <h2>Frontera de Pareto</h2>
           </div>
           <p className="muted-text plot-sub">Velocidad (tok/s) frente a área total (mm²), variando multiplicadores y bits de peso. Solo diseños que cumplen las restricciones.</p>
+          <SweepProgress sweep={paretoSweep} />
           {pareto.all.length > 1 && (
             <Plot points={pareto.all} xLabel="Área total (mm²)" yLabel="Velocidad" xLog yLog line={false} onPick={(p) => {
               const chosen = pareto.all.find((o) => o.x === p.x && o.y === p.y);
               if (chosen) {
+                setParam("target_tok_s", 0);
                 setParam("macs_per_die", chosen.macs);
                 setParam("weight_bits", chosen.bits);
                 setParam("use_model_mix", false);
@@ -235,12 +255,11 @@ function FormatComparison() {
   const model = useDesign((s) => s.model);
   const params = useDesign((s) => s.params);
   const setParam = useDesign((s) => s.setParam);
-  const rows = useMemo(() => {
-    if (!model) return [];
-    const presets = WEIGHT_PRESETS.flatMap((section) => section.presets.map((preset) => ({ ...preset, family: section.title })));
-    const results: SweepResult[] = sweepDesign(model, params, presets.map((p) => p.values));
-    return presets.map((preset, i) => ({ preset, metrics: results[i].metrics, errors: results[i].errors })).sort((a, b) => a.metrics.total_area_mm2 - b.metrics.total_area_mm2);
-  }, [model, params]);
+  const sweep = useSweep("formats", model, params, FORMAT_VARIANTS);
+  const rows = useMemo(
+    () => (sweep.results ?? []).map((r, i) => ({ preset: FORMAT_PRESETS[i], metrics: r.metrics, errors: r.errors })).sort((a, b) => a.metrics.total_area_mm2 - b.metrics.total_area_mm2),
+    [sweep],
+  );
   const current = matchingPreset(params as unknown as Record<string, unknown>);
   return (
     <div className="card">
@@ -248,6 +267,7 @@ function FormatComparison() {
         <h2>Formatos de pesos</h2>
       </div>
       <p className="muted-text plot-sub">El circuito de cada formato con este diseño, de menor a mayor área. Clic en una fila para usarlo. Top-1 es la coincidencia con coma flotante en 16 o 64 tokens de Qwen3.8 real. Ese modelo ya viene cuantizado a 4 bits, así que los formatos pequeños pueden salir mejor de lo que saldrían con pesos originales.</p>
+      <SweepProgress sweep={sweep} />
       <div className="format-table">
         <table className="front">
           <thead>
@@ -290,7 +310,7 @@ export function CalibrationPanel() {
       REFERENCES.map((ref) => {
         const model = models.find((m) => m.id === ref.model);
         if (!model) return null;
-        const report = estimateDesign(model, { ...defaults, ...ref.params } as ChipParams);
+        const report = estimateDesign(model, { ...defaults, target_tok_s: 0, ...ref.params } as ChipParams);
         return { ref, report };
       }),
     [models, defaults],
