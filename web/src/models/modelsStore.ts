@@ -48,6 +48,15 @@ export interface Job {
   target: string;
 }
 
+export interface SpeedResult {
+  name: string;
+  total: number;
+  position: number;
+  cells: number;
+  lanes: number;
+  ops: { name: string; cycles: number; count: number }[];
+}
+
 export interface ImageStatus {
   state: "idle" | "writing" | "done" | "error";
   name?: string;
@@ -75,6 +84,9 @@ interface ModelsState {
   error: string | null;
   settingsError: string | null;
   image: ImageStatus;
+  speed: SpeedResult | null;
+  measuring: boolean;
+  measureSpeed: (path: string, context: number, cells: number, bits: number, lanes: number) => Promise<void>;
 
   set: (patch: Partial<ModelsState>) => void;
   loadSettings: () => Promise<void>;
@@ -119,6 +131,17 @@ export const useModels = create<ModelsState>((set, get) => ({
   error: null,
   settingsError: null,
   image: { state: "idle" },
+  speed: null,
+  measuring: false,
+  async measureSpeed(path, context, cells, bits, lanes) {
+    set({ measuring: true, error: null });
+    try {
+      const speed = await call<SpeedResult>("/api/speed", { method: "POST", headers: json, body: JSON.stringify({ path, context_tokens: context, cells, activation_bits: bits, vector_lanes: lanes }) });
+      set({ speed, measuring: false });
+    } catch (e) {
+      set({ error: text(e), measuring: false });
+    }
+  },
 
   set: (patch) => set(patch),
 

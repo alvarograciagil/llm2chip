@@ -501,10 +501,10 @@ impl Layout {
         asm
     }
 
-    /// The cycles each operation of the token routine takes on this die, in program order.
+    /// The cycles each operation of a token takes on this die, in program order.
     pub fn cycles_by_op(&self, program: &Program, token: u32, position: u32) -> Result<Vec<(String, u64)>, String> {
         let mut list = Vec::new();
-        for inst in &program.ops[..program.logits_from] {
+        for inst in &program.ops {
             let mut asm = self.assembly();
             self.run_list(&mut asm, program, std::slice::from_ref(inst), Expr::var(Var::Token), Expr::var(Var::Position), true)?;
             let mut code = DieProgram::new(self.config);

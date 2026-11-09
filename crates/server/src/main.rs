@@ -26,7 +26,8 @@ use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
 use netlist::soc::{FirmwareImage, SocBus, SocConfig};
 use netlist::{CellConfig, DieConfig, Microprogram, Parameter};
 use sim::chip::{RunnerEngine, FLOW_DRAFT_REGISTER, FLOW_REGISTER_BITS, FLOW_INDEX_BITS};
-use sim::image::{load_or_build, verify, write_chip_image, ImageRequest, LoadReport};
+use sim::image::{fitted_die, load_or_build, verify, write_chip_image, ImageRequest, LoadReport};
+use sim::lower::Layout;
 use sim::tokenizer::TokenizerTables;
 use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
 use std::collections::HashMap;
@@ -244,6 +245,52 @@ fn run_lab(catalog: &Catalog, request: LabRequest) -> Result<serde_json::Value, 
         "first_divergence": first_divergence,
         "has_state": !program.delta_slots.is_empty(),
     }))
+}
+
+#[derive(Deserialize)]
+struct SpeedRequest {
+    path: String,
+    context_tokens: u64,
+    cells: usize,
+    activation_bits: u32,
+    #[serde(default = "one_lane")]
+    vector_lanes: u32,
+}
+
+/// Counts the cycles of a token at the last position of the context, on the die the image
+/// would be built for. The result is what the circuit does, not what the estimator expects.
+fn run_speed(catalog: &Catalog, request: SpeedRequest) -> Result<serde_json::Value, String> {
+    let dir = PathBuf::from(&request.path);
+    let entry = catalog.find(&request.path).ok_or("el modelo no está en las carpetas conocidas")?;
+    if !entry.supported {
+        return Err(entry.adaptation.reason.unwrap_or_else(|| "esta arquitectura todavía no se puede ejecutar".into()));
+    }
+    let program = compile_model(&entry.config)?;
+    let weights = Weights::open(&dir)?;
+    let context = request.context_tokens.max(1);
+    let image = ImageRequest { chips: vec![1], context_tokens: context, cells: request.cells.max(1), activation_bits: request.activation_bits.clamp(8, 24), lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), add_special: false, stop: Vec::new() };
+    let die = fitted_die(&program, &weights, &image)?;
+    let layout = Layout::for_image(&program, &weights, die, context as usize)?;
+    let mut totals: Vec<(String, u64, u32)> = Vec::new();
+    for (name, cycles) in layout.cycles_by_op(&program, 0, (context - 1) as u32)? {
+        match totals.iter_mut().find(|row| row.0 == name) {
+            Some(row) => (row.1, row.2) = (row.1 + cycles, row.2 + 1),
+            None => totals.push((name, cycles, 1)),
+        }
+    }
+    totals.sort_by_key(|row| std::cmp::Reverse(row.1));
+    let total: u64 = totals.iter().map(|row| row.1).sum();
+    let ops: Vec<_> = totals.iter().map(|(name, cycles, count)| serde_json::json!({ "name": name, "cycles": cycles, "count": count })).collect();
+    Ok(serde_json::json!({ "name": entry.name, "total": total, "position": context - 1, "cells": die.cells, "lanes": 1u32 << die.features.lane_bits, "ops": ops }))
+}
+
+async fn speed(State(app): State<App>, Json(request): Json<SpeedRequest>) -> Response {
+    let catalog = app.catalog.clone();
+    match tokio::task::spawn_blocking(move || run_speed(&catalog, request)).await {
+        Ok(Ok(result)) => Json(result).into_response(),
+        Ok(Err(message)) => refused(message),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 async fn lab(State(app): State<App>, Json(request): Json<LabRequest>) -> Response {
@@ -821,6 +868,7 @@ async fn main() {
         .route("/api/hf/cancel", post(hub_cancel))
         .route("/api/hf/discard", post(hub_discard))
         .route("/api/lab", post(lab))
+        .route("/api/speed", post(speed))
         .route("/api/image", get(image_status).post(image_start))
         .route("/api/image/cancel", post(image_cancel))
         .route("/api/hf/token", put(hub_set_token).get(hub_token).delete(hub_clear_token))

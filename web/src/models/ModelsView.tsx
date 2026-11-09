@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Segmented } from "../components/controls";
 import { useSimulator, type ServerModel } from "../simulator/simulatorStore";
+import { formatNumber } from "../format";
 import { useDesign } from "../store";
 import { formatBytes, formatCount, formatRemaining, useModels, type Adaptation, type Details, type Job } from "./modelsStore";
 
@@ -35,6 +36,12 @@ function LocalList() {
     const dies = Math.max(1, Math.round(report?.dies ?? 1));
     void startImage(m.path, Array.from({ length: dies }, (_, i) => i + 1), Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits), Number(params.vector_lanes_per_die));
   };
+  const measureSpeed = useModels((s) => s.measureSpeed);
+  const measuring = useModels((s) => s.measuring);
+  const measure = (m: ServerModel) => {
+    const { params } = useDesign.getState();
+    void measureSpeed(m.path, Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits), Number(params.vector_lanes_per_die));
+  };
   const simulate = (m: ServerModel) => {
     setSimulator({ path: m.path });
     setView("simulador");
@@ -63,6 +70,7 @@ function LocalList() {
             <button className="pill" disabled={!m.adaptation.design} onClick={() => toDesigner(m.name, m.config, m.adaptation)}>Diseñar chip</button>
             <button className="pill" disabled={!m.supported} onClick={() => simulate(m)}>Simular</button>
             <button className="pill" disabled={!m.supported || writing} onClick={() => makeImage(m)}>Generar imagen</button>
+            <button className="pill" disabled={!m.supported || measuring} onClick={() => measure(m)}>Medir velocidad</button>
           </div>
         </li>
       ))}
@@ -321,6 +329,8 @@ export function ModelsPanel() {
         {!local && <p className="model-reason">Estás conectado por la red local sin cifrar: escribe el token desde el propio equipo.</p>}
       </div>
 
+      <SpeedPanel />
+
       {image.state !== "idle" && (
         <>
           <h3>Imagen del chip</h3>
@@ -346,5 +356,56 @@ export function ModelsPanel() {
         </>
       )}
     </aside>
+  );
+}
+
+const OPERATION_NAMES: Record<string, string> = {
+  AttnSum: "Atención",
+  DeltaStep: "DeltaNet",
+  Dconv: "Convolución",
+  Matvec: "Matrices",
+  RmsGated: "Normalización con puerta",
+  RmsNorm: "Normalización",
+  Rope: "RoPE",
+  Silu: "SiLU",
+  Gelu: "GELU",
+  Moe: "Expertos",
+  SigmoidMoe: "Expertos",
+  Mla: "Atención latente",
+};
+
+/** The tokens per second of the generated circuit, counted cycle by cycle, against the target. */
+function SpeedPanel() {
+  const speed = useModels((s) => s.speed);
+  const measuring = useModels((s) => s.measuring);
+  const params = useDesign((s) => s.params);
+  if (measuring) return <p className="muted-text">Contando los ciclos del circuito…</p>;
+  if (!speed) return null;
+  const ghz = Number(params.freq_ghz);
+  const measured = (ghz * 1e9) / speed.total;
+  const target = Number(params.target_tok_s);
+  const top = Math.max(...speed.ops.map((o) => o.cycles), 1);
+  return (
+    <>
+      <h3>Velocidad del circuito</h3>
+      <div className="inset padded form job">
+        <div className="job-head">
+          <strong title={speed.name}>{speed.name}</strong>
+        </div>
+        <p className="muted-text">
+          {formatNumber(measured)} tok/s a {formatNumber(ghz)} GHz con {speed.cells.toLocaleString("es-ES")} celdas y {speed.lanes} carriles, en la posición {speed.position.toLocaleString("es-ES")}
+          {target > 0 ? `. Objetivo: ${formatNumber(target)} tok/s (${formatNumber(target / measured)} veces más).` : "."}
+        </p>
+        <div className="lab-bars" role="table" aria-label="Ciclos por operación">
+          {speed.ops.slice(0, 8).map((o) => (
+            <div className="lab-row" role="row" key={o.name} title={`${o.name}: ${o.count} veces`}>
+              <span role="cell" className="lab-label">{OPERATION_NAMES[o.name] ?? o.name}</span>
+              <span role="cell" className="lab-track"><i style={{ width: `${(100 * o.cycles) / top}%` }} /></span>
+              <span role="cell" className="lab-value">{(o.cycles / 1e6).toLocaleString("es-ES", { maximumFractionDigits: 1 })} M</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
   );
 }
