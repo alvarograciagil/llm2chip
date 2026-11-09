@@ -64,7 +64,7 @@ fn gates_match_the_model() {
         let logits: Vec<i64> = (0..length).map(|_| (noise.next() % spread) as i64 - spread as i64 / 2).collect();
         let inverse = noise.next() % 4096;
         let limit = 1 + noise.next() as usize % 8;
-        let greedy = noise.next() % 8 == 0;
+        let greedy = noise.next().is_multiple_of(8);
         let got = run_gates(&mut sim, &logits, inverse, limit, greedy);
         let expected = model.sample(&logits, inverse, limit, greedy);
         assert_eq!(got, expected, "ronda {round}, {length} logits, k={limit}, inversa {inverse}, voraz {greedy}");
