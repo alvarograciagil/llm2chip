@@ -5,6 +5,6 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const name = process.argv[2];
-const [command, args] = process.platform === "win32" ? ["powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(here, `${name}.ps1`)]] : ["bash", [join(here, `${name}.sh`)]];
+const [command, args] = process.platform === "win32" ? ["powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(here, `${name}.ps1`), ...process.argv.slice(3).flatMap((a) => (a === "--lan" ? ["-Lan"] : [a]))]] : ["bash", [join(here, `${name}.sh`), ...process.argv.slice(3)]];
 const result = spawnSync(command, args, { stdio: "inherit" });
 process.exit(result.status ?? 1);

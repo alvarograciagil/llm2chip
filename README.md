@@ -79,7 +79,17 @@ Hace falta Rust con `wasm32-unknown-unknown` y `riscv32im-unknown-none-elf`, `wa
 scripts/dev.sh
 ```
 
-Abre `http://localhost:5173`. El motor local solo escucha en `127.0.0.1`. Para empaquetar la aplicación de escritorio:
+Abre `http://localhost:5173`. El motor local solo escucha en `127.0.0.1`.
+
+Para usar la interfaz desde otros equipos de tu red:
+
+```bash
+scripts/dev.sh --lan
+```
+
+Al arrancar muestra una dirección con una clave de acceso, que se guarda en `~/.llm2chip/lan-url`. Quien tenga esa dirección puede cargar modelos y ejecutarlos en este equipo, así que no la compartas fuera de tu red. El motor sigue escuchando solo en local; `LLM2CHIP_LAN_KEY` fija tu propia clave y `LLM2CHIP_WEB_PORT` cambia el puerto.
+
+Para empaquetar la aplicación de escritorio:
 
 ```bash
 scripts/build-app.sh
