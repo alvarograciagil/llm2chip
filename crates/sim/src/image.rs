@@ -16,7 +16,7 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// Cycles the load controller spends per 32-bit word when each element is one word.
 const CYCLES_PER_WORD: u64 = 3;
 
@@ -138,6 +138,9 @@ pub struct ImageTensor {
     pub offset: u64,
     pub bytes: u64,
     pub rows: u64,
+    /// For a matrix in the cells, the rows of one use. Zero for any other tensor.
+    #[serde(default)]
+    pub block: u64,
     pub crc: u32,
 }
 
@@ -238,7 +241,14 @@ pub fn write_chip_image(dir: &Path, firmware: &FirmwareImage, request: &ImageReq
     let boot_bytes: Vec<u8> = boot.iter().flat_map(|w| w.to_le_bytes()).collect();
 
     let cells = request.cells as u64;
-    let raw = weights.raw_tensors();
+    // Matrices go in the form the cells take; only what is not in them stays as it came.
+    let placed = Layout::for_image(&program, &weights, die, request.context_tokens.max(1) as usize)?;
+    let in_cells = placed.cell_tensors();
+    let is_in_cells = |name: &str| {
+        let matrix = [".weight", ".scales", ".biases", ".scale"].iter().find_map(|end| name.strip_suffix(end)).unwrap_or(name);
+        !placed.is_lookup_table(matrix) && in_cells.iter().any(|t| t.name == matrix)
+    };
+    let raw: Vec<_> = weights.raw_tensors().into_iter().filter(|(name, _, _)| !is_in_cells(name)).collect();
     let mut entries: Vec<ImageTensor> = raw
         .iter()
         .map(|(name, dtype, bytes)| {
@@ -246,9 +256,14 @@ pub fn write_chip_image(dir: &Path, firmware: &FirmwareImage, request: &ImageReq
                 Some(shape) if shape.len() >= 2 => shape[..shape.len() - 1].iter().product::<usize>() as u64,
                 _ => 1,
             };
-            ImageTensor { name: name.to_string(), dtype: dtype.to_string(), target: target_of(name, dtype) as u32, offset: 0, bytes: bytes.len() as u64, rows, crc: 0 }
+            ImageTensor { name: name.to_string(), dtype: dtype.to_string(), target: target_of(name, dtype) as u32, offset: 0, bytes: bytes.len() as u64, rows, block: 0, crc: 0 }
         })
         .collect();
+    let first_in_cells = entries.len();
+    for tensor in &in_cells {
+        let bytes = tensor.rows as u64 * tensor.row_bytes(&weights)? as u64;
+        entries.push(ImageTensor { name: tensor.name.clone(), dtype: "cell".into(), target: Target::CellWeight as u32, offset: 0, bytes, rows: tensor.rows as u64, block: tensor.block as u64, crc: 0 });
+    }
     let payload: u64 = entries.iter().map(|t| t.bytes).sum();
     total.store(payload + boot_bytes.len() as u64, Relaxed);
 
@@ -280,7 +295,8 @@ pub fn write_chip_image(dir: &Path, firmware: &FirmwareImage, request: &ImageReq
     file.write_all(&boot_bytes).map_err(io)?;
     done.store(boot_bytes.len() as u64, Relaxed);
 
-    for (entry, (_, _, bytes)) in entries.iter_mut().zip(&raw) {
+    let (plain, encoded) = entries.split_at_mut(first_in_cells);
+    for (entry, (_, _, bytes)) in plain.iter_mut().zip(&raw) {
         let row_bytes = (entry.bytes / entry.rows.max(1)) as usize;
         let spread = if row_bytes == 0 { 1 } else { cells.min(entry.rows.max(1)) };
         let mut hasher = crc32fast::Hasher::new();
@@ -303,6 +319,23 @@ pub fn write_chip_image(dir: &Path, firmware: &FirmwareImage, request: &ImageReq
             let tail = &bytes[row_bytes * entry.rows as usize..];
             file.write_all(tail).map_err(io)?;
             hasher.update(tail);
+        }
+        entry.crc = hasher.finalize();
+        done.fetch_add(entry.bytes, Relaxed);
+    }
+    for (entry, tensor) in encoded.iter_mut().zip(&in_cells) {
+        let mut hasher = crc32fast::Hasher::new();
+        for cell in 0..tensor.spread() {
+            if cancel.load(Relaxed) {
+                drop(file);
+                let _ = std::fs::remove_file(&draft);
+                return Err("cancelada".into());
+            }
+            for row in tensor.rows_of(cell) {
+                let bytes = tensor.encoded_row(&weights, row)?;
+                file.write_all(&bytes).map_err(io)?;
+                hasher.update(&bytes);
+            }
         }
         entry.crc = hasher.finalize();
         done.fetch_add(entry.bytes, Relaxed);
@@ -360,14 +393,15 @@ impl ChipImage {
     /// Everything one cell stores of a tensor, in the order it takes it.
     pub fn cell_weights(&mut self, name: &str, cell: u64) -> Result<Vec<u8>, String> {
         let entry = self.manifest.tensors.iter().find(|t| t.name == name).ok_or_else(|| format!("{name} no está en la imagen"))?.clone();
-        let spread = self.manifest.cells.min(entry.rows.max(1));
+        let (block, blocks) = if entry.block > 0 { (entry.block, entry.rows / entry.block) } else { (entry.rows.max(1), 1) };
+        let spread = self.manifest.cells.min(block);
         if cell >= spread {
             return Ok(Vec::new());
         }
         let row_bytes = entry.bytes / entry.rows.max(1);
-        let before: u64 = (0..cell).map(|c| rows_of_cell(entry.rows, spread, c)).sum();
+        let before: u64 = (0..cell).map(|c| blocks * rows_of_cell(block, spread, c)).sum();
         self.file.seek(SeekFrom::Start(entry.offset + before * row_bytes)).map_err(io)?;
-        let mut bytes = vec![0u8; (rows_of_cell(entry.rows, spread, cell) * row_bytes) as usize];
+        let mut bytes = vec![0u8; (blocks * rows_of_cell(block, spread, cell) * row_bytes) as usize];
         self.file.read_exact(&mut bytes).map_err(io)?;
         Ok(bytes)
     }

@@ -149,6 +149,16 @@ impl Expr {
         Self { constant: 0, terms }
     }
 
+    /// This index without its part in `variable`.
+    pub fn without(mut self, variable: Var) -> Self {
+        for term in self.terms.iter_mut() {
+            if term.is_some_and(|(v, _)| v == variable) {
+                *term = None;
+            }
+        }
+        self
+    }
+
     /// True when `by` divides every value this index can take.
     pub fn is_multiple_of(&self, by: u32) -> bool {
         self.constant.is_multiple_of(by) && self.terms.iter().flatten().all(|(_, coefficient)| coefficient.is_multiple_of(by))
@@ -547,6 +557,8 @@ impl From<Alu<u32>> for Alu<Expr> {
 pub enum Step {
     One(Alu<Expr>),
     Repeat { variable: Var, count: Expr, body: Vec<Step> },
+    /// A single-operation loop that issues one element, or block, per cycle.
+    Stream { variable: Var, count: u32, body: Alu<Expr> },
     /// Moves every cell to where a matrix starts.
     CellSeek { weights: Expr, factors: Expr },
     /// Clears the row totals and restarts the input vector.
@@ -556,6 +568,9 @@ pub enum Step {
     /// The totals of the first `rows` cells go to the wide memory.
     CellDrain { rows: u32 },
 }
+
+/// Below this a loop is not worth the words it takes to set up a stream.
+const MIN_STREAM: u32 = 4;
 
 /// Fractional bits of the scale and bias the cells multiply by.
 pub const FACTOR_FRACTION: u32 = 4;
@@ -590,13 +605,14 @@ pub struct Assembly {
     loops: u32,
     lane_bits: u32,
     cells: u32,
+    streams: bool,
     /// Matrices the cells hold. Any other is computed from the vector registers.
     pub in_cells: HashMap<String, CellMatrix>,
 }
 
 impl Assembly {
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -641,11 +657,39 @@ impl Assembly {
         let lanes = 1u32 << self.lane_bits;
         let aligned = starts.iter().all(|s| s.is_multiple_of(lanes));
         if lanes == 1 || !independent || !aligned || !len.is_constant() || len.constant() < lanes {
-            return self.each(len, |s, i| emit(s, i, false));
+            self.each(len, |s, i| emit(s, i, false));
+            return self.stream_last(1);
         }
         let (blocks, rest) = (len.constant() / lanes, len.constant() % lanes);
         self.each(blocks.into(), |s, i| emit(s, i * lanes, true));
+        self.stream_last(lanes);
         self.each(rest.into(), |s, i| emit(s, i + (blocks * lanes).into(), false));
+        self.stream_last(1);
+    }
+
+    /// Turns the loop just built into a stream, if nothing in it needs the steps apart.
+    fn stream_last(&mut self, unit: u32) {
+        if !self.streams {
+            return;
+        }
+        let Some(Step::Repeat { variable, count, body }) = self.steps.last() else {
+            return;
+        };
+        let ([Step::One(step)], true) = (body.as_slice(), count.is_constant() && count.constant() >= MIN_STREAM) else {
+            return;
+        };
+        let (variable, count, step) = (*variable, count.constant(), *step);
+        let stride = |index: Expr| index.coefficient(variable);
+        let moves_with = |index: Expr| stride(index) == 0 || stride(index) == unit;
+        // Results land two or three cycles after the read, so nothing may read a place
+        // an earlier element of the same stream is still going to write.
+        let safe = |operand: At<Expr>| operand.0 != step.dst.0 || (stride(operand.1) == unit && operand.1 == step.dst.1);
+        let plain = !(step.load_shift_a || step.load_shift_b || step.load_shift_left || step.load_wide_shift || step.link_send || step.magnitude_clear || step.accumulator_clear || step.wide_clear || step.wide_scan || step.wide_write) && step.literal.is_none();
+        let streamable = matches!(step.op, OP_ADD | OP_SUB | OP_MUL | OP_MOV | OP_FUNCTION | OP_SHIFT_LEFT);
+        let scans = !step.write;
+        if plain && streamable && (scans || stride(step.dst.1) == unit) && moves_with(step.a.1) && moves_with(step.b.1) && (scans || (safe(step.a) && safe(step.b))) {
+            *self.steps.last_mut().expect("bucle") = Step::Stream { variable, count, body: step };
+        }
     }
 
     fn binary(&mut self, op: u32, a: At<Expr>, b: At<Expr>, dst: At<Expr>) {
@@ -787,6 +831,13 @@ fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32)
                 }
             }
             Step::Repeat { body, .. } => mark_window(body, step, windowed, exponents),
+            Step::Stream { body, .. } => {
+                let mut one = [Step::One(*body)];
+                mark_window(&mut one, step, windowed, exponents);
+                if let [Step::One(marked)] = one {
+                    *body = marked;
+                }
+            }
             Step::CellGroup { src, .. } => assert!(!windowed.contains(src), "las celdas leen de registros fijos"),
             Step::CellSeek { .. } | Step::CellPass | Step::CellDrain { .. } => {}
         }
@@ -945,6 +996,7 @@ impl BlockOps for Assembly {
                 let (x, y) = indices(set, term);
                 s.accumulate(x, y);
             });
+            s.stream_last(1);
             s.store_accumulator(set);
         });
         self.narrow_sums(a, b, dst, sets);
@@ -1084,18 +1136,30 @@ impl BlockOps for Assembly {
         self.binary(OP_SUB, self.sc(8), e, self.sc(12));
         self.binary(OP_MAX, self.sc(12), self.sc(10), self.sc(13));
         self.load_shifts(Some(self.sc(13)), None, Some(self.sc(11)));
+        let apart = src != dst || from == to;
         self.elements(len, &[from, to], true, |s, i, vector| {
             let mut right = alu(OP_MOV);
             right.a = (src, from + i);
             right.dst = (dst, to + i);
             right.vector = vector;
             s.push(right);
-            let mut left = alu(OP_SHIFT_LEFT);
-            left.a = (dst, to + i);
-            left.dst = (dst, to + i);
-            left.vector = vector;
-            s.push(left);
+            if !apart {
+                let mut left = alu(OP_SHIFT_LEFT);
+                left.a = (dst, to + i);
+                left.dst = (dst, to + i);
+                left.vector = vector;
+                s.push(left);
+            }
         });
+        if apart {
+            self.elements(len, &[to], true, |s, i, vector| {
+                let mut left = alu(OP_SHIFT_LEFT);
+                left.a = (dst, to + i);
+                left.dst = (dst, to + i);
+                left.vector = vector;
+                s.push(left);
+            });
+        }
         self.clear_shifts();
     }
 
@@ -1243,6 +1307,12 @@ impl Behavior {
                     for i in 0..value(loops, *count) {
                         loops.insert(*variable, i);
                         self.walk(body, token, position, loops);
+                    }
+                }
+                Step::Stream { variable, count, body } => {
+                    for i in 0..*count {
+                        loops.insert(*variable, i);
+                        self.walk(&[Step::One(*body)], token, position, loops);
                     }
                 }
                 Step::CellSeek { .. } | Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } => panic!("este modelo no guarda los pesos de las celdas"),

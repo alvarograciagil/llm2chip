@@ -81,21 +81,28 @@ mod chip_image {
         assert!(image.verify().unwrap().is_empty());
         assert!(!image.boot().unwrap().is_empty());
 
-        // The rows every cell receives, put back in order, are the original matrix.
+        // Each cell receives its rows as codes plus factors, in the order it reads them.
         let weights = sim::Weights::open(&dir).unwrap();
-        let name = "lm_head.weight";
-        let original = weights.raw_tensors().into_iter().find(|t| t.0 == name).unwrap().2.to_vec();
-        let shape = weights.shape(name).unwrap().to_vec();
-        let row_bytes = original.len() / shape[0];
-        let mut rebuilt = vec![0u8; original.len()];
+        let matrix = weights.matrix("lm_head").unwrap();
+        let (cols, groups) = (8, matrix.cell_groups(8).1);
+        let exponent = matrix.exponent(cols);
+        let row_bytes = cols / 2 + 8 * groups;
+        let mut seen = 0;
         for cell in 0..3usize {
-            let bytes = image.cell_weights(name, cell as u64).unwrap();
+            let bytes = image.cell_weights("lm_head", cell as u64).unwrap();
             for (index, row) in bytes.chunks(row_bytes).enumerate() {
-                let at = (cell + 3 * index) * row_bytes;
-                rebuilt[at..at + row_bytes].copy_from_slice(row);
+                let (codes, factors) = matrix.cell_row(cell + 3 * index, cols, exponent, 16).unwrap();
+                let decoded: Vec<i64> = row[..cols / 2].iter().flat_map(|b| [(*b as i8) << 4 >> 4, *b as i8 >> 4]).map(i64::from).collect();
+                assert_eq!(decoded, codes, "códigos de la fila {}", cell + 3 * index);
+                for (group, (scale, bias)) in factors.iter().enumerate() {
+                    let at = cols / 2 + 8 * group;
+                    assert_eq!(i64::from(i32::from_le_bytes(row[at..at + 4].try_into().unwrap())), *scale);
+                    assert_eq!(i64::from(i32::from_le_bytes(row[at + 4..at + 8].try_into().unwrap())), *bias);
+                }
+                seen += 1;
             }
         }
-        assert_eq!(rebuilt, original);
+        assert_eq!(seen, matrix.rows());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

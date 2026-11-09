@@ -73,6 +73,61 @@ fn rows_per_use(program: &Program, op: &Op, name: &str, rows: usize) -> usize {
     }
 }
 
+/// A matrix as the image stores it for the cells.
+#[derive(Clone, Debug)]
+pub struct CellTensor {
+    pub name: String,
+    pub rows: usize,
+    pub cols: usize,
+    /// Rows of one use, each starting again at the first cell.
+    pub block: usize,
+    pub exponent: i64,
+    cells: usize,
+    bits: u32,
+}
+
+impl CellTensor {
+    /// The cells that hold part of this matrix.
+    pub fn spread(&self) -> usize {
+        self.cells.min(self.block)
+    }
+
+    /// The rows `cell` holds, in the order it reads them.
+    pub fn rows_of(&self, cell: usize) -> impl Iterator<Item = usize> + '_ {
+        let rounds = self.block.div_ceil(self.cells);
+        (0..self.rows / self.block).flat_map(move |block| (0..rounds).map(move |round| (block, round * self.cells + cell))).filter(|(_, row)| *row < self.block).map(|(block, row)| block * self.block + row)
+    }
+
+    /// One row in the bytes of the image: its codes, then each group's scale and bias.
+    pub fn encoded_row(&self, weights: &Weights, row: usize) -> Result<Vec<u8>, String> {
+        let matrix = weights.matrix(&self.name)?;
+        let (codes, factors) = matrix.cell_row(row, self.cols, self.exponent, self.bits)?;
+        let code_bits = matrix.cell_code_bits(self.cols, self.bits);
+        let mut bytes = Vec::with_capacity(self.row_bytes(weights)?);
+        match code_bits {
+            0..=4 => bytes.extend(codes.chunks(2).map(|pair| (pair[0] as u8 & 0xF) | (pair.get(1).map_or(0, |c| *c as u8 & 0xF) << 4))),
+            5..=8 => bytes.extend(codes.iter().map(|c| *c as u8)),
+            _ => bytes.extend(codes.iter().flat_map(|c| (*c as i16).to_le_bytes())),
+        }
+        for (scale, bias) in factors {
+            bytes.extend((scale as i32).to_le_bytes());
+            bytes.extend((bias as i32).to_le_bytes());
+        }
+        Ok(bytes)
+    }
+
+    /// The size of one row in the image.
+    pub fn row_bytes(&self, weights: &Weights) -> Result<usize, String> {
+        let matrix = weights.matrix(&self.name)?;
+        let codes = match matrix.cell_code_bits(self.cols, self.bits) {
+            0..=4 => self.cols.div_ceil(2),
+            5..=8 => self.cols,
+            _ => 2 * self.cols,
+        };
+        Ok(codes + 8 * matrix.cell_groups(self.cols).1)
+    }
+}
+
 /// One matrix in the cells, in the order they hold them.
 #[derive(Clone, Debug)]
 struct CellEntry {
@@ -154,6 +209,7 @@ pub struct Layout {
     setup: Assembly,
     cell_plan: Vec<CellEntry>,
     in_cells: HashMap<String, CellMatrix>,
+    lookup_tables: HashSet<String>,
 }
 
 impl Layout {
@@ -181,6 +237,7 @@ impl Layout {
         let mut setup = Assembly::new(&config);
         let mut matrices: HashMap<String, u32> = HashMap::new();
         let mut cell_plan: Vec<CellEntry> = Vec::new();
+        let mut lookup_tables: HashSet<String> = HashSet::new();
         let mut in_registers: HashSet<String> = HashSet::new();
         let mut small: HashMap<String, u32> = HashMap::new();
         let mut inverse_root: HashMap<usize, u32> = HashMap::new();
@@ -204,6 +261,9 @@ impl Layout {
         for inst in all_ops(program) {
             for (name, rows, cols) in matrices_of(program, &inst.op) {
                 let table = matches!(inst.op, Op::EmbRead { .. });
+                if table {
+                    lookup_tables.insert(name.clone());
+                }
                 let reg = *matrices.entry(name.clone()).or_insert_with(|| alloc(1));
                 if chip_tokens.is_some() && matrices_in_registers && (!cells || table) && in_registers.insert(name.clone()) {
                     if rows * cols > 1 << config.index_bits {
@@ -335,7 +395,7 @@ impl Layout {
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
         }
-        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, rope, rope_table, rope_half, inverse_root, inverse_len, setup, cell_plan, in_cells })
+        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, rope, rope_table, rope_half, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -446,6 +506,16 @@ impl Layout {
             shape = (shape.0.max(weights.matrix(&e.name)?.cell_code_bits(e.cols, self.config.cell.activation_bits)), shape.1.max(e.group));
         }
         Ok(shape)
+    }
+
+    /// Whether the program also reads single rows of this matrix from the registers.
+    pub fn is_lookup_table(&self, name: &str) -> bool {
+        self.lookup_tables.contains(name)
+    }
+
+    /// Every matrix in the cells, in the order they hold them.
+    pub fn cell_tensors(&self) -> Vec<CellTensor> {
+        self.cell_plan.iter().map(|e| CellTensor { name: e.name.clone(), rows: e.rows, cols: e.cols, block: e.block, exponent: e.exponent, cells: self.config.cells as usize, bits: self.config.cell.activation_bits }).collect()
     }
 
     pub fn cell_depths(&self) -> (u64, u64) {

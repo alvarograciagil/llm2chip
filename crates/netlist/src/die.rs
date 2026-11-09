@@ -61,6 +61,11 @@ impl DieFeatures {
     }
 
     /// The general die minus register loops, for programs written one register at a time.
+    /// Whether the die can pipeline loops, which takes the two fields of a fixed operand.
+    pub fn streams(&self) -> bool {
+        self.widths[FIXED_A_FIELD] > 0
+    }
+
     pub fn without_register_windows() -> Self {
         let mut features = Self::default();
         features.widths[WINDOW_X_FIELD..].fill(0);
@@ -170,12 +175,16 @@ pub struct ControlWord {
     pub cell_seek_factors: bool,
     /// The wide memory takes the next total of the result chain.
     pub wide_from_chain: bool,
+    /// While the index counters stream, an operand that stays at its literal position.
+    pub fixed_a: bool,
+    pub fixed_b: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 53;
+pub const FIELD_COUNT: usize = 55;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
+const FIXED_A_FIELD: usize = 53;
 
 pub const OP_ADD: u32 = 0;
 pub const OP_MUL: u32 = 1;
@@ -256,6 +265,8 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("cell_seek_weights", 1),
         ("cell_seek_factors", 1),
         ("wide_from_chain", 1),
+        ("fixed_a", 1),
+        ("fixed_b", 1),
     ]
 }
 
@@ -320,6 +331,8 @@ impl ControlWord {
             self.cell_seek_weights as u128,
             self.cell_seek_factors as u128,
             self.wide_from_chain as u128,
+            self.fixed_a as u128,
+            self.fixed_b as u128,
         ]
     }
 
@@ -365,6 +378,25 @@ fn and_not(b: &mut Builder, enable: Bit, value: Bit, name: &str) -> Bit {
 }
 
 /// Loadable counter: `clear` wins, then `advance` increments.
+/// An index that moves a whole block of elements at a time while `block` is set.
+fn index_counter(gen: &mut Gen, b: &mut Builder, (name, wires): (&str, usize), width: u32, (clear, advance): (Bit, Bit), block: Bit, lane_bits: usize) -> Vec<Bit> {
+    if lane_bits == 0 {
+        return counter(gen, b, name, width, clear, advance);
+    }
+    let mut l = Logic { b, next: wires };
+    let value = l.fresh_bus(width as usize);
+    let by_block = l.and(advance, block);
+    let single = l.not(block);
+    let by_one = l.and(advance, single);
+    let mut step = vec![Bit::Zero; width as usize];
+    (step[0], step[lane_bits]) = (by_one, by_block);
+    let next = l.adder(&value, &step, Bit::Zero).0;
+    let keep = l.not(clear);
+    let held: Vec<Bit> = next.iter().map(|bit| l.and(keep, *bit)).collect();
+    l.connect_flops(&held, &value);
+    value
+}
+
 fn counter(gen: &mut Gen, b: &mut Builder, name: &str, width: u32, clear: Bit, advance: Bit) -> Vec<Bit> {
     let module = gen.address_counter(width);
     let value = b.wire(name, width);
@@ -691,22 +723,24 @@ impl Gen {
 
         // --- Vector registers ---
         b.group("Banco de vectores");
-        let read_index = counter(self, &mut b, "read_index", c.index_bits, read_reset, read_step);
+        let lane_shift = c.features.lane_bits as usize;
+        let read_index = index_counter(self, &mut b, ("read_index", 46_000), c.index_bits, (read_reset, read_step), fields["vector"][0], lane_shift);
         let chain_write = b.wire("chain_write", 1)[0];
         b.and_to(wide_write, wide_from_chain, chain_write);
         let write_step = bus_or(&mut b, write_en, chain_write, "write_step");
-        let write_index = counter(self, &mut b, "write_index", c.index_bits, write_reset, write_step);
+        let write_index = index_counter(self, &mut b, ("write_index", 47_000), c.index_bits, (write_reset, write_step), fields["vector"][0], lane_shift);
         let join = |reg: &[Bit], index: &[Bit]| -> Vec<Bit> { index.iter().chain(reg).copied().collect() };
         let use_literal = fields["use_literal"][0];
         let mux_index = self.mux_bus(c.index_bits);
-        let pick = |b: &mut Builder, name: &str, counter: &[Bit], literal: &[Bit]| -> Vec<Bit> {
+        let pick = |b: &mut Builder, name: &str, fixed: Bit, counter: &[Bit], literal: &[Bit]| -> Vec<Bit> {
             let y = b.wire(name, c.index_bits);
-            b.inst(&format!("{name}_select"), &mux_index, &[("s", vec![use_literal]), ("a", counter.to_vec()), ("b", literal.to_vec()), ("y", y.clone())]);
+            let select = bus_or(b, use_literal, fixed, &format!("{name}_literal"));
+            b.inst(&format!("{name}_select"), &mux_index, &[("s", vec![select]), ("a", counter.to_vec()), ("b", literal.to_vec()), ("y", y.clone())]);
             y
         };
-        let plain_a = pick(&mut b, "plain_a", &read_index, &fields["literal_a"]);
-        let plain_b = pick(&mut b, "plain_b", &read_index, &fields["literal_b"]);
-        let plain_w = pick(&mut b, "plain_w", &write_index, &fields["literal_dst"]);
+        let plain_a = pick(&mut b, "plain_a", fields["fixed_a"][0], &read_index, &fields["literal_a"]);
+        let plain_b = pick(&mut b, "plain_b", fields["fixed_b"][0], &read_index, &fields["literal_b"]);
+        let plain_w = pick(&mut b, "plain_w", Bit::Zero, &write_index, &fields["literal_dst"]);
         let offset = |b: &mut Builder, name: &str, plain: &[Bit], by: &[Bit]| -> Vec<Bit> {
             let sum = b.wire(name, c.index_bits);
             let carry = b.wire(&format!("{name}_carry"), 1);
@@ -1431,6 +1465,12 @@ fn visit_indices(steps: &[Step], f: &mut impl FnMut(Expr)) {
                 f(alu.window);
             }
             Step::Repeat { body, .. } => visit_indices(body, f),
+            Step::Stream { body, .. } => {
+                f(body.a.1);
+                f(body.b.1);
+                f(body.dst.1);
+                f(body.window);
+            }
             Step::CellSeek { weights, factors } => {
                 f(*weights);
                 f(*factors);
@@ -1600,11 +1640,80 @@ impl DieProgram {
                     self.alu(&bound);
                 }
                 Step::Repeat { variable, count, body } => self.compile_loop(*variable, *count, body),
+                Step::Stream { variable, count, body } => self.stream(*variable, *count, body),
                 Step::CellSeek { weights, factors } => self.cell_seek(*weights, *factors),
                 Step::CellPass => self.cell_pass(),
                 Step::CellGroup { src, length } => self.cell_group(*src, *length),
                 Step::CellDrain { rows } => self.cell_drain(*rows),
             }
+        }
+    }
+
+    /// The offset register for an operand that moves with the index counters.
+    fn moving_offset(&mut self, index: Expr, temporaries: &mut Vec<u32>) -> u32 {
+        let (literal, register) = self.resolve(index);
+        if literal == 0 {
+            return register;
+        }
+        let temporary = self.allocate();
+        temporaries.push(temporary);
+        self.set_index(temporary, register, literal);
+        temporary
+    }
+
+    /// One element per cycle: each word reads one, computes the last and writes an earlier one.
+    fn stream(&mut self, variable: Var, count: u32, step: &Alu<Expr>) {
+        let moves = |index: Expr| index.coefficient(variable) != 0;
+        let mut temporaries = Vec::new();
+        let place = |this: &mut Self, index: Expr, temporaries: &mut Vec<u32>| {
+            if moves(index) { (0, this.moving_offset(index.without(variable), temporaries)) } else { this.resolve(index) }
+        };
+        let (literal_a, offset_a) = place(self, step.a.1, &mut temporaries);
+        let (literal_b, offset_b) = place(self, step.b.1, &mut temporaries);
+        let offset_dst = self.moving_offset(step.dst.1.without(variable), &mut temporaries);
+        let window_x = if step.window_a || step.window_b || step.window_dst { self.resolve(step.window).1 } else { 0 };
+        let (fixed_a, fixed_b) = (!moves(step.a.1), !moves(step.b.1));
+        let extra = usize::from(step.op == OP_FUNCTION);
+        let (n, written) = (count as usize, 2 + extra);
+
+        let word = |k: usize| {
+            let mut w = ControlWord { vector: step.vector, window_x, ..Default::default() };
+            if k < n {
+                w.read_step = true;
+                (w.reg_a, w.literal_a, w.offset_a, w.window_a, w.fixed_a) = (step.a.0, literal_a, offset_a, step.window_a, fixed_a);
+                (w.reg_b, w.literal_b, w.offset_b, w.window_b, w.fixed_b) = (step.b.0, literal_b, offset_b, step.window_b, fixed_b);
+            }
+            if (1..n + 1 + extra).contains(&k) {
+                (w.op, w.shift, w.function, w.magnitude_scan, w.accumulate) = (step.op, step.shift, step.function, step.magnitude_scan && k <= n, step.accumulate && k <= n);
+                (w.broadcast_a, w.broadcast_b) = (step.broadcast_a, step.broadcast_b);
+            }
+            if (written..n + written).contains(&k) {
+                (w.reg_dst, w.offset_dst, w.window_dst, w.write_en) = (step.dst.0, offset_dst, step.window_dst, step.write);
+            }
+            w
+        };
+        let start = self.end();
+        let w = self.slot(start);
+        (w.read_reset, w.write_reset) = (true, true);
+        let (from, until) = if n > written { (written, n) } else { (n + written, n + written) };
+        for k in 0..from.min(n + written) {
+            let at = self.end();
+            *self.slot(at) = word(k);
+        }
+        // The words in the middle are all the same, so they are written once.
+        let mut left = until - from;
+        while left > 0 {
+            let turns = left.min(1 << REPEAT_BITS);
+            let at = self.end();
+            *self.slot(at) = ControlWord { repeat: turns as u32 - 1, ..word(from) };
+            left -= turns;
+        }
+        for k in until.max(from.min(n + written))..n + written {
+            let at = self.end();
+            *self.slot(at) = word(k);
+        }
+        for temporary in temporaries {
+            self.release(temporary);
         }
     }
 
@@ -1826,7 +1935,7 @@ impl DieProgram {
                     let mut candidate = *word;
                     candidate.repeat = last.repeat;
                     let effect = word.halt || word.x_write || word.branch;
-                    if !effect && candidate.encode_words(&self.config) == last.encode_words(&self.config) && last.repeat < (1 << REPEAT_BITS) - 1 {
+                    if word.repeat == 0 && !effect && candidate.encode_words(&self.config) == last.encode_words(&self.config) && last.repeat < (1 << REPEAT_BITS) - 1 {
                         last.repeat += 1;
                         continue;
                     }
