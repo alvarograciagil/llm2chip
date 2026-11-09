@@ -5,7 +5,12 @@ use model_ir::ModelGraph;
 use netlist::block::Behavior;
 use netlist::demo;
 use netlist::export::{project_files, ProjectOptions};
-use netlist::{cell_design, die_design, to_verilog, to_vhdl, CellConfig, Design, DieConfig, Simulator, TestStep};
+use netlist::chip::{chip_design, ChipConfig};
+use netlist::die::word_bits;
+use netlist::image::{build_image, Segment, Target};
+use netlist::sampler::{exponential_table, SamplerConfig};
+use netlist::soc::{FirmwareImage, SocConfig};
+use netlist::{cell_design, die_design, to_verilog, to_vhdl, CellConfig, ControlWord, Design, DieConfig, Simulator, TestStep};
 use wasm_bindgen::prelude::*;
 
 const BUILTIN_MODELS: [(&str, &str, &str); 6] = [
@@ -231,6 +236,44 @@ pub struct DieSimulation {
 enum Demo {
     Mlp(demo::Example),
     Block(demo::BlockDemo),
+    Boot(BootDemo),
+}
+
+/// The complete chip starting up from its image, which the app plays the host of.
+struct BootDemo {
+    image: Vec<u32>,
+    pending: Option<u32>,
+    output: Vec<u8>,
+    segments: usize,
+}
+
+impl BootDemo {
+    fn new(config: DieConfig) -> Result<Self, String> {
+        let firmware = FirmwareImage::from_elf(include_bytes!("../../../firmware/prebuilt/firmware.elf"))?;
+        let beats = word_bits(&config).div_ceil(32);
+        let segments = vec![
+            Segment { target: Target::Microcode, unit: 0, address: 0, beats, words: (0..4).flat_map(|_| ControlWord::default().encode_words(&config)).collect() },
+            Segment { target: Target::Vector, unit: 0, address: 0, beats: 1, words: vec![100, 200, 300, 400] },
+            Segment { target: Target::Function, unit: 0, address: 0, beats: 1, words: (0..16).map(|i| i * 3).collect() },
+            Segment { target: Target::SamplerTable, unit: 0, address: 0, beats: 1, words: exponential_table()[..16].to_vec() },
+        ];
+        let image = build_image(&firmware.program, &firmware.data, &[], &segments)?;
+        Ok(Self { image, pending: None, output: Vec::new(), segments: segments.len() })
+    }
+
+    /// One cycle of the host side, before the clock edge.
+    fn serve(&mut self, sim: &mut Simulator) -> Result<(), JsError> {
+        let fail = |e: netlist::SimError| JsError::new(&e.0);
+        sim.set("image_resp_valid", self.pending.is_some() as u64).map_err(fail)?;
+        sim.set("image_resp_data", self.pending.unwrap_or(0) as u64).map_err(fail)?;
+        sim.set("host_tx_ready", 1).map_err(fail)?;
+        sim.settle();
+        self.pending = (sim.get("image_req_valid") == Some(1)).then(|| self.image[sim.get("image_req_addr").unwrap_or(0) as usize]);
+        if sim.get("host_tx_valid") == Some(1) {
+            self.output.push(sim.get("host_tx_data").unwrap_or(0) as u8);
+        }
+        Ok(())
+    }
 }
 
 #[wasm_bindgen]
@@ -239,6 +282,23 @@ impl DieSimulation {
     #[wasm_bindgen(constructor)]
     pub fn new(params: &str, kind: &str) -> Result<DieSimulation, JsError> {
         let p: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&e.to_string()))?;
+        if kind == "boot" {
+            let config = demo::block_config();
+            let chip = ChipConfig { soc: SocConfig { program_bits: 12, data_bits: 13, fifo_bits: 6 }, die: config, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4 } };
+            let design = chip_design(chip);
+            let mut sim = Simulator::new(&design).map_err(|e| JsError::new(&e.0))?;
+            sim.set("reset", 1).map_err(|e| JsError::new(&e.0))?;
+            sim.tick();
+            sim.set("reset", 0).map_err(|e| JsError::new(&e.0))?;
+            // An empty prompt: the firmware loads everything and stops.
+            let mut boot = BootDemo::new(config).map_err(|e| JsError::new(&e))?;
+            sim.set("host_rx_valid", 1).map_err(|e| JsError::new(&e.0))?;
+            sim.set("host_rx_data", 0).map_err(|e| JsError::new(&e.0))?;
+            boot.serve(&mut sim)?;
+            sim.tick();
+            sim.set("host_rx_valid", 0).map_err(|e| JsError::new(&e.0))?;
+            return Ok(DieSimulation { design, config, sim, demo: Demo::Boot(boot), started: true });
+        }
         let config = if kind == "mlp" {
             DieConfig {
                 cells: 3,
@@ -299,6 +359,9 @@ impl DieSimulation {
             self.sim.set("start", 0).map_err(|e| JsError::new(&e.0))?;
             self.started = true;
         }
+        if let Demo::Boot(boot) = &mut self.demo {
+            boot.serve(&mut self.sim)?;
+        }
         self.sim.tick();
         Ok(self.sim.get("halted") == Some(1))
     }
@@ -329,6 +392,11 @@ impl DieSimulation {
                     got.push(value);
                 }
                 to_js(&serde_json::json!({ "got": got, "expected": built.expected, "exact": exact, "tolerance": built.tolerance }))
+            }
+            Demo::Boot(boot) => {
+                let text = String::from_utf8_lossy(&boot.output).into_owned();
+                let exact = text == ".".repeat(boot.segments);
+                to_js(&serde_json::json!({ "got": [], "expected": [], "exact": exact, "tolerance": 0.0, "text": text }))
             }
         }
     }

@@ -20,6 +20,9 @@ const COVERAGE: [string, boolean][] = [
   ["Un modelo Qwen3.5 completo, compilado y ejecutado en puertas", true],
   ["Varios carriles vectoriales en paralelo", false],
   ["Mezcla de expertos y cabeza MTP en puertas", true],
+  ["Microprograma fijo, con bucles y parámetros", true],
+  ["CPU, carga de la imagen y muestreo en el chip", true],
+  ["ECC, BIST y reparación", false],
 ];
 
 const GATE_NAMES: Record<string, string> = { and: "AND", or: "OR", xor: "XOR", not: "NOT", mux: "Selectores", dff: "Biestables", sram: "Memorias" };
@@ -54,6 +57,7 @@ const DEMO_TEXT: Record<DieDemo, string> = {
   mlp: "Tres celdas ejecutan una capa MLP: dos matrices, activación, producto, otra matriz y residual.",
   attention: "Una consulta contra tres tokens en caché: producto escalar, softmax con tablas y suma ponderada.",
   delta: "Una cabeza de Gated DeltaNet: decaimiento, memoria, error, actualización del estado y salida.",
+  boot: "El chip completo arranca desde su imagen: el controlador copia el firmware y este carga cada bloque en el die, comprobando su CRC.",
 };
 
 function DiePanel() {
@@ -73,7 +77,7 @@ function DiePanel() {
   return (
     <>
       <div className="scope">
-        <Segmented label="Programa" value={demo} options={[["mlp", "MLP"], ["attention", "Atención"], ["delta", "DeltaNet"]]} onChange={setDemo} />
+        <Segmented label="Programa" value={demo} options={[["mlp", "MLP"], ["attention", "Atención"], ["delta", "DeltaNet"], ["boot", "Arranque"]]} onChange={setDemo} />
       </div>
       <p className="detail-sub">{DEMO_TEXT[demo]}</p>
       <div className="sim-actions">
@@ -85,7 +89,17 @@ function DiePanel() {
         <div><dt>Estado</dt><dd>{done ? "Terminado" : cycle > 0 ? "Ejecutando" : "Cargado"}</dd></div>
         <div><dt>Ciclo de reloj</dt><dd>{formatNumber(cycle)}</dd></div>
       </dl>
-      {results && (
+      {results?.text !== undefined && (
+        <>
+          <h3>Salida por el puerto de host</h3>
+          <div className="inset padded"><code>{results.text}</code></div>
+          <div className={`issue ${results.exact ? "ok" : "error"}`} role="status">
+            <span className="issue-icon" aria-hidden="true">{results.exact ? "✓" : "!"}</span>
+            <div><strong>{results.exact ? "Todos los bloques han pasado la comprobación de CRC." : "Algún bloque no ha pasado la comprobación de CRC."}</strong></div>
+          </div>
+        </>
+      )}
+      {results && results.text === undefined && (
         <>
           <h3>Resultado de la capa</h3>
           <dl className="inset metrics">
@@ -99,15 +113,15 @@ function DiePanel() {
           </div>
         </>
       )}
-      <h3>Circuito del die</h3>
+      <h3>{demo === "boot" ? "Circuito del chip" : "Circuito del die"}</h3>
       <dl className="inset metrics">
         {Object.entries(counts).map(([name, count]) => (
           <div key={name}><dt>{GATE_NAMES[name] ?? name}</dt><dd>{formatNumber(count)}</dd></div>
         ))}
       </dl>
       <div className="sim-actions">
-        <button className="pill" onClick={() => download(die.verilog(), "llm2chip_die.v")}>Exportar a Verilog</button>
-        <button className="pill" onClick={() => download(die.vhdl(), "llm2chip_die.vhd")}>Exportar a VHDL</button>
+        <button className="pill" onClick={() => download(die.verilog(), demo === "boot" ? "llm2chip_chip.v" : "llm2chip_die.v")}>Exportar a Verilog</button>
+        <button className="pill" onClick={() => download(die.vhdl(), demo === "boot" ? "llm2chip_chip.vhd" : "llm2chip_die.vhd")}>Exportar a VHDL</button>
       </div>
     </>
   );

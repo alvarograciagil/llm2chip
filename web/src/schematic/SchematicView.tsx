@@ -241,12 +241,14 @@ export function SchematicView() {
   const module = currentModule(design, path);
   const area = useCellSim((s) => s.area);
   const overview = !!module && !area && module.instances.length > AREA_VIEW_THRESHOLD;
-  const [layout, setLayout] = useState<Layout | null>(null);
+  // The layout arrives later than the module it was computed for, so the two travel together.
+  const [placed, setPlaced] = useState<{ module: NetlistModule; layout: Layout } | null>(null);
+  const layout = placed && placed.module === module ? placed.layout : null;
   useEffect(() => {
     if (!module || !design) return;
     let current = true;
     void (overview ? layoutAreas(module, design) : layoutModule(module, design, area)).then((next) => {
-      if (current) setLayout(next);
+      if (current) setPlaced({ module, layout: next });
     });
     return () => {
       current = false;

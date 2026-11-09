@@ -8,13 +8,14 @@ export interface ScriptStep {
 
 export type Scope = "cell" | "die";
 
-export type DieDemo = "mlp" | "attention" | "delta";
+export type DieDemo = "mlp" | "attention" | "delta" | "boot";
 
 export interface DieResults {
   got: number[];
   expected: number[];
   exact: boolean;
   tolerance: number;
+  text?: string;
 }
 
 interface CellSimState {
@@ -58,6 +59,10 @@ export function parseList(text: string): bigint[] | null {
   if (parts.length === 0 || !parts.every((p) => /^-?\d+$/.test(p))) return null;
   return parts.map((p) => BigInt(p));
 }
+
+const TICKS_PER_SLICE = 1500;
+const MAX_TICKS = 400_000;
+let pumping = false;
 
 const usesShifter = (info: CellInfo) => ["float", "posit", "log"].includes(info.config.coding);
 
@@ -230,14 +235,29 @@ export const useCellSim = create<CellSimState>((set, get) => {
     runAll() {
       const { die, scope, dieDone } = get();
       if (scope === "die") {
-        if (!die || dieDone) return;
-        for (let i = 0; i < 100000; i++) {
-          if (die.tick()) {
-            set({ dieDone: true, dieResults: JSON.parse(die.results()) });
-            break;
+        if (!die || dieDone || pumping) return;
+        pumping = true;
+        let ticks = 0;
+        // Works in slices so that a long start-up leaves the interface responsive.
+        const slice = () => {
+          if (get().die !== die) {
+            pumping = false;
+            return;
           }
-        }
-        refresh();
+          const end = Math.min(ticks + TICKS_PER_SLICE, MAX_TICKS);
+          for (; ticks < end; ticks++) {
+            if (die.tick()) {
+              pumping = false;
+              set({ dieDone: true, dieResults: JSON.parse(die.results()) });
+              refresh();
+              return;
+            }
+          }
+          refresh();
+          if (ticks < MAX_TICKS) setTimeout(slice, 0);
+          else pumping = false;
+        };
+        slice();
         return;
       }
       const { handle, script } = get();
