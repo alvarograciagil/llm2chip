@@ -155,6 +155,7 @@ pub(crate) struct Builder {
     module: Module,
     counter: usize,
     group: String,
+    prefix: String,
 }
 
 impl Builder {
@@ -170,7 +171,13 @@ impl Builder {
             },
             counter: 0,
             group: String::new(),
+            prefix: String::new(),
         }
+    }
+
+    /// Everything named from now on starts with this, for circuits built several times.
+    pub fn set_prefix(&mut self, prefix: &str) {
+        self.prefix = prefix.into();
     }
 
     pub fn group(&mut self, name: &str) {
@@ -179,7 +186,7 @@ impl Builder {
 
     pub fn wire(&mut self, name: &str, width: u32) -> Vec<Bit> {
         let id = self.module.nets.len();
-        self.module.nets.push(Net { name: name.into(), width });
+        self.module.nets.push(Net { name: format!("{}{name}", self.prefix), width });
         (0..width).map(|bit| Bit::Net(id, bit)).collect()
     }
 
@@ -204,7 +211,7 @@ impl Builder {
 
     fn add(&mut self, name: String, kind: InstKind, conns: &[(&str, Vec<Bit>)]) {
         self.module.instances.push(Instance {
-            name,
+            name: format!("{}{name}", self.prefix),
             kind,
             group: self.group.clone(),
             conns: conns.iter().map(|(p, b)| (p.to_string(), b.clone())).collect(),

@@ -305,9 +305,17 @@ impl Layout {
                 }
                 Op::Scale { factor, .. } => store(format!("escala:{factor}"), vec![*factor as f64], &mut setup, &mut small),
                 Op::AddWeight { weight, .. } => store(weight.clone(), weights.floats(weight)?.iter().map(|v| *v as f64).collect(), &mut setup, &mut small),
-                Op::RmsGated { weight, .. } | Op::Dconv { weight, .. } => {
+                Op::RmsGated { weight, .. } => {
                     let name = format!("{weight}.weight");
                     let values = weights.floats(&name)?.iter().map(|w| *w as f64).collect();
+                    store(name, values, &mut setup, &mut small);
+                }
+                Op::Dconv { slot, weight, .. } => {
+                    // Kept as one row per tap, which is how the history is stored too.
+                    let (dim, kernel) = program.conv_slots[*slot];
+                    let name = format!("{weight}.weight");
+                    let taps = weights.floats(&name)?;
+                    let values = (0..kernel).flat_map(|k| (0..dim).map(move |c| (c, k))).map(|(c, k)| taps[c * kernel + k] as f64).collect();
                     store(name, values, &mut setup, &mut small);
                 }
                 Op::DeltaStep { a_log, dt_bias, key_dim, .. } => {
@@ -797,8 +805,8 @@ impl Layout {
                 let regs = AttentionRegs { scores: t[10], top: t[11], shifted: t[12], weights: t[13], total: t[14], inverse: t[15], probabilities: t[16], softcap: capped };
                 let first = self.parts[0];
                 let query = self.reg(*query);
-                ops.each((*kv_heads as u32).into(), |ops, kv_head| {
-                    ops.each((group as u32).into(), |ops, shared| {
+                ops.each_head(*kv_heads as u32, group as u32, |ops, kv_head, shared| {
+                    {
                         let h = kv_head * group as u32 + shared;
                         ops.with_window(h, &[first], |ops, offset| {
                             let qh = t[20];
@@ -807,10 +815,10 @@ impl Layout {
                             let store = KeyStore { keys, values, stride: width, offset: kv_head * d };
                             ops.attention(qh, store, self.ones, first + offset, d, tokens, Some(self.inverse_root[scale_dim]), regs);
                         });
-                    });
+                    }
                 });
                 let parts: Vec<(u32, u32)> = (0..*heads).map(|h| (self.parts[h], d)).collect();
-                ops.gather(&parts, self.reg(*dst));
+                ops.gather_heads(&parts, self.reg(*dst));
             }
             Op::Dconv { slot, weight, src, dst } => {
                 let (dim, kernel) = program.conv_slots[*slot];
@@ -819,12 +827,8 @@ impl Layout {
                 let reg = self.conv[*slot];
                 let (dim32, kernel32) = (dim as u32, kernel as u32);
                 ops.align_to(self.reg(*src), zero, STATE_EXPONENT, reg, (history * dim32).into(), dim32.into());
-                ops.dots(taps, reg, self.reg(*dst), dim32.into(), kernel32.into(), |c, k| ((taps, c * kernel32 + k), (reg, k * dim32 + c)));
-                ops.each(history.into(), |ops, k| {
-                    ops.each(dim32.into(), |ops, c| {
-                        ops.move_element((reg, (k + 1.into()) * dim32 + c), (reg, k * dim32 + c));
-                    });
-                });
+                ops.depthwise(taps, reg, self.reg(*dst), dim32, kernel32);
+                ops.each(history.into(), |ops, k| ops.copy_elements(reg, (k + 1.into()) * dim32, k * dim32, dim32));
             }
             Op::DeltaStep { slot, mixed, a, b, a_log, dt_bias, key_dim, key_heads, value_dim, value_heads, dst } => {
                 let ratio = value_heads / key_heads;
@@ -835,8 +839,8 @@ impl Layout {
                 let (a_reg, b_reg) = (self.reg(*a), self.reg(*b));
                 let (scale_a, bias) = (self.small[a_log], self.small[dt_bias]);
                 let (first_state, first_out) = (self.delta[*slot][0], self.delta_parts[0]);
-                ops.each((*key_heads as u32).into(), |ops, key_head| {
-                    ops.each((ratio as u32).into(), |ops, shared| {
+                ops.each_head(*key_heads as u32, ratio as u32, |ops, key_head, shared| {
+                    {
                         let h = key_head * ratio as u32 + shared;
                         ops.with_window(h, &[first_state, first_out], |ops, offset| {
                             let (qh, kh, vh, beta, decay) = (t[20], t[21], t[22], t[23], t[24]);
@@ -871,10 +875,10 @@ impl Layout {
                             let regs = DeltaRegs { state: first_state + offset, key: kh, query: qh, value: vh, beta, decay, memory: t[10], error: t[11], delta: t[12], update: t[13], next: t[14], out: first_out + offset };
                             ops.delta_step(regs, kd, vd);
                         });
-                    });
+                    }
                 });
                 let parts: Vec<(u32, u32)> = (0..*value_heads).map(|h| (self.delta_parts[h], vd)).collect();
-                ops.gather(&parts, self.reg(*dst));
+                ops.gather_heads(&parts, self.reg(*dst));
             }
             Op::RmsGated { src, z, weight, block, dst } => {
                 let count = program.buffers[*src] / block;
@@ -883,7 +887,7 @@ impl Layout {
                 let (src, z) = (self.reg(*src), self.reg(*z));
                 let d = *block as u32;
                 let (first_out, first_part) = (self.delta_parts[0], self.parts[0]);
-                ops.each((count as u32).into(), |ops, b| {
+                ops.each_head(count as u32, 1, |ops, b, _| {
                     ops.with_window(b, &[first_out, first_part], |ops, offset| {
                         if by_head {
                             ops.copy_part(first_out + offset, 0.into(), t[40], 0.into(), d.into());
@@ -903,7 +907,7 @@ impl Layout {
                     });
                 });
                 let parts: Vec<(u32, u32)> = (0..count).map(|b| (self.parts[b], d)).collect();
-                ops.gather(&parts, self.reg(*dst));
+                ops.gather_heads(&parts, self.reg(*dst));
             }
             Op::Concat { a, b, dst } => {
                 let (la, lb) = (program.buffers[*a] as u32, program.buffers[*b] as u32);

@@ -40,7 +40,7 @@ fn visit(gen: &mut Gen, name: &str, finished: &mut HashMap<String, bool>, top: b
         return false;
     }
 
-    let mut b = Builder { module, counter: 1_000_000, group: "Autotest de memorias".into() };
+    let mut b = Builder { prefix: String::new(), module, counter: 1_000_000, group: "Autotest de memorias".into() };
     let hooks = if top {
         let found = |b: &Builder, net: &str| net_named(&b.module, net).expect("el chip debe declarar las señales de autotest");
         Hooks { enable: found(&b, ENABLE), done: found(&b, DONE), fail: found(&b, FAIL) }

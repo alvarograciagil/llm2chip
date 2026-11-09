@@ -149,6 +149,11 @@ impl Expr {
         Self { constant: 0, terms }
     }
 
+    /// True when this index is always a fixed distance past `other`.
+    pub fn is_after(&self, other: Expr) -> bool {
+        self.constant > other.constant && self.variables().eq(other.variables())
+    }
+
     /// This index without its part in `variable`.
     pub fn without(self, variable: Var) -> Self {
         self.variables().filter(|(v, _)| *v != variable).fold(Self::from(self.constant), |sum, (v, c)| sum + Self::var(v) * c)
@@ -360,6 +365,26 @@ pub trait BlockOps: Sized {
     }
 
     /// Softmax attention: `query` against `tokens` keys, then the weighted sum of values.
+    /// Runs `body` for every pair of indices, at once where the die has several vector units.
+    fn each_head(&mut self, outer: u32, inner: u32, mut body: impl FnMut(&mut Self, Self::N, Self::N)) {
+        self.each(outer.into(), |s, o| s.each(inner.into(), |s, i| body(s, o, i)));
+    }
+
+    /// Like `gather`, for parts that `each_head` left on the units that made them.
+    fn gather_heads(&mut self, parts: &[(u32, u32)], dst: u32) {
+        self.gather(parts, dst);
+    }
+
+    /// `dst[c] = Σ taps[k · width + c] · history[k · width + c]` over `kernel` rows.
+    fn depthwise(&mut self, taps: u32, history: u32, dst: u32, width: u32, kernel: u32) {
+        self.dots(taps, history, dst, width.into(), kernel.into(), |c, k| ((taps, k * width + c), (history, k * width + c)));
+    }
+
+    /// Moves `width` elements of `reg` to an earlier place in the same register.
+    fn copy_elements(&mut self, reg: u32, from: Self::N, to: Self::N, width: u32) {
+        self.each(width.into(), |s, c| s.move_element((reg, from + c), (reg, to + c)));
+    }
+
     /// Keeps the key of one token at its place in the store.
     fn store_key(&mut self, src: u32, exponent: i64, keys: u32, slot: Self::N, width: u32) {
         self.align_to(src, 0.into(), exponent, keys, slot * width, width.into());
@@ -432,6 +457,8 @@ pub struct Alu<N = u32> {
     pub window_dst: bool,
     /// One element per lane at once; the indices are those of the first lane.
     pub vector: bool,
+    /// Operand A comes from this vector unit, plus one; zero means its own.
+    pub from_cluster: u32,
     pub broadcast_a: bool,
     pub broadcast_b: bool,
     pub shift: u32,
@@ -468,6 +495,7 @@ impl<N: Default> Alu<N> {
             window_b: false,
             window_dst: false,
             vector: false,
+            from_cluster: 0,
             broadcast_a: false,
             broadcast_b: false,
             shift: 0,
@@ -515,6 +543,7 @@ impl Alu<Expr> {
             window_b: self.window_b,
             window_dst: self.window_dst,
             vector: self.vector,
+            from_cluster: self.from_cluster,
             broadcast_a: self.broadcast_a,
             broadcast_b: self.broadcast_b,
             shift: self.shift,
@@ -571,7 +600,9 @@ pub enum Step {
     /// A single-operation loop that issues one element, or block, per cycle.
     Stream { variable: Var, count: Expr, body: Alu<Expr> },
     /// `wide[j] += weights · matrix[start + j]` for every `j` of a row, or from zero if `fresh`.
-    Combine { weights: At<Expr>, matrix: u32, start: Expr, width: Expr, fresh: bool, window: Expr, window_a: bool, window_b: bool },
+    Combine { weights: At<Expr>, matrix: u32, start: Expr, width: Expr, fresh: bool, window: Expr, window_a: bool, window_b: bool, moving: bool },
+    /// One copy of `body` on several vector units, each with its own values of `vars`.
+    Clustered { vars: Vec<Var>, assignments: Vec<Vec<u32>>, body: Vec<Step> },
     /// Moves every cell to where a matrix starts.
     CellSeek { weights: Expr, factors: Expr },
     /// Clears the row totals and restarts the input vector.
@@ -630,6 +661,7 @@ pub struct Assembly {
     cells: u32,
     streams: bool,
     combines: bool,
+    clusters: u32,
     /// With keys kept in columns, how many tokens each column has room for.
     pub key_capacity: Option<u32>,
     /// Matrices the cells hold. Any other is computed from the vector registers.
@@ -638,7 +670,7 @@ pub struct Assembly {
 
 impl Assembly {
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -887,6 +919,7 @@ fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32)
                 *window_a = windowed.contains(&weights.0);
                 *window_b = windowed.contains(matrix);
             }
+            Step::Clustered { body, .. } => mark_window(body, step, windowed, exponents),
             Step::CellGroup { src, .. } => assert!(!windowed.contains(src), "las celdas leen de registros fijos"),
             Step::CellSeek { .. } | Step::CellPass | Step::CellDrain { .. } => {}
         }
@@ -898,7 +931,8 @@ fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32)
 fn can_stream(variable: Var, step: &Alu<Expr>, unit: u32) -> bool {
     let stride = |index: Expr| index.coefficient(variable);
     let moves_with = |index: Expr| stride(index) == 0 || stride(index) == unit;
-    let safe = |operand: At<Expr>| operand.0 != step.dst.0 || (stride(operand.1) == unit && operand.1 == step.dst.1);
+    // Moving elements to earlier places is safe: the reads stay ahead of the writes.
+    let safe = |operand: At<Expr>| operand.0 != step.dst.0 || (stride(operand.1) == unit && (operand.1 == step.dst.1 || operand.1.is_after(step.dst.1)));
     let plain = !(step.load_shift_a || step.load_shift_b || step.load_shift_left || step.load_wide_shift || step.link_send || step.magnitude_clear || step.accumulator_clear || step.wide_clear || step.wide_write) && step.literal.is_none();
     let streamable = matches!(step.op, OP_ADD | OP_SUB | OP_MUL | OP_MOV | OP_FUNCTION | OP_SHIFT_LEFT | OP_WIDE_OUT);
     let scans = !step.write;
@@ -1079,8 +1113,8 @@ impl BlockOps for Assembly {
         // A zero weight clears every sum, whatever the matrix holds.
         let zero = self.sc(10);
         self.immediate(0, zero);
-        self.steps.push(Step::Combine { weights: zero, matrix, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false });
-        self.each(count, |s, t| s.steps.push(Step::Combine { weights: (weights, t), matrix, start: t * stride + offset, width: width.into(), fresh: false, window: 0.into(), window_a: false, window_b: false }));
+        self.steps.push(Step::Combine { weights: zero, matrix, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
+        self.each(count, |s, t| s.steps.push(Step::Combine { weights: (weights, t), matrix, start: t * stride + offset, width: width.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false }));
         self.narrow_sums(weights, matrix, dst, width.into());
     }
 
@@ -1202,6 +1236,84 @@ impl BlockOps for Assembly {
         self.normalize(dst, offset.into());
     }
 
+    fn each_head(&mut self, outer: u32, inner: u32, mut body: impl FnMut(&mut Self, Expr, Expr)) {
+        if self.clusters <= 1 {
+            return self.each(outer.into(), |s, o| s.each(inner.into(), |s, i| body(s, o, i)));
+        }
+        let (first, second) = (Var::Loop(self.loops), Var::Loop(self.loops + 1));
+        self.loops += 2;
+        let before = std::mem::take(&mut self.steps);
+        body(self, Expr::var(first), Expr::var(second));
+        let inside = std::mem::replace(&mut self.steps, before);
+        let total = outer * inner;
+        for block in 0..total.div_ceil(self.clusters) {
+            let assignments = (0..self.clusters.min(total - block * self.clusters)).map(|unit| {
+                let head = block * self.clusters + unit;
+                vec![head / inner, head % inner]
+            });
+            self.steps.push(Step::Clustered { vars: vec![first, second], assignments: assignments.collect(), body: inside.clone() });
+        }
+    }
+
+    fn gather_heads(&mut self, parts: &[(u32, u32)], dst: u32) {
+        if self.clusters <= 1 {
+            return self.gather(parts, dst);
+        }
+        self.clear_shifts();
+        let zero = self.sc(15);
+        let (largest, shift, exponent) = (self.sc(1), self.sc(2), self.sc(3));
+        let unit_of = |part: usize, units: u32| part as u32 % units + 1;
+        let units = self.clusters;
+        for (part, (reg, _)) in parts.iter().enumerate() {
+            let mut read = alu(OP_MOV);
+            (read.a, read.b, read.dst, read.from_cluster) = (self.exponent(*reg), zero, exponent, unit_of(part, units));
+            self.push(read);
+            if part == 0 {
+                self.binary(OP_MOV, exponent, zero, largest);
+            } else {
+                self.binary(OP_MAX, largest, exponent, largest);
+            }
+        }
+        let mut offset = 0;
+        for (part, (reg, len)) in parts.iter().enumerate() {
+            let mut read = alu(OP_MOV);
+            (read.a, read.b, read.dst, read.from_cluster) = (self.exponent(*reg), zero, exponent, unit_of(part, units));
+            self.push(read);
+            self.binary(OP_SUB, largest, exponent, shift);
+            self.load_shifts(Some(shift), None, None);
+            let at: Expr = offset.into();
+            self.elements((*len).into(), &[at], true, |s, i, vector| {
+                let mut step = alu(OP_MOV);
+                (step.a, step.b, step.dst, step.from_cluster) = ((*reg, i), zero, (dst, at + i), unit_of(part, units));
+                (step.vector, step.broadcast_b) = (vector, vector);
+                s.push(step);
+            });
+            self.clear_shifts();
+            offset += len;
+        }
+        self.binary(OP_MOV, largest, zero, self.exponent(dst));
+        self.normalize(dst, offset.into());
+    }
+
+    fn depthwise(&mut self, taps: u32, history: u32, dst: u32, width: u32, kernel: u32) {
+        if !self.combines || width < MIN_STREAM {
+            return self.dots(taps, history, dst, width.into(), kernel.into(), |c, k| ((taps, k * width + c), (history, k * width + c)));
+        }
+        let zero = self.sc(10);
+        self.immediate(0, zero);
+        self.steps.push(Step::Combine { weights: zero, matrix: history, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
+        self.each(kernel.into(), |s, k| s.steps.push(Step::Combine { weights: (taps, k * width), matrix: history, start: k * width, width: width.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: true }));
+        self.narrow_sums(taps, history, dst, width.into());
+    }
+
+    fn copy_elements(&mut self, reg: u32, from: Expr, to: Expr, width: u32) {
+        self.elements(width.into(), &[from, to], true, |s, c, vector| {
+            let mut step = alu(OP_MOV);
+            (step.a, step.dst, step.vector) = ((reg, from + c), (reg, to + c), vector);
+            s.push(step);
+        });
+    }
+
     fn store_key(&mut self, src: u32, exponent: i64, keys: u32, slot: Expr, width: u32) {
         let Some(capacity) = self.key_capacity else {
             return self.align_to(src, 0.into(), exponent, keys, slot * width, width.into());
@@ -1228,8 +1340,8 @@ impl BlockOps for Assembly {
         };
         let zero = self.sc(10);
         self.immediate(0, zero);
-        self.steps.push(Step::Combine { weights: zero, matrix: keys, start: 0.into(), width: tokens, fresh: true, window: 0.into(), window_a: false, window_b: false });
-        self.each(width.into(), |s, j| s.steps.push(Step::Combine { weights: (query, j), matrix: keys, start: (offset + j) * capacity, width: tokens, fresh: false, window: 0.into(), window_a: false, window_b: false }));
+        self.steps.push(Step::Combine { weights: zero, matrix: keys, start: 0.into(), width: tokens, fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
+        self.each(width.into(), |s, j| s.steps.push(Step::Combine { weights: (query, j), matrix: keys, start: (offset + j) * capacity, width: tokens, fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false }));
         self.narrow_sums(query, keys, dst, tokens);
     }
 
@@ -1414,7 +1526,7 @@ impl Behavior {
                         self.walk(&[Step::One(*body)], token, position, loops);
                     }
                 }
-                Step::Combine { .. } | Step::CellSeek { .. } | Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } => panic!("este modelo no guarda los pesos de las celdas"),
+                Step::Clustered { .. } | Step::Combine { .. } | Step::CellSeek { .. } | Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } => panic!("este modelo no guarda los pesos de las celdas"),
             }
         }
     }
