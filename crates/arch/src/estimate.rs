@@ -2,7 +2,7 @@ use crate::floorplan::{build_floorplan, Floorplan};
 use crate::optim::catalog;
 use crate::params::{ChipParams, KvBackend, LinkKind, WeightBackend};
 use crate::tech::{node, TechNode};
-use netlist::format::WeightCoding;
+use netlist::format::{switching_per_mac, WeightCoding};
 use netlist::multiplier::MultiplierKind;
 use netlist::{cell_design, CellConfig, Simulator};
 use model_ir::{Block, ModelGraph, StageKind, WeightTensor};
@@ -98,6 +98,10 @@ impl Report {
 }
 
 /// AND, OR, XOR, NOT and MUX delays as a fraction of one full adder's carry path.
+/// One weighted gate toggle measured in the cell, in full-adder energy units, calibrated
+/// so that an 8 × 16 multiplier matches the published energy of a full-adder array.
+const SWITCHING_TO_FULL_ADDERS: f64 = 0.226;
+
 const GATE_DELAYS: [f64; 5] = [0.25, 0.25, 0.5, 0.12, 0.4];
 
 fn coding_name(coding: WeightCoding) -> &'static str {
@@ -274,14 +278,13 @@ struct Multiplier {
 }
 
 fn weight_multiplier(tech: &TechNode, p: &ChipParams, widest: u32, cell_bits: f64) -> Multiplier {
-    let significand = CellConfig { weight_bits: widest, ..p.cell_config(1) }.significand_bits();
-    let products = significand as f64 * p.activation_bits as f64;
+    let switching = switching_per_mac(CellConfig { weight_bits: widest, ..p.cell_config(3) });
     let addr_bits = (cell_bits / widest as f64).max(2.0).log2().ceil() as u32;
     let cell_logic = netlist_cell_um2(tech, p, widest, addr_bits);
     let accumulator_bits = p.effective_accumulator() as f64;
     let accumulator = accumulator_bits * (tech.fa_um2 + tech.ff_um2);
     let mut area = (cell_logic - accumulator).max(0.0);
-    let mut energy = (products + accumulator_bits) * tech.e_fa_pj;
+    let mut energy = switching * SWITCHING_TO_FULL_ADDERS * tech.e_fa_pj;
     let mut delay_factor = 1.0;
     let mut cycle_factor = 1.0;
     if p.has("sin_multiplicadores") {

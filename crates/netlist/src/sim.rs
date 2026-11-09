@@ -278,6 +278,31 @@ impl Simulator {
         self.ports.get(port).map(|bits| read(&self.values, bits) as u64)
     }
 
+    /// Runs `cycles` with a stimulus and counts how often each gate kind's output
+    /// changes value: AND, OR, XOR, NOT, MUX, then flip-flop.
+    pub fn switching_activity(&mut self, cycles: u32, mut stimulus: impl FnMut(&mut Simulator, u32)) -> [u64; 6] {
+        let mut counts = [0u64; 6];
+        let mut last: Vec<u8> = self.values.clone();
+        for cycle in 0..cycles {
+            stimulus(self, cycle);
+            self.tick();
+            for g in &self.gates {
+                if self.values[g.y] != last[g.y] {
+                    counts[match g.op {
+                        Op::And => 0,
+                        Op::Or => 1,
+                        Op::Xor => 2,
+                        Op::Not => 3,
+                        Op::Mux => 4,
+                    }] += 1;
+                }
+            }
+            counts[5] += self.flops.iter().filter(|(_, q)| self.values[*q] != last[*q]).count() as u64;
+            last.clone_from(&self.values);
+        }
+        counts
+    }
+
     /// The slowest combinational path, given the delay of an AND, OR, XOR, NOT and MUX.
     pub fn critical_path(&self, delays: [f64; 5]) -> f64 {
         let mut arrival = vec![0f64; self.values.len()];

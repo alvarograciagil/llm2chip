@@ -334,3 +334,51 @@ impl Gen {
         out
     }
 }
+
+/// Average toggles per multiplication, weighted by each gate's relative capacitance,
+/// measured by running the real cell gates on pseudo-random weights and activations.
+pub fn switching_per_mac(config: CellConfig) -> f64 {
+    let config = config.checked();
+    let design = crate::cell_design(config);
+    let Ok(mut sim) = crate::Simulator::new(&design) else { return 0.0 };
+    const WORDS: u64 = 8;
+    const CYCLES: u32 = 64;
+    let mut state = 0x1F2E_3D4C_5B6A_7988u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let w = config.weight_bits;
+    let set = |sim: &mut crate::Simulator, port: &str, value: u64| sim.set(port, value).is_ok();
+    set(&mut sim, "clear", 1);
+    sim.tick();
+    set(&mut sim, "clear", 0);
+    if config.shifts() {
+        set(&mut sim, "exp_base", 1u64 << (config.exponent_width().max(1) - 1));
+    }
+    if config.coding == WeightCoding::Codebook {
+        set(&mut sim, "table_en", 1);
+        for address in 0..1u64 << w.min(8) {
+            set(&mut sim, "table_addr", address);
+            set(&mut sim, "table_data", next() >> 48);
+            sim.tick();
+        }
+        set(&mut sim, "table_en", 0);
+    }
+    set(&mut sim, "load_en", 1);
+    for address in 0..WORDS.min(1 << config.addr_bits) {
+        set(&mut sim, "load_addr", address);
+        set(&mut sim, "load_data", next() >> (64 - w));
+        sim.tick();
+    }
+    set(&mut sim, "load_en", 0);
+    set(&mut sim, "run", 1);
+    let shift = 64 - config.activation_bits;
+    let counts = sim.switching_activity(CYCLES, |sim, _| {
+        sim.set("x", next() >> shift).expect("puerto de activación");
+    });
+    let weights = [1.0, 1.0, 1.6, 0.6, 1.4, 2.2];
+    counts.iter().zip(weights).map(|(count, weight)| *count as f64 * weight).sum::<f64>() / CYCLES as f64
+}
