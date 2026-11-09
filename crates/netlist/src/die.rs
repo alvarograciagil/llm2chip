@@ -203,10 +203,12 @@ pub struct ControlWord {
     pub x_only: u32,
     /// Only the first `literal_b` vector units execute from now on.
     pub set_clusters: bool,
+    /// The wide sum takes the total of what every vector unit holds at that place.
+    pub wide_reduce: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 61;
+pub const FIELD_COUNT: usize = 62;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
@@ -299,6 +301,7 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("from_cluster", c.features.cluster_bits + 1),
         ("x_only", c.features.cluster_bits + 1),
         ("set_clusters", 1),
+        ("wide_reduce", 1),
     ]
 }
 
@@ -371,6 +374,7 @@ impl ControlWord {
             self.from_cluster as u128,
             self.x_only as u128,
             self.set_clusters as u128,
+            self.wide_reduce as u128,
         ]
     }
 
@@ -580,8 +584,9 @@ impl Gen {
         self.add(b.finish())
     }
 
-    /// What the wide memory holds plus a product, registered for its write.
-    fn wide_sum(&mut self, b: &mut Builder, (name, adder, register): (&str, &str, &str), held: &[Bit], product: &[Bit], fresh: Bit, bits: u32) -> Vec<Bit> {
+    /// What the wide memory holds plus a product, or the total over the units, registered for its write.
+    #[allow(clippy::too_many_arguments)]
+    fn wide_sum(&mut self, b: &mut Builder, (name, adder, register, mux): (&str, &str, &str, &str), held: &[Bit], product: &[Bit], fresh: Bit, (bits, fraction): (u32, usize), across: Option<(Bit, &[Bit])>) -> Vec<Bit> {
         let keep = b.wire(&format!("{name}_keep"), 1)[0];
         b.not_to(fresh, keep);
         let start = b.wire(&format!("{name}_start"), bits);
@@ -589,12 +594,20 @@ impl Gen {
             b.and_to(keep, *from, *to);
         }
         let sign = *product.last().expect("producto vacío");
-        let extended: Vec<Bit> = (0..bits as usize).map(|i| product.get(i).copied().unwrap_or(sign)).collect();
+        let extended: Vec<Bit> = std::iter::repeat_n(Bit::Zero, fraction).chain((0..bits as usize - fraction).map(|i| product.get(i).copied().unwrap_or(sign))).collect();
         let sum = b.wire(&format!("{name}_d"), bits);
         let carry = b.wire(&format!("{name}_carry"), 1);
         b.inst(name, adder, &[("a", start), ("b", extended), ("cin", vec![Bit::Zero]), ("sum", sum.clone()), ("cout", carry)]);
+        let chosen = match across {
+            Some((on, total)) => {
+                let y = b.wire(&format!("{name}_chosen"), bits);
+                b.inst(&format!("{name}_select"), mux, &[("s", vec![on]), ("a", sum), ("b", total.to_vec()), ("y", y.clone())]);
+                y
+            }
+            None => sum,
+        };
         let q = b.wire(&format!("{name}_q"), bits);
-        b.inst(&format!("{name}_reg"), register, &[("d", sum), ("q", q.clone())]);
+        b.inst(&format!("{name}_reg"), register, &[("d", chosen), ("q", q.clone())]);
         q
     }
 
@@ -757,9 +770,13 @@ impl Gen {
             }).collect()).collect();
             (foreign, banks)
         };
-        let chain_out = b.wire("chain_out", wide);
+        let unit_chains: Vec<Vec<Vec<Bit>>> = (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("unit{k}_chain{lane}"), wide)).collect()).collect();
+        let wide_bits = 2 * a + 16 + FACTOR_FRACTION;
+        let unit_wide: Vec<Vec<Vec<Bit>>> = (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("unit{k}_wide{lane}"), wide_bits)).collect()).collect();
+        let reduced: Vec<Vec<Bit>> = (0..lanes).map(|lane| b.wire(&format!("wide_reduced{lane}"), wide_bits)).collect();
         let global_running = running;
         let mut first_unit = None;
+        let mut unit_ports = Vec::with_capacity(clusters);
         for (cluster, unit_banks) in cluster_banks.iter().enumerate() {
             b.set_prefix(&if clusters > 1 { format!("c{cluster}_") } else { String::new() });
             let enabled = b.wire("unit_enabled", 1)[0];
@@ -1084,18 +1101,28 @@ impl Gen {
             let wide_scan = ctl("wide_scan", &mut b, &fields);
             let wide_clear = ctl("wide_clear", &mut b, &fields);
             let load_wide_shift = ctl("load_wide_shift", &mut b, &fields);
-            let wide_read = b.wire("wide_read", accumulator_bits);
-            // Sums from the cells arrive shifted, and sign-extended if the chain is narrower.
+            // The wide memory keeps the cells' fractional bits until every unit's part is
+            // added, so the result rounds once, as a single unit would.
+            let fraction = FACTOR_FRACTION as usize;
+            let wide_mux = self.mux_bus(wide_bits);
+            let wide_adder = self.ripple_adder(wide_bits);
+            let wide_register = self.register(wide_bits);
+            let wide_stored = b.wire("wide_stored", wide_bits);
+            let wide_read: Vec<Bit> = wide_stored[fraction..].to_vec();
+            let chain_out = unit_chains[cluster][0].clone();
             let chain_shifted = barrel_right(&mut b, &mux_wide, "chain_shift", &chain_out, &fields["shift"]);
-            let chain_sign = *chain_shifted.last().expect("cadena vacía");
-            let chain_wide: Vec<Bit> = (0..accumulator_bits as usize).map(|i| chain_shifted.get(i).copied().unwrap_or(chain_sign)).collect();
-            let wide_data = b.wire("wide_data", accumulator_bits);
-            let from_outside = b.wire("wide_outside", accumulator_bits);
-            b.inst("wide_data_select", &acc_mux, &[("s", vec![wide_from_chain]), ("a", accumulator.clone()), ("b", chain_wide), ("y", from_outside.clone())]);
+            let widen = |chain: &[Bit]| -> Vec<Bit> {
+                let sign = *chain.last().expect("cadena vacía");
+                (0..wide_bits as usize).map(|i| chain.get(i).copied().unwrap_or(sign)).collect()
+            };
+            let from_accumulator: Vec<Bit> = std::iter::repeat_n(Bit::Zero, fraction).chain(accumulator.iter().copied()).collect();
+            let wide_data = b.wire("wide_data", wide_bits);
+            let from_outside = b.wire("wide_outside", wide_bits);
+            b.inst("wide_data_select", &wide_mux, &[("s", vec![wide_from_chain]), ("a", from_accumulator), ("b", widen(&chain_out)), ("y", from_outside.clone())]);
             let combines = c.features.combines();
-            let lane_sums: Vec<Vec<Bit>> = (0..lanes).map(|lane| b.wire(&format!("wide_sum{lane}"), accumulator_bits)).collect();
+            let lane_sums: Vec<Vec<Bit>> = (0..lanes).map(|lane| b.wire(&format!("wide_sum{lane}"), wide_bits)).collect();
             if combines {
-                b.inst("wide_sum_select", &acc_mux, &[("s", vec![fields["wide_accumulate"][0]]), ("a", from_outside), ("b", lane_sums[0].clone()), ("y", wide_data.clone())]);
+                b.inst("wide_sum_select", &wide_mux, &[("s", vec![fields["wide_accumulate"][0]]), ("a", from_outside), ("b", lane_sums[0].clone()), ("y", wide_data.clone())]);
             } else {
                 for (from, to) in from_outside.iter().zip(&wide_data) {
                     b.or_to(*from, Bit::Zero, *to);
@@ -1117,22 +1144,31 @@ impl Gen {
                     let here = l.equals(&index_w[..lane_bits], lane as u32);
                     let alone = l.and(wide_write, here);
                     let write = l.or(alone, together);
-                    let data = if lane == 0 { wide_data.clone() } else { l.mux_bus(together, &wide_data, sum) };
+                    let data = if lane == 0 {
+                        wide_data.clone()
+                    } else {
+                        let block = l.mux_bus(wide_from_chain, sum, &widen(&unit_chains[cluster][lane]));
+                        l.mux_bus(together, &wide_data, &block)
+                    };
                     let name = if lanes == 1 { "wide_memory".to_string() } else { format!("wide_memory{lane}") };
-                    let read = l.b.wire(&format!("{name}_data"), accumulator_bits);
-                    l.b.ram2p(&name, c.index_bits - lane_bits as u32, accumulator_bits, &[("raddr", wide_raddr[lane_bits..].to_vec()), ("waddr", index_w[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data), ("rdata", read.clone())]);
+                    let read = l.b.wire(&format!("{name}_data"), wide_bits);
+                    l.b.ram2p(&name, c.index_bits - lane_bits as u32, wide_bits, &[("raddr", wide_raddr[lane_bits..].to_vec()), ("waddr", index_w[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data), ("rdata", read.clone())]);
+                    for (from, to) in read.iter().zip(&unit_wide[cluster][lane]) {
+                        l.b.or_to(*from, Bit::Zero, *to);
+                    }
                     wide_banks.push(read);
                 }
                 let bank = l.fresh_bus(lane_bits);
                 l.connect_flops(&wide_raddr[..lane_bits], &bank);
                 let chosen = l.select(&bank, &wide_banks);
-                for (from, to) in chosen.iter().zip(&wide_read) {
+                for (from, to) in chosen.iter().zip(&wide_stored) {
                     l.b.or_to(*from, Bit::Zero, *to);
                 }
             }
             let wide_fresh = fields["wide_fresh"][0];
+            let across_units = (clusters > 1).then_some(fields["wide_reduce"][0]);
             if combines {
-                let sum = self.wide_sum(&mut b, ("wide_sum_adder", &acc_adder, &acc_reg), &wide_read, &product, wide_fresh, accumulator_bits);
+                let sum = self.wide_sum(&mut b, ("wide_sum_adder", &wide_adder, &wide_register, &wide_mux), &wide_stored, &product, wide_fresh, (wide_bits, fraction), across_units.map(|on| (on, reduced[0].as_slice())));
                 for (from, to) in sum.iter().zip(&lane_sums[0]) {
                     b.or_to(*from, Bit::Zero, *to);
                 }
@@ -1143,8 +1179,19 @@ impl Gen {
             b.not_to(wide_clear, keep_wide);
             let wide_magnitude_d = b.wire("wide_magnitude_d", accumulator_bits - 1);
             for i in 0..wide_top {
-                let differs = b.wire(&format!("wide_differs{i}"), 1)[0];
-                b.xor_to(wide_read[i], wide_read[wide_top], differs);
+                let differs = {
+                    let mut l = Logic { b: &mut b, next: 53_000 + i * 2048 };
+                    let mut any = l.xor(wide_read[i], wide_read[wide_top]);
+                    for (lane, bank) in wide_banks.iter().enumerate().skip(1) {
+                        let (value, sign) = (bank[fraction + i], bank[fraction + wide_top]);
+                        let here = l.xor(value, sign);
+                        let block = l.and(wide_scan, vector_flag);
+                        let live = l.and(block, scanned_lane[lane]);
+                        let counted = l.and(live, here);
+                        any = l.or(any, counted);
+                    }
+                    any
+                };
                 let seen = b.wire(&format!("wide_seen{i}"), 1)[0];
                 b.and_to(wide_scan, differs, seen);
                 let merged = b.wire(&format!("wide_merged{i}"), 1)[0];
@@ -1264,14 +1311,15 @@ impl Gen {
                 let saturated = saturate(&mut b, &moved_left, a);
                 let mut leaves = vec![zero_leaf.clone(); 16];
                 leaves[OP_ADD as usize] = sum.clone();
-                for (op, leaf) in [(OP_MUL, shifted), (OP_FUNCTION, table), (OP_SUB, sum), (OP_MOV, lane_a), (OP_SHIFT_LEFT, saturated)] {
+                    let wide_out = self.rounded_right(&mut b, &name("wide_right"), &wide_banks[lane][fraction..], &wide_shift, a as usize);
+            for (op, leaf) in [(OP_MUL, shifted), (OP_FUNCTION, table), (OP_SUB, sum), (OP_MOV, lane_a), (OP_SHIFT_LEFT, saturated), (OP_WIDE_OUT, wide_out)] {
                     if c.features.uses(op) {
                         leaves[op as usize] = leaf;
                     }
                 }
                 if combines {
                     let (adder_name, sum) = (name("wide_sum"), &lane_sums[lane]);
-                    let total = self.wide_sum(&mut b, (&adder_name, &acc_adder, &acc_reg), &wide_banks[lane], &product, wide_fresh, accumulator_bits);
+                    let total = self.wide_sum(&mut b, (&adder_name, &wide_adder, &wide_register, &wide_mux), &wide_banks[lane], &product, wide_fresh, (wide_bits, fraction), across_units.map(|on| (on, reduced[lane].as_slice())));
                     for (from, to) in total.iter().zip(sum) {
                         b.or_to(*from, Bit::Zero, *to);
                     }
@@ -1283,11 +1331,21 @@ impl Gen {
             }
 
             if cluster == 0 {
-                first_unit = Some((read_a, index_a, write_data));
+                first_unit = Some(write_data);
             }
+            unit_ports.push((read_a, index_a));
         }
         b.set_prefix("");
-        let (read_a, index_a, write_data) = first_unit.expect("al menos una unidad");
+        let write_data = first_unit.expect("al menos una unidad");
+        {
+            let mut l = Logic { b: &mut b, next: 60_000 };
+            for (lane, output) in reduced.iter().enumerate() {
+                let total = unit_wide.iter().skip(1).fold(unit_wide[0][lane].clone(), |sum, unit| l.adder(&sum, &unit[lane], Bit::Zero).0);
+                for (from, to) in total.iter().zip(output) {
+                    l.b.or_to(*from, Bit::Zero, *to);
+                }
+            }
+        }
         let op = fields["op"].clone();
 
         // The sequencer waits when it needs a word that has not arrived or cannot send one.
@@ -1342,39 +1400,44 @@ impl Gen {
             }
         }
 
-        // --- Activation network ---
-        b.group("Red de activaciones");
-        let mut x_bus = read_a;
-        for stage in 0..c.broadcast_stages {
-            let q = b.wire(&format!("x_bus{stage}"), a);
-            b.inst(&format!("x_stage{stage}"), &reg_a, &[("d", x_bus), ("q", q.clone())]);
-            x_bus = q;
-        }
-
-        // --- Cells and their result chain ---
-        let cell_seek_addr: Vec<Bit> = (0..cfg.addr_bits as usize).map(|i| index_a.get(i).copied().unwrap_or(Bit::Zero)).collect();
-        let mut chain_in = vec![Bit::Zero; wide as usize];
-        for i in (0..c.cells as usize).rev() {
-            b.group("Celdas");
-            let total = b.wire(&format!("cell{i}_total"), wide);
-            let mut cell_pins = vec![("clear", vec![cell_clear]), ("clear_group", vec![cell_clear_group]), ("flush", vec![cell_flush]), ("run", vec![cell_run]), ("x", x_bus.clone()), ("total", total.clone()), ("seek_weights", vec![cell_seek_weights]), ("seek_factors", vec![cell_seek_factors]), ("seek_addr", cell_seek_addr.clone())];
-            if let Some((load_cell, load_scale, cell_addr)) = &cell_ports {
-                cell_pins.extend([("load_en", vec![load_cell[i]]), ("load_scale", vec![*load_scale]), ("load_addr", cell_addr.clone()), ("load_data", cell_data[..c.scale_bits.max(cfg.weight_bits) as usize].to_vec())]);
+        // --- Activation network and cells, one array per vector unit ---
+        let per_unit = (c.cells as usize / clusters).max(1);
+        for (unit, (read_a, index_a)) in unit_ports.into_iter().enumerate() {
+            b.group("Red de activaciones");
+            let mut x_bus = read_a;
+            for stage in 0..c.broadcast_stages {
+                let q = b.wire(&format!("x_bus{unit}_{stage}"), a);
+                b.inst(&format!("x_stage{unit}_{stage}"), &reg_a, &[("d", x_bus), ("q", q.clone())]);
+                x_bus = q;
             }
-            b.inst(&format!("cell{i}"), &cell, &cell_pins);
+            let cell_seek_addr: Vec<Bit> = (0..cfg.addr_bits as usize).map(|i| index_a.get(i).copied().unwrap_or(Bit::Zero)).collect();
+            let mut chain_in = vec![vec![Bit::Zero; wide as usize]; lanes];
+            for row in (0..per_unit).rev() {
+                let i = unit * per_unit + row;
+                let lane = row % lanes;
+                b.group("Celdas");
+                let total = b.wire(&format!("cell{i}_total"), wide);
+                let mut cell_pins = vec![("clear", vec![cell_clear]), ("clear_group", vec![cell_clear_group]), ("flush", vec![cell_flush]), ("run", vec![cell_run]), ("x", x_bus.clone()), ("total", total.clone()), ("seek_weights", vec![cell_seek_weights]), ("seek_factors", vec![cell_seek_factors]), ("seek_addr", cell_seek_addr.clone())];
+                if let Some((load_cell, load_scale, cell_addr)) = &cell_ports {
+                    cell_pins.extend([("load_en", vec![load_cell[i]]), ("load_scale", vec![*load_scale]), ("load_addr", cell_addr.clone()), ("load_data", cell_data[..c.scale_bits.max(cfg.weight_bits) as usize].to_vec())]);
+                }
+                b.inst(&format!("cell{i}"), &cell, &cell_pins);
 
-            b.group("Cadena de resultados");
-            let chosen = b.wire(&format!("chain{i}_load"), wide);
-            b.inst(&format!("chain{i}_select"), &mux_wide, &[("s", vec![chain_load]), ("a", chain_in.clone()), ("b", total), ("y", chosen.clone())]);
-            let q = b.wire(&format!("chain{i}"), wide);
-            let keep = bus_or(&mut b, chain_load, chain_shift, &format!("chain{i}_update"));
-            let held = b.wire(&format!("chain{i}_held"), wide);
-            b.inst(&format!("chain{i}_hold"), &mux_wide, &[("s", vec![keep]), ("a", q.clone()), ("b", chosen), ("y", held.clone())]);
-            b.inst(&format!("chain{i}_reg"), &reg_wide, &[("d", held), ("q", q.clone())]);
-            chain_in = q;
-        }
-        for (i, bit) in chain_in.iter().enumerate() {
-            b.xor_to(*bit, Bit::Zero, chain_out[i]);
+                b.group("Cadena de resultados");
+                let chosen = b.wire(&format!("chain{i}_load"), wide);
+                b.inst(&format!("chain{i}_select"), &mux_wide, &[("s", vec![chain_load]), ("a", chain_in[lane].clone()), ("b", total), ("y", chosen.clone())]);
+                let q = b.wire(&format!("chain{i}"), wide);
+                let keep = bus_or(&mut b, chain_load, chain_shift, &format!("chain{i}_update"));
+                let held = b.wire(&format!("chain{i}_held"), wide);
+                b.inst(&format!("chain{i}_hold"), &mux_wide, &[("s", vec![keep]), ("a", q.clone()), ("b", chosen), ("y", held.clone())]);
+                b.inst(&format!("chain{i}_reg"), &reg_wide, &[("d", held), ("q", q.clone())]);
+                chain_in[lane] = q;
+            }
+            for (lane, output) in unit_chains[unit].iter().enumerate() {
+                for (from, to) in chain_in[lane].iter().zip(output) {
+                    b.or_to(*from, Bit::Zero, *to);
+                }
+            }
         }
         self.add(b.finish())
     }
@@ -1694,7 +1757,8 @@ fn visit_indices(steps: &[Step], f: &mut impl FnMut(Expr)) {
                 f(*factors);
             }
             Step::Clustered { body, .. } => visit_indices(body, f),
-            Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } => {}
+            Step::CellGroup { start, .. } => f(*start),
+            Step::CellPass | Step::CellDrain { .. } | Step::WideReduce { .. } => {}
         }
     }
 }
@@ -1864,7 +1928,8 @@ impl DieProgram {
                 Step::Clustered { vars, assignments, body } => self.clustered(vars, assignments, body),
                 Step::CellSeek { weights, factors } => self.cell_seek(*weights, *factors),
                 Step::CellPass => self.cell_pass(),
-                Step::CellGroup { src, length } => self.cell_group(*src, *length),
+                Step::CellGroup { src, length, start } => self.cell_group(*src, *length, *start),
+                Step::WideReduce { rows } => self.wide_reduce(*rows),
                 Step::CellDrain { rows } => self.cell_drain(*rows),
             }
         }
@@ -2087,14 +2152,15 @@ impl DieProgram {
     }
 
     /// Streams the next `length` activations through the cells, then applies their factors.
-    fn cell_group(&mut self, src: u32, length: u32) {
+    fn cell_group(&mut self, src: u32, length: u32, first: Expr) {
+        let offset = self.resolve(first).1;
         let c = self.config;
         let x_delay = 1 + c.broadcast_stages as usize;
         let start = self.end();
         for i in 0..length as usize {
             let w = self.slot(start + i);
             w.read_step = true;
-            w.reg_a = src;
+            (w.reg_a, w.offset_a) = (src, offset);
             self.slot(start + i + x_delay).cell_run = true;
         }
         let settled = start + length as usize + x_delay + c.cell.latency() as usize + 1;
@@ -2102,15 +2168,34 @@ impl DieProgram {
         self.slot(settled + 1);
     }
 
-    /// Moves the totals of the first `rows` cells into the wide memory.
+    /// Moves the totals of the first `rows` cells into the wide memory, a block at a time.
     fn cell_drain(&mut self, rows: u32) {
+        let lane_bits = self.config.features.lane_bits;
+        let lanes = 1u32 << lane_bits;
         let t = self.end();
         self.slot(t).chain_load = true;
-        for i in 0..rows as usize {
+        for i in 0..rows.div_ceil(lanes) as usize {
             let w = self.slot(t + 1 + i);
-            (w.wide_write, w.wide_from_chain, w.chain_shift, w.shift) = (true, true, true, FACTOR_FRACTION);
+            (w.wide_write, w.wide_from_chain, w.chain_shift, w.vector) = (true, true, true, lane_bits > 0);
         }
-        self.slot(t + 1 + rows as usize);
+        let end = self.end();
+        self.slot(end);
+    }
+
+    /// Replaces each sum in the wide memory by the total over all the vector units.
+    fn wide_reduce(&mut self, rows: u32) {
+        let vector = self.config.features.lane_bits > 0;
+        let mut temporaries = Vec::new();
+        let word = |k: usize| {
+            let mut w = ControlWord { vector, wide_accumulate: true, read_step: true, ..Default::default() };
+            w.wide_reduce = k >= 1;
+            w.wide_write = k >= 2;
+            w
+        };
+        self.emit_variable_stream(rows.into(), 2, &mut temporaries, word);
+        for temporary in temporaries {
+            self.release(temporary);
+        }
     }
 
     /// One single-element operation. Nothing overlaps, so each takes a few cycles.

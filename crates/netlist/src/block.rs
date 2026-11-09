@@ -608,7 +608,9 @@ pub enum Step {
     /// Clears the row totals and restarts the input vector.
     CellPass,
     /// One group of columns through the cells.
-    CellGroup { src: u32, length: u32 },
+    CellGroup { src: u32, length: u32, start: Expr },
+    /// The totals of all the vector units are added together in their wide memories.
+    WideReduce { rows: u32 },
     /// The totals of the first `rows` cells go to the wide memory.
     CellDrain { rows: u32 },
 }
@@ -702,9 +704,10 @@ impl Assembly {
         }
     }
 
-    fn cell_round(&mut self, src: u32, place: CellMatrix, rows: u32) {
+    fn cell_round(&mut self, src: u32, place: CellMatrix, rows: u32, column: Expr) {
         self.steps.push(Step::CellPass);
-        self.each(place.groups.into(), |s, _| s.steps.push(Step::CellGroup { src, length: place.group }));
+        let groups = place.groups.div_ceil(self.clusters);
+        self.each(groups.into(), |s, _| s.steps.push(Step::CellGroup { src, length: place.group, start: column }));
         self.steps.push(Step::CellDrain { rows });
     }
 
@@ -921,7 +924,7 @@ fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32)
             }
             Step::Clustered { body, .. } => mark_window(body, step, windowed, exponents),
             Step::CellGroup { src, .. } => assert!(!windowed.contains(src), "las celdas leen de registros fijos"),
-            Step::CellSeek { .. } | Step::CellPass | Step::CellDrain { .. } => {}
+            Step::CellSeek { .. } | Step::CellPass | Step::CellDrain { .. } | Step::WideReduce { .. } => {}
         }
     }
 }
@@ -1123,14 +1126,14 @@ impl BlockOps for Assembly {
         clear.write = false;
         clear.wide_clear = true;
         self.push(clear);
-        self.each(sets, |s, set| {
+        self.elements(sets, &[], true, |s, set, vector| {
             let mut scan = alu(OP_MOV);
             scan.a = (0, set);
             scan.write = false;
             scan.wide_scan = true;
+            scan.vector = vector;
             s.push(scan);
         });
-        self.stream_last(1);
         let mut count = alu(OP_WIDE_LZC);
         count.dst = self.sc(0);
         self.push(count);
@@ -1143,13 +1146,13 @@ impl BlockOps for Assembly {
         load.write = false;
         load.load_wide_shift = true;
         self.push(load);
-        self.each(sets, |s, set| {
+        self.elements(sets, &[], true, |s, set, vector| {
             let mut out = alu(OP_WIDE_OUT);
             out.a = (0, set);
             out.dst = (dst, set);
+            out.vector = vector;
             s.push(out);
         });
-        self.stream_last(1);
         self.binary(OP_ADD, self.exponent(a), self.exponent(b), self.sc(5));
         self.binary(OP_ADD, self.sc(5), self.sc(4), self.sc(6));
         self.immediate(1 - self.bits as i64, self.sc(7));
@@ -1410,13 +1413,26 @@ impl BlockOps for Assembly {
         let Some(place) = self.in_cells.get(name).copied() else {
             return self.dots(matrix, src, dst, rows.into(), cols.into(), |r, j| ((matrix, (r + first) * cols + j), (src, j)));
         };
-        // A matrix used a block at a time keeps each block's rows from cell 0 on.
-        let passes = rows.div_ceil(self.cells);
+        // A matrix used a block at a time keeps each block's rows from cell 0 on. Each
+        // vector unit has its own cells, and takes its own slice of the columns.
+        let units = self.clusters;
+        let per_unit = self.cells / units;
+        let groups = place.groups.div_ceil(units);
+        let columns = groups * place.group;
+        let passes = rows.div_ceil(per_unit);
         let block = first.divided_by(rows);
-        self.steps.push(Step::CellSeek { weights: Expr::from(place.weights) + block * (passes * cols), factors: Expr::from(place.factors) + block * (passes * place.groups) });
-        self.each((rows / self.cells).into(), |s, _| s.cell_round(src, place, s.cells));
-        if !rows.is_multiple_of(self.cells) {
-            self.cell_round(src, place, rows % self.cells);
+        self.steps.push(Step::CellSeek { weights: Expr::from(place.weights) + block * (passes * columns), factors: Expr::from(place.factors) + block * (passes * groups) });
+        let column = Var::Loop(self.loops);
+        self.loops += 1;
+        let before = std::mem::take(&mut self.steps);
+        self.each((rows / per_unit).into(), |s, _| s.cell_round(src, place, per_unit, Expr::var(column)));
+        if !rows.is_multiple_of(per_unit) {
+            self.cell_round(src, place, rows % per_unit, Expr::var(column));
+        }
+        let inside = std::mem::replace(&mut self.steps, before);
+        self.steps.push(Step::Clustered { vars: vec![column], assignments: (0..units).map(|unit| vec![unit * columns]).collect(), body: inside });
+        if units > 1 {
+            self.steps.push(Step::WideReduce { rows });
         }
         self.narrow_sums(matrix, src, dst, rows.into());
     }
@@ -1526,7 +1542,7 @@ impl Behavior {
                         self.walk(&[Step::One(*body)], token, position, loops);
                     }
                 }
-                Step::Clustered { .. } | Step::Combine { .. } | Step::CellSeek { .. } | Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } => panic!("este modelo no guarda los pesos de las celdas"),
+                Step::Clustered { .. } | Step::Combine { .. } | Step::CellSeek { .. } | Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } | Step::WideReduce { .. } => panic!("este modelo no guarda los pesos de las celdas"),
             }
         }
     }

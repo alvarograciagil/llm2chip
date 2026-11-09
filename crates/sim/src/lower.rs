@@ -141,14 +141,16 @@ struct CellEntry {
 }
 
 /// The address of each matrix in the cells, and how deep their two memories must be.
-fn place_in_cells(plan: &[CellEntry], cells: usize) -> (HashMap<String, CellMatrix>, u64, u64) {
+fn place_in_cells(plan: &[CellEntry], cells: usize, units: usize) -> (HashMap<String, CellMatrix>, u64, u64) {
+    let per_unit = (cells / units).max(1);
     let (mut weights, mut factors) = (0u64, 0u64);
     let mut places = HashMap::new();
     for e in plan {
         places.insert(e.name.clone(), CellMatrix { weights: weights as u32, factors: factors as u32, group: e.group as u32, groups: e.groups as u32 });
-        let rounds = (e.rows / e.block * e.block.div_ceil(cells)) as u64;
-        weights += rounds * e.cols as u64;
-        factors += rounds * e.groups as u64;
+        let rounds = (e.rows / e.block * e.block.div_ceil(per_unit)) as u64;
+        let groups = e.groups.div_ceil(units) as u64;
+        weights += rounds * groups * e.group as u64;
+        factors += rounds * groups;
     }
     (places, weights, factors)
 }
@@ -281,6 +283,9 @@ impl Layout {
                 if cells && !table && cell_plan.iter().all(|e| e.name != name) {
                     let matrix = weights.matrix(&name)?;
                     let (group, groups) = matrix.cell_groups(cols);
+                    // A matrix with no groups of its own is split so every unit gets a part.
+                    let units = 1usize << config.features.cluster_bits;
+                    let (group, groups) = if groups == 1 && units > 1 && cols.is_multiple_of(units) { (cols / units, units) } else { (group, groups) };
                     let exponent = matrix.exponent(cols);
                     setup.load_mantissas(reg, &[], exponent);
                     cell_plan.push(CellEntry { block: rows_per_use(program, &inst.op, &name, rows), name, rows, cols, group, groups, exponent });
@@ -400,7 +405,7 @@ impl Layout {
             return Err(format!("faltan registros: se necesitan {next}"));
         }
         let key_capacity = chip_tokens.filter(|_| cells && config.features.combines()).map(|tokens| (tokens as u32).next_multiple_of(1 << config.features.lane_bits));
-        let (in_cells, cell_weights, cell_factors) = place_in_cells(&cell_plan, config.cells as usize);
+        let (in_cells, cell_weights, cell_factors) = place_in_cells(&cell_plan, config.cells as usize, 1 << config.features.cluster_bits);
         let reach = 1u64 << config.index_bits.min(config.cell.addr_bits);
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
@@ -545,26 +550,36 @@ impl Layout {
     }
 
     pub fn cell_depths(&self) -> (u64, u64) {
-        let (_, weights, factors) = place_in_cells(&self.cell_plan, self.config.cells as usize);
+        let (_, weights, factors) = place_in_cells(&self.cell_plan, self.config.cells as usize, 1 << self.config.features.cluster_bits);
         (weights, factors)
     }
 
-    /// What `cell` holds: one code per weight and the scale and bias of each group.
+    /// What `cell` holds: one code per weight and the scale and bias of each group. Each
+    /// vector unit's cells hold the columns of its own groups, padded with zeros.
     pub fn cell_contents(&self, weights: &Weights, cell: u32) -> Result<CellRow, String> {
-        let cells = self.config.cells as usize;
+        let units = 1usize << self.config.features.cluster_bits;
+        let per_unit = (self.config.cells as usize / units).max(1);
+        let (unit, place) = (cell as usize / per_unit, cell as usize % per_unit);
         let (mut codes, mut factors) = (Vec::new(), Vec::new());
         for e in &self.cell_plan {
             let matrix = weights.matrix(&e.name)?;
+            let groups = e.groups.div_ceil(units);
+            let first = unit * groups;
             for block in 0..e.rows / e.block {
-                for round in 0..e.block.div_ceil(cells) {
-                    let row = round * cells + cell as usize;
+                for round in 0..e.block.div_ceil(per_unit) {
+                    let row = round * per_unit + place;
                     if row < e.block {
                         let (w, f) = matrix.cell_row(block * e.block + row, e.cols, e.exponent, self.config.cell.activation_bits)?;
-                        codes.extend(w);
-                        factors.extend(f);
+                        let shared = |g: usize| if f.len() == e.groups { f.get(g).copied() } else { (g < e.groups).then(|| f[0]) };
+                        for g in first..first + groups {
+                            factors.push(shared(g).unwrap_or((0, 0)));
+                            for j in 0..e.group {
+                                codes.push(w.get(g * e.group + j).copied().unwrap_or(0));
+                            }
+                        }
                     } else {
-                        codes.extend(std::iter::repeat_n(0, e.cols));
-                        factors.extend(std::iter::repeat_n((0, 0), e.groups));
+                        codes.extend(std::iter::repeat_n(0, groups * e.group));
+                        factors.extend(std::iter::repeat_n((0, 0), groups));
                     }
                 }
             }
@@ -579,7 +594,7 @@ impl Layout {
         let dropped: HashSet<u32> = self.weights.iter().filter(|(name, _)| !used.contains(*name)).map(|(_, reg)| *reg).collect();
         self.setup.initial.retain(|(register, _), _| !dropped.contains(register));
         self.cell_plan.retain(|e| used.contains(&e.name));
-        self.in_cells = place_in_cells(&self.cell_plan, self.config.cells as usize).0;
+        self.in_cells = place_in_cells(&self.cell_plan, self.config.cells as usize, 1 << self.config.features.cluster_bits).0;
     }
 
     /// Runs one routine of the microprogram directly, at software speed.
