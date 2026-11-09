@@ -107,11 +107,6 @@ pub fn load_or_build(weights: &Weights, path: &Path) -> Result<(Manifest, bool),
     Ok((manifest, true))
 }
 
-/// The first `count` bytes of a stored tensor, for loading a real sample through the gates.
-pub fn sample_codes(weights: &Weights, name: &str, count: usize) -> Option<Vec<u32>> {
-    weights.raw_tensors().into_iter().find(|(tensor, ..)| *tensor == name).map(|(_, _, bytes)| bytes[..count.min(bytes.len())].iter().map(|b| *b as u32).collect())
-}
-
 const FILE_MAGIC: &[u8; 8] = b"L2CIMG01";
 
 /// What a chip image is built for.

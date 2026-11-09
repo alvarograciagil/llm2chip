@@ -175,7 +175,7 @@ fn setup(name: &str, firmware: &FirmwareImage) -> Setup {
     std::fs::create_dir_all(&dir).unwrap();
     make_checkpoint(&dir);
     let program = compile_qwen3_5(CONFIG).unwrap();
-    let die = DieConfig { microcode_bits: 15, ..die_config() };
+    let die = DieConfig { microcode_bits: 15, ..cell_die_config() };
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let tables = tiny_tokenizer();
     let generation = GenerationSetup { max_new: 1, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0 };
@@ -194,7 +194,7 @@ fn the_same_image_adapts_to_one_or_two_chips() {
 
     // One chip, at instruction level, with the very same image.
     let engine = VmEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&setup.dir).unwrap(), setup.die, CHIP_TOKENS).unwrap();
-    let code = Layout::new(&program, &Weights::open(&setup.dir).unwrap(), setup.die, Some(CHIP_TOKENS)).unwrap().die_microprogram(&program, &program.split(1).unwrap(), 0).unwrap();
+    let code = Layout::with_cells(&program, &Weights::open(&setup.dir).unwrap(), setup.die, CHIP_TOKENS).unwrap().die_microprogram(&program, &program.split(1).unwrap(), 0).unwrap();
     let model = ChipModel::new(engine, code, SamplerModel { config: setup.config.sampler, rng: 0, table: exponential_table() });
     let mut bus = SocBus::booted_with(setup.config.soc, &setup.image, input, model).unwrap();
     let mut cpu = Rv32Iss::default();
@@ -223,7 +223,7 @@ fn the_same_image_adapts_to_one_or_two_chips() {
     assert_eq!(failed, board.doubles as u64, "cada palabra con dos bits malos consta como fallida");
     assert_eq!(corrected, (board.flips - board.doubles) as u64, "cada bit suelto invertido consta como corregido");
 
-    let logits_register = Layout::new(&program, &Weights::open(&setup.dir).unwrap(), setup.die, Some(CHIP_TOKENS)).unwrap().logits_register(&program);
+    let logits_register = Layout::with_cells(&program, &Weights::open(&setup.dir).unwrap(), setup.die, CHIP_TOKENS).unwrap().logits_register(&program);
     for index in 0..8 {
         let address = (logits_register as usize) << setup.die.index_bits | index;
         let gates = board.chips[0].peek_memory("/die/vectors_a", address).unwrap() as u64 & 0xFFFF;

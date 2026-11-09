@@ -3,12 +3,12 @@
 
 use compiler::compile_qwen3_5;
 use netlist::chip::{chip_design, chip_info, ChipConfig, ChipModel, GenerationSetup, DEBUG_CPU_PC, DEBUG_CYCLES, DEBUG_DIE_BUSY, DEBUG_SAMPLER_BUSY};
-use netlist::image::{build_image, Segment, Target};
+use netlist::image::build_image;
 use netlist::rv32::Rv32Iss;
 use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
 use netlist::soc::{FirmwareImage, SocBus, SocConfig};
 use netlist::Simulator;
-use sim::chip::{image_segments, VmEngine};
+use sim::chip::{cell_segments, image_segments, VmEngine};
 use sim::lower::Layout;
 use sim::Weights;
 use std::path::Path;
@@ -88,16 +88,16 @@ fn text_goes_through_the_whole_chip_in_gates() {
     make_checkpoint(&dir);
     let program = compile_qwen3_5(CONFIG).unwrap();
 
-    let die = netlist::DieConfig { microcode_bits: 15, ..die_config() };
+    let die = netlist::DieConfig { microcode_bits: 15, ..cell_die_config() };
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
-    let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), die, Some(CHIP_TOKENS)).unwrap();
+    let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0 };
     let info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
     let mut segments = image_segments(&die, &code, &layout);
-    // A sample of the model's own weights goes through the real controller into a cell.
-    let sample = sim::image::sample_codes(&Weights::open(&dir).unwrap(), "model.embed_tokens.weight", 8).unwrap();
-    segments.push(Segment { target: Target::CellWeight, unit: 0, address: 0, beats: 1, words: sample.clone() });
+    // The model's own weights go through the real controller into the cells.
+    let checkpoint = Weights::open(&dir).unwrap();
+    segments.extend(cell_segments(&die, &layout, &checkpoint).unwrap());
     eprintln!("{} segmentos, microprograma de {} palabras", segments.len(), code.words.len());
     let tables = tiny_tokenizer();
     let image = build_image(&firmware.program, &firmware.data, &info, &tables.to_words(), &segments).unwrap();
@@ -131,8 +131,9 @@ fn text_goes_through_the_whole_chip_in_gates() {
     assert_eq!(debug(&mut sim, DEBUG_DIE_BUSY), bus.peripheral.die_busy, "ciclos del die");
     assert!(debug(&mut sim, DEBUG_SAMPLER_BUSY) > 0);
     assert!(debug(&mut sim, DEBUG_CPU_PC) > 0);
-    for (address, code) in sample.iter().enumerate() {
-        assert_eq!(sim.peek_memory("/die/cell0/compute/weight_sram", address), Some(*code as u128), "peso {address}");
+    let (codes, _) = layout.cell_contents(&checkpoint, 0).unwrap();
+    for (address, code) in codes.iter().enumerate() {
+        assert_eq!(sim.peek_memory("/die/cell0/compute/weight_sram", address), Some((*code as u8) as u128), "peso {address}");
     }
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -145,15 +146,15 @@ fn any_token_on_the_stop_list_ends_the_answer() {
     std::fs::create_dir_all(&dir).unwrap();
     make_checkpoint(&dir);
     let program = compile_qwen3_5(CONFIG).unwrap();
-    let die = netlist::DieConfig { microcode_bits: 15, ..die_config() };
+    let die = netlist::DieConfig { microcode_bits: 15, ..cell_die_config() };
     let sampler = SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 };
     let soc = SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 };
-    let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), die, Some(CHIP_TOKENS)).unwrap();
+    let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let generate = |stop: Vec<u32>| {
         let setup = GenerationSetup { max_new: 1, greedy: true, limit: 4, temperature: 256, seed: 1, raw_tokens: false, stop, draft_depth: 0, draft_logits: 0 };
         let info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
-        let image = build_image(&firmware.program, &firmware.data, &info, &tiny_tokenizer().to_words(), &image_segments(&die, &code, &layout)).unwrap();
+        let image = build_image(&firmware.program, &firmware.data, &info, &tiny_tokenizer().to_words(), &[image_segments(&die, &code, &layout), cell_segments(&die, &layout, &Weights::open(&dir).unwrap()).unwrap()].concat()).unwrap();
         let engine = VmEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
         let model = ChipModel::new(engine, code.clone(), SamplerModel { config: sampler, rng: 0, table: exponential_table() });
         let mut bus = SocBus::booted_with(soc, &image, b"hoy\0", model).unwrap();

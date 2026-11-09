@@ -401,8 +401,7 @@ fn the_cells_reach_the_same_bits_as_the_exact_machine() {
     let serial = gates_after(&program, &dir, base, &tokens).cycles;
     let mut cycles = Vec::new();
     for (cells, lane_bits) in [(1u32, 0u32), (2, 0), (8, 0), (8, 2)] {
-        let cell = netlist::CellConfig { accumulator_bits: 40, addr_bits: 12, ..base.cell };
-        let c = DieConfig { cells, cell, scale_bits: 21, index_bits: 12, features: base.features.with_lane_bits(lane_bits), ..base };
+        let c = DieConfig { cells, features: base.features.with_lane_bits(lane_bits), ..cell_die_config() };
         let mut run = gates_in_cells(&program, &dir, c, &tokens);
         for (buffer, length) in program.buffers.iter().enumerate() {
             let gates = run.layout.register_of(buffer);

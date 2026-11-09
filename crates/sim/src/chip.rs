@@ -51,9 +51,10 @@ pub struct VmEngine {
 impl VmEngine {
     pub fn new(program: Program, weights: Weights, config: DieConfig, chip_tokens: usize) -> Result<Self, String> {
         let weights = Arc::new(weights);
-        let layout = Layout::new(&program, &weights, config, Some(chip_tokens))?;
+        let layout = Layout::with_cells(&program, &weights, config, chip_tokens)?;
         let exponents = exponent_register(&config);
         let mut vm = BlockVm::new(&config, layout.registers_used() as usize + 8, Some(weights));
+        vm.compute_in_cells();
         load_initial(&mut vm, &layout.setup().initial, exponents);
         let code = layout.microprogram(&program)?;
         Ok(Self { config, code, program, layout, vm, index_bits: config.index_bits, exponents })
@@ -180,12 +181,28 @@ pub fn plan_parts(program: &Program, dir: &Path, config: DieConfig, chip_tokens:
     let plan = program.split(chips)?;
     (0..chips)
         .map(|chip| {
-            let mut layout = Layout::new(program, &Weights::open(dir)?, config, Some(chip_tokens))?;
+            let weights = Weights::open(dir)?;
+            let mut layout = Layout::with_cells(program, &weights, config, chip_tokens)?;
             layout.keep_weights_of(program, &plan, chip);
             let code = layout.die_microprogram(program, &plan, chip)?;
-            Ok(ChipPart { info: chip_info(&config, &code, layout.logits_register(program), program.vocab as u32, setup), segments: image_segments(&config, &code, &layout) })
+            let mut segments = image_segments(&config, &code, &layout);
+            segments.extend(cell_segments(&config, &layout, &weights)?);
+            Ok(ChipPart { info: chip_info(&config, &code, layout.logits_register(program), program.vocab as u32, setup), segments })
         })
         .collect()
+}
+
+/// What the firmware writes into each cell: its weights, then its scales and biases.
+pub fn cell_segments(config: &DieConfig, layout: &Layout, weights: &Weights) -> Result<Vec<Segment>, String> {
+    let width = config.scale_bits.max(config.cell.weight_bits).max(config.cell.activation_bits);
+    let mask = |value: i64| value as u32 & ((1u64 << width) - 1) as u32;
+    let mut segments = Vec::with_capacity(2 * config.cells as usize);
+    for cell in 0..config.cells {
+        let (codes, factors) = layout.cell_contents(weights, cell)?;
+        segments.push(Segment { target: Target::CellWeight, unit: cell, address: 0, beats: 1, words: codes.iter().map(|c| mask(*c)).collect() });
+        segments.push(Segment { target: Target::CellScale, unit: cell, address: 0, beats: 1, words: factors.iter().flat_map(|(scale, bias)| [mask(*scale), mask(*bias)]).collect() });
+    }
+    Ok(segments)
 }
 
 /// Everything the firmware has to load onto the die from the image.
