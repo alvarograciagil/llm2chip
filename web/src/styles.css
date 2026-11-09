@@ -1651,3 +1651,243 @@ input[type="range"]::-webkit-slider-thumb {
 .format-table tbody tr.selected-row {
   background: var(--accent-soft, rgba(10, 132, 255, 0.14));
 }
+
+/* Vista de funcionamiento */
+.stage.logic {
+  overflow: auto;
+}
+
+.logic-page {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px 24px 48px;
+}
+
+.logic-page h2 {
+  margin: 0 0 6px;
+  font-size: 20px;
+}
+
+.logic-flow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  margin-top: 16px;
+}
+
+.logic-flow .logic-flow {
+  margin-top: 0;
+}
+
+.logic-step {
+  display: grid;
+  gap: 3px;
+  width: min(420px, 100%);
+  padding: 10px 14px;
+  border: 1px solid var(--separator);
+  border-left: 4px solid var(--logic-color, var(--label-3));
+  border-radius: 10px;
+  background: var(--group-solid);
+  color: var(--label);
+  font: inherit;
+  text-align: left;
+}
+
+button.logic-step {
+  cursor: pointer;
+}
+
+button.logic-step:hover {
+  border-color: var(--accent);
+  border-left-color: var(--logic-color, var(--accent));
+}
+
+.logic-step span {
+  color: var(--label-2);
+}
+
+.logic-step small {
+  color: var(--label-3);
+}
+
+.logic-step.outside {
+  border-style: dashed;
+  border-left-style: solid;
+}
+
+.weights {
+  --logic-color: var(--cat-memoria);
+}
+
+.vector {
+  --logic-color: var(--cat-vectorial);
+}
+
+.state {
+  --logic-color: var(--cat-estado);
+}
+
+.logic-arrow {
+  width: 2px;
+  height: 18px;
+  background: var(--label-3);
+  position: relative;
+  margin-bottom: 5px;
+}
+
+.logic-arrow::after {
+  content: "";
+  position: absolute;
+  left: -4px;
+  bottom: -5px;
+  border: 5px solid transparent;
+  border-bottom-width: 0;
+  border-top-color: var(--label-3);
+}
+
+.logic-layers {
+  width: 100%;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--separator);
+  border-radius: 12px;
+}
+
+.logic-layers h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.logic-strip {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 12px;
+}
+
+.logic-strip i {
+  flex: 1;
+  height: 16px;
+  border-radius: 2px;
+  background: var(--logic-color, var(--label-3));
+}
+
+.logic-kinds {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.logic-kinds .logic-step {
+  width: 100%;
+}
+
+.logic-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  border-radius: 3px;
+  background: var(--logic-color, var(--label-3));
+}
+
+.kind-0 {
+  --logic-color: var(--cat-memoria);
+}
+
+.kind-1 {
+  --logic-color: var(--cat-calculo);
+}
+
+.kind-2 {
+  --logic-color: var(--cat-interconexion);
+}
+
+.logic-legend {
+  position: static;
+  width: fit-content;
+  margin: 10px 0 14px;
+}
+
+.logic-graph {
+  display: block;
+  margin: 0 auto;
+}
+
+.logic-edge {
+  fill: none;
+  stroke: var(--label-3);
+  stroke-width: 1.4;
+}
+
+.logic-head {
+  fill: var(--label-3);
+}
+
+.logic-port {
+  fill: none;
+  stroke: var(--label-3);
+  stroke-dasharray: 4 3;
+}
+
+.logic-port-text {
+  fill: var(--label-2);
+  font-size: 12px;
+}
+
+.logic-node {
+  cursor: pointer;
+}
+
+.logic-node > rect:first-child {
+  fill: var(--group-solid);
+  stroke: var(--separator);
+}
+
+.logic-node:hover > rect:first-child,
+.logic-node.selected > rect:first-child {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.logic-stripe {
+  fill: var(--logic-color);
+}
+
+.logic-title {
+  fill: var(--label);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.logic-formula {
+  fill: var(--label);
+  font-size: 12px;
+}
+
+.logic-dims {
+  fill: var(--label-2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.logic-big-formula {
+  margin: 4px 0 8px;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.logic-tensor code {
+  overflow-wrap: anywhere;
+}
+
+.breadcrumb.static {
+  margin-bottom: 10px;
+}
+
+/* Five views no longer fit around the title in a narrow window. */
+@media (max-width: 1000px) {
+  .toolbar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+}

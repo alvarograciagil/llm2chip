@@ -89,6 +89,12 @@ pub fn schedule_design(name: &str, config: &str, params: &str) -> Result<String,
     to_js(&compiler::schedule(&model, &p, &report.floorplan, ghz, factor))
 }
 
+/// The operations one token goes through, as the chip will execute them.
+#[wasm_bindgen]
+pub fn program_design(config: &str) -> Result<String, JsError> {
+    to_js(&compiler::compile_qwen3_5(config).map_err(|e| JsError::new(&e))?)
+}
+
 /// Evaluates one design per entry in the JSON array `variants`, each merged over `params`.
 #[wasm_bindgen]
 pub fn sweep_design(name: &str, config: &str, params: &str, variants: &str) -> Result<String, JsError> {

@@ -7,6 +7,7 @@ import init, {
   optimization_catalog,
   presets,
   schedule_design,
+  program_design,
   sweep_design,
   tech_nodes,
 } from "./wasm/llm2chip_wasm.js";
@@ -148,6 +149,28 @@ export interface SweepResult {
   errors: number;
 }
 
+export interface ProgramOp {
+  op: string;
+  [field: string]: unknown;
+}
+
+export interface ProgramInst {
+  op: ProgramOp;
+  layer: number | null;
+  name: string;
+}
+
+export interface Program {
+  family: string;
+  vocab: number;
+  hidden: number;
+  num_layers: number;
+  buffers: number[];
+  ops: ProgramInst[];
+  logits_from: number;
+  logits: number;
+}
+
 export type Bit = { net: [number, number] } | "zero" | "one";
 export type PrimType = "and2" | "or2" | "xor2" | "not" | "mux2" | "dff" | "sram" | "ram2p";
 
@@ -189,6 +212,15 @@ export const defaultParams = (): ChipParams => JSON.parse(default_params());
 export const optimizationCatalog = (): Optimization[] => JSON.parse(optimization_catalog());
 export const designPresets = (): Preset[] => JSON.parse(presets());
 export const techNodes = (): TechNode[] => JSON.parse(tech_nodes());
+
+/** Null for models the compiler cannot lower yet. */
+export function programDesign(model: ModelSource): Program | null {
+  try {
+    return JSON.parse(program_design(model.config));
+  } catch {
+    return null;
+  }
+}
 
 export function scheduleDesign(model: ModelSource, params: ChipParams): Schedule {
   return JSON.parse(schedule_design(model.name, model.config, JSON.stringify(params)));

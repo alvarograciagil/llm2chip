@@ -138,6 +138,7 @@ export function Toolbar() {
         value={view}
         options={[
           ["plano", "Plano"],
+          ["funcionamiento", "Funcionamiento"],
           ["esquematico", "Esquemático"],
           ["simulador", "Simulador"],
           ["explorador", "Explorador"],

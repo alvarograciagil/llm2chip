@@ -1,3 +1,4 @@
+import { LogicPanel, LogicView } from "./logic/LogicView";
 import { useEffect } from "react";
 import { FloorplanView } from "./components/FloorplanView";
 import { Inspector } from "./components/Inspector";
@@ -45,6 +46,8 @@ export function App() {
         <Sidebar />
         {view === "plano" && <FloorplanView />}
         {view === "plano" && <Inspector />}
+        {view === "funcionamiento" && <LogicView />}
+        {view === "funcionamiento" && <LogicPanel />}
         {view === "esquematico" && <SchematicView />}
         {view === "esquematico" && <SchematicPanel />}
         {view === "simulador" && <SimulatorView />}

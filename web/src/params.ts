@@ -126,7 +126,7 @@ export const PARAM_GROUPS: Group[] = [
     title: "Objetivo",
     open: true,
     fields: [
-      { kind: "range", key: "max_params_g", label: "Parámetros máximos", min: 0.0001, max: 200, log: true, unit: "G", help: "Tamaño del mayor modelo que el chip puede alojar. Dimensiona la memoria de pesos." },
+      { kind: "range", key: "max_params_g", label: "Parámetros máximos", min: 0.0001, max: 100000, log: true, unit: "G", help: "Tamaño del mayor modelo que el chip puede alojar, hasta 100 billones de parámetros (100.000 G). Dimensiona la memoria de pesos." },
       { kind: "range", key: "context_tokens", label: "Contexto", min: 128, max: 1048576, log: true, integer: true, unit: "tokens", help: "Hasta 1 M de tokens. La caché KV crece linealmente con el contexto y es el bloque que más limita la velocidad; a partir de unos 32 K conviene llevarla a HBM4." },
       { kind: "toggle", key: "mtp_enabled", label: "Soporte MTP", help: "Añade la cabeza que especula los siguientes tokens y aprovecha los dies inactivos." },
       { kind: "range", key: "mtp_depth", label: "Profundidad MTP", min: 1, max: 3, step: 1, integer: true, help: "Tokens especulados por ronda.", when: (p) => p.mtp_enabled === true },
