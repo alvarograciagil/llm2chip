@@ -1074,6 +1074,21 @@ button.link-row {
   .inspector {
     display: none;
   }
+
+  /* Where the panel holds a view's only controls it moves below the view. */
+  .split:has(.inspector.essential) {
+    grid-template-rows: minmax(0, 1fr) minmax(0, 46%);
+  }
+
+  .split:has(.inspector.essential) .sidebar {
+    grid-row: 1 / span 2;
+  }
+
+  .inspector.essential {
+    display: block;
+    grid-column: 2;
+    overflow-y: auto;
+  }
 }
 
 @media (max-width: 720px) {
@@ -1084,6 +1099,19 @@ button.link-row {
 
   .sidebar {
     order: 2;
+  }
+
+  .split:has(.inspector.essential) {
+    grid-template-rows: 34% 36% 30%;
+  }
+
+  .split:has(.inspector.essential) .sidebar {
+    grid-row: auto;
+    order: 3;
+  }
+
+  .inspector.essential {
+    grid-column: 1;
   }
 
   .toolbar {
@@ -1952,13 +1980,37 @@ button.logic-step:hover {
   }
 }
 
-@media (max-width: 880px) {
+@media (max-width: 1100px) {
+  .toolbar .segmented button {
+    padding: 2px 6px;
+  }
+}
+
+@media (max-width: 920px) {
   .app-name {
     display: none;
   }
+}
 
+/* Seven views and the design's actions no longer fit on one line. */
+@media (min-width: 721px) and (max-width: 940px) {
+  .toolbar {
+    grid-template-columns: 1fr auto;
+    height: auto;
+    padding: 6px 14px;
+    row-gap: 6px;
+  }
+
+  .toolbar > .segmented,
+  .toolbar > [role="radiogroup"] {
+    grid-row: 2;
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 640px) {
   .toolbar .segmented button {
-    padding: 2px 6px;
+    padding: 2px 4px;
   }
 }
 

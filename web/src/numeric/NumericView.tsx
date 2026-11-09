@@ -126,7 +126,7 @@ export function NumericPanel() {
   );
 
   return (
-    <aside className="inspector">
+    <aside className="inspector essential">
       <h2 className="detail-title">Laboratorio numérico</h2>
       <p className="detail-sub">Compara la aritmética del chip con la referencia en coma flotante.</p>
       <div className="inset padded form">

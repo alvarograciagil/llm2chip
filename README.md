@@ -60,7 +60,8 @@ Todos los chips de un sistema salen de la misma netlist y leen la misma imagen. 
 - **Esquemático:** el circuito real por áreas, hasta la puerta lógica, simulable paso a paso.
 - **Simulador:** escribe un texto y ejecútalo sobre el chip, eligiendo cuánto simular de cada bloque.
 - **Explorador:** barridos, frontera de Pareto, comparación de formatos y calibración.
-- **Modelos:** carpetas donde buscar, y búsqueda y descarga desde Hugging Face.
+- **Numérico:** compara la aritmética del chip con la coma flotante, capa a capa y token a token.
+- **Modelos:** carpetas donde buscar, búsqueda y descarga desde Hugging Face, y generación de la imagen completa del chip.
 
 ### Modelos que se pueden adaptar
 
@@ -122,6 +123,8 @@ Windows tiene los equivalentes `.ps1`. Los pesos no se incluyen: la aplicación 
 - La máquina de enteros exactos coincide bit a bit con las puertas en todos los búferes de esos modelos.
 - Qwen3.8-27B real se ejecuta de principio a fin con el firmware del chip. El tokenizador del firmware se compila desde el `tokenizer.json` de cada modelo y coincide con la biblioteca de referencia en miles de textos difíciles, también con los archivos reales de Llama 3.2, Mistral 7B, Mistral Nemo y DeepSeek V3.
 - Todas las arquitecturas simulables con pesos aleatorios diminutos dan los mismos logits que `mlx-lm`, token a token.
+- Con carriles vectoriales en paralelo, las puertas dan los mismos bits que con un solo carril en menos ciclos.
+- La imagen de un chip se genera desde la aplicación y comprueba el CRC de cada tensor. El firmware ejecuta la cabeza MTP y coincide con el bucle en software.
 - Cada formato de peso y cada multiplicador se comprueban contra la aritmética de referencia, y el Verilog y el VHDL exportados se ejecutan en simuladores externos.
 
 Los detalles y mediciones están en [`docs/`](docs) y [`tests/golden/`](tests/golden).
@@ -132,6 +135,7 @@ Es un diseño de arquitectura y lógica, no un layout fabricable: no hay colocac
 
 - Área, energía y velocidad son estimaciones, parte derivadas del circuito generado y parte calibradas con chips publicados. La aplicación indica el origen de cada cifra.
 - Los modelos reales no se simulan puerta a puerta, sino con una máquina verificada contra las puertas en modelos diminutos.
+- El microprograma de un modelo real calcula cada producto matriz-vector en serie, con un solo acumulador. La matriz de celdas está en las puertas y se comprueba aparte, pero ese microprograma todavía no la usa. La velocidad del plano y del explorador sale del estimador, no de contar ciclos de ese microprograma: en Qwen3.8 los productos en serie son el 99,6 % de sus ciclos, y los carriles vectoriales solo ahorran en torno al 0,1 %.
 - Los paquetes de Windows y Linux y el backend de Vulkan todavía no se han ejecutado en esos sistemas.
 
 ## Estructura

@@ -20,7 +20,7 @@ El chip recibe bytes de texto y devuelve bytes de texto. El tokenizado, la infer
 |---|---|---|
 | Celdas MAC + SRAM de pesos | Producto matriz-vector | En puertas |
 | Red de activaciones | Distribución y suma | En puertas |
-| Carriles vectoriales | Atención, delta, puertas de la MLP | En puertas, un carril |
+| Carriles vectoriales | Atención, delta, puertas de la MLP | En puertas, con registros en bancos y una ALU por carril |
 | Tablas de función | SiLU, sigmoide, exp, raíz | En puertas |
 | Registros vectoriales y microsecuenciador | Control de cada etapa, bucles y parámetros | En puertas, con microprograma fijo |
 | Enlace entre dies | Paso de activaciones, con corrección, repetición de palabras dañadas y cruce entre relojes | En puertas |
@@ -34,7 +34,7 @@ El chip recibe bytes de texto y devuelve bytes de texto. El tokenizado, la infer
 | ECC, CRC, BIST y reparación | Fiabilidad y celdas defectuosas | ECC por carril en la celda y CRC en la carga, en puertas; autotest de marcha en todas las memorias de lectura y escritura, accesible por JTAG; filas de reserva verificadas como bloque |
 | Unidad de muestreo y RNG | Top-k y temperatura sobre los logits, con filtro de varios carriles | En puertas y modelo, conectada al die |
 | Tokenizador en firmware | Sigue las reglas del `tokenizer.json` de cada modelo mediante tablas: tokens añadidos, normalización, expresiones regulares, BPE y plantilla de tokens especiales | Comparado con la biblioteca `tokenizers` en estilos sintéticos y modelos reales; en ISS con tablas reales y en puertas con tablas diminutas. Su memoria de trabajo se dimensiona con el contexto del diseño y el estimador la cuenta |
-| Planificador de tokens y MTP | Decide qué ejecuta cada die, y deshace | En software |
+| Planificador de tokens y MTP | Decide qué ejecuta cada die, y deshace | En firmware, comprobado contra el bucle en software |
 | Reloj, reset y gestión de energía | Secuencia de reset, puertas de reloj | Reset en puertas; el reloj y la energía solo se estiman, porque el simulador tiene un único reloj |
 | Depuración y contadores | Contadores, puerto de lectura y JTAG estándar | En puertas |
 
