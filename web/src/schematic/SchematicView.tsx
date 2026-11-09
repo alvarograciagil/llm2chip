@@ -5,6 +5,8 @@ import { AREA_VIEW_THRESHOLD, layoutAreas, layoutModule, type Edge, type Layout,
 import { currentModule, useCellSim } from "./simStore";
 
 const MIN_FIT = 0.7;
+/** More marks than this would be noise rather than information. */
+const MAX_WIDTH_MARKS = 240;
 
 interface Camera {
   x: number;
@@ -149,13 +151,31 @@ function PortSymbol({ node, value }: { node: Node; value: string }) {
   );
 }
 
-function EdgePath({ edge, value, state, onHover }: { edge: Edge; value: string; state: "" | "hot" | "dim"; onHover: (e: Edge | null) => void }) {
-  const d = edge.points.map(([x, y], i) => `${i ? "L" : "M"}${x} ${y}`).join(" ");
+/** The classic slash and number on a bus, on its first stretch long enough to hold them. */
+function BusWidth({ edge }: { edge: Edge }) {
+  for (let i = 1; i < edge.points.length; i++) {
+    const [[x1, y1], [x2, y2]] = [edge.points[i - 1], edge.points[i]];
+    if (y1 === y2 && Math.abs(x2 - x1) >= 34) {
+      const x = x1 + Math.sign(x2 - x1) * 14;
+      return (
+        <g className="bus-width">
+          <path d={`M${x - 3} ${y1 + 4} l6 -8`} />
+          <text x={x + 5} y={y1 - 4}>{edge.bits.length}</text>
+        </g>
+      );
+    }
+  }
+  return null;
+}
+
+function EdgePath({ edge, value, state, showWidth, onHover }: { edge: Edge; value: string; state: "" | "hot" | "dim"; showWidth: boolean; onHover: (e: Edge | null) => void }) {
+  const d = edge.d;
   const active = value.includes("1");
   return (
     <g className={state} onPointerEnter={() => onHover(edge)} onPointerLeave={() => onHover(null)}>
       <path className="wire-hit" d={d} />
       <path className={`wire ${active ? "on" : ""} ${value.length > 1 ? "bus" : ""}`} d={d} />
+      {showWidth && edge.bits.length > 1 && <BusWidth edge={edge} />}
     </g>
   );
 }
@@ -190,7 +210,7 @@ function Diagram({ module, layout, snapshot }: { module: NetlistModule; layout: 
         </g>
       ))}
       {layout.edges.map((edge) => (
-        <EdgePath key={edge.id} edge={edge} value={busValue(module, snapshot, edge.bits)} state={!focus ? "" : focus.has(edge.driver) ? "hot" : "dim"} onHover={setHovered} />
+        <EdgePath key={edge.id} edge={edge} value={busValue(module, snapshot, edge.bits)} state={!focus ? "" : focus.has(edge.driver) ? "hot" : "dim"} showWidth={layout.edges.length <= MAX_WIDTH_MARKS} onHover={setHovered} />
       ))}
       {layout.junctions.map(([x, y]) => (
         <circle key={`${x},${y}`} className="junction" cx={x} cy={y} r={2.6} />
@@ -210,7 +230,9 @@ function Diagram({ module, layout, snapshot }: { module: NetlistModule; layout: 
             else if (node.instance?.kind.kind === "module") enter(node.id);
           }}
         >
-          {node.kind === "area" ? (
+          {node.kind === "join" ? (
+            <rect className="bus-join" width={node.w} height={node.h} rx={2} />
+          ) : node.kind === "area" ? (
             <AreaSymbol node={node} />
           ) : node.kind !== "instance" ? (
             <PortSymbol node={node} value={pinValue(node, node.pins[0])} />

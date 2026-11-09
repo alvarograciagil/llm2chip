@@ -1225,6 +1225,25 @@ input[type="range"]::-webkit-slider-thumb {
   stroke-width: 3.5;
 }
 
+.bus-join {
+  fill: var(--label-3);
+}
+
+.bus-width path {
+  fill: none;
+  stroke: var(--label-3);
+  stroke-width: 1;
+}
+
+.bus-width text {
+  font-size: 9px;
+  fill: var(--label-2);
+}
+
+.dim .bus-width {
+  opacity: 0.25;
+}
+
 .junction {
   fill: var(--label-3);
 }
