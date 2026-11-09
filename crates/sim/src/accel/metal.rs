@@ -21,6 +21,7 @@ struct Job {
     groups: u32,
     group_size: u32,
     words_per_row: u32,
+    skip: u32,
     factor: f32,
     limit: i64,
 }
@@ -96,9 +97,12 @@ impl MetalAccelerator {
         let (Some((words, words_at)), Some((scales, scales_at)), Some((biases, biases_at))) = (self.locate(tensor.words), self.locate(tensor.scales), self.locate(tensor.biases)) else {
             return false;
         };
-        if words_at % 4 != 0 || scales_at % 2 != 0 || biases_at % 2 != 0 || rows * tensor.stride >= u32::MAX as usize {
+        if rows * tensor.stride >= u32::MAX as usize {
             return false;
         }
+        // Tensors are not aligned in the file: start on a word and skip the codes before the row.
+        let words_start = words_at + first * tensor.stride;
+        let job = Job { skip: (words_start % 4) as u32 * 8 / tensor.bits, ..job };
         let mut scratch = self.scratch.lock().expect("búferes de Metal");
         autoreleasepool(|_| {
             if scratch.input.length() < input.len() {
@@ -117,7 +121,7 @@ impl MetalAccelerator {
             let groups_bytes = first * tensor.groups * 2;
             // SAFETY: every offset lies inside its buffer, as `locate` and the tensor's bounds guarantee.
             unsafe {
-                encoder.setBuffer_offset_atIndex(Some(words), words_at + first * tensor.stride, 0);
+                encoder.setBuffer_offset_atIndex(Some(words), words_start & !3, 0);
                 encoder.setBuffer_offset_atIndex(Some(scales), scales_at + groups_bytes, 1);
                 encoder.setBuffer_offset_atIndex(Some(biases), biases_at + groups_bytes, 2);
                 encoder.setBuffer_offset_atIndex(Some(&scratch.input), 0, 3);
@@ -143,7 +147,7 @@ impl MetalAccelerator {
     }
 
     fn job(tensor: &PackedTensor<'_>, cols: usize, factor: f32, limit: i64) -> Job {
-        Job { cols: cols as u32, groups: tensor.groups as u32, group_size: (cols / tensor.groups) as u32, words_per_row: (tensor.stride / 4) as u32, factor, limit }
+        Job { cols: cols as u32, groups: tensor.groups as u32, group_size: (cols / tensor.groups) as u32, words_per_row: (tensor.stride / 4) as u32, skip: 0, factor, limit }
     }
 }
 

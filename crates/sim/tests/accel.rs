@@ -21,9 +21,10 @@ impl Noise {
     }
 }
 
-fn write_checkpoint(dir: &Path) {
+/// `gap` shifts every tensor in the file: real checkpoints do not align them.
+fn write_checkpoint(dir: &Path, gap: usize) {
     let mut noise = Noise(7);
-    let mut data = Vec::new();
+    let mut data = vec![0u8; gap];
     let mut header = serde_json::Map::new();
     let mut add = |name: &str, dtype: &str, shape: Vec<usize>, bytes: Vec<u8>, data: &mut Vec<u8>| {
         let start = data.len();
@@ -49,23 +50,29 @@ fn write_checkpoint(dir: &Path) {
     std::fs::write(dir.join("model.safetensors"), file).unwrap();
 }
 
-fn checkpoint(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("llm2chip-accel-{tag}-{}", std::process::id()));
+fn checkpoint(gap: usize) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("llm2chip-accel-{gap}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    write_checkpoint(&dir);
+    write_checkpoint(&dir, gap);
     dir
 }
 
 #[test]
-fn gpu_matches_cpu() {
-    let dir = checkpoint("products");
+fn gpu_matches_cpu_at_any_alignment() {
+    for gap in [0, 1, 2, 3] {
+        compare(gap);
+    }
+}
+
+fn compare(gap: usize) {
+    let dir = checkpoint(gap);
     let cpu = Weights::open(&dir).unwrap();
     let gpu = Weights::open(&dir).unwrap().with_gpu();
     let Some(name) = gpu.accelerator_name() else {
         eprintln!("sin GPU: prueba omitida");
         return;
     };
-    eprintln!("GPU: {name}");
+    eprintln!("GPU: {name}, desplazamiento {gap}");
     let mut noise = Noise(99);
     for matrix in ["four", "eight"] {
         let (a, b) = (cpu.matrix(matrix).unwrap(), gpu.matrix(matrix).unwrap());
@@ -91,5 +98,6 @@ fn gpu_matches_cpu() {
             }
         }
     }
+    assert_eq!(gpu.gpu_products(), 2 * (2 + 5 * 2), "la GPU debe ejecutar todos los productos");
     std::fs::remove_dir_all(dir).ok();
 }

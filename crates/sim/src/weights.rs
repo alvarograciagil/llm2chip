@@ -32,6 +32,7 @@ pub struct Weights {
     recoded: Mutex<HashMap<String, Option<Arc<Recoded>>>>,
     /// Bytes of memory that rewritten tensors may still take.
     recode_budget: AtomicUsize,
+    gpu_products: AtomicUsize,
 }
 
 /// Smaller products finish sooner on the CPU than a GPU round trip takes.
@@ -105,7 +106,7 @@ impl Weights {
             }
             files.push(map);
         }
-        Ok(Self { accelerator: None, files, tensors, format: None, references: Mutex::new(HashMap::new()), recoded: Mutex::new(HashMap::new()), recode_budget: AtomicUsize::new(default_recode_budget()) })
+        Ok(Self { accelerator: None, files, tensors, format: None, references: Mutex::new(HashMap::new()), recoded: Mutex::new(HashMap::new()), recode_budget: AtomicUsize::new(default_recode_budget()), gpu_products: AtomicUsize::new(0) })
     }
 
     /// Makes every matrix read back as if stored in `format`.
@@ -124,6 +125,11 @@ impl Weights {
     /// The GPU in use, if any.
     pub fn accelerator_name(&self) -> Option<String> {
         self.accelerator.as_ref().map(|a| a.name())
+    }
+
+    /// How many matrix products the GPU has completed.
+    pub fn gpu_products(&self) -> usize {
+        self.gpu_products.load(Ordering::Relaxed)
     }
 
     fn bytes(&self, name: &str) -> Result<(&[u8], &TensorRef), String> {
@@ -412,6 +418,7 @@ impl Matrix<'_> {
                 if let Some(accelerator) = self.gpu_for(y.len() * cols) {
                     let tensor = PackedTensor { words, scales, biases, bits: (words_per_row * 32 / cols) as u32, stride: words_per_row * 4, groups: *groups };
                     if accelerator.float_product(&tensor, first, x, y) {
+                        self.owner.gpu_products.fetch_add(1, Ordering::Relaxed);
                         return;
                     }
                 }
@@ -530,6 +537,7 @@ impl Matrix<'_> {
                 if let Some(accelerator) = self.gpu_for(rows * cols) {
                     let tensor = PackedTensor { words, scales, biases, bits: (words_per_row * 32 / cols) as u32, stride: words_per_row * 4, groups: *groups };
                     if accelerator.exact_product(&tensor, first, x, ExactScale { shift: fraction + AFFINE_EXTRA - exponent as i32, limit }, &mut sums) {
+                        self.owner.gpu_products.fetch_add(1, Ordering::Relaxed);
                         return sums;
                     }
                 }
