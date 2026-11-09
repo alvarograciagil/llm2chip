@@ -157,6 +157,10 @@ impl BlockVm {
 impl BlockOps for BlockVm {
     type N = u32;
 
+    fn with_window(&mut self, step: u32, _windowed: &[u32], mut body: impl FnMut(&mut Self, u32)) {
+        body(self, step);
+    }
+
     fn each(&mut self, count: u32, mut body: impl FnMut(&mut Self, u32)) {
         for i in 0..count {
             body(self, i);

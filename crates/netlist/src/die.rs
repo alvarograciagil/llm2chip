@@ -49,7 +49,14 @@ impl Default for DieFeatures {
 
 impl DieFeatures {
     pub fn is_general(&self) -> bool {
-        *self == Self::default()
+        self.ops == u32::MAX
+    }
+
+    /// The general die minus register loops, for programs written one register at a time.
+    pub fn without_register_windows() -> Self {
+        let mut features = Self::default();
+        features.widths[WINDOW_X_FIELD..].fill(0);
+        features
     }
 
     /// Exactly what this microprogram needs.
@@ -62,7 +69,7 @@ impl DieFeatures {
             for (width, value) in features.widths.iter_mut().zip(word.field_values()) {
                 *width = (*width).max((u128::BITS - value.leading_zeros()) as u8);
             }
-            highest_x = highest_x.max(word.offset_a).max(word.offset_b).max(word.offset_dst).max(word.x_dst).max(word.x_src).max(word.x_limit);
+            highest_x = highest_x.max(word.offset_a).max(word.offset_b).max(word.offset_dst).max(word.x_dst).max(word.x_src).max(word.x_limit).max(word.window_x);
         }
         for parameter in &code.parameters {
             highest_x = highest_x.max(parameter.register);
@@ -140,11 +147,17 @@ pub struct ControlWord {
     pub branch: bool,
     pub x_limit: u32,
     pub target: u32,
+    /// Adds `index[window_x]` to the marked operands' register numbers.
+    pub window_x: u32,
+    pub window_a: bool,
+    pub window_b: bool,
+    pub window_dst: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 43;
+pub const FIELD_COUNT: usize = 47;
 const LINK_SEND_FIELD: usize = 17;
+const WINDOW_X_FIELD: usize = 43;
 
 pub const OP_ADD: u32 = 0;
 pub const OP_MUL: u32 = 1;
@@ -215,6 +228,10 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("branch", 1),
         ("x_limit", x_bits(c)),
         ("target", c.microcode_bits),
+        ("window_x", x_bits(c)),
+        ("window_a", 1),
+        ("window_b", 1),
+        ("window_dst", 1),
     ]
 }
 
@@ -269,6 +286,10 @@ impl ControlWord {
             self.branch as u128,
             self.x_limit as u128,
             self.target as u128,
+            self.window_x as u128,
+            self.window_a as u128,
+            self.window_b as u128,
+            self.window_dst as u128,
         ]
     }
 
@@ -587,6 +608,7 @@ impl Gen {
         let branch = ctl("branch", &mut b, &fields);
         let x_adder = self.ripple_adder(c.index_bits);
         let (offset_a, offset_b, offset_dst);
+        let (window_a, window_b, window_dst);
         {
             let width = c.index_bits as usize;
             let mut l = Logic { b: &mut b, next: 0 };
@@ -594,6 +616,12 @@ impl Gen {
             offset_a = l.select(&fields["offset_a"], &stored);
             offset_b = l.select(&fields["offset_b"], &stored);
             offset_dst = l.select(&fields["offset_dst"], &stored);
+            let window = l.select(&fields["window_x"], &stored);
+            let window: Vec<Bit> = (0..c.reg_bits as usize).map(|i| window.get(i).copied().unwrap_or(Bit::Zero)).collect();
+            let gate = |l: &mut Logic, on: Bit| -> Vec<Bit> { window.iter().map(|bit| l.and(*bit, on)).collect() };
+            window_a = gate(&mut l, fields["window_a"][0]);
+            window_b = gate(&mut l, fields["window_b"][0]);
+            window_dst = gate(&mut l, fields["window_dst"][0]);
             let source = l.select(&fields["x_src"], &stored);
             let limit = l.select(&fields["x_limit"], &stored);
             let sum = l.fresh_bus(width);
@@ -646,9 +674,24 @@ impl Gen {
         let index_a = offset(&mut b, "index_a", &plain_a, &offset_a);
         let index_b = offset(&mut b, "index_b", &plain_b, &offset_b);
         let index_w = offset(&mut b, "index_w", &plain_w, &offset_dst);
-        let addr_a = join(&fields["reg_a"], &index_a);
-        let addr_b = join(&fields["reg_b"], &index_b);
-        let addr_w = join(&fields["reg_dst"], &index_w);
+        // Only a program that loops over registers pays for adding to their numbers.
+        let windowed = c.features.widths[WINDOW_X_FIELD] > 0;
+        let register_adder = self.ripple_adder(c.reg_bits);
+        let register = |b: &mut Builder, name: &str, plain: &[Bit], by: &[Bit]| -> Vec<Bit> {
+            if !windowed {
+                return plain.to_vec();
+            }
+            let sum = b.wire(name, c.reg_bits);
+            let carry = b.wire(&format!("{name}_carry"), 1);
+            b.inst(&format!("{name}_window"), &register_adder, &[("a", plain.to_vec()), ("b", by.to_vec()), ("cin", vec![Bit::Zero]), ("sum", sum.clone()), ("cout", carry)]);
+            sum
+        };
+        let number_a = register(&mut b, "reg_a_final", &fields["reg_a"], &window_a);
+        let number_b = register(&mut b, "reg_b_final", &fields["reg_b"], &window_b);
+        let number_w = register(&mut b, "reg_dst_final", &fields["reg_dst"], &window_dst);
+        let addr_a = join(&number_a, &index_a);
+        let addr_b = join(&number_b, &index_b);
+        let addr_w = join(&number_w, &index_w);
 
         let write_data = b.wire("write_data", a);
         let waddr = b.wire("waddr", addr_bits);
@@ -1229,6 +1272,7 @@ fn visit_indices(steps: &[Step], f: &mut impl FnMut(Expr)) {
                 f(alu.a.1);
                 f(alu.b.1);
                 f(alu.dst.1);
+                f(alu.window);
             }
             Step::Repeat { body, .. } => visit_indices(body, f),
         }
@@ -1389,6 +1433,9 @@ impl DieProgram {
                     let mut bound = symbolic.map_indices(|_| 0);
                     (bound.a.1, bound.b.1, bound.dst.1) = (a, b, dst);
                     (bound.offset_a, bound.offset_b, bound.offset_dst) = (offset_a, offset_b, offset_dst);
+                    if symbolic.window_a || symbolic.window_b || symbolic.window_dst {
+                        bound.window_x = self.resolve(symbolic.window).1;
+                    }
                     self.alu(&bound);
                 }
                 Step::Repeat { variable, count, body } => self.compile_loop(*variable, *count, body),
@@ -1409,6 +1456,7 @@ impl DieProgram {
             w.reg_b = step.b.0;
             w.literal_b = step.b.1;
             w.offset_b = step.offset_b;
+            (w.window_x, w.window_a, w.window_b) = (step.window_x, step.window_a, step.window_b);
             w.magnitude_clear = step.magnitude_clear;
             w.accumulator_clear = step.accumulator_clear;
             w.wide_clear = step.wide_clear;
@@ -1422,6 +1470,7 @@ impl DieProgram {
             w.reg_b = step.b.0;
             w.literal_b = step.literal.unwrap_or(step.b.1);
             w.offset_b = step.offset_b;
+            (w.window_x, w.window_a, w.window_b) = (step.window_x, step.window_a, step.window_b);
             w.op = step.op;
             w.shift = step.shift;
             w.function = step.function;
@@ -1440,6 +1489,7 @@ impl DieProgram {
             w.reg_a = step.a.0;
             w.literal_a = step.a.1;
             w.offset_a = step.offset_a;
+            (w.window_x, w.window_a) = (step.window_x, step.window_a);
             w.op = step.op;
             w.function = step.function;
         }
@@ -1449,6 +1499,7 @@ impl DieProgram {
         w.reg_dst = step.dst.0;
         w.literal_dst = step.dst.1;
         w.offset_dst = step.offset_dst;
+        (w.window_x, w.window_dst) = (step.window_x, step.window_dst);
         w.write_en = step.write;
         w.load_shift_a = step.load_shift_a;
         w.load_shift_b = step.load_shift_b;

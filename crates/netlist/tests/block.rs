@@ -16,7 +16,7 @@ fn config() -> DieConfig {
         microcode_bits: 14,
         broadcast_stages: 1,
         function_bits: 8,
-        function_select_bits: 3, features: Default::default(),
+        function_select_bits: 3, features: netlist::DieFeatures::without_register_windows(),
     }
 }
 

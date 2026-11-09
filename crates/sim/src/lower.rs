@@ -387,18 +387,21 @@ impl Layout {
 
     fn rms_blocks<O: BlockOps>(&self, ops: &mut O, src: u32, weight: Option<u32>, block: usize, count: usize, dst: u32) {
         let t = &self.temporaries;
-        let mut parts = Vec::new();
-        for b in 0..count {
-            let part = self.parts[b];
-            ops.copy_part(src, ((b * block) as u32).into(), t[40], 0.into(), (block as u32).into());
-            ops.normalize(t[40], (block as u32).into());
-            ops.rms_normalize(t[40], t[41], block as u32, (t[42], t[43]), self.inverse_len.get(&block).copied(), Some(self.epsilon));
-            match weight {
-                Some(w) => ops.multiply(t[41], w, part, (block as u32).into()),
-                None => ops.copy_part(t[41], 0.into(), part, 0.into(), (block as u32).into()),
-            }
-            parts.push((part, block as u32));
-        }
+        let d = block as u32;
+        let first = self.parts[0];
+        ops.each((count as u32).into(), |ops, b| {
+            ops.with_window(b, &[first], |ops, offset| {
+                let part = first + offset;
+                ops.copy_part(src, b * d, t[40], 0.into(), d.into());
+                ops.normalize(t[40], d.into());
+                ops.rms_normalize(t[40], t[41], d, (t[42], t[43]), self.inverse_len.get(&block).copied(), Some(self.epsilon));
+                match weight {
+                    Some(w) => ops.multiply(t[41], w, part, d.into()),
+                    None => ops.copy_part(t[41], 0.into(), part, 0.into(), d.into()),
+                }
+            });
+        });
+        let parts: Vec<(u32, u32)> = (0..count).map(|b| (self.parts[b], d)).collect();
         ops.gather(&parts, dst);
     }
 
@@ -435,10 +438,10 @@ impl Layout {
             Op::SplitQueryGate { src, query, gate, block } => {
                 let heads = program.buffers[*query] / block;
                 let d = *block as u32;
-                for h in 0..heads as u32 {
-                    ops.copy_part(self.reg(*src), (h * 2 * d).into(), t[0], (h * d).into(), d.into());
-                    ops.copy_part(self.reg(*src), (h * 2 * d + d).into(), t[1], (h * d).into(), d.into());
-                }
+                ops.each((heads as u32).into(), |ops, h| {
+                    ops.copy_part(self.reg(*src), h * (2 * d), t[0], h * d, d.into());
+                    ops.copy_part(self.reg(*src), h * (2 * d) + d.into(), t[1], h * d, d.into());
+                });
                 ops.gather(&[(t[0], (heads * block) as u32)], self.reg(*query));
                 ops.gather(&[(t[1], (heads * block) as u32)], self.reg(*gate));
             }
@@ -477,22 +480,27 @@ impl Layout {
                 let d = *head_dim as u32;
                 let (keys, values) = (self.keys[*slot], self.values[*slot]);
                 let regs = AttentionRegs { scores: t[10], top: t[11], shifted: t[12], weights: t[13], total: t[14], inverse: t[15], probabilities: t[16] };
-                let mut parts = Vec::new();
-                for h in 0..*heads {
-                    let kv_head = (h / group) as u32;
-                    let (qh, kt, vt) = (t[20], t[21], t[22]);
-                    ops.copy_part(self.reg(*query), (h as u32 * d).into(), qh, zero, d.into());
-                    ops.normalize(qh, d.into());
-                    ops.each(tokens, |ops, token_index| {
-                        let from = token_index * width + (kv_head * d).into();
-                        ops.copy_part(keys, from, kt, token_index * d, d.into());
-                        ops.copy_part(values, from, vt, token_index * d, d.into());
+                let first = self.parts[0];
+                let query = self.reg(*query);
+                ops.each((*kv_heads as u32).into(), |ops, kv_head| {
+                    ops.each((group as u32).into(), |ops, shared| {
+                        let h = kv_head * group as u32 + shared;
+                        ops.with_window(h, &[first], |ops, offset| {
+                            let (qh, kt, vt) = (t[20], t[21], t[22]);
+                            ops.copy_part(query, h * d, qh, zero, d.into());
+                            ops.normalize(qh, d.into());
+                            ops.each(tokens, |ops, token_index| {
+                                let from = token_index * width + kv_head * d;
+                                ops.copy_part(keys, from, kt, token_index * d, d.into());
+                                ops.copy_part(values, from, vt, token_index * d, d.into());
+                            });
+                            ops.normalize(kt, tokens * d);
+                            ops.normalize(vt, tokens * d);
+                            ops.attention(qh, kt, vt, self.ones, first + offset, d, tokens, Some(self.inverse_root[head_dim]), regs);
+                        });
                     });
-                    ops.normalize(kt, tokens * d);
-                    ops.normalize(vt, tokens * d);
-                    ops.attention(qh, kt, vt, self.ones, self.parts[h], d, tokens, Some(self.inverse_root[head_dim]), regs);
-                    parts.push((self.parts[h], d));
-                }
+                });
+                let parts: Vec<(u32, u32)> = (0..*heads).map(|h| (self.parts[h], d)).collect();
                 ops.gather(&parts, self.reg(*dst));
             }
             Op::Dconv { slot, weight, src, dst } => {
@@ -517,43 +525,46 @@ impl Layout {
                 let mixed = self.reg(*mixed);
                 let (a_reg, b_reg) = (self.reg(*a), self.reg(*b));
                 let (scale_a, bias) = (self.small[a_log], self.small[dt_bias]);
-                let mut parts = Vec::new();
-                for h in 0..*value_heads {
-                    let key_head = (h / ratio) as u32;
-                    let h32 = h as u32;
-                    let (qh, kh, vh, beta, decay) = (t[20], t[21], t[22], t[23], t[24]);
-                    let (work, inv) = (t[25], t[26]);
+                let (first_state, first_out) = (self.delta[*slot][0], self.delta_parts[0]);
+                ops.each((*key_heads as u32).into(), |ops, key_head| {
+                    ops.each((ratio as u32).into(), |ops, shared| {
+                        let h = key_head * ratio as u32 + shared;
+                        ops.with_window(h, &[first_state, first_out], |ops, offset| {
+                            let (qh, kh, vh, beta, decay) = (t[20], t[21], t[22], t[23], t[24]);
+                            let (work, inv) = (t[25], t[26]);
 
-                    ops.copy_part(mixed, (key_head * kd).into(), work, (0).into(), (kd).into());
-                    ops.normalize(work, (kd).into());
-                    ops.l2_normalize(work, t[27], kd, (inv, t[28]), Some(self.epsilon));
-                    ops.scale(root, t[27], qh, (kd).into());
-                    ops.copy_part(mixed, (key_len + key_head * kd).into(), work, (0).into(), (kd).into());
-                    ops.normalize(work, (kd).into());
-                    ops.l2_normalize(work, kh, kd, (inv, t[28]), Some(self.epsilon));
-                    ops.copy_part(mixed, (2 * key_len + h32 * vd).into(), vh, (0).into(), (vd).into());
-                    ops.normalize(vh, (vd).into());
+                            ops.copy_part(mixed, key_head * kd, work, 0.into(), kd.into());
+                            ops.normalize(work, kd.into());
+                            ops.l2_normalize(work, t[27], kd, (inv, t[28]), Some(self.epsilon));
+                            ops.scale(root, t[27], qh, kd.into());
+                            ops.copy_part(mixed, key_head * kd + key_len.into(), work, 0.into(), kd.into());
+                            ops.normalize(work, kd.into());
+                            ops.l2_normalize(work, kh, kd, (inv, t[28]), Some(self.epsilon));
+                            ops.copy_part(mixed, h * vd + (2 * key_len).into(), vh, 0.into(), vd.into());
+                            ops.normalize(vh, vd.into());
 
-                    ops.copy_part(b_reg, (h32).into(), work, (0).into(), (1).into());
-                    ops.normalize(work, (1).into());
-                    ops.function(FN_SIGMOID, work, beta, (1).into());
+                            ops.copy_part(b_reg, h, work, 0.into(), 1.into());
+                            ops.normalize(work, 1.into());
+                            ops.function(FN_SIGMOID, work, beta, 1.into());
 
-                    ops.copy_part(a_reg, (h32).into(), t[29], (0).into(), (1).into());
-                    ops.normalize(t[29], (1).into());
-                    ops.copy_part(bias, (h32).into(), t[30], (0).into(), (1).into());
-                    ops.normalize(t[30], (1).into());
-                    ops.add(t[29], t[30], work, (1).into());
-                    ops.function(FN_SOFTPLUS, work, t[31], (1).into());
-                    ops.copy_part(scale_a, (h32).into(), t[32], (0).into(), (1).into());
-                    ops.normalize(t[32], (1).into());
-                    ops.multiply(t[31], t[32], t[33], (1).into());
-                    ops.multiply(t[33], self.minus_one, work, (1).into());
-                    ops.function(FN_EXP, work, decay, (1).into());
+                            ops.copy_part(a_reg, h, t[29], 0.into(), 1.into());
+                            ops.normalize(t[29], 1.into());
+                            ops.copy_part(bias, h, t[30], 0.into(), 1.into());
+                            ops.normalize(t[30], 1.into());
+                            ops.add(t[29], t[30], work, 1.into());
+                            ops.function(FN_SOFTPLUS, work, t[31], 1.into());
+                            ops.copy_part(scale_a, h, t[32], 0.into(), 1.into());
+                            ops.normalize(t[32], 1.into());
+                            ops.multiply(t[31], t[32], t[33], 1.into());
+                            ops.multiply(t[33], self.minus_one, work, 1.into());
+                            ops.function(FN_EXP, work, decay, 1.into());
 
-                    let regs = DeltaRegs { state: self.delta[*slot][h], key: kh, query: qh, value: vh, beta, decay, memory: t[10], error: t[11], delta: t[12], update: t[13], next: t[14], out: self.delta_parts[h] };
-                    ops.delta_step(regs, kd, vd);
-                    parts.push((self.delta_parts[h], vd));
-                }
+                            let regs = DeltaRegs { state: first_state + offset, key: kh, query: qh, value: vh, beta, decay, memory: t[10], error: t[11], delta: t[12], update: t[13], next: t[14], out: first_out + offset };
+                            ops.delta_step(regs, kd, vd);
+                        });
+                    });
+                });
+                let parts: Vec<(u32, u32)> = (0..*value_heads).map(|h| (self.delta_parts[h], vd)).collect();
                 ops.gather(&parts, self.reg(*dst));
             }
             Op::RmsGated { src, z, weight, block, dst } => {
@@ -562,26 +573,27 @@ impl Layout {
                 let by_head = self.delta_outputs.contains(src);
                 let (src, z) = (self.reg(*src), self.reg(*z));
                 let d = *block as u32;
-                let mut parts = Vec::new();
-                for b in 0..count {
-                    let b32 = b as u32;
-                    if by_head {
-                        ops.copy_part(self.delta_parts[b], (0).into(), t[40], (0).into(), (d).into());
-                    } else {
-                        ops.copy_part(src, (b32 * d).into(), t[40], (0).into(), (d).into());
-                    }
-                    ops.normalize(t[40], (d).into());
-                    ops.rms_normalize(t[40], t[41], d, (t[42], t[43]), self.inverse_len.get(block).copied(), Some(self.epsilon));
-                    ops.multiply(t[41], w, t[44], (d).into());
-                    ops.copy_part(z, (b32 * d).into(), t[45], (0).into(), (d).into());
-                    ops.normalize(t[45], (d).into());
-                    // SiLU's small values would be lost next to its peak, so z and its
-                    // sigmoid are applied one after the other.
-                    ops.function(FN_SIGMOID, t[45], t[46], (d).into());
-                    ops.multiply(t[44], t[45], t[38], (d).into());
-                    ops.multiply(t[38], t[46], self.parts[b], (d).into());
-                    parts.push((self.parts[b], d));
-                }
+                let (first_out, first_part) = (self.delta_parts[0], self.parts[0]);
+                ops.each((count as u32).into(), |ops, b| {
+                    ops.with_window(b, &[first_out, first_part], |ops, offset| {
+                        if by_head {
+                            ops.copy_part(first_out + offset, 0.into(), t[40], 0.into(), d.into());
+                        } else {
+                            ops.copy_part(src, b * d, t[40], 0.into(), d.into());
+                        }
+                        ops.normalize(t[40], d.into());
+                        ops.rms_normalize(t[40], t[41], d, (t[42], t[43]), self.inverse_len.get(block).copied(), Some(self.epsilon));
+                        ops.multiply(t[41], w, t[44], d.into());
+                        ops.copy_part(z, b * d, t[45], 0.into(), d.into());
+                        ops.normalize(t[45], d.into());
+                        // SiLU's small values would be lost next to its peak, so z and its
+                        // sigmoid are applied one after the other.
+                        ops.function(FN_SIGMOID, t[45], t[46], d.into());
+                        ops.multiply(t[44], t[45], t[38], d.into());
+                        ops.multiply(t[38], t[46], first_part + offset, d.into());
+                    });
+                });
+                let parts: Vec<(u32, u32)> = (0..count).map(|b| (self.parts[b], d)).collect();
                 ops.gather(&parts, self.reg(*dst));
             }
             Op::Concat { a, b, dst } => {

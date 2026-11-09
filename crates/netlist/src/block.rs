@@ -257,6 +257,9 @@ pub trait BlockOps: Sized {
     fn mark_equal(&mut self, a: u32, b: u32, dst: u32, len: Self::N);
     fn set_exponent(&mut self, reg: u32, exponent: i64);
     fn subtract_exponent(&mut self, reg: u32, amount: i64);
+    /// Runs `body` for the registers that are `step` places after the ones in `windowed`.
+    /// It receives the offset to add to them, which a compiled program applies at run time.
+    fn with_window(&mut self, step: Self::N, windowed: &[u32], body: impl FnMut(&mut Self, u32));
     /// `rows` rows of the matrix from `first`. It is held in register `matrix`, but
     /// `name` lets an implementation stream it from the checkpoint instead.
     #[allow(clippy::too_many_arguments)]
@@ -363,6 +366,12 @@ pub struct Alu<N = u32> {
     pub offset_a: u32,
     pub offset_b: u32,
     pub offset_dst: u32,
+    /// Added to the registers of the operands marked below, for loops over registers.
+    pub window: N,
+    pub window_x: u32,
+    pub window_a: bool,
+    pub window_b: bool,
+    pub window_dst: bool,
     pub shift: u32,
     pub function: u32,
     pub literal: Option<u32>,
@@ -391,6 +400,11 @@ impl<N: Default> Alu<N> {
             offset_a: 0,
             offset_b: 0,
             offset_dst: 0,
+            window: N::default(),
+            window_x: 0,
+            window_a: false,
+            window_b: false,
+            window_dst: false,
             shift: 0,
             function: 0,
             literal: None,
@@ -421,6 +435,7 @@ impl Alu<Expr> {
     /// The same step with its indices replaced by what `index` makes of them.
     pub fn map_indices(&self, mut index: impl FnMut(Expr) -> u32) -> Alu<u32> {
         let (a, b, dst) = (index(self.a.1), index(self.b.1), index(self.dst.1));
+        let window = index(self.window);
         Alu {
             op: self.op,
             a: (self.a.0, a),
@@ -429,6 +444,11 @@ impl Alu<Expr> {
             offset_a: self.offset_a,
             offset_b: self.offset_b,
             offset_dst: self.offset_dst,
+            window,
+            window_x: self.window_x,
+            window_a: self.window_a,
+            window_b: self.window_b,
+            window_dst: self.window_dst,
             shift: self.shift,
             function: self.function,
             literal: self.literal,
@@ -659,8 +679,39 @@ impl Assembly {
     }
 }
 
+fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32) {
+    for item in steps {
+        match item {
+            Step::One(alu) => {
+                alu.window = step;
+                alu.window_a = windowed.contains(&alu.a.0);
+                alu.window_b = windowed.contains(&alu.b.0);
+                alu.window_dst = windowed.contains(&alu.dst.0);
+                // A register's exponent lives at its number, so that index moves as well.
+                for at in [&mut alu.a, &mut alu.b, &mut alu.dst] {
+                    if at.0 == exponents && at.1.is_constant() && windowed.contains(&at.1.constant()) {
+                        at.1 = at.1 + step;
+                    }
+                }
+            }
+            Step::Repeat { body, .. } => mark_window(body, step, windowed, exponents),
+        }
+    }
+}
+
 impl BlockOps for Assembly {
     type N = Expr;
+
+    fn with_window(&mut self, step: Expr, windowed: &[u32], mut body: impl FnMut(&mut Self, u32)) {
+        if step.is_constant() {
+            return body(self, step.constant());
+        }
+        let outer = std::mem::take(&mut self.steps);
+        body(self, 0);
+        let mut inner = std::mem::replace(&mut self.steps, outer);
+        mark_window(&mut inner, step, windowed, self.exponents);
+        self.steps.extend(inner);
+    }
 
     fn each(&mut self, count: Expr, mut body: impl FnMut(&mut Self, Expr)) {
         if count.is_constant() {
@@ -1051,6 +1102,9 @@ impl Behavior {
     }
 
     fn step(&mut self, s: &Alu) {
+        let stepped = |at: At<u32>, on: bool| if on { (at.0 + s.window, at.1) } else { at };
+        let moved = Alu { a: stepped(s.a, s.window_a), b: stepped(s.b, s.window_b), dst: stepped(s.dst, s.window_dst), ..*s };
+        let s = &moved;
         let bits = self.bits;
         if s.magnitude_clear {
             self.magnitude = 0;
