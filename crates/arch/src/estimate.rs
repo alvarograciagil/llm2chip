@@ -1,6 +1,6 @@
 use crate::floorplan::{build_floorplan, Floorplan};
 use crate::optim::catalog;
-use crate::params::{ChipParams, CircuitGoal, KvBackend, LinkKind, WeightBackend};
+use crate::params::{ChipParams, CircuitGoal, DieMode, KvBackend, LinkKind, WeightBackend};
 use crate::tech::{node, TechNode};
 use netlist::format::{switching_per_mac, WeightCoding};
 use netlist::multiplier::MultiplierKind;
@@ -332,6 +332,43 @@ fn weight_multiplier(tech: &TechNode, p: &ChipParams, widest: u32, cell_bits: f6
     }
 }
 
+/// How much more state a die reserves than this model needs: for depth and for width.
+fn envelope_scale(model: &ModelGraph, p: &ChipParams) -> (f64, f64) {
+    if p.die_mode == DieMode::Custom {
+        return (1.0, 1.0);
+    }
+    ((p.max_layers as f64 / model.num_layers.max(1) as f64).max(1.0), (p.max_hidden_size as f64 / model.hidden_size.max(1) as f64).max(1.0))
+}
+
+fn vocabulary_room(model: &ModelGraph, p: &ChipParams) -> f64 {
+    if p.die_mode == DieMode::Custom { model.vocab_size as f64 } else { (p.max_vocabulary as f64).max(model.vocab_size as f64) }
+}
+
+fn check_envelope(model: &ModelGraph, p: &ChipParams, out: &mut Vec<Violation>) {
+    if p.weight_backend == WeightBackend::Rom {
+        out.push(Violation {
+            severity: Severity::Error,
+            message: "Con ROM cada die lleva grabados pesos distintos, así que no pueden ser todos iguales.".into(),
+            fix: "Usa SRAM o genera cada die a medida.".into(),
+            field: Some("die_mode"),
+        });
+    }
+    for (too_big, what, field) in [
+        (model.num_layers > p.max_layers, "capas", "max_layers"),
+        (model.hidden_size > p.max_hidden_size as u64, "ancho interno", "max_hidden_size"),
+        (model.vocab_size > p.max_vocabulary as u64, "vocabulario", "max_vocabulary"),
+    ] {
+        if too_big {
+            out.push(Violation {
+                severity: Severity::Error,
+                message: format!("El modelo supera el límite de {what} de este diseño."),
+                fix: "Sube ese límite.".into(),
+                field: Some(field),
+            });
+        }
+    }
+}
+
 /// Measured on Qwen3.8's tables: about 12 MB for 248,000 tokens.
 const TOKENIZER_BITS_PER_TOKEN: f64 = 400.0;
 
@@ -485,7 +522,7 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     push("sampler", "Unidad de muestreo", sampler_um2 * um2 * ROUTING_OVERHEAD / d,
         "Conserva los mejores logits y elige el siguiente token, con top-k y temperatura.");
     // Merge table, token offsets and the text of each token, read only by the CPU.
-    let tokenizer_bits = model.vocab_size as f64 * TOKENIZER_BITS_PER_TOKEN;
+    let tokenizer_bits = vocabulary_room(model, p) * TOKENIZER_BITS_PER_TOKEN;
     let tokenizer_density = if p.weight_backend == WeightBackend::Rom { tech.rom_mbit_mm2 } else { tech.sram_density(1024.0) };
     push("tokenizer_tables", "Tablas del tokenizador", tokenizer_bits / 1e6 / tokenizer_density / d,
         "Vocabulario y fusiones que el firmware usa para convertir texto en tokens y volver.");
@@ -750,7 +787,8 @@ fn resolve_circuit(tech: &TechNode, model: &ModelGraph, p: &ChipParams, widest: 
         decisions.push(CircuitDecision { weight_bits, share, multiplier: choice.multiplier, mac_stages: choice.mac_stages, adder_stages: choice.adder_stages, skip_zeros: choice.skip_zeros, area_um2: choice.area_um2, energy_pj: choice.energy_pj, fmax_ghz: choice.fmax_ghz });
         Some(with_choice(p, choice.multiplier, choice.mac_stages, choice.adder_stages, choice.skip_zeros))
     };
-    let mixed = p.mixes_widths() && widest > p.weight_bits;
+    // Dies that must be interchangeable all need the widest cell.
+    let mixed = p.mixes_widths() && widest > p.weight_bits && p.die_mode == DieMode::Custom;
     let wide = if mixed { wide_share(model, p) } else { 1.0 };
     let Some(params) = choose(widest, wide) else {
         return Resolved { params: p.clone(), decisions: Vec::new(), narrow: None };
@@ -848,9 +886,11 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     }
 
     let kv_compression = if p.has("compresion_kv") { 0.5 } else { 1.0 };
-    let kv_bits = model.state.kv_values_per_token as f64 * context * p.kv_bits as f64 * kv_compression;
-    let state_bits = model.state.delta_values as f64 * p.delta_state_bits as f64
-        + model.state.conv_values as f64 * p.activation_bits as f64;
+    // A die meant for any model reserves state for the largest one it accepts.
+    let (layer_room, width_room) = envelope_scale(model, p);
+    let kv_bits = model.state.kv_values_per_token as f64 * layer_room * width_room * context * p.kv_bits as f64 * kv_compression;
+    let state_bits = model.state.delta_values as f64 * layer_room * width_room * width_room * p.delta_state_bits as f64
+        + model.state.conv_values as f64 * layer_room * width_room * p.activation_bits as f64;
     let depth = if p.mtp_enabled { p.mtp_depth.min(3) } else { 0 };
     let rollback_bits = state_bits * depth as f64;
     let inputs = AreaInputs {
@@ -949,6 +989,9 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     // Weights and state share the same external channel when both live there.
     let shared_memory = p.weight_backend == WeightBackend::ExternalDdr && p.kv_backend == KvBackend::ExternalDdr;
     let memory_time = if shared_memory { weight_time + kv_time } else { weight_time.max(kv_time) };
+    if p.die_mode == DieMode::Identical {
+        check_envelope(model, p, &mut violations);
+    }
     let sampling = sampling_cycles(p, model);
     let token_time = (compute_time + sampling / (freq * 1e9)).max(memory_time);
     let stream_rate = 1.0 / token_time;
@@ -1178,6 +1221,20 @@ mod tests {
             assert!((report.metric("tok_s_base").unwrap() / target - 1.0).abs() < 0.02);
         }
         assert!(fast.macs_per_die > small.macs_per_die * 3 / 2);
+    }
+
+    #[test]
+    fn identical_dies_cost_more_than_custom_ones_and_check_their_limits() {
+        let model = qwen();
+        let custom = estimate(&model, &ChipParams::default()).unwrap();
+        let repeated = ChipParams { die_mode: DieMode::Identical, ..Default::default() };
+        let identical = estimate(&model, &repeated).unwrap();
+        assert_eq!(identical.decisions.len(), 1, "todas las celdas iguales");
+        assert!(identical.total_area_mm2 > custom.total_area_mm2);
+        let errors = |p: &ChipParams| estimate(&model, p).unwrap().violations.iter().filter(|v| v.severity == Severity::Error).count();
+        assert_eq!(errors(&repeated), 0);
+        assert_eq!(errors(&ChipParams { max_layers: 32, ..repeated.clone() }), 1);
+        assert_eq!(errors(&ChipParams { weight_backend: WeightBackend::Rom, ..repeated }), 1);
     }
 
     #[test]

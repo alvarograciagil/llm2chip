@@ -6,6 +6,16 @@ use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum DieMode {
+    /// Each die is built for exactly what it holds of this model.
+    #[default]
+    Custom,
+    /// One die design, repeated: more dies fit larger models, up to the limits below.
+    Identical,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CircuitGoal {
     /// The product of area and energy.
     #[default]
@@ -80,6 +90,11 @@ pub struct ChipParams {
     pub circuit_goal: CircuitGoal,
     /// When above zero, the multipliers per die follow from this speed and the model.
     pub target_tok_s: f64,
+    pub die_mode: DieMode,
+    /// With identical dies: the deepest, widest model the design must accept.
+    pub max_layers: u32,
+    pub max_hidden_size: u32,
+    pub max_vocabulary: u32,
     pub multiplier_kind: MultiplierKind,
     pub mac_stages: u32,
     pub adder_stages: u32,
@@ -138,6 +153,10 @@ impl Default for ChipParams {
             auto_circuit: true,
             circuit_goal: CircuitGoal::Balanced,
             target_tok_s: 0.0,
+            die_mode: DieMode::Custom,
+            max_layers: 128,
+            max_hidden_size: 8192,
+            max_vocabulary: 1 << 20,
             multiplier_kind: MultiplierKind::Wallace,
             mac_stages: 2,
             adder_stages: 2,
