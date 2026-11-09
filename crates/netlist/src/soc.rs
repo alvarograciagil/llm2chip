@@ -30,6 +30,8 @@ pub const PERIPHERAL_BASE: u32 = 0x4000_0000;
 pub const CONFIG_WORD: usize = 0x0C00;
 /// Word of data memory where the image builder places the segment table.
 pub const SEGMENT_TABLE_WORD: usize = 0x1000;
+/// Word of data memory with the directory of parts for each number of chips.
+pub const PLAN_DIRECTORY_WORD: usize = 0x0FF0;
 /// Word of data memory where the image builder places the tokenizer's tables.
 pub const TOKENIZER_WORD: usize = 0x2000;
 /// The widest thing the load controller writes, in 32-bit image words.

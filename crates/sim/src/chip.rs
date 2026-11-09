@@ -7,12 +7,13 @@ use crate::weights::Weights;
 use compiler::Program;
 use crate::Runner;
 use netlist::block::{encode_vector, exponent_register, tables, BlockOps, Place};
-use netlist::chip::DieEngine;
+use netlist::chip::{chip_info, DieEngine, GenerationSetup};
 use netlist::die::word_bits;
-use netlist::image::{Segment, Target};
+use netlist::image::{ChipPart, Segment, Target};
 use netlist::sampler::exponential_table;
 use netlist::{DieConfig, Microprogram};
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::Arc;
 
 /// Fills a machine's registers from the values a layout starts with.
@@ -149,6 +150,19 @@ impl DieEngine for RunnerEngine<'_> {
         }
         self.mantissas.get((address & ((1 << FLOW_INDEX_BITS) - 1)) as usize).copied().unwrap_or(0)
     }
+}
+
+/// What each chip takes from the image when the model is shared among `chips` of them.
+pub fn plan_parts(program: &Program, dir: &Path, config: DieConfig, chip_tokens: usize, setup: &GenerationSetup, chips: usize) -> Result<Vec<ChipPart>, String> {
+    let plan = program.split(chips)?;
+    (0..chips)
+        .map(|chip| {
+            let mut layout = Layout::new(program, &Weights::open(dir)?, config, Some(chip_tokens))?;
+            layout.keep_weights_of(program, &plan, chip);
+            let code = layout.die_microprogram(program, &plan, chip)?;
+            Ok(ChipPart { info: chip_info(&config, &code, layout.logits_register(program), program.vocab as u32, setup), segments: image_segments(&config, &code, &layout) })
+        })
+        .collect()
 }
 
 /// Everything the firmware has to load onto the die from the image.

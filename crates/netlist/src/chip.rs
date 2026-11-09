@@ -25,7 +25,7 @@ pub const REG_SAMPLE_SEED: u32 = 41;
 pub const REG_SAMPLE_START: u32 = 42;
 pub const REG_SAMPLE_DONE: u32 = 43;
 pub const REG_SAMPLE_TOKEN: u32 = 44;
-pub const REG_DIE_ID: u32 = 45;
+pub const REG_FOLLOWER: u32 = 45;
 pub const REG_CHAIN_DATA: u32 = 46;
 pub const REG_CHAIN_STATUS: u32 = 47;
 
@@ -72,7 +72,8 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     let booting = b.output("booting", 1);
     let image_req_valid = b.output("image_req_valid", 1);
     let image_req_addr = b.output("image_req_addr", 32);
-    let die_id = b.input("die_id", 4);
+    // The only thing a board decides: which chip leads. Numbers are handed out at start-up.
+    let follower = b.input("follower", 1);
     let control_bits = crate::link::wire_bits(32);
     let data_bits = crate::link::wire_bits(c.die.cell.activation_bits);
     let link_tx_valid = b.output("link_tx_valid", 1);
@@ -359,7 +360,7 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
         let sign = vector_out[activation - 1];
         let vector_word: Vec<Bit> = vector_out.iter().copied().chain(std::iter::repeat_n(sign, 32 - activation)).collect();
         let mut value = constant(0, 32);
-        for (register, word) in [(REG_STATUS, widen(&die_halted)), (REG_VECTOR_DATA, vector_word), (REG_SAMPLE_DONE, widen(&sampler_done)), (REG_SAMPLE_TOKEN, widen(&sampler_token)), (REG_DIE_ID, widen(&die_id)), (REG_CHAIN_DATA, chain_held.clone()), (REG_CHAIN_STATUS, widen(&[chain_has_data[0], chain_can_send[0]]))] {
+        for (register, word) in [(REG_STATUS, widen(&die_halted)), (REG_VECTOR_DATA, vector_word), (REG_SAMPLE_DONE, widen(&sampler_done)), (REG_SAMPLE_TOKEN, widen(&sampler_token)), (REG_FOLLOWER, widen(&follower)), (REG_CHAIN_DATA, chain_held.clone()), (REG_CHAIN_STATUS, widen(&[chain_has_data[0], chain_can_send[0]]))] {
             let chosen = l.equals(&selected, register);
             value = l.mux_bus(chosen, &value, &word);
         }
@@ -506,8 +507,7 @@ pub const INFO_PARAMETER_COUNT: usize = 11;
 pub const INFO_RAW_TOKENS: usize = 12;
 pub const INFO_STOP_FIRST: usize = 13;
 pub const INFO_STOP_SECOND: usize = 14;
-pub const INFO_DIES: usize = 15;
-pub const INFO_PARAMETERS: usize = 16;
+pub const INFO_PARAMETERS: usize = 15;
 pub const INFO_PARAMETER_SLOTS: usize = 16;
 
 /// Settings for generating text.
@@ -523,8 +523,6 @@ pub struct GenerationSetup {
     pub raw_tokens: bool,
     /// Tokens that end the generation; `u32::MAX` means none.
     pub stop: [u32; 2],
-    /// Chips sharing the model; the first one talks to the host.
-    pub dies: u32,
 }
 
 /// The chip description the firmware reads from its data memory.
@@ -544,7 +542,6 @@ pub fn chip_info(c: &DieConfig, code: &Microprogram, logits_register: u32, vocab
     info[INFO_RAW_TOKENS] = setup.raw_tokens as u32;
     info[INFO_STOP_FIRST] = setup.stop[0];
     info[INFO_STOP_SECOND] = setup.stop[1];
-    info[INFO_DIES] = setup.dies;
     assert!(code.parameters.len() <= INFO_PARAMETER_SLOTS, "demasiados parámetros");
     info[INFO_PARAMETER_COUNT] = code.parameters.len() as u32;
     for p in &code.parameters {

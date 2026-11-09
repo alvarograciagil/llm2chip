@@ -15,7 +15,9 @@ const LOADER: *mut u32 = 0x3000_0000 as *mut u32;
 const LOADER_START: usize = 6;
 const LOADER_BUSY: usize = 7;
 const LOADER_CRC: usize = 8;
-const SEGMENT_TABLE: *const u32 = 0x1000_4000 as *const u32;
+const DATA_MEMORY: *const u32 = 0x1000_0000 as *const u32;
+const DEFAULT_SEGMENT_TABLE: usize = 0x1000;
+const PLAN_DIRECTORY: usize = 0x0FF0;
 const SEGMENT_FIELDS: usize = 7;
 
 const PERIPHERALS: *mut u32 = 0x4000_0000 as *mut u32;
@@ -32,12 +34,12 @@ const REG_SAMPLE_SEED: usize = 41;
 const REG_SAMPLE_START: usize = 42;
 const REG_SAMPLE_DONE: usize = 43;
 const REG_SAMPLE_TOKEN: usize = 44;
-const REG_DIE_ID: usize = 45;
+const REG_FOLLOWER: usize = 45;
 const REG_CHAIN_DATA: usize = 46;
 const REG_CHAIN_STATUS: usize = 47;
 
 /// The description the image builder leaves in data memory.
-const INFO: *const u32 = 0x1000_3000 as *const u32;
+const DEFAULT_INFO: usize = 0x0C00;
 const INFO_ENTRY_TOKEN: usize = 0;
 const INFO_LOGITS: usize = 2;
 const INFO_LOGITS_EXPONENT: usize = 3;
@@ -52,8 +54,7 @@ const INFO_PARAMETER_COUNT: usize = 11;
 const INFO_RAW_TOKENS: usize = 12;
 const INFO_STOP_FIRST: usize = 13;
 const INFO_STOP_SECOND: usize = 14;
-const INFO_DIES: usize = 15;
-const INFO_PARAMETERS: usize = 16;
+const INFO_PARAMETERS: usize = 15;
 
 /// The tokenizer's tables, which the image builder leaves after the segment table.
 const TOKENIZER: *const u32 = 0x1000_8000 as *const u32;
@@ -93,8 +94,21 @@ _start:
 "#
 );
 
+/// Words of data memory of this chip's description and segment table, and chip count.
+static mut INFO_WORD: usize = DEFAULT_INFO;
+static mut TABLE_WORD: usize = DEFAULT_SEGMENT_TABLE;
+static mut CHIPS: u32 = 1;
+
+fn data_word(word: usize) -> u32 {
+    unsafe { read_volatile(DATA_MEMORY.add(word)) }
+}
+
 fn info(field: usize) -> u32 {
-    unsafe { read_volatile(INFO.add(field)) }
+    data_word(unsafe { INFO_WORD } + field)
+}
+
+fn chips() -> u32 {
+    unsafe { CHIPS }
 }
 
 fn peripheral_write(register: usize, value: u32) {
@@ -122,9 +136,10 @@ fn send(byte: u8) {
 /// Loads every segment of the image; each CRC mismatch is reported to the host.
 fn load_segments() {
     unsafe {
-        let count = read_volatile(SEGMENT_TABLE) as usize;
+        let table = TABLE_WORD;
+        let count = data_word(table) as usize;
         for index in 0..count {
-            let field = |i: usize| read_volatile(SEGMENT_TABLE.add(1 + index * SEGMENT_FIELDS + i));
+            let field = |i: usize| data_word(table + 1 + index * SEGMENT_FIELDS + i);
             for register in 0..6 {
                 write_volatile(LOADER.add(register), field(register));
             }
@@ -134,6 +149,56 @@ fn load_segments() {
             send(if good { b'.' } else { b'E' });
         }
     }
+}
+
+const COUNT_WORD: u32 = 0xC000_0000;
+const TOTAL_WORD: u32 = 0xD000_0000;
+const WORD_VALUE: u32 = 0x0FFF_FFFF;
+/// How long a chip waits for a neighbour's ready signal before concluding it is alone.
+const LONELY_POLLS: u32 = 32;
+
+fn chain_connected() -> bool {
+    (0..LONELY_POLLS).any(|_| peripheral_read(REG_CHAIN_STATUS) & 2 != 0)
+}
+
+/// Finds out how many chips there are and which one this is, around the chain.
+fn count_chips() -> (u32, u32) {
+    if peripheral_read(REG_FOLLOWER) != 0 {
+        let id = chain_receive() & WORD_VALUE;
+        chain_send(COUNT_WORD | (id + 1));
+        let total = chain_receive();
+        chain_send(total);
+        return (id, total & WORD_VALUE);
+    }
+    if !chain_connected() {
+        return (0, 1);
+    }
+    chain_send(COUNT_WORD | 1);
+    let total = chain_receive() & WORD_VALUE;
+    chain_send(TOTAL_WORD | total);
+    chain_receive();
+    (0, total)
+}
+
+/// Takes this chip's part of the image, if the image has a plan for this many chips.
+fn select_part(id: u32, total: u32) -> bool {
+    let plans = data_word(PLAN_DIRECTORY) as usize;
+    if plans == 0 {
+        return total == 1;
+    }
+    let lists = data_word(PLAN_DIRECTORY + 1) as usize;
+    for plan in 0..plans {
+        if data_word(lists + 2 * plan) == total {
+            let parts = data_word(lists + 2 * plan + 1) as usize;
+            unsafe {
+                INFO_WORD = data_word(parts + 2 * id as usize) as usize;
+                TABLE_WORD = data_word(parts + 2 * id as usize + 1) as usize;
+                CHIPS = total;
+            }
+            return true;
+        }
+    }
+    false
 }
 
 fn chain_send(word: u32) {
@@ -162,7 +227,7 @@ fn wait_for_die() {
 
 /// Orders a routine on every chip: the command goes down the chain before this die starts.
 fn run_die(routine: u32, token: u32, position: u32) {
-    if info(INFO_DIES) > 1 {
+    if chips() > 1 {
         chain_send(routine);
         chain_send(token);
         chain_send(position);
@@ -173,7 +238,7 @@ fn run_die(routine: u32, token: u32, position: u32) {
 
 /// What every chip but the first does: obey the chain and pass the commands on.
 fn serve_chain(id: u32) -> ! {
-    let forward = id + 1 < info(INFO_DIES);
+    let forward = id + 1 < chips();
     loop {
         let (routine, token, position) = (chain_receive(), chain_receive(), chain_receive());
         if forward {
@@ -473,8 +538,14 @@ fn emit(token: u32) {
 
 #[unsafe(no_mangle)]
 extern "C" fn main() {
+    let (id, total) = count_chips();
+    if !select_part(id, total) {
+        if id == 0 {
+            send(b'N');
+        }
+        return;
+    }
     load_segments();
-    let id = peripheral_read(REG_DIE_ID);
     if id != 0 {
         serve_chain(id);
     }

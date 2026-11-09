@@ -82,17 +82,19 @@ Los múltiplos precalculados salen perdiendo en los casos medidos: quitan el mul
 
 ## Varios chips
 
-Todos los chips salen de la misma netlist y se distinguen por los pines `die_id`. Cada uno lleva CPU, memorias, controlador de carga, die y muestreo. El de `die_id` 0 es el maestro: habla con el host, tokeniza y muestrea. Los demás cargan su imagen y obedecen.
+Todos los chips salen de la misma netlist y leen la misma imagen. Cada uno lleva CPU, memorias, controlador de carga, die y muestreo. Un solo pin, `follower`, decide en la placa cuál manda: habla con el host, tokeniza y muestrea.
+
+Al arrancar, el maestro envía un contador por la cadena de control. Cada chip toma su número, lo incrementa y lo pasa; al volver al maestro, ese valor es el total, que vuelve a dar la vuelta. Con el total y su número, cada chip busca en la imagen su microprograma y sus pesos. Si la imagen no contempla ese número de chips, el maestro lo avisa por el host. Un chip cuya cadena no tiene vecino funciona solo.
 
 | Pines | Función |
 |---|---|
 | `link_tx_*`, `link_rx_*` | Datos entre dies, en anillo: activaciones y, del último al primero, los logits |
-| `chain_tx_*`, `chain_rx_*` | Órdenes del maestro: rutina, token y posición, de chip en chip |
-| `image_req_*`, `image_resp_*` | Cada chip pide su parte de la imagen |
-| `die_id` | Identidad del chip, fijada en la placa |
+| `chain_tx_*`, `chain_rx_*` | Recuento al arrancar y órdenes del maestro, en anillo |
+| `image_req_*`, `image_resp_*` | Cada chip pide su parte de la misma imagen |
+| `follower` | A cero en el chip que manda |
 | `reset`, `host_*`, `debug_*` | Reset, host (solo se usa en el maestro) y depuración |
 
-Cada palabra lleva un código que corrige un bit y detecta dos, y una señal de válido y otra de listo. No hay reintento: un error doble se cuenta, pero el dato llega mal. El reloj sigue siendo común en la simulación, así que falta el cruce entre dominios de reloj. Los chips tampoco se descubren solos: el número de chips, la identidad y el reparto de capas vienen de la imagen y de los pines.
+Cada palabra lleva un código que corrige un bit y detecta dos, y una señal de válido y otra de listo. No hay reintento: un error doble se cuenta, pero el dato llega mal. El reloj sigue siendo común en la simulación, así que falta el cruce entre dominios de reloj. La imagen debe traer el reparto de capas de cada número de chips admitido.
 
 ## Pesos grabados
 

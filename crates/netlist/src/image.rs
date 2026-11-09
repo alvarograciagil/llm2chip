@@ -2,7 +2,7 @@
 //! Words 0 to 2 are the magic number and the sizes of the firmware's two memories, which
 //! the load controller copies by itself; the firmware then loads every other segment.
 
-use crate::soc::{CONFIG_WORD, SEGMENT_TABLE_WORD, TOKENIZER_WORD};
+use crate::soc::{CONFIG_WORD, PLAN_DIRECTORY_WORD, SEGMENT_TABLE_WORD, TOKENIZER_WORD};
 
 pub const MAGIC: u32 = 0x4943_324C;
 pub const HEADER_WORDS: usize = 3;
@@ -57,8 +57,8 @@ pub fn build_image(program: &[u32], data: &[u32], config: &[u32], tokenizer: &[u
     if data.len() > CONFIG_WORD {
         return Err(format!("los datos del firmware ocupan {} palabras y el límite es {CONFIG_WORD}", data.len()));
     }
-    if config.len() > SEGMENT_TABLE_WORD - CONFIG_WORD {
-        return Err(format!("la descripción del chip ocupa {} palabras y el límite es {}", config.len(), SEGMENT_TABLE_WORD - CONFIG_WORD));
+    if config.len() > PLAN_DIRECTORY_WORD - CONFIG_WORD {
+        return Err(format!("la descripción del chip ocupa {} palabras y el límite es {}", config.len(), PLAN_DIRECTORY_WORD - CONFIG_WORD));
     }
     let table_words = 1 + segments.len() * SEGMENT_FIELDS;
     if table_words > TOKENIZER_WORD - SEGMENT_TABLE_WORD {
@@ -85,6 +85,70 @@ pub fn build_image(program: &[u32], data: &[u32], config: &[u32], tokenizer: &[u
         image.extend_from_slice(tokenizer);
     }
     for segment in segments {
+        image.extend_from_slice(&segment.words);
+    }
+    Ok(image)
+}
+
+/// What one chip needs when the model is shared among a given number of them.
+#[derive(Clone, Debug)]
+pub struct ChipPart {
+    pub info: Vec<u32>,
+    pub segments: Vec<Segment>,
+}
+
+fn table_words(segments: &[Segment]) -> usize {
+    1 + segments.len() * SEGMENT_FIELDS
+}
+
+fn segment_table(segments: &[Segment], source: &mut usize) -> Vec<u32> {
+    let mut table = vec![segments.len() as u32];
+    for segment in segments {
+        table.extend([*source as u32, segment.target as u32, segment.unit, segment.address, segment.elements() as u32, segment.beats, crc32(&segment.words)]);
+        *source += segment.words.len();
+    }
+    table
+}
+
+/// One image for every number of chips in `plans`, each given with one part per chip.
+/// The firmware counts the chips at start-up and takes its own part.
+pub fn build_plan_image(program: &[u32], data: &[u32], tokenizer: &[u32], plans: &[Vec<ChipPart>]) -> Result<Vec<u32>, String> {
+    if data.len() > CONFIG_WORD {
+        return Err(format!("los datos del firmware ocupan {} palabras y el límite es {CONFIG_WORD}", data.len()));
+    }
+    // The directory: for each plan its number of chips and where its parts are listed.
+    let lists_at = TOKENIZER_WORD + tokenizer.len();
+    let lists_len = 2 * plans.len() + plans.iter().map(|plan| 2 * plan.len()).sum::<usize>();
+    let mut block = lists_at + lists_len;
+    let mut lists = vec![0u32; 2 * plans.len()];
+    for (index, plan) in plans.iter().enumerate() {
+        lists[2 * index] = plan.len() as u32;
+        lists[2 * index + 1] = (lists_at + lists.len()) as u32;
+        for part in plan {
+            lists.push(block as u32);
+            lists.push((block + part.info.len()) as u32);
+            block += part.info.len() + table_words(&part.segments);
+        }
+    }
+    let data_words = block;
+    let mut source = HEADER_WORDS + program.len() + data_words;
+    let mut blocks = Vec::new();
+    for part in plans.iter().flatten() {
+        blocks.extend_from_slice(&part.info);
+        blocks.extend(segment_table(&part.segments, &mut source));
+    }
+
+    let mut image = vec![MAGIC, program.len() as u32, data_words as u32];
+    image.extend_from_slice(program);
+    image.extend_from_slice(data);
+    let base = HEADER_WORDS + program.len();
+    image.resize(base + PLAN_DIRECTORY_WORD, 0);
+    image.extend([plans.len() as u32, lists_at as u32]);
+    image.resize(base + TOKENIZER_WORD, 0);
+    image.extend_from_slice(tokenizer);
+    image.extend(lists);
+    image.extend(blocks);
+    for segment in plans.iter().flatten().flat_map(|part| &part.segments) {
         image.extend_from_slice(&segment.words);
     }
     Ok(image)

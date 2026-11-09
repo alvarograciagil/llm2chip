@@ -51,7 +51,7 @@ Lo que dibuja el esquemático es la misma netlist que se simula y se exporta: no
 | Enlaces entre chips | Datos y órdenes con corrección de errores y control de flujo |
 | Fiabilidad y depuración | Autotest de memoria, filas de reserva, contadores y puerto de depuración |
 
-Todos los chips de un sistema salen de la misma netlist. Una identidad fijada en la placa decide cuál actúa de maestro.
+Todos los chips de un sistema salen de la misma netlist y leen la misma imagen. Un pin decide cuál manda; al arrancar se cuentan por la cadena de control, y cada uno toma su parte del modelo.
 
 ## La aplicación
 
@@ -96,7 +96,7 @@ Windows tiene los equivalentes `.ps1`. Los pesos no se incluyen: el simulador bu
 ## Qué está verificado
 
 - La netlist de un chip completo, de bytes de entrada a bytes de salida, coincide ciclo a ciclo con la simulación rápida en un modelo Qwen3.5 diminuto.
-- Dos chips idénticos en una placa simulada, con retardos y bits invertidos en los enlaces, generan el mismo texto y los mismos logits que uno solo.
+- Con una misma imagen, dos chips idénticos en una placa simulada, con retardos y bits invertidos en los enlaces, generan el mismo texto y los mismos logits que uno solo.
 - La máquina de enteros exactos coincide bit a bit con las puertas en todos los búferes de esos modelos.
 - Qwen3.8-27B real se ejecuta de principio a fin con el firmware del chip. Su tokenizador coincide con la biblioteca de referencia en los textos de prueba.
 - Cada formato de peso y cada multiplicador se comprueban contra la aritmética de referencia, y el Verilog y el VHDL exportados se ejecutan en simuladores externos.
