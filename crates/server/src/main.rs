@@ -24,6 +24,7 @@ struct Loaded {
     name: String,
     engine: Box<dyn Runner>,
     tokenizer: Tokenizer,
+    accelerator: Option<String>,
 }
 
 #[derive(Clone)]
@@ -100,6 +101,9 @@ struct LoadRequest {
     /// The chip's weight format; `None` keeps the checkpoint as it is.
     #[serde(default)]
     format: Option<WeightFormat>,
+    /// Runs the large matrix products on this system's GPU when it has one.
+    #[serde(default)]
+    gpu: bool,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -110,7 +114,7 @@ struct NumericRequest {
 }
 
 fn load_model(request: LoadRequest) -> Result<Loaded, String> {
-    let LoadRequest { path, numeric, exact, format } = request;
+    let LoadRequest { path, numeric, exact, format, gpu } = request;
     let path = path.as_str();
     let dir = Path::new(path);
     let entry = scan_models().into_iter().find(|m| m.path == path).ok_or("el modelo no está en las carpetas conocidas")?;
@@ -124,24 +128,26 @@ fn load_model(request: LoadRequest) -> Result<Loaded, String> {
         Some(n) => Numeric::Block { activation_bits: n.activation_bits.clamp(4, 24), state_bits: n.state_bits.clamp(4, 24), table_bits: n.table_bits.map(|b| b.clamp(4, 16)) },
     };
     let weights = Weights::open(dir)?.with_format(format);
+    let weights = if gpu { weights.with_gpu() } else { weights };
+    let accelerator = weights.accelerator_name();
     let engine: Box<dyn Runner> = if exact {
         Box::new(ExactEngine::new(compile_qwen3_5(&config)?, weights, numeric.map_or(16, |n| n.activation_bits.clamp(8, 24)))?)
     } else {
         Box::new(Engine::new(compile_qwen3_5(&config)?, weights, mode)?)
     };
-    Ok(Loaded { name: entry.name, engine, tokenizer })
+    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator })
 }
 
 async fn load(State(app): State<App>, Json(request): Json<LoadRequest>) -> Response {
     let result = tokio::task::spawn_blocking(move || {
         let loaded = load_model(request)?;
-        let name = loaded.name.clone();
+        let reply = (loaded.name.clone(), loaded.accelerator.clone());
         *app.loaded.lock().unwrap() = Some(loaded);
-        Ok::<_, String>(name)
+        Ok::<_, String>(reply)
     })
     .await;
     match result {
-        Ok(Ok(name)) => Json(serde_json::json!({ "loaded": name })).into_response(),
+        Ok(Ok((name, accelerator))) => Json(serde_json::json!({ "loaded": name, "accelerator": accelerator })).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

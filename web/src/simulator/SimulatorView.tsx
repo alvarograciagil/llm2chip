@@ -226,10 +226,14 @@ export function SimulatorPanel() {
           <input type="checkbox" checked={state.useDesignFormat} onChange={(e) => set({ useDesignFormat: e.target.checked, designFormat: designFormat(params) })} />
           Convertir los pesos al formato del chip ({formatLabel})
         </label>
+        <label className="check">
+          <input type="checkbox" checked={state.useGpu} onChange={(e) => set({ useGpu: e.target.checked })} />
+          Acelerar con la GPU
+        </label>
         <button className="pill primary-pill" disabled={state.loading || !state.path} onClick={() => { set({ designFormat: designFormat(params) }); void load(); }}>
           {state.loading ? "Cargando…" : state.loaded ? "Recargar" : "Cargar modelo"}
         </button>
-        {state.loaded && <p className="muted-text">Cargado: {state.loaded}</p>}
+        {state.loaded && <p className="muted-text">Cargado: {state.loaded} · {state.accelerator ?? "CPU"}</p>}
       </div>
 
       <h3>Generación</h3>

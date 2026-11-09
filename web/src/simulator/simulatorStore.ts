@@ -25,6 +25,8 @@ interface SimulatorState {
   models: ServerModel[];
   path: string;
   loaded: string | null;
+  accelerator: string | null;
+  useGpu: boolean;
   loading: boolean;
   numeric: Numeric;
   activationBits: number;
@@ -65,6 +67,8 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   models: [],
   path: "",
   loaded: null,
+  accelerator: null,
+  useGpu: true,
   loading: false,
   numeric: "float",
   activationBits: 16,
@@ -105,19 +109,20 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   set: (patch) => set(patch),
 
   async load() {
-    const { path, numeric, activationBits, stateBits, tableBits, useDesignFormat, designFormat } = get();
+    const { path, numeric, activationBits, stateBits, tableBits, useDesignFormat, designFormat, useGpu } = get();
     set({ loading: true, error: null });
     const body = {
       path,
       numeric: numeric !== "float" ? { activation_bits: activationBits, state_bits: stateBits, table_bits: tableBits } : null,
       exact: numeric === "exact",
       format: useDesignFormat ? designFormat : null,
+      gpu: useGpu,
     };
     try {
       const response = await fetch("/api/load", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       if (!response.ok) throw new Error(await message(response));
-      const { loaded } = await response.json();
-      set({ loaded, loading: false });
+      const { loaded, accelerator } = await response.json();
+      set({ loaded, accelerator, loading: false });
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e), loading: false });
     }
