@@ -33,6 +33,7 @@ El chip recibe bytes de texto y devuelve bytes de texto. El tokenizado, la infer
 | Red de escritura de pesos | Lleva cada palabra a su celda | Solo puertos de carga directos |
 | ECC, CRC, BIST y reparación | Fiabilidad y celdas defectuosas | Solo área |
 | Unidad de muestreo y RNG | Top-k y temperatura sobre los logits, con filtro de varios carriles | En puertas y modelo, conectada al die |
+| Tokenizador en firmware | BPE con sus tablas en memoria de datos; no aplica NFC | En ISS con Qwen real y en puertas con tablas diminutas |
 | Planificador de tokens y MTP | Decide qué ejecuta cada die, y deshace | En software |
 | Reloj, reset y gestión de energía | Secuencia de reset, puertas de reloj | Falta |
 | Depuración y contadores | JTAG, trazas, rendimiento | Falta |
@@ -49,7 +50,7 @@ Cada bloque se configura por separado desde la simulación. Así se elige entre 
 |---|---|---|---|---|
 | Arranque y BIST | Sí | | ISS | CPU en puertas |
 | Carga de pesos | Pesos directos del checkpoint | | Controlador real, imagen, ECC y ciclos | Muestra o modelo diminuto |
-| Tokenizador | | En Rust, fuera del chip (hoy) | Firmware en ISS (pendiente) | Firmware en puertas (pendiente) |
+| Tokenizador | | En Rust, fuera del chip | Firmware en ISS | Firmware en puertas, con tablas diminutas |
 | Núcleo de inferencia | | Coma flotante (CPU o GPU) | Enteros exactos (CPU o GPU) | Modelo diminuto |
 | Muestreo | | En Rust, fuera del chip | Unidad funcional | Puertas |
 | Destokenizador | | En Rust, fuera del chip | Firmware en ISS | Firmware en puertas |

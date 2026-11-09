@@ -319,6 +319,9 @@ fn weight_multiplier(tech: &TechNode, p: &ChipParams, widest: u32, cell_bits: f6
     }
 }
 
+/// Measured on Qwen3.8's tables: about 12 MB for 248,000 tokens.
+const TOKENIZER_BITS_PER_TOKEN: f64 = 400.0;
+
 /// Candidates the sampling unit keeps.
 const SAMPLER_ENTRIES: f64 = 64.0;
 
@@ -466,6 +469,11 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
         + 24.0 * 16.0 * tech.fa_um2;
     push("sampler", "Unidad de muestreo", sampler_um2 * um2 * ROUTING_OVERHEAD / d,
         "Conserva los mejores logits y elige el siguiente token, con top-k y temperatura.");
+    // Merge table, token offsets and the text of each token, read only by the CPU.
+    let tokenizer_bits = model.vocab_size as f64 * TOKENIZER_BITS_PER_TOKEN;
+    let tokenizer_density = if p.weight_backend == WeightBackend::Rom { tech.rom_mbit_mm2 } else { tech.sram_density(1024.0) };
+    push("tokenizer_tables", "Tablas del tokenizador", tokenizer_bits / 1e6 / tokenizer_density / d,
+        "Vocabulario y fusiones que el firmware usa para convertir texto en tokens y volver.");
     push("control", "Secuenciador y microprograma", 0.8,
         "Ejecuta el microprograma que dirige cada etapa.");
     push("system", "CPU de control y carga", (tech.cpu_mm2 + tech.io_mm2) / d,
@@ -837,6 +845,7 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
                 format!("{:.0} MB a {} bits, repartidos entre {dies} dies.", state_bits / 8e6, p.delta_state_bits)),
             "mtp_rollback" => (0.0, 0.0, 0.0, format!("{depth} copias del estado recurrente.")),
             "control" => (1.0, 0.0, 0.0, "Área fija estimada por die.".into()),
+            "tokenizer_tables" => (0.0, 0.0, 0.0, format!("{:.0} Mbit para un vocabulario de {} tokens.", model.vocab_size as f64 * TOKENIZER_BITS_PER_TOKEN / 1e6, model.vocab_size)),
             "sampler" => (0.0, 0.0, 0.0, format!("{} carriles de filtro y {} candidatos.", p.sampler_lanes, SAMPLER_ENTRIES)),
             "links" => (link_cycles / total_cycles, 0.0, link_bytes, "Un punto de enlace por die.".into()),
             _ => (0.0, 0.0, 0.0, "Área fija estimada.".into()),

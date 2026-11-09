@@ -39,7 +39,8 @@ interface SimulatorState {
   mtpDepth: number;
   firmware: boolean;
   samplerUnit: boolean;
-  chip: { cycles: number; dieCycles: number } | null;
+  firmwareTokenizer: boolean;
+  chip: { cycles: number; dieCycles: number; tokenizerMatch: boolean | null } | null;
   acceptance: { hits: number[]; tries: number[] };
   prompt: string;
   maxTokens: number;
@@ -85,6 +86,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   mtpDepth: 0,
   firmware: false,
   samplerUnit: false,
+  firmwareTokenizer: false,
   chip: null,
   acceptance: { hits: [], tries: [] },
   prompt: "¿Cuál es la capital de Francia? Responde en una frase.",
@@ -138,10 +140,10 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   },
 
   generate() {
-    const { prompt, maxTokens, temperature, topK, mtpDepth, firmware, samplerUnit } = get();
+    const { prompt, maxTokens, temperature, topK, mtpDepth, firmware, samplerUnit, firmwareTokenizer } = get();
     const metric = (id: string) => useDesign.getState().report?.metrics.find((m) => m.id === id)?.value ?? 0;
     const rate = metric("tok_s");
-    const fidelity = { firmware, sampler_unit: samplerUnit || firmware, cycles_per_token: rate > 0 ? (metric("freq_ghz") * 1e9) / rate : 0, sampler_lanes: useDesign.getState().params.sampler_lanes };
+    const fidelity = { firmware, sampler_unit: samplerUnit || firmware, cycles_per_token: rate > 0 ? (metric("freq_ghz") * 1e9) / rate : 0, sampler_lanes: useDesign.getState().params.sampler_lanes, tokenizer: firmware && firmwareTokenizer };
     socket?.close();
     set({ chip: null, output: "", running: true, error: null, phase: "Conectando", tokens: 0, prefilled: 0, promptTokens: 0, seconds: [], saturated: 0, acceptance: { hits: [], tries: [] } });
     const protocol = location.protocol === "https:" ? "wss" : "ws";
@@ -166,7 +168,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
         }));
       }
       if (data.type === "done") {
-        set({ phase: "Terminado", running: false, chip: data.chip ? { cycles: data.chip.cycles, dieCycles: data.chip.die_cycles } : null });
+        set({ phase: "Terminado", running: false, chip: data.chip ? { cycles: data.chip.cycles, dieCycles: data.chip.die_cycles, tokenizerMatch: data.chip.tokenizer_match ?? null } : null });
         ws.close();
       }
       if (data.type === "error") {

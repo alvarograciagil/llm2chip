@@ -20,6 +20,7 @@ use netlist::soc::{FirmwareImage, SocBus, SocConfig};
 use netlist::{CellConfig, DieConfig, Microprogram, Parameter};
 use sim::chip::{RunnerEngine, FLOW_REGISTER_BITS, FLOW_INDEX_BITS};
 use sim::lower::{ENTRY_LOGITS, ENTRY_TOKEN};
+use sim::tokenizer::TokenizerTables;
 use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -36,6 +37,9 @@ struct Loaded {
     engine: Box<dyn Runner>,
     tokenizer: Tokenizer,
     accelerator: Option<String>,
+    dir: PathBuf,
+    /// The firmware's tokenizer tables, built the first time they are needed.
+    firmware_tables: Option<Vec<u32>>,
 }
 
 #[derive(Clone)]
@@ -146,7 +150,7 @@ fn load_model(request: LoadRequest) -> Result<Loaded, String> {
     } else {
         Box::new(Engine::new(compile_qwen3_5(&config)?, weights, mode)?)
     };
-    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator })
+    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator, dir: dir.to_path_buf(), firmware_tables: None })
 }
 
 async fn load(State(app): State<App>, Json(request): Json<LoadRequest>) -> Response {
@@ -194,6 +198,9 @@ struct Fidelity {
     /// Logits the sampling unit takes in per cycle, from the design being evaluated.
     #[serde(default)]
     sampler_lanes: u32,
+    /// The firmware turns the text into tokens instead of receiving them ready.
+    #[serde(default)]
+    tokenizer: bool,
 }
 
 async fn generate_socket(ws: WebSocketUpgrade, State(app): State<App>) -> Response {
@@ -277,8 +284,19 @@ fn sample_on_unit(unit: &mut SamplerModel, logits: &[f32], temperature: f32, top
     unit.sample(&mantissas, inverse, top_k.clamp(1, SAMPLER_ENTRIES as usize), temperature <= 0.0).token
 }
 
+/// The bytes after `shown` that already form complete UTF-8 characters.
+fn take_text(bytes: &[u8], shown: &mut usize) -> String {
+    let pending = &bytes[*shown..];
+    let valid = match std::str::from_utf8(pending) {
+        Ok(_) => pending.len(),
+        Err(e) => e.valid_up_to(),
+    };
+    *shown += valid;
+    String::from_utf8_lossy(&pending[..valid]).into_owned()
+}
+
 /// Runs the chip's real firmware at instruction level around the loaded engine.
-fn run_firmware(loaded: &mut Loaded, ids: &[u32], request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+fn run_firmware(loaded: &mut Loaded, text: &str, ids: &[u32], request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> {
     use std::sync::atomic::Ordering::Relaxed;
     if request.mtp_depth > 0 {
         return Err("la cabeza MTP todavía no funciona con la CPU simulada".into());
@@ -295,20 +313,27 @@ fn run_firmware(loaded: &mut Loaded, ids: &[u32], request: &GenerateRequest, sen
         limit: request.top_k.clamp(1, SAMPLER_ENTRIES as usize) as u32,
         temperature: (request.temperature.max(0.0) * 256.0).round().max(1.0) as u32,
         seed,
-        raw_tokens: true,
+        raw_tokens: !request.fidelity.tokenizer,
         stop: STOP_TOKENS,
-        byte_to_token: Vec::new(),
-        token_to_byte: Vec::new(),
     };
     let info = chip_info(&die, &code, FLOW_LOGITS_REGISTER, vocabulary as u32, &setup);
-    let image = build_image(&firmware.program, &firmware.data, &info, &[])?;
-    let mut input: Vec<u8> = ids.iter().flat_map(|t| t.to_le_bytes()).collect();
-    input.extend(u32::MAX.to_le_bytes());
+    let use_tables = request.fidelity.tokenizer;
+    if use_tables && loaded.firmware_tables.is_none() {
+        loaded.firmware_tables = Some(TokenizerTables::from_file(&loaded.dir.join("tokenizer.json"))?.to_words());
+    }
+    let tables: &[u32] = if use_tables { loaded.firmware_tables.as_deref().unwrap_or_default() } else { &[] };
+    let image = build_image(&firmware.program, &firmware.data, &info, tables, &[])?;
+    let input: Vec<u8> = if use_tables {
+        text.bytes().chain([0]).collect()
+    } else {
+        ids.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect()
+    };
 
     let Loaded { engine, tokenizer, .. } = loaded;
+    let data_bits = if use_tables { 22 } else { 13 };
     let unit = sampler_model(vocabulary, seed, request.fidelity.sampler_lanes);
     let runner = RunnerEngine::new(engine.as_mut(), FLOW_BITS, request.fidelity.cycles_per_token.max(0.0) as u64);
-    let soc = SocConfig { program_bits: 14, data_bits: 13, fifo_bits: 6 };
+    let soc = SocConfig { program_bits: 14, data_bits, fifo_bits: 6 };
     let mut bus = SocBus::booted_with(soc, &image, &input, ChipModel::new(runner, code, unit))?;
     let mut cpu = Rv32Iss::default();
     let (mut emitted, mut reported, mut shown) = (0, 0, 0);
@@ -326,6 +351,15 @@ fn run_firmware(loaded: &mut Loaded, ids: &[u32], request: &GenerateRequest, sen
             reported += 1;
             let _ = sender.blocking_send(serde_json::json!({ "type": "prefill", "done": reported, "total": ids.len(), "seconds": runner.last_seconds }));
         }
+        if use_tables {
+            // A token's text is complete once the firmware asks for the next token's logits.
+            while emitted + 1 < bus.peripheral.engine.generated {
+                emitted += 1;
+                let piece = take_text(&bus.tx, &mut shown);
+                let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle }));
+            }
+            continue;
+        }
         while bus.tx.len() / 4 > emitted {
             let at = emitted * 4;
             output.push(u32::from_le_bytes([bus.tx[at], bus.tx[at + 1], bus.tx[at + 2], bus.tx[at + 3]]));
@@ -335,8 +369,18 @@ fn run_firmware(loaded: &mut Loaded, ids: &[u32], request: &GenerateRequest, sen
             let _ = sender.blocking_send(serde_json::json!({ "type": "token", "id": output[emitted - 1], "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle }));
         }
     }
+    if use_tables {
+        let piece = take_text(&bus.tx, &mut shown);
+        if !piece.is_empty() {
+            emitted += 1;
+            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle }));
+        }
+    } else {
+        emitted = output.len();
+    }
     let runner = &bus.peripheral.engine;
-    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": output.len(), "chip": { "cycles": cpu.cycle, "die_cycles": runner.die_cycles } }));
+    let tokenizer_match = use_tables.then(|| runner.tokens.len() >= ids.len() && runner.tokens[..ids.len()] == *ids);
+    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": emitted, "chip": { "cycles": cpu.cycle, "die_cycles": runner.die_cycles, "tokenizer_match": tokenizer_match } }));
     Ok(())
 }
 
@@ -346,11 +390,11 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     let loaded = guard.as_mut().ok_or("carga un modelo primero")?;
     let think = if request.thinking { "<think>\n" } else { "<think>\n\n</think>\n\n" };
     let text = format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n{think}", request.prompt);
-    let ids = loaded.tokenizer.encode(text, false).map_err(|e| e.to_string())?.get_ids().to_vec();
+    let ids = loaded.tokenizer.encode(text.as_str(), false).map_err(|e| e.to_string())?.get_ids().to_vec();
     loaded.engine.reset();
     let _ = sender.blocking_send(serde_json::json!({ "type": "start", "prompt_tokens": ids.len() }));
     if request.fidelity.firmware {
-        return run_firmware(loaded, &ids, &request, sender, cancelled);
+        return run_firmware(loaded, &text, &ids, &request, sender, cancelled);
     }
 
     let mut unit = sampler_model(loaded.engine.vocabulary(), 0x1234_5679, request.fidelity.sampler_lanes);

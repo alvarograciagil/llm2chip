@@ -271,7 +271,7 @@ impl BootDemo {
             Segment { target: Target::Function, unit: 0, address: 0, beats: 1, words: (0..16).map(|i| i * 3).collect() },
             Segment { target: Target::SamplerTable, unit: 0, address: 0, beats: 1, words: exponential_table()[..16].to_vec() },
         ];
-        let image = build_image(&firmware.program, &firmware.data, &[], &segments)?;
+        let image = build_image(&firmware.program, &firmware.data, &[], &[], &segments)?;
         Ok(Self { image, pending: None, output: Vec::new(), segments: segments.len() })
     }
 

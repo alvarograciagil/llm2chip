@@ -2,7 +2,7 @@
 //! Words 0 to 2 are the magic number and the sizes of the firmware's two memories, which
 //! the load controller copies by itself; the firmware then loads every other segment.
 
-use crate::soc::{CONFIG_WORD, SEGMENT_TABLE_WORD};
+use crate::soc::{CONFIG_WORD, SEGMENT_TABLE_WORD, TOKENIZER_WORD};
 
 pub const MAGIC: u32 = 0x4943_324C;
 pub const HEADER_WORDS: usize = 3;
@@ -53,7 +53,7 @@ pub fn crc32(words: &[u32]) -> u32 {
 
 /// Builds the image. The chip description and the segment table are placed inside
 /// the firmware's data memory, where it finds them without any other help.
-pub fn build_image(program: &[u32], data: &[u32], config: &[u32], segments: &[Segment]) -> Result<Vec<u32>, String> {
+pub fn build_image(program: &[u32], data: &[u32], config: &[u32], tokenizer: &[u32], segments: &[Segment]) -> Result<Vec<u32>, String> {
     if data.len() > CONFIG_WORD {
         return Err(format!("los datos del firmware ocupan {} palabras y el límite es {CONFIG_WORD}", data.len()));
     }
@@ -61,7 +61,10 @@ pub fn build_image(program: &[u32], data: &[u32], config: &[u32], segments: &[Se
         return Err(format!("la descripción del chip ocupa {} palabras y el límite es {}", config.len(), SEGMENT_TABLE_WORD - CONFIG_WORD));
     }
     let table_words = 1 + segments.len() * SEGMENT_FIELDS;
-    let data_words = SEGMENT_TABLE_WORD + table_words;
+    if table_words > TOKENIZER_WORD - SEGMENT_TABLE_WORD {
+        return Err(format!("la tabla de segmentos ocupa {table_words} palabras y el límite es {}", TOKENIZER_WORD - SEGMENT_TABLE_WORD));
+    }
+    let data_words = if tokenizer.is_empty() { SEGMENT_TABLE_WORD + table_words } else { TOKENIZER_WORD + tokenizer.len() };
     let mut source = HEADER_WORDS + program.len() + data_words;
 
     let mut table = vec![segments.len() as u32];
@@ -77,6 +80,10 @@ pub fn build_image(program: &[u32], data: &[u32], config: &[u32], segments: &[Se
     image.extend_from_slice(config);
     image.resize(HEADER_WORDS + program.len() + SEGMENT_TABLE_WORD, 0);
     image.extend(table);
+    if !tokenizer.is_empty() {
+        image.resize(HEADER_WORDS + program.len() + TOKENIZER_WORD, 0);
+        image.extend_from_slice(tokenizer);
+    }
     for segment in segments {
         image.extend_from_slice(&segment.words);
     }

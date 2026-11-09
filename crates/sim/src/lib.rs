@@ -5,6 +5,7 @@ pub mod chip;
 mod exact;
 mod exec;
 pub mod lower;
+pub mod tokenizer;
 mod requant;
 mod vm;
 mod weights;

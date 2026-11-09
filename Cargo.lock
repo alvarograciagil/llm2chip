@@ -1239,6 +1239,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-metal",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "sysinfo",

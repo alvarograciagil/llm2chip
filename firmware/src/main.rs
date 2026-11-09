@@ -51,8 +51,23 @@ const INFO_RAW_TOKENS: usize = 12;
 const INFO_STOP_FIRST: usize = 13;
 const INFO_STOP_SECOND: usize = 14;
 const INFO_PARAMETERS: usize = 15;
-const INFO_BYTE_TO_TOKEN: usize = INFO_PARAMETERS + 4 * 16;
-const INFO_TOKEN_TO_BYTE: usize = INFO_BYTE_TO_TOKEN + 256;
+
+/// The tokenizer's tables, which the image builder leaves after the segment table.
+const TOKENIZER: *const u32 = 0x1000_8000 as *const u32;
+const TOK_MERGE_SLOTS: usize = 0;
+const TOK_MERGES: usize = 1;
+const TOK_LETTER_COUNT: usize = 2;
+const TOK_LETTERS: usize = 3;
+const TOK_NUMBER_COUNT: usize = 4;
+const TOK_NUMBERS: usize = 5;
+const TOK_BYTE_SYMBOLS: usize = 6;
+const TOK_OFFSETS: usize = 7;
+const TOK_BLOB: usize = 8;
+const TOK_ADDED_COUNT: usize = 9;
+const TOK_ADDED: usize = 10;
+const TOK_TEXT: usize = 11;
+const TOK_TEXT_CAPACITY: usize = 12;
+const MAX_SYMBOLS: usize = 512;
 
 const END_OF_TOKENS: u32 = u32::MAX;
 
@@ -150,17 +165,253 @@ fn sample() -> u32 {
     peripheral_read(REG_SAMPLE_TOKEN)
 }
 
-/// The next token from the host, or `None` once the prompt is over.
-fn next_token() -> Option<u32> {
-    if info(INFO_RAW_TOKENS) != 0 {
-        let mut token = 0u32;
-        for shift in 0..4 {
-            token |= (receive() as u32) << (8 * shift);
+fn tok(field: usize) -> u32 {
+    unsafe { read_volatile(TOKENIZER.add(field)) }
+}
+
+fn tok_word(offset: u32) -> u32 {
+    unsafe { read_volatile(TOKENIZER.add(offset as usize)) }
+}
+
+fn blob_byte(at: u32) -> u8 {
+    unsafe { read_volatile((TOKENIZER.add(tok(TOK_BLOB) as usize) as *const u8).add(at as usize)) }
+}
+
+/// Whether `code` falls in one of a table's sorted, inclusive ranges.
+fn in_ranges(code: u32, table: u32, count: u32) -> bool {
+    let (mut low, mut high) = (0, count);
+    while low < high {
+        let middle = (low + high) / 2;
+        if code < tok_word(table + 2 * middle) {
+            high = middle;
+        } else if code > tok_word(table + 2 * middle + 1) {
+            low = middle + 1;
+        } else {
+            return true;
         }
-        return (token != END_OF_TOKENS).then_some(token);
     }
-    let byte = receive();
-    (byte != 0).then(|| info(INFO_BYTE_TO_TOKEN + byte as usize))
+    false
+}
+
+fn is_letter(code: u32) -> bool {
+    in_ranges(code, tok(TOK_LETTERS), tok(TOK_LETTER_COUNT))
+}
+
+fn is_number(code: u32) -> bool {
+    in_ranges(code, tok(TOK_NUMBERS), tok(TOK_NUMBER_COUNT))
+}
+
+fn is_space(code: u32) -> bool {
+    matches!(code, 9..=13 | 0x20 | 0x85 | 0xA0 | 0x1680 | 0x2000..=0x200A | 0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000)
+}
+
+/// The UTF-8 character at `at` and the offset of the next one.
+fn character(text: &[u8], at: usize) -> (u32, usize) {
+    let first = text[at] as u32;
+    let (length, initial) = match first {
+        0..=0x7F => return (first, at + 1),
+        0xC0..=0xDF => (2, first & 0x1F),
+        0xE0..=0xEF => (3, first & 0x0F),
+        _ => (4, first & 0x07),
+    };
+    let end = (at + length).min(text.len());
+    let code = text[at + 1..end].iter().fold(initial, |code, byte| code << 6 | (*byte as u32 & 0x3F));
+    (code, end)
+}
+
+/// Where the piece that starts at `start` ends, following the model's splitting pattern.
+fn piece_end(text: &[u8], start: usize) -> usize {
+    let len = text.len();
+    let (first, second) = character(text, start);
+    if first == b'\'' as u32 {
+        for suffix in [&b"s"[..], b"t", b"re", b"ve", b"m", b"ll", b"d"] {
+            let end = second + suffix.len();
+            if end <= len && text[second..end].eq_ignore_ascii_case(suffix) {
+                return end;
+            }
+        }
+    }
+    let first_is_letter = is_letter(first);
+    let first_is_number = is_number(first);
+    let letters_from = if first_is_letter {
+        Some(start)
+    } else if !first_is_number && first != 13 && first != 10 && second < len && is_letter(character(text, second).0) {
+        Some(second)
+    } else {
+        None
+    };
+    if let Some(mut at) = letters_from {
+        while at < len {
+            let (code, next) = character(text, at);
+            if !is_letter(code) {
+                break;
+            }
+            at = next;
+        }
+        return at;
+    }
+    if first_is_number {
+        return second;
+    }
+
+    let symbols_from = if first == 32 { second } else { start };
+    let mut at = symbols_from;
+    while at < len {
+        let (code, next) = character(text, at);
+        if is_space(code) || is_letter(code) || is_number(code) {
+            break;
+        }
+        at = next;
+    }
+    if at > symbols_from {
+        while at < len && (text[at] == 13 || text[at] == 10) {
+            at += 1;
+        }
+        return at;
+    }
+
+    // A run of white space: through its last line break, or up to the following text.
+    let (mut end, mut break_end, mut previous) = (start, None, start);
+    while end < len {
+        let (code, next) = character(text, end);
+        if !is_space(code) {
+            break;
+        }
+        previous = end;
+        end = next;
+        if code == 13 || code == 10 {
+            break_end = Some(end);
+        }
+    }
+    if let Some(found) = break_end {
+        return found;
+    }
+    if end < len && previous > start {
+        return previous;
+    }
+    end.max(second)
+}
+
+/// The rank and result of merging two symbols, if the vocabulary has that pair.
+fn merge(first: u32, second: u32) -> Option<(u32, u32)> {
+    let mask = tok(TOK_MERGE_SLOTS) - 1;
+    let mut slot = first.wrapping_mul(0x9E37_79B1) ^ second.wrapping_mul(0x85EB_CA77);
+    let table = tok(TOK_MERGES);
+    loop {
+        slot &= mask;
+        let at = table + 4 * slot;
+        let stored = tok_word(at);
+        if stored == 0 {
+            return None;
+        }
+        if stored == first + 1 && tok_word(at + 1) == second {
+            return Some((tok_word(at + 2), tok_word(at + 3)));
+        }
+        slot += 1;
+    }
+}
+
+/// Byte-pair encoding of one piece; each token goes to `sink`.
+fn encode_piece(piece: &[u8], sink: &mut impl FnMut(u32)) {
+    let table = tok(TOK_BYTE_SYMBOLS);
+    for chunk in piece.chunks(MAX_SYMBOLS) {
+        let mut symbols = [0u32; MAX_SYMBOLS];
+        for (slot, byte) in symbols.iter_mut().zip(chunk) {
+            *slot = tok_word(table + *byte as u32);
+        }
+        let mut count = chunk.len();
+        while count > 1 {
+            let mut best: Option<(u32, u32, u32, u32)> = None;
+            for pair in symbols[..count].windows(2) {
+                if let Some((rank, id)) = merge(pair[0], pair[1]) {
+                    if best.is_none_or(|(lowest, ..)| rank < lowest) {
+                        best = Some((rank, pair[0], pair[1], id));
+                    }
+                }
+            }
+            let Some((_, first, second, id)) = best else { break };
+            let (mut read, mut write) = (0, 0);
+            while read < count {
+                if read + 1 < count && symbols[read] == first && symbols[read + 1] == second {
+                    symbols[write] = id;
+                    read += 2;
+                } else {
+                    symbols[write] = symbols[read];
+                    read += 1;
+                }
+                write += 1;
+            }
+            count = write;
+        }
+        for symbol in &symbols[..count] {
+            sink(*symbol);
+        }
+    }
+}
+
+/// The special token at the start of `text`, longest first: its number and length.
+fn added_token(text: &[u8]) -> Option<(u32, usize)> {
+    let table = tok(TOK_ADDED);
+    let mut best: Option<(u32, usize)> = None;
+    for index in 0..tok(TOK_ADDED_COUNT) {
+        let at = table + 3 * index;
+        let (id, offset, length) = (tok_word(at), tok_word(at + 1), tok_word(at + 2) as usize);
+        if length <= text.len() && best.is_none_or(|(_, longest)| length > longest) && (0..length).all(|i| blob_byte(offset + i as u32) == text[i]) {
+            best = Some((id, length));
+        }
+    }
+    best
+}
+
+fn encode_text(text: &[u8], sink: &mut impl FnMut(u32)) {
+    let mut at = 0;
+    while at < text.len() {
+        let mut stop = at;
+        while stop < text.len() && added_token(&text[stop..]).is_none() {
+            stop += 1;
+        }
+        let mut piece = at;
+        while piece < stop {
+            let end = piece_end(&text[..stop], piece);
+            encode_piece(&text[piece..end], sink);
+            piece = end;
+        }
+        if let Some((id, length)) = (stop < text.len()).then(|| added_token(&text[stop..])).flatten() {
+            sink(id);
+            at = stop + length;
+        } else {
+            at = stop;
+        }
+    }
+}
+
+/// Reads the whole prompt from the host and hands over its tokens.
+fn read_prompt(sink: &mut impl FnMut(u32)) {
+    if info(INFO_RAW_TOKENS) != 0 {
+        loop {
+            let mut token = 0u32;
+            for shift in 0..4 {
+                token |= (receive() as u32) << (8 * shift);
+            }
+            if token == END_OF_TOKENS {
+                return;
+            }
+            sink(token);
+        }
+    }
+    let buffer = unsafe { core::slice::from_raw_parts_mut(TOKENIZER.add(tok(TOK_TEXT) as usize) as *mut u8, tok(TOK_TEXT_CAPACITY) as usize) };
+    let mut length = 0;
+    loop {
+        let byte = receive();
+        if byte == 0 {
+            break;
+        }
+        if length < buffer.len() {
+            buffer[length] = byte;
+            length += 1;
+        }
+    }
+    encode_text(&buffer[..length], sink);
 }
 
 fn emit(token: u32) {
@@ -168,8 +419,11 @@ fn emit(token: u32) {
         for shift in 0..4 {
             send((token >> (8 * shift)) as u8);
         }
-    } else {
-        send(info(INFO_TOKEN_TO_BYTE + token as usize) as u8);
+        return;
+    }
+    let offsets = tok(TOK_OFFSETS);
+    for at in tok_word(offsets + token)..tok_word(offsets + token + 1) {
+        send(blob_byte(at));
     }
 }
 
@@ -179,11 +433,11 @@ extern "C" fn main() {
     peripheral_write(REG_SAMPLE_SEED, info(INFO_SEED));
     let (entry_token, entry_logits) = (info(INFO_ENTRY_TOKEN), info(INFO_ENTRY_LOGITS));
     let (mut last, mut position) = (0, 0);
-    while let Some(token) = next_token() {
+    read_prompt(&mut |token| {
         run_die(entry_token, token, position);
         last = token;
         position += 1;
-    }
+    });
     if position == 0 {
         return;
     }

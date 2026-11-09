@@ -369,10 +369,8 @@ pub const INFO_STOP_FIRST: usize = 13;
 pub const INFO_STOP_SECOND: usize = 14;
 pub const INFO_PARAMETERS: usize = 15;
 pub const INFO_PARAMETER_SLOTS: usize = 16;
-pub const INFO_BYTE_TO_TOKEN: usize = INFO_PARAMETERS + 4 * INFO_PARAMETER_SLOTS;
-pub const INFO_TOKEN_TO_BYTE: usize = INFO_BYTE_TO_TOKEN + 256;
 
-/// Settings for generating text, and the mapping between bytes and tokens.
+/// Settings for generating text.
 #[derive(Clone, Debug)]
 pub struct GenerationSetup {
     pub max_new: u32,
@@ -385,8 +383,6 @@ pub struct GenerationSetup {
     pub raw_tokens: bool,
     /// Tokens that end the generation; `u32::MAX` means none.
     pub stop: [u32; 2],
-    pub byte_to_token: Vec<u32>,
-    pub token_to_byte: Vec<u32>,
 }
 
 /// The chip description the firmware reads from its data memory.
@@ -411,9 +407,5 @@ pub fn chip_info(c: &DieConfig, code: &Microprogram, logits_register: u32, vocab
     for p in &code.parameters {
         info.extend([p.register, p.token, p.position, p.constant]);
     }
-    info.resize(INFO_BYTE_TO_TOKEN, 0);
-    info.extend_from_slice(&setup.byte_to_token);
-    info.resize(INFO_TOKEN_TO_BYTE, 0);
-    info.extend_from_slice(&setup.token_to_byte);
     info
 }

@@ -115,14 +115,14 @@ fn compare(image: &[u32], expected_output: &[u8]) {
 #[test]
 fn the_chip_boots_from_its_image_and_loads_every_segment() {
     let Some(firmware) = build_firmware() else { return };
-    let image = build_image(&firmware.program, &firmware.data, &[], &segments()).unwrap();
+    let image = build_image(&firmware.program, &firmware.data, &[], &[], &segments()).unwrap();
     compare(&image, b"...");
 }
 
 #[test]
 fn a_corrupted_segment_is_reported() {
     let Some(firmware) = build_firmware() else { return };
-    let mut image = build_image(&firmware.program, &firmware.data, &[], &segments()).unwrap();
+    let mut image = build_image(&firmware.program, &firmware.data, &[], &[], &segments()).unwrap();
     let last = image.len() - 1;
     image[last] ^= 0x10;
     compare(&image, b"..E");

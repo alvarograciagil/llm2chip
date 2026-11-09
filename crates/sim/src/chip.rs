@@ -96,11 +96,15 @@ pub struct RunnerEngine<'a> {
     pub saturated: u64,
     pub die_cycles: u64,
     pub error: Option<String>,
+    /// Every token the firmware has sent to the die, in order.
+    pub tokens: Vec<u32>,
+    /// How many times the firmware has asked for logits.
+    pub generated: usize,
 }
 
 impl<'a> RunnerEngine<'a> {
     pub fn new(engine: &'a mut dyn Runner, bits: u32, cycles_per_token: u64) -> Self {
-        Self { engine, pending: None, mantissas: Vec::new(), exponent: 0, bits, cycles_per_token, steps: 0, last_seconds: 0.0, saturated: 0, die_cycles: 0, error: None }
+        Self { engine, pending: None, mantissas: Vec::new(), exponent: 0, bits, cycles_per_token, steps: 0, last_seconds: 0.0, saturated: 0, die_cycles: 0, error: None, tokens: Vec::new(), generated: 0 }
     }
 
     fn step(&mut self, token: u32, want_logits: bool) {
@@ -128,6 +132,9 @@ impl DieEngine for RunnerEngine<'_> {
         if routine == crate::lower::ENTRY_TOKEN {
             self.die_cycles += self.cycles_per_token;
             self.pending = Some(token);
+            self.tokens.push(token);
+        } else if routine == crate::lower::ENTRY_LOGITS {
+            self.generated += 1;
         }
     }
 
