@@ -37,6 +37,7 @@ struct Gate {
 }
 
 struct Memory {
+    path: String,
     /// Differs from `addr` only for memories with a separate write port.
     write_addr: Vec<usize>,
     addr: Vec<usize>,
@@ -112,6 +113,7 @@ impl Elaborator<'_> {
                 InstKind::Prim(Prim::Mux2) => self.gates.push(Gate { op: Op::Mux, a: one("a"), b: one("b"), c: one("s"), y: one("y") }),
                 InstKind::Prim(Prim::Dff) => self.flops.push((one("d"), one("q"))),
                 InstKind::Prim(Prim::Ram2p { addr_bits, .. }) => self.memories.push(Memory {
+                    path: format!("{path}/{}", inst.name),
                     write_addr: conns["waddr"].clone(),
                     addr: conns["raddr"].clone(),
                     we: one("we"),
@@ -120,6 +122,7 @@ impl Elaborator<'_> {
                     cells: vec![0; 1usize << addr_bits],
                 }),
                 InstKind::Prim(Prim::Sram { addr_bits, .. }) => self.memories.push(Memory {
+                    path: format!("{path}/{}", inst.name),
                     write_addr: conns["addr"].clone(),
                     addr: conns["addr"].clone(),
                     we: one("we"),
@@ -215,6 +218,18 @@ impl Simulator {
         }
         sim.settle();
         Ok(sim)
+    }
+
+    /// Writes directly into a memory, as a testbench preloads one.
+    pub fn poke_memory(&mut self, path: &str, address: usize, value: u128) -> Result<(), SimError> {
+        let memory = self.memories.iter_mut().find(|m| m.path == path).ok_or_else(|| SimError(format!("memoria desconocida: {path}")))?;
+        let slot = memory.cells.get_mut(address).ok_or_else(|| SimError(format!("dirección fuera de {path}: {address}")))?;
+        *slot = value;
+        Ok(())
+    }
+
+    pub fn peek_memory(&self, path: &str, address: usize) -> Option<u128> {
+        self.memories.iter().find(|m| m.path == path).and_then(|m| m.cells.get(address).copied())
     }
 
     pub fn set(&mut self, port: &str, value: u64) -> Result<(), SimError> {

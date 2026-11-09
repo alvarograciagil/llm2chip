@@ -8,7 +8,9 @@ mod cell;
 pub mod demo;
 pub mod export;
 pub mod die;
+pub mod rv32;
 mod sim;
+pub mod soc;
 mod verilog;
 mod vhdl;
 
