@@ -1,2 +1,35 @@
-/** Agreement with floating point, measured on real Qwen3.8-27B weights (tests/golden/format_quality.md). */
-export const FORMAT_QUALITY: Record<string, { top1: number; kl: number }> = {};
+/**
+ * Agreement with floating point, measured on real Qwen3.8-27B weights (tests/golden/format_quality.md).
+ * Only presets whose group size matches the measured configuration appear here.
+ */
+export const FORMAT_QUALITY: Record<string, { top1: number; kl: number }> = {
+  Q2: { top1: 0, kl: 11.9131 },
+  Q3: { top1: 0, kl: 13.0815 },
+  Q4: { top1: 0, kl: 13.1163 },
+  Q5: { top1: 0, kl: 14.434 },
+  Q6: { top1: 43.8, kl: 0.9755 },
+  Q7: { top1: 87.5, kl: 0.1267 },
+  Q8: { top1: 87.5, kl: 0.0177 },
+  Q10: { top1: 100, kl: 0.0008 },
+  Q12: { top1: 100, kl: 0.0001 },
+  Q16: { top1: 100, kl: 0 },
+  Q24: { top1: 100, kl: 0 },
+  Q32: { top1: 100, kl: 0 },
+  "MLX 2 bits": { top1: 31.2, kl: 2.2172 },
+  "MLX 3 bits": { top1: 87.5, kl: 0.1466 },
+  "MLX 4 bits": { top1: 100, kl: 0.0048 },
+  "MLX 5 bits": { top1: 87.5, kl: 0.0056 },
+  Q4_0: { top1: 87.5, kl: 0.0478 },
+  Q8_0: { top1: 100, kl: 0.0001 },
+  "FP8 (E4M3)": { top1: 100, kl: 0.0066 },
+  FP16: { top1: 100, kl: 0 },
+  BF16: { top1: 100, kl: 0 },
+  FP24: { top1: 100, kl: 0 },
+  FP32: { top1: 100, kl: 0 },
+  "MXFP4 (E2M1 / 32)": { top1: 93.8, kl: 0.0648 },
+  "MXFP6 (E2M3 / 32)": { top1: 93.8, kl: 0.0054 },
+  "MXFP8 (E4M3 / 32)": { top1: 100, kl: 0.0066 },
+  "Posit8 es1": { top1: 93.8, kl: 0.0123 },
+  "Posit16 es1": { top1: 100, kl: 0 },
+  "LNS 8 (4 de fracción)": { top1: 81.2, kl: 0.18 },
+};
