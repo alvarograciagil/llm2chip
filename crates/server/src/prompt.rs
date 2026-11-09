@@ -73,15 +73,6 @@ impl PromptStyle {
         };
         environment.render_str(template, context).map(|text| (text, false)).map_err(|e| format!("la plantilla de chat del modelo falla: {e}"))
     }
-
-    /// The chip's firmware compares against two tokens.
-    pub fn stop_pair(&self) -> [u32; 2] {
-        match self.stop.as_slice() {
-            [] => [u32::MAX; 2],
-            [one] => [*one; 2],
-            [one, two, ..] => [*one, *two],
-        }
-    }
 }
 
 #[cfg(test)]
@@ -107,12 +98,5 @@ mod tests {
     fn a_template_that_refuses_reports_it() {
         let error = style(Some("{{ raise_exception('solo sistema') }}"), vec![]).render("hola", false).unwrap_err();
         assert!(error.contains("solo sistema"), "{error}");
-    }
-
-    #[test]
-    fn stop_tokens_fit_the_chips_two_slots() {
-        assert_eq!(style(None, vec![]).stop_pair(), [u32::MAX; 2]);
-        assert_eq!(style(None, vec![7]).stop_pair(), [7, 7]);
-        assert_eq!(style(None, vec![7, 8, 9]).stop_pair(), [7, 8]);
     }
 }

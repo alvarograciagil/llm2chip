@@ -369,8 +369,10 @@ fn check_envelope(model: &ModelGraph, p: &ChipParams, out: &mut Vec<Violation>) 
     }
 }
 
-/// Measured on Qwen3.8's tables: about 12 MB for 248,000 tokens.
-const TOKENIZER_BITS_PER_TOKEN: f64 = 400.0;
+/// The largest measured, Llama 3.2's; a test keeps real tables under it. Qwen uses half.
+pub const TOKENIZER_BITS_PER_TOKEN: f64 = 500.0;
+/// The CPU's program memory, the firmware's size rounded up to a power of two.
+pub const FIRMWARE_PROGRAM_BYTES: u32 = 1 << 15;
 
 /// Candidates the sampling unit keeps.
 const SAMPLER_ENTRIES: f64 = 64.0;
@@ -526,6 +528,12 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     let tokenizer_density = if p.weight_backend == WeightBackend::Rom { tech.rom_mbit_mm2 } else { tech.sram_density(1024.0) };
     push("tokenizer_tables", "Tablas del tokenizador", tokenizer_bits / 1e6 / tokenizer_density / d,
         "Vocabulario y fusiones que el firmware usa para convertir texto en tokens y volver.");
+    // Not in the tech file's CPU figure: this grows with the context the design allows.
+    let (text_bytes, arena_words) = tokenizer_rt::memory_for_context(p.context_tokens);
+    let cpu_memory_bits = 8.0 * (FIRMWARE_PROGRAM_BYTES as f64 + text_bytes as f64 + 4.0 * arena_words as f64);
+    let cpu_memory_share = if p.die_mode == DieMode::Identical { 1.0 } else { 1.0 / d };
+    push("cpu_memory", "Memoria de la CPU", cpu_memory_bits / 1e6 / tech.sram_density(1024.0) * cpu_memory_share,
+        "Programa del firmware y memoria donde el tokenizador trabaja con el texto de entrada.");
     push("control", "Secuenciador y microprograma", 0.8,
         "Ejecuta el microprograma que dirige cada etapa.");
     // Interchangeable dies all carry the CPU, even though only the first one leads.
@@ -569,6 +577,7 @@ fn driven_by(id: &str) -> &'static [&'static str] {
     match id {
         "cell_weights" => &["max_params_g", "weight_coding", "weight_bits", "group_size", "weight_backend"],
         "weight_tables" => &["weight_coding", "weight_bits"],
+        "cpu_memory" => &["context_tokens"],
         "cell_macs" => &["macs_per_die", "multiplier_kind", "weight_coding", "weight_bits", "weight_exponent_bits", "activation_bits", "mac_stages"],
         "scale_units" => &["group_size", "scale_bits"],
         "activation_noc" => &["macs_per_die", "activation_bits", "noc_stages"],
@@ -1097,6 +1106,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             "mtp_rollback" => (0.0, 0.0, 0.0, format!("{depth} copias del estado recurrente.")),
             "control" => (1.0, 0.0, 0.0, "Área fija estimada por die.".into()),
             "tokenizer_tables" => (0.0, 0.0, 0.0, format!("{:.0} Mbit para un vocabulario de {} tokens.", model.vocab_size as f64 * TOKENIZER_BITS_PER_TOKEN / 1e6, model.vocab_size)),
+            "cpu_memory" => (0.0, 0.0, 0.0, format!("Para prompts de hasta {} tokens.", p.context_tokens)),
             "sampler" => (0.0, 0.0, 0.0, format!("{} carriles de filtro y {} candidatos.", p.sampler_lanes, SAMPLER_ENTRIES)),
             "links" => (link_cycles / total_cycles, 0.0, link_bytes, "Un punto de enlace por die.".into()),
             _ => (0.0, 0.0, 0.0, "Área fija estimada.".into()),
@@ -1404,6 +1414,24 @@ mod tests {
         let report = estimate(&stories, &p).unwrap();
         assert_eq!(report.dies, 1);
         assert!(report.die_area_mm2 < 20.0, "{}", report.die_area_mm2);
+    }
+
+    #[test]
+    fn the_firmware_fits_the_program_memory_the_estimate_counts() {
+        let elf = include_bytes!("../../../firmware/prebuilt/firmware.elf");
+        let word = |at: usize| u32::from_le_bytes(elf[at..at + 4].try_into().unwrap()) as usize;
+        let entries = u16::from_le_bytes(elf[44..46].try_into().unwrap()) as usize;
+        let at_address_zero = (0..entries).map(|i| word(28) + 32 * i).find(|at| word(*at) == 1 && word(*at + 8) == 0).unwrap();
+        assert!(word(at_address_zero + 16) <= FIRMWARE_PROGRAM_BYTES as usize);
+    }
+
+    #[test]
+    fn working_memory_follows_the_context() {
+        let area = |context| {
+            let report = estimate(&qwen(), &ChipParams { context_tokens: context, ..Default::default() }).unwrap();
+            report.blocks.iter().find(|b| b.id == "cpu_memory").unwrap().per_die_mm2
+        };
+        assert!(area(32768) > 3.0 * area(8192));
     }
 
     #[test]

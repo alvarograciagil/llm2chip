@@ -4,7 +4,7 @@
 //! code runs in the firmware and in the tests that compare it with the library.
 #![no_std]
 
-pub const HEADER_WORDS: usize = 34;
+pub const HEADER_WORDS: usize = 35;
 pub const F_CLASSES: usize = 0;
 pub const F_BLOB: usize = 1;
 pub const F_NORMALIZER: usize = 2;
@@ -39,6 +39,19 @@ pub const F_FIRST_TOKEN_SPACES: usize = 30;
 pub const F_TEXT: usize = 31;
 pub const F_TEXT_BYTES: usize = 32;
 pub const F_ARENA_WORDS: usize = 33;
+pub const F_MERGE_ENTRIES: usize = 34;
+
+/// Room for the text of a full context, at a generous eight bytes per token.
+pub const TEXT_BYTES_PER_TOKEN: u32 = 8;
+/// Working memory for each byte of text: its copies, its pieces and the matching stack.
+pub const ARENA_WORDS_PER_TEXT_BYTE: u32 = 6;
+const LARGEST_CONTEXT: u64 = 1 << 20;
+
+/// The text bytes and working words a chip needs for prompts of up to this many tokens.
+pub fn memory_for_context(tokens: u64) -> (u32, u32) {
+    let text = tokens.clamp(32, LARGEST_CONTEXT) as u32 * TEXT_BYTES_PER_TOKEN;
+    (text, text * ARENA_WORDS_PER_TEXT_BYTE)
+}
 
 pub const MODEL_BPE: u32 = 0;
 pub const MODEL_WORD_LEVEL: u32 = 1;
@@ -48,6 +61,8 @@ pub const ADDED_LSTRIP: u32 = 2;
 pub const ADDED_RSTRIP: u32 = 4;
 /// Where the first byte of an added token sits in its flags, to reject most positions cheaply.
 pub const ADDED_FIRST_SHIFT: u32 = 8;
+/// Words before each table of added tokens: one bit for each possible first byte.
+pub const ADDED_BITMAP_WORDS: usize = 8;
 
 pub const R_MATCH: u32 = 0;
 pub const R_CHAR: u32 = 1;
@@ -91,6 +106,8 @@ pub const FORM_WORDS: usize = 7;
 
 const ADDED_PIECE: u32 = u32::MAX;
 const NO_RANK: u32 = u32::MAX;
+const DEAD_SYMBOL: u32 = u32::MAX;
+const MERGE_BLOCK: usize = 64;
 const HANGUL_S: u32 = 0xAC00;
 const HANGUL_L: u32 = 0x1100;
 const HANGUL_V: u32 = 0x1161;
@@ -241,10 +258,11 @@ struct Work<'a> {
 
 impl<'a> Work<'a> {
     fn new(arena: &'a mut [u32]) -> Self {
-        let quarter = arena.len() / 4;
-        let (stack, rest) = arena.split_at_mut(quarter);
-        let (first, rest) = rest.split_at_mut(quarter / 2);
-        let (second, bytes) = rest.split_at_mut(quarter / 2);
+        // Models without a pre-tokenizer byte-pair encode the whole text as one piece.
+        let (half, twelfth) = (arena.len() / 2, arena.len() / 12);
+        let (stack, rest) = arena.split_at_mut(half);
+        let (first, rest) = rest.split_at_mut(twelfth);
+        let (second, bytes) = rest.split_at_mut(twelfth);
         // SAFETY: every bit pattern is valid for both types, and u8 needs no alignment.
         let bytes = unsafe { core::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut u8, bytes.len() * 4) };
         Self { bytes, used: 0, pieces: Pieces { lists: [first, second], live: 0, count: 0, written: 0 }, stack }
@@ -705,6 +723,11 @@ impl<'a> Tokenizer<'a> {
 
     /// The added token that starts here, longest first: its table entry and length.
     fn added_at(&self, table: usize, count: usize, text: &[u8]) -> Option<(usize, usize)> {
+        // Hundreds of added tokens share a few first bytes, so most positions end here.
+        let first = text[0] as usize;
+        if self.t[table - ADDED_BITMAP_WORDS + first / 32] >> (first % 32) & 1 == 0 {
+            return None;
+        }
         let mut best: Option<(usize, usize)> = None;
         for index in 0..count {
             let entry = table + 4 * index;
@@ -782,9 +805,9 @@ impl<'a> Tokenizer<'a> {
 
     fn vocabulary(&self, bytes: impl Iterator<Item = u8>) -> Option<u32> {
         let (first, second) = hash_string(self.t[F_SEED], bytes);
-        let mask = self.field(F_VOCAB_SLOTS).checked_sub(1)?;
+        let slots = self.field(F_VOCAB_SLOTS);
         let table = self.field(F_VOCAB);
-        let mut slot = first as usize & mask;
+        let mut slot = first as usize % slots;
         loop {
             let stored = self.t[table + 2 * slot + 1];
             if stored == 0 {
@@ -793,59 +816,96 @@ impl<'a> Tokenizer<'a> {
             if self.t[table + 2 * slot] == second {
                 return Some(stored - 1);
             }
-            slot = (slot + 1) & mask;
+            slot = (slot + 1) % slots;
         }
     }
 
+    /// The rank and result of joining two symbols. The hash table holds only ranks.
     fn merge(&self, first: u32, second: u32) -> (u32, u32) {
-        let mask = self.t[F_MERGE_SLOTS] - 1;
-        let table = self.t[F_MERGES];
-        let mut slot = pair_slot(first, second);
+        let (slots, table, entries) = (self.field(F_MERGE_SLOTS), self.field(F_MERGES), self.field(F_MERGE_ENTRIES));
+        let mut slot = pair_slot(first, second) as usize % slots;
         loop {
-            slot &= mask;
-            let at = (table + 4 * slot) as usize;
-            let stored = self.t[at];
+            let stored = self.t[table + slot] as usize;
             if stored == 0 {
                 return (NO_RANK, 0);
             }
-            if stored == first + 1 && self.t[at + 1] == second {
-                return (self.t[at + 2], self.t[at + 3]);
+            let entry = entries + 3 * (stored - 1);
+            if self.t[entry] == first && self.t[entry + 1] == second {
+                return (stored as u32 - 1, self.t[entry + 2]);
             }
-            slot += 1;
+            slot = (slot + 1) % slots;
         }
     }
 
-    /// Always the lowest-ranked pair next, the leftmost if the same pair repeats.
-    fn merge_symbols(&self, stack: &mut [u32], mut count: usize) -> usize {
-        let total = count;
-        let (symbols, rest) = stack.split_at_mut(total);
-        let (ranks, results) = rest.split_at_mut(total);
-        for i in 0..count.saturating_sub(1) {
+    /// Always the lowest-ranked pair next, the leftmost if the same pair repeats. Merged
+    /// symbols are only marked, and a minimum per block keeps a long text from being
+    /// scanned once per merge.
+    fn merge_symbols(&self, stack: &mut [u32], count: usize) -> usize {
+        if count < 2 {
+            return count;
+        }
+        let blocks = count.div_ceil(MERGE_BLOCK);
+        let (symbols, rest) = stack.split_at_mut(count);
+        let (ranks, rest) = rest.split_at_mut(count);
+        let (results, rest) = rest.split_at_mut(count);
+        let best = &mut rest[..blocks];
+        for i in 0..count - 1 {
             (ranks[i], results[i]) = self.merge(symbols[i], symbols[i + 1]);
         }
-        while count > 1 {
-            let mut best = 0;
-            for i in 1..count - 1 {
-                if ranks[i] < ranks[best] {
-                    best = i;
+        ranks[count - 1] = NO_RANK;
+        fn refresh(ranks: &[u32], best: &mut [u32], block: usize) {
+            let end = ((block + 1) * MERGE_BLOCK).min(ranks.len());
+            best[block] = ranks[block * MERGE_BLOCK..end].iter().copied().min().unwrap_or(NO_RANK);
+        }
+        for block in 0..blocks {
+            refresh(ranks, best, block);
+        }
+        loop {
+            let (mut block, mut lowest) = (0, best[0]);
+            for (index, value) in best.iter().enumerate().skip(1) {
+                if *value < lowest {
+                    (block, lowest) = (index, *value);
                 }
             }
-            if ranks[best] == NO_RANK {
+            if lowest == NO_RANK {
                 break;
             }
-            symbols[best] = results[best];
-            symbols.copy_within(best + 2..count, best + 1);
-            ranks.copy_within(best + 1..count - 1, best);
-            results.copy_within(best + 1..count - 1, best);
-            count -= 1;
-            if best > 0 {
-                (ranks[best - 1], results[best - 1]) = self.merge(symbols[best - 1], symbols[best]);
+            let mut at = block * MERGE_BLOCK;
+            while ranks[at] != lowest {
+                at += 1;
             }
-            if best + 1 < count {
-                (ranks[best], results[best]) = self.merge(symbols[best], symbols[best + 1]);
+            let mut next = at + 1;
+            while symbols[next] == DEAD_SYMBOL {
+                next += 1;
+            }
+            symbols[at] = results[at];
+            symbols[next] = DEAD_SYMBOL;
+            ranks[next] = NO_RANK;
+            let mut after = next + 1;
+            while after < count && symbols[after] == DEAD_SYMBOL {
+                after += 1;
+            }
+            (ranks[at], results[at]) = if after < count { self.merge(symbols[at], symbols[after]) } else { (NO_RANK, 0) };
+            let mut before = at;
+            while before > 0 {
+                before -= 1;
+                if symbols[before] != DEAD_SYMBOL {
+                    (ranks[before], results[before]) = self.merge(symbols[before], symbols[at]);
+                    refresh(ranks, best, before / MERGE_BLOCK);
+                    break;
+                }
+            }
+            refresh(ranks, best, at / MERGE_BLOCK);
+            refresh(ranks, best, next / MERGE_BLOCK);
+        }
+        let mut kept = 0;
+        for read in 0..count {
+            if symbols[read] != DEAD_SYMBOL {
+                symbols[kept] = symbols[read];
+                kept += 1;
             }
         }
-        count
+        kept
     }
 
     fn encode_bpe(&self, text: &[u8], stack: &mut [u32], sink: &mut impl FnMut(u32)) -> Outcome {
@@ -856,9 +916,9 @@ impl<'a> Tokenizer<'a> {
             }
         }
         let characters = text.iter().filter(|b| **b & 0xC0 != 0x80).count();
-        // Each character can become as many symbols as it has bytes with its affixes.
-        let room = (text.len() + (self.field(F_PREFIX_LEN) + self.field(F_SUFFIX_LEN)) * characters) * 3;
-        if room > stack.len() {
+        // Without byte fallback a character is one symbol; with it, one per byte and affix.
+        let symbols = if self.t[F_BYTE_FALLBACK] == 0 { characters } else { text.len() + (self.field(F_PREFIX_LEN) + self.field(F_SUFFIX_LEN)) * characters };
+        if symbols * 3 + symbols.div_ceil(MERGE_BLOCK) > stack.len() {
             return Err(OutOfMemory);
         }
         let (prefix, prefix_len, suffix, suffix_len) = (self.field(F_PREFIX), self.field(F_PREFIX_LEN), self.field(F_SUFFIX), self.field(F_SUFFIX_LEN));

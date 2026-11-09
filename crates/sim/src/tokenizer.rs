@@ -9,13 +9,14 @@ use std::path::Path;
 use tokenizer_rt::*;
 use unicode_normalization_alignments::char as unicode;
 
-/// Bytes set aside for the incoming text.
-const TEXT_BYTES: u32 = 1 << 18;
-/// Words of working memory for the steps of tokenization.
-const ARENA_WORDS: u32 = 1 << 19;
 const GPT2_PATTERN: &str = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+";
 const MAX_PROGRAM_WORDS: usize = 1 << 16;
 const LAST_CHARACTER: u32 = 0x10FFFF;
+
+/// Hash tables are kept two thirds full, which costs a probe or two per lookup.
+fn hash_slots(entries: usize) -> usize {
+    entries + entries / 2 + 1
+}
 
 /// The tables as the words of the firmware's memory.
 #[derive(Clone, Debug, Default)]
@@ -825,8 +826,10 @@ fn decoded(tokens: &mut [Vec<u8>], decoder: &Value, fused: &mut bool, leading: &
 }
 
 impl TokenizerTables {
-    pub fn from_file(path: &Path) -> Result<Self, String> {
-        Self::from_json(&std::fs::read_to_string(path).map_err(|e| e.to_string())?, TEXT_BYTES, ARENA_WORDS)
+    /// Compiles a model's tokenizer for a chip with this much context.
+    pub fn from_file(path: &Path, context_tokens: u64) -> Result<Self, String> {
+        let (text_bytes, arena_words) = memory_for_context(context_tokens);
+        Self::from_json(&std::fs::read_to_string(path).map_err(|e| e.to_string())?, text_bytes, arena_words)
     }
 
     /// Compiles the text of a `tokenizer.json`, with room for that much text and work.
@@ -891,10 +894,16 @@ impl TokenizerTables {
             let list = if is_normalized { &mut normalized } else { &mut raw };
             list.extend([token["id"].as_u64().unwrap_or(0) as u32, at, length, flags]);
         }
-        b.words[F_ADDED_RAW_COUNT] = raw.len() as u32 / 4;
-        b.words[F_ADDED_RAW] = b.place(&raw);
-        b.words[F_ADDED_NORMALIZED_COUNT] = normalized.len() as u32 / 4;
-        b.words[F_ADDED_NORMALIZED] = b.place(&normalized);
+        for (table, field, count) in [(&raw, F_ADDED_RAW, F_ADDED_RAW_COUNT), (&normalized, F_ADDED_NORMALIZED, F_ADDED_NORMALIZED_COUNT)] {
+            let mut bitmap = [0u32; ADDED_BITMAP_WORDS];
+            for entry in table.chunks(4) {
+                let first = entry[3] >> ADDED_FIRST_SHIFT;
+                bitmap[first as usize / 32] |= 1 << (first % 32);
+            }
+            b.place(&bitmap);
+            b.words[field] = b.place(table);
+            b.words[count] = table.len() as u32 / 4;
+        }
 
         let affix = |key: &str| model[key].as_str().unwrap_or("").to_string();
         let (prefix, suffix) = (affix("continuing_subword_prefix"), affix("end_of_word_suffix"));
@@ -908,7 +917,7 @@ impl TokenizerTables {
             bare.chars().count() == 1 || text.chars().count() == 1
         };
         let entries: Vec<(&str, u32)> = ids.iter().filter(|(text, _)| !is_bpe || ignore_merges || is_symbol(text)).map(|(text, id)| (*text, *id)).collect();
-        let slots = (entries.len() * 2).next_power_of_two().max(2);
+        let slots = hash_slots(entries.len());
         let seed = (0..).find(|seed| {
             let mut seen = HashSet::new();
             entries.iter().all(|(text, _)| seen.insert(hash_string(*seed, text.bytes())))
@@ -916,9 +925,9 @@ impl TokenizerTables {
         let mut vocabulary_table = vec![0u32; slots * 2];
         for (text, id) in &entries {
             let (first, second) = hash_string(seed, text.bytes());
-            let mut slot = first as usize & (slots - 1);
+            let mut slot = first as usize % slots;
             while vocabulary_table[2 * slot + 1] != 0 {
-                slot = (slot + 1) & (slots - 1);
+                slot = (slot + 1) % slots;
             }
             vocabulary_table[2 * slot] = second;
             vocabulary_table[2 * slot + 1] = id + 1;
@@ -945,17 +954,19 @@ impl TokenizerTables {
                     .collect()
             })
             .unwrap_or_default();
-        let merge_slots = (merges.len().max(1) * 2).next_power_of_two();
-        let mut hash = vec![0u32; merge_slots * 4];
-        for (rank, (first, second, result)) in merges.iter().enumerate() {
-            let mut slot = pair_slot(*first, *second) as usize & (merge_slots - 1);
-            while hash[slot * 4] != 0 {
-                slot = (slot + 1) & (merge_slots - 1);
+        let merge_slots = hash_slots(merges.len());
+        let mut hash = vec![0u32; merge_slots];
+        for (rank, (first, second, _)) in merges.iter().enumerate() {
+            let mut slot = pair_slot(*first, *second) as usize % merge_slots;
+            while hash[slot] != 0 {
+                slot = (slot + 1) % merge_slots;
             }
-            hash[slot * 4..slot * 4 + 4].copy_from_slice(&[first + 1, *second, rank as u32, *result]);
+            hash[slot] = rank as u32 + 1;
         }
+        let entries: Vec<u32> = merges.iter().flat_map(|(first, second, result)| [*first, *second, *result]).collect();
         b.words[F_MERGE_SLOTS] = merge_slots as u32;
         b.words[F_MERGES] = b.place(&hash);
+        b.words[F_MERGE_ENTRIES] = b.place(&entries);
 
         if is_bpe && model["byte_fallback"].as_bool().unwrap_or(false) {
             let table: Vec<u32> = (0..=255u8).map(|byte| ids.get(format!("<0x{byte:02X}>").as_str()).map_or(0, |id| id + 1)).collect();
@@ -1018,6 +1029,11 @@ impl TokenizerTables {
     /// Decides whether the post-processor's special tokens surround the text.
     pub fn set_add_special(&mut self, add: bool) {
         self.words[F_ADD_SPECIAL] = add as u32;
+    }
+
+    /// The words of the tables alone, without the room for text and work.
+    pub fn table_words(&self) -> usize {
+        self.words.len()
     }
 
     /// The tables, then the empty text buffer and working memory that follow them.

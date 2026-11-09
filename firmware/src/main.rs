@@ -53,8 +53,8 @@ const INFO_SEED: usize = 9;
 const INFO_ACTIVATION_BITS: usize = 10;
 const INFO_PARAMETER_COUNT: usize = 11;
 const INFO_RAW_TOKENS: usize = 12;
-const INFO_STOP_FIRST: usize = 13;
-const INFO_STOP_SECOND: usize = 14;
+const INFO_STOP_COUNT: usize = 13;
+const INFO_STOP_TABLE: usize = 14;
 const INFO_PARAMETERS: usize = 15;
 
 /// The tokenizer's tables, which the image builder leaves after the segment table.
@@ -346,13 +346,13 @@ extern "C" fn main() {
     if position == 0 {
         return;
     }
-    let (first_stop, second_stop) = (info(INFO_STOP_FIRST), info(INFO_STOP_SECOND));
+    let stops = info(INFO_STOP_TABLE) as usize..(info(INFO_STOP_TABLE) + info(INFO_STOP_COUNT)) as usize;
     // Raw mode has no tokenizer in memory to ask.
     let mut decoding = if info(INFO_RAW_TOKENS) != 0 { Decoding::default() } else { tokenizer().decoding() };
     for _ in 0..info(INFO_MAX_NEW) {
         run_die(entry_logits, last, position - 1);
         last = sample();
-        if last == first_stop || last == second_stop {
+        if stops.clone().any(|at| info(at) == last) {
             return;
         }
         emit(last, &mut decoding);

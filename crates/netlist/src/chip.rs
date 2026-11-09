@@ -505,8 +505,8 @@ pub const INFO_SEED: usize = 9;
 pub const INFO_ACTIVATION_BITS: usize = 10;
 pub const INFO_PARAMETER_COUNT: usize = 11;
 pub const INFO_RAW_TOKENS: usize = 12;
-pub const INFO_STOP_FIRST: usize = 13;
-pub const INFO_STOP_SECOND: usize = 14;
+pub const INFO_STOP_COUNT: usize = 13;
+pub const INFO_STOP_TABLE: usize = 14;
 pub const INFO_PARAMETERS: usize = 15;
 pub const INFO_PARAMETER_SLOTS: usize = 16;
 
@@ -521,8 +521,8 @@ pub struct GenerationSetup {
     pub seed: u32,
     /// The host exchanges 32-bit token numbers instead of text.
     pub raw_tokens: bool,
-    /// Tokens that end the generation; `u32::MAX` means none.
-    pub stop: [u32; 2],
+    /// Tokens that end the generation, as many as the model has.
+    pub stop: Vec<u32>,
 }
 
 /// The chip description the firmware reads from its data memory.
@@ -540,12 +540,13 @@ pub fn chip_info(c: &DieConfig, code: &Microprogram, logits_register: u32, vocab
     info[INFO_SEED] = setup.seed;
     info[INFO_ACTIVATION_BITS] = c.cell.activation_bits;
     info[INFO_RAW_TOKENS] = setup.raw_tokens as u32;
-    info[INFO_STOP_FIRST] = setup.stop[0];
-    info[INFO_STOP_SECOND] = setup.stop[1];
+    info[INFO_STOP_COUNT] = setup.stop.len() as u32;
     assert!(code.parameters.len() <= INFO_PARAMETER_SLOTS, "demasiados parámetros");
     info[INFO_PARAMETER_COUNT] = code.parameters.len() as u32;
     for p in &code.parameters {
         info.extend([p.register, p.token, p.position, p.constant]);
     }
+    info[INFO_STOP_TABLE] = info.len() as u32;
+    info.extend_from_slice(&setup.stop);
     info
 }

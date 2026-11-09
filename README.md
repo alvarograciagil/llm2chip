@@ -121,7 +121,7 @@ Windows tiene los equivalentes `.ps1`. Los pesos no se incluyen: la aplicación 
 - La netlist de un chip completo, de bytes de entrada a bytes de salida, coincide ciclo a ciclo con la simulación rápida en un modelo Qwen3.5 diminuto.
 - Con una misma imagen, dos chips idénticos en una placa simulada, con retardos y bits invertidos en los enlaces, generan el mismo texto y los mismos logits que uno solo.
 - La máquina de enteros exactos coincide bit a bit con las puertas en todos los búferes de esos modelos.
-- Qwen3.8-27B real se ejecuta de principio a fin con el firmware del chip. El tokenizador del firmware se compila desde el `tokenizer.json` de cada modelo y coincide con la biblioteca de referencia en miles de textos difíciles.
+- Qwen3.8-27B real se ejecuta de principio a fin con el firmware del chip. El tokenizador del firmware se compila desde el `tokenizer.json` de cada modelo y coincide con la biblioteca de referencia en miles de textos difíciles, también con los archivos reales de Llama 3.2, Mistral 7B, Mistral Nemo y DeepSeek V3.
 - Llama, Llama 3, Mistral y Qwen3 con pesos aleatorios diminutos dan los mismos logits que `mlx-lm`, token a token.
 - Cada formato de peso y cada multiplicador se comprueban contra la aritmética de referencia, y el Verilog y el VHDL exportados se ejecutan en simuladores externos.
 

@@ -23,7 +23,9 @@ fn build_firmware() -> Option<FirmwareImage> {
 fn local_tokenizers() -> Vec<PathBuf> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return Vec::new() };
     let mut found = Vec::new();
-    for root in [home.join(".mtplx/models"), home.join(".llm2chip/models")] {
+    // Other tokenizers to compare, each file in its own folder under this one.
+    let extra = std::env::var_os("LLM2CHIP_TOKENIZERS").map(PathBuf::from);
+    for root in [home.join(".mtplx/models"), home.join(".llm2chip/models")].into_iter().chain(extra) {
         for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
             found.push(entry.path().join("tokenizer.json"));
         }
@@ -210,6 +212,66 @@ fn what_cannot_be_done_is_refused_with_the_reason() {
     refused(r#"{"pre_tokenizer":{"type":"Split","pattern":{"Regex":"(a*)*"},"behavior":"Isolated"},"model":{"type":"BPE","vocab":{},"merges":[]}}"#, "vacío");
 }
 
+/// Text as far as it stays within this many tokens and the bytes set aside for them.
+fn filled_to_context(reference: &Tokenizer, seed: &str, context: u64, text_bytes: usize) -> String {
+    let (mut low, mut high) = (1, text_bytes / seed.len() + 1);
+    while low + 1 < high {
+        let middle = (low + high) / 2;
+        let text = seed.repeat(middle);
+        if text.len() <= text_bytes && reference.encode(text.as_str(), false).unwrap().len() as u64 <= context {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    seed.repeat(low)
+}
+
+const TEXTURES: &[&str] = &[
+    "The quick brown fox, who wasn't late, jumped over 12 lazy dogs.\n",
+    "¿Cuál es la capital de Francia? Responde en una frase, por favor. ",
+    "日本語のテキストと中文混合のサンプル文章です。",
+    "한국어 문장을 여러 번 반복합니다. 안녕하세요. ",
+    "Русский текст для проверки памяти токенизатора. ",
+    "fn main() { let x = vec![1, 2, 3]; println!(\"{:?}\", x); }\r\n",
+    "😀👍🏽🇪🇸 👨\u{200d}👩\u{200d}👧 ",
+    "1234567890 3.14159 ",
+    "cafe\u{301} n\u{303} e\u{301}e\u{301} ",
+];
+
+#[test]
+fn a_prompt_as_long_as_the_context_fits_in_the_memory_set_aside() {
+    const CONTEXT: u64 = 1024;
+    let (text_bytes, arena_words) = tokenizer_rt::memory_for_context(CONTEXT);
+    let mut failures = Vec::new();
+    for path in local_tokenizers() {
+        let reference = Tokenizer::from_file(&path).unwrap();
+        let json = std::fs::read_to_string(&path).unwrap();
+        let tables = TokenizerTables::from_json(&json, text_bytes, arena_words).unwrap();
+        for seed in TEXTURES {
+            let text = filled_to_context(&reference, seed, CONTEXT, text_bytes as usize);
+            match tables.encode(&text) {
+                Ok(tokens) if tokens == reference.encode(text.as_str(), false).unwrap().get_ids() => {}
+                other => failures.push(format!("{} con {seed:?} ({} bytes): {}", path.display(), text.len(), other.map_or_else(|e| e, |_| "tokens distintos".to_string()))),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn the_tables_stay_within_what_the_estimator_assumes() {
+    let mut worst = 0f64;
+    for path in local_tokenizers() {
+        let tables = TokenizerTables::from_file(&path, 256).unwrap();
+        let vocabulary = Tokenizer::from_file(&path).unwrap().get_vocab_size(true) as f64;
+        let bits = tables.table_words() as f64 * 32.0 / vocabulary;
+        eprintln!("{:>6.0} bits por token: {}", bits, path.display());
+        worst = worst.max(bits);
+    }
+    assert!(worst <= arch::TOKENIZER_BITS_PER_TOKEN, "{worst} bits por token");
+}
+
 #[test]
 fn running_out_of_memory_is_reported_not_misread() {
     let json = style_json(STYLES[0].1);
@@ -233,20 +295,22 @@ fn the_firmware_tokenizes_like_the_reference() {
 
 fn firmware_matches(firmware: &FirmwareImage, path: &Path, failures: &mut Vec<String>) {
     let reference = Tokenizer::from_file(path).unwrap();
-    let tables = TokenizerTables::from_file(path).unwrap().to_words();
+    let tables = TokenizerTables::from_file(path, 8192).unwrap().to_words();
     eprintln!("tablas: {} palabras", tables.len());
 
     let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false };
     let die = DieConfig { cells: 1, cell, scale_bits: 16, reg_bits: 12, index_bits: 18, microcode_bits: 2, broadcast_stages: 1, function_bits: 12, function_select_bits: 3 };
     let code = Microprogram { words: Vec::new(), entries: vec![0, 1], parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0 }] };
-    let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: false, stop: [u32::MAX, u32::MAX] };
+    let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: false, stop: Vec::new() };
     let info = chip_info(&die, &code, 1, 248_077, &setup);
     let image = build_image(&firmware.program, &firmware.data, &info, &tables, &[]).unwrap();
     let soc = SocConfig { program_bits: 14, data_bits: (tables.len() + (1 << 14)).next_power_of_two().ilog2(), fifo_bits: 6 };
     let _ = ChipConfig { soc, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 18, entries: 4, lanes: 1 } };
 
-    for text in TEXTS {
-        let expected = reference.encode(*text, false).unwrap().get_ids().to_vec();
+    // A prompt of several thousand tokens, which some models encode as a single piece.
+    let long = "The quick brown fox, who wasn't late, jumped over 12 lazy dogs.\n".repeat(320);
+    for text in TEXTS.iter().copied().chain([long.as_str()]) {
+        let expected = reference.encode(text, false).unwrap().get_ids().to_vec();
         let tokens = Rc::new(RefCell::new(Vec::new()));
         let mut input = text.as_bytes().to_vec();
         input.push(0);
@@ -259,7 +323,7 @@ fn firmware_matches(firmware: &FirmwareImage, path: &Path, failures: &mut Vec<St
             assert!(cpu.cycle < 2_000_000_000, "el firmware no termina con {text:?}");
         }
         let got = tokens.borrow().clone();
-        eprintln!("{:>9} ciclos, {:>3} tokens: {text:?}", cpu.cycle, got.len());
+        eprintln!("{:>9} ciclos, {:>3} tokens: {:?}", cpu.cycle, got.len(), &text[..text.len().min(40)]);
         if got != expected {
             failures.push(format!("{} {text:?}\n  firmware:   {got:?}\n  referencia: {expected:?}", path.display()));
         }

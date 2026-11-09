@@ -92,7 +92,7 @@ fn text_goes_through_the_whole_chip_in_gates() {
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), die, Some(CHIP_TOKENS)).unwrap();
     let code = layout.microprogram(&program).unwrap();
-    let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: [u32::MAX, u32::MAX] };
+    let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new() };
     let info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
     let mut segments = image_segments(&die, &code, &layout);
     // A sample of the model's own weights goes through the real controller into a cell.
@@ -135,4 +135,38 @@ fn text_goes_through_the_whole_chip_in_gates() {
         assert_eq!(sim.peek_memory("/die/cell0/compute/weight_sram", address), Some(*code as u128), "peso {address}");
     }
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "millones de instrucciones: solo con optimizaciones")]
+fn any_token_on_the_stop_list_ends_the_answer() {
+    let Some(firmware) = build_firmware() else { return };
+    let dir = std::env::temp_dir().join(format!("llm2chip-stop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+    let die = netlist::DieConfig { microcode_bits: 15, ..die_config() };
+    let sampler = SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 };
+    let soc = SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 };
+    let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), die, Some(CHIP_TOKENS)).unwrap();
+    let code = layout.microprogram(&program).unwrap();
+    let generate = |stop: Vec<u32>| {
+        let setup = GenerationSetup { max_new: 1, greedy: true, limit: 4, temperature: 256, seed: 1, raw_tokens: false, stop };
+        let info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
+        let image = build_image(&firmware.program, &firmware.data, &info, &tiny_tokenizer().to_words(), &image_segments(&die, &code, &layout)).unwrap();
+        let engine = VmEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
+        let model = ChipModel::new(engine, code.clone(), SamplerModel { config: sampler, rng: 0, table: exponential_table() });
+        let mut bus = SocBus::booted_with(soc, &image, b"hoy\0", model).unwrap();
+        let mut cpu = Rv32Iss::default();
+        while !cpu.halted {
+            cpu.step(&mut bus);
+        }
+        bus.tx.iter().filter(|b| **b != b'.').copied().collect::<Vec<u8>>()
+    };
+    let free = generate(Vec::new());
+    assert_eq!(free.len(), 1, "un token de una letra");
+    let token = match free[0] { b'h' => 0, b'y' => 1, b'o' => 7, letter => (letter - b'a') as u32 };
+    assert!(generate(vec![100, 200, 300, token]).is_empty(), "el cuarto de la lista también detiene");
+    assert_eq!(generate(vec![100, 200, 300]), free);
+    std::fs::remove_dir_all(dir).unwrap();
 }

@@ -151,7 +151,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
     const { prompt, maxTokens, temperature, topK, mtpDepth, firmware, samplerUnit, firmwareTokenizer } = get();
     const metric = (id: string) => useDesign.getState().report?.metrics.find((m) => m.id === id)?.value ?? 0;
     const rate = metric("tok_s");
-    const fidelity = { firmware, sampler_unit: samplerUnit || firmware, cycles_per_token: rate > 0 ? (metric("freq_ghz") * 1e9) / rate : 0, sampler_lanes: useDesign.getState().params.sampler_lanes, tokenizer: firmware && firmwareTokenizer };
+    const fidelity = { firmware, sampler_unit: samplerUnit || firmware, cycles_per_token: rate > 0 ? (metric("freq_ghz") * 1e9) / rate : 0, sampler_lanes: useDesign.getState().params.sampler_lanes, tokenizer: firmware && firmwareTokenizer, context_tokens: useDesign.getState().params.context_tokens };
     socket?.close();
     set({ chip: null, output: "", running: true, error: null, phase: "Conectando", tokens: 0, prefilled: 0, promptTokens: 0, seconds: [], saturated: 0, acceptance: { hits: [], tries: [] } });
     const protocol = location.protocol === "https:" ? "wss" : "ws";

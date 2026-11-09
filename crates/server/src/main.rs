@@ -39,6 +39,7 @@ use tokio::sync::mpsc;
 const PORT: u16 = 7878;
 const FIRMWARE: &[u8] = include_bytes!("../../../firmware/prebuilt/firmware.elf");
 const FLOW_LOGITS_REGISTER: u32 = 1;
+const DEFAULT_CONTEXT: u64 = 8192;
 
 struct Loaded {
     name: String,
@@ -47,7 +48,7 @@ struct Loaded {
     accelerator: Option<String>,
     dir: PathBuf,
     /// The firmware's tokenizer tables, built the first time they are needed.
-    firmware_tables: Option<Vec<u32>>,
+    firmware_tables: Option<(u64, Vec<u32>)>,
     load_report: Option<LoadReport>,
     prompt: PromptStyle,
 }
@@ -268,6 +269,9 @@ struct Fidelity {
     /// The firmware turns the text into tokens instead of receiving them ready.
     #[serde(default)]
     tokenizer: bool,
+    /// The context of the design being evaluated, which sizes the firmware's memory.
+    #[serde(default)]
+    context_tokens: u64,
 }
 
 async fn generate_socket(ws: WebSocketUpgrade, State(app): State<App>) -> Response {
@@ -381,16 +385,20 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
         temperature: (request.temperature.max(0.0) * 256.0).round().max(1.0) as u32,
         seed,
         raw_tokens: !request.fidelity.tokenizer,
-        stop: loaded.prompt.stop_pair(),
+        stop: loaded.prompt.stop.clone(),
     };
     let info = chip_info(&die, &code, FLOW_LOGITS_REGISTER, vocabulary as u32, &setup);
     let use_tables = request.fidelity.tokenizer;
-    if use_tables && loaded.firmware_tables.is_none() {
-        let mut tables = TokenizerTables::from_file(&loaded.dir.join("tokenizer.json"))?;
+    let context = if request.fidelity.context_tokens > 0 { request.fidelity.context_tokens } else { DEFAULT_CONTEXT };
+    if use_tables && loaded.firmware_tables.as_ref().is_none_or(|(built_for, _)| *built_for != context) {
+        let mut tables = TokenizerTables::from_file(&loaded.dir.join("tokenizer.json"), context)?;
         tables.set_add_special(add_special);
-        loaded.firmware_tables = Some(tables.to_words());
+        loaded.firmware_tables = Some((context, tables.to_words()));
     }
-    let tables: &[u32] = if use_tables { loaded.firmware_tables.as_deref().unwrap_or_default() } else { &[] };
+    let tables: &[u32] = match &loaded.firmware_tables {
+        Some((_, words)) if use_tables => words,
+        _ => &[],
+    };
     let image = build_image(&firmware.program, &firmware.data, &info, tables, &[])?;
     let input: Vec<u8> = if use_tables {
         text.bytes().chain([0]).collect()
