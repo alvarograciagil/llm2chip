@@ -376,7 +376,7 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
     let vocabulary = loaded.engine.vocabulary();
     let cell = CellConfig { weight_bits: 8, activation_bits: FLOW_BITS, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false };
     let die = DieConfig { cells: 1, cell, scale_bits: 16, reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: Default::default() };
-    let code = Microprogram { words: Vec::new(), entries: vec![ENTRY_TOKEN as u32, ENTRY_LOGITS as u32], parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0 }] };
+    let code = Microprogram { words: Vec::new(), entries: vec![ENTRY_TOKEN as u32, ENTRY_LOGITS as u32], parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }] };
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u32);
     let setup = GenerationSetup {
         max_new: request.max_tokens as u32,

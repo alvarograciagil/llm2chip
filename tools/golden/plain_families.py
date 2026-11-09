@@ -16,6 +16,10 @@ from mlx_lm.utils import _get_classes
 TOKENS = [3, 1, 4, 1, 5, 9, 2, 6]
 HIDDEN, HEADS, VOCAB = 16, 2, 32
 CASES = {
+    "gemma": {"num_key_value_heads": 1, "head_dim": 8},
+    "gemma2": {"num_key_value_heads": 1, "head_dim": 8, "query_pre_attn_scalar": 12},
+    "gemma3_text": {"num_key_value_heads": 1, "head_dim": 8, "query_pre_attn_scalar": 12, "sliding_window": 3, "sliding_window_pattern": 2, "max_position_embeddings": 64},
+    "qwen2": {"num_key_value_heads": 2, "tie_word_embeddings": False, "max_position_embeddings": 64, "rope_theta": 10000.0},
     "llama": {"num_key_value_heads": 2, "tie_word_embeddings": False},
     "llama3": {
         "model_type": "llama", "num_key_value_heads": 2, "tie_word_embeddings": False, "max_position_embeddings": 128,
@@ -39,6 +43,10 @@ for family, extra in CASES.items():
     for name, value in tree_flatten(model.parameters()):
         shape = value.shape
         weights[name] = mx.array(rng.normal(0.0, 0.6, shape).astype(np.float32))
+    if family == "gemma3_text":
+        # Real checkpoints leave the output tied to the embedding.
+        del weights["lm_head.weight"]
+        weights = model.sanitize(weights)
     model.load_weights(list(weights.items()))
 
     out = root / family

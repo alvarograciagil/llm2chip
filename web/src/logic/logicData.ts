@@ -63,6 +63,8 @@ export function multiplications(op: ProgramOp, program: Program): number {
       return len("src") * len("dst");
     case "mul_elem":
     case "silu":
+    case "gelu":
+    case "scale":
       return len("dst");
     case "rms_norm":
     case "rms_gated":

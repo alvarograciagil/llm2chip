@@ -436,7 +436,7 @@ impl<E: DieEngine> ChipModel<E> {
     /// Recovers the token and position from the parameter registers.
     fn token_and_position(&self) -> (u32, u32) {
         let (mut token, mut position) = (0, 0);
-        for p in &self.code.parameters {
+        for p in self.code.parameters.iter().filter(|p| p.window == 0) {
             let value = self.parameters[p.register as usize].wrapping_sub(p.constant);
             token = value.checked_div(p.token).unwrap_or(token);
             position = value.checked_div(p.position).unwrap_or(position);
@@ -544,7 +544,7 @@ pub fn chip_info(c: &DieConfig, code: &Microprogram, logits_register: u32, vocab
     assert!(code.parameters.len() <= INFO_PARAMETER_SLOTS, "demasiados parámetros");
     info[INFO_PARAMETER_COUNT] = code.parameters.len() as u32;
     for p in &code.parameters {
-        info.extend([p.register, p.token, p.position, p.constant]);
+        info.extend([p.register, p.token, p.position, p.constant, p.window_length, p.window_slot, p.window]);
     }
     info[INFO_STOP_TABLE] = info.len() as u32;
     info.extend_from_slice(&setup.stop);

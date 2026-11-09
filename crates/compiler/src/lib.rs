@@ -17,13 +17,21 @@ pub enum Op {
     Add { a: Buf, b: Buf, dst: Buf },
     MulElem { a: Buf, b: Buf, dst: Buf },
     Silu { src: Buf, dst: Buf },
+    /// `x · Φ(x)`, with the normal distribution or, when `approximate`, its tanh fit.
+    Gelu { src: Buf, approximate: bool, dst: Buf },
+    /// Every element times a constant.
+    Scale { src: Buf, factor: f32, dst: Buf },
+    /// Adds a stored vector, such as a projection's bias.
+    AddWeight { src: Buf, weight: String, dst: Buf },
     /// `x · rsqrt(mean(x²) + eps) · (offset + w)`, per block of `block` values.
     RmsNorm { src: Buf, weight: String, offset: f32, block: usize, dst: Buf },
     /// `q_proj` interleaves each head's query and gate.
     SplitQueryGate { src: Buf, query: Buf, gate: Buf, block: usize },
-    Rope { buf: Buf, block: usize, rotary: usize },
-    KvAppend { slot: usize, key: Buf, value: Buf },
-    AttnSum { slot: usize, query: Buf, head_dim: usize, heads: usize, kv_heads: usize, dst: Buf },
+    Rope { buf: Buf, block: usize, rotary: usize, table: usize },
+    KvAppend { slot: usize, key: Buf, value: Buf, window: Option<usize> },
+    AttnSum { slot: usize, query: Buf, head_dim: usize, scale_dim: usize, heads: usize, kv_heads: usize, window: Option<usize>, softcap: Option<f32>, dst: Buf },
+    /// `cap · tanh(x / cap)`, which keeps every value inside `±cap`.
+    SoftCap { src: Buf, cap: f32, dst: Buf },
     Sigmoid { src: Buf, dst: Buf },
     Dconv { slot: usize, weight: String, src: Buf, dst: Buf },
     DeltaStep { slot: usize, mixed: Buf, a: Buf, b: Buf, a_log: String, dt_bias: String, key_dim: usize, key_heads: usize, value_dim: usize, value_heads: usize, dst: Buf },
@@ -38,7 +46,7 @@ impl Op {
     pub fn buffers(&self) -> (Vec<Buf>, Vec<Buf>) {
         match self {
             Op::EmbRead { dst, .. } => (vec![], vec![*dst]),
-            Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } | Op::Moe { src, dst, .. } => (vec![*src], vec![*dst]),
+            Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Gelu { src, dst, .. } | Op::Scale { src, dst, .. } | Op::SoftCap { src, dst, .. } | Op::AddWeight { src, dst, .. } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } | Op::Moe { src, dst, .. } => (vec![*src], vec![*dst]),
             Op::Add { a, b, dst } | Op::MulElem { a, b, dst } | Op::Concat { a, b, dst } => (vec![*a, *b], vec![*dst]),
             Op::SplitQueryGate { src, query, gate, .. } => (vec![*src], vec![*query, *gate]),
             Op::Rope { buf, .. } => (vec![*buf], vec![*buf]),
@@ -73,6 +81,8 @@ pub struct Program {
     pub conv_slots: Vec<(usize, usize)>,
     pub rope_theta: f32,
     pub rope_scaling: Option<RopeScaling>,
+    /// The base of a second RoPE table, for layers that see only recent tokens.
+    pub local_rope_theta: Option<f32>,
     /// The small constant that keeps the RMS norms' square root defined.
     pub rms_epsilon: f64,
     /// The hidden state after the final norm, the input of a draft step.
@@ -228,13 +238,13 @@ fn emit_attention(e: &mut Emit, s: &Shape, prefix: &str, normed: Buf) -> Buf {
     e.op("Separar consulta y puerta", Op::SplitQueryGate { src: qg, query, gate, block: s.head_dim });
     let query = e.norm("Normalizar Q", query, p("q_norm"), s.head_dim, query_len);
     let key = e.norm("Normalizar K", k, p("k_norm"), s.head_dim, kv_len);
-    e.op("RoPE en Q", Op::Rope { buf: query, block: s.head_dim, rotary: s.rotary });
-    e.op("RoPE en K", Op::Rope { buf: key, block: s.head_dim, rotary: s.rotary });
+    e.op("RoPE en Q", Op::Rope { buf: query, block: s.head_dim, rotary: s.rotary, table: 0 });
+    e.op("RoPE en K", Op::Rope { buf: key, block: s.head_dim, rotary: s.rotary, table: 0 });
     let slot = e.program.kv_slots.len();
     e.program.kv_slots.push(KvShape { head_dim: s.head_dim, heads: s.kv_heads });
-    e.op("Guardar en caché KV", Op::KvAppend { slot, key, value: v });
+    e.op("Guardar en caché KV", Op::KvAppend { slot, key, value: v, window: None });
     let attn = e.buf(query_len);
-    e.op("Atención", Op::AttnSum { slot, query, head_dim: s.head_dim, heads: s.heads, kv_heads: s.kv_heads, dst: attn });
+    e.op("Atención", Op::AttnSum { slot, query, head_dim: s.head_dim, scale_dim: s.head_dim, heads: s.heads, kv_heads: s.kv_heads, window: None, softcap: None, dst: attn });
     let gate_on = e.buf(query_len);
     e.op("Sigmoide de puerta", Op::Sigmoid { src: gate, dst: gate_on });
     let gated = e.buf(query_len);
@@ -272,7 +282,7 @@ fn emit_layer_tail(e: &mut Emit, s: &Shape, prefix: &str, x: Buf, mixed: Buf) ->
 }
 
 /// The checkpoints `compile_model` can turn into a program, by `model_type`.
-pub const SIMULATED_FAMILIES: [&str; 7] = ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "llama", "mistral", "qwen3"];
+pub const SIMULATED_FAMILIES: [&str; 11] = ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "llama", "mistral", "qwen2", "qwen3", "gemma", "gemma2", "gemma3_text"];
 
 /// Compiles any supported checkpoint from its `config.json`.
 pub fn compile_model(config: &str) -> Result<Program, String> {
@@ -282,31 +292,68 @@ pub fn compile_model(config: &str) -> Result<Program, String> {
     }
     match value.get("model_type").and_then(Value::as_str) {
         Some("qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text") => compile_qwen3_5(config),
-        Some("llama" | "mistral" | "qwen2" | "qwen3") => compile_llama(&value),
+        Some("llama" | "mistral" | "qwen2" | "qwen3" | "gemma" | "gemma2" | "gemma3_text") => compile_llama(&value),
         Some(other) => Err(format!("no hay compilador para la arquitectura «{other}»")),
         None => Err("el config no indica model_type".into()),
     }
 }
 
-fn plain_attention(e: &mut Emit, s: &Shape, prefix: &str, normed: Buf, head_norms: bool) -> Buf {
+/// How a layer of the plain family differs from the others.
+struct PlainLayer {
+    head_norms: bool,
+    attention_bias: bool,
+    /// Qwen2 has biases on its inputs but none on the output projection.
+    output_bias: bool,
+    scale_dim: usize,
+    rope_table: usize,
+    window: Option<usize>,
+    softcap: Option<f32>,
+}
+
+fn with_bias(e: &mut Emit, name: &'static str, matrix: String, src: Buf, len: usize, bias: bool) -> Buf {
+    let out = e.matvec(name, matrix.clone(), src, len);
+    if !bias {
+        return out;
+    }
+    let dst = e.buf(len);
+    e.op("Sumar sesgo", Op::AddWeight { src: out, weight: format!("{matrix}.bias"), dst });
+    dst
+}
+
+fn plain_attention(e: &mut Emit, s: &Shape, prefix: &str, normed: Buf, layer: &PlainLayer) -> Buf {
     let p = |n: &str| format!("{prefix}.self_attn.{n}");
     let query_len = s.heads * s.head_dim;
     let kv_len = s.kv_heads * s.head_dim;
-    let mut query = e.matvec("Proyección Q", p("q_proj"), normed, query_len);
-    let mut key = e.matvec("Proyección K", p("k_proj"), normed, kv_len);
-    let value = e.matvec("Proyección V", p("v_proj"), normed, kv_len);
-    if head_norms {
+    let mut query = with_bias(e, "Proyección Q", p("q_proj"), normed, query_len, layer.attention_bias);
+    let mut key = with_bias(e, "Proyección K", p("k_proj"), normed, kv_len, layer.attention_bias);
+    let value = with_bias(e, "Proyección V", p("v_proj"), normed, kv_len, layer.attention_bias);
+    if layer.head_norms {
         query = e.norm("Normalizar Q", query, p("q_norm"), s.head_dim, query_len);
         key = e.norm("Normalizar K", key, p("k_norm"), s.head_dim, kv_len);
     }
-    e.op("RoPE en Q", Op::Rope { buf: query, block: s.head_dim, rotary: s.rotary });
-    e.op("RoPE en K", Op::Rope { buf: key, block: s.head_dim, rotary: s.rotary });
+    e.op("RoPE en Q", Op::Rope { buf: query, block: s.head_dim, rotary: s.rotary, table: layer.rope_table });
+    e.op("RoPE en K", Op::Rope { buf: key, block: s.head_dim, rotary: s.rotary, table: layer.rope_table });
     let slot = e.program.kv_slots.len();
     e.program.kv_slots.push(KvShape { head_dim: s.head_dim, heads: s.kv_heads });
-    e.op("Guardar en caché KV", Op::KvAppend { slot, key, value });
+    e.op("Guardar en caché KV", Op::KvAppend { slot, key, value, window: layer.window });
     let attn = e.buf(query_len);
-    e.op("Atención", Op::AttnSum { slot, query, head_dim: s.head_dim, heads: s.heads, kv_heads: s.kv_heads, dst: attn });
-    e.matvec("Proyección de salida", p("o_proj"), attn, s.hidden)
+    e.op("Atención", Op::AttnSum { slot, query, head_dim: s.head_dim, scale_dim: layer.scale_dim, heads: s.heads, kv_heads: s.kv_heads, window: layer.window, softcap: layer.softcap, dst: attn });
+    with_bias(e, "Proyección de salida", p("o_proj"), attn, s.hidden, layer.output_bias)
+}
+
+/// The gated feed-forward of the plain family, with its activation and optional bias.
+fn plain_mlp(e: &mut Emit, s: &Shape, prefix: &str, normed: Buf, gelu: Option<bool>, bias: bool) -> Buf {
+    let p = |n: &str| format!("{prefix}.mlp.{n}");
+    let gate = with_bias(e, "Proyección gate", p("gate_proj"), normed, s.intermediate, bias);
+    let up = with_bias(e, "Proyección up", p("up_proj"), normed, s.intermediate, bias);
+    let active = e.buf(s.intermediate);
+    match gelu {
+        Some(approximate) => e.op("Activación GELU", Op::Gelu { src: gate, approximate, dst: active }),
+        None => e.op("Activación SiLU", Op::Silu { src: gate, dst: active }),
+    }
+    let product = e.buf(s.intermediate);
+    e.op("Puerta × up", Op::MulElem { a: active, b: up, dst: product });
+    with_bias(e, "Proyección down", p("down_proj"), product, s.hidden, bias)
 }
 
 /// Compiles the architectures made of plain attention and a gated MLP. They differ
@@ -314,6 +361,8 @@ fn plain_attention(e: &mut Emit, s: &Shape, prefix: &str, normed: Buf, head_norm
 /// here so that a checkpoint never runs with a different meaning than it was trained.
 fn compile_llama(config: &Value) -> Result<Program, String> {
     let family = config["model_type"].as_str().unwrap_or("llama");
+    let gemma = family.starts_with("gemma");
+    let four_norms = matches!(family, "gemma2" | "gemma3_text");
     let hidden = dim(config, "hidden_size")?;
     let heads = dim(config, "num_attention_heads")?;
     let kv_heads = config.get("num_key_value_heads").and_then(Value::as_u64).map_or(heads, |v| v as usize);
@@ -324,22 +373,23 @@ fn compile_llama(config: &Value) -> Result<Program, String> {
     if head_dim == 0 || (config.get("head_dim").is_none() && hidden % heads != 0) {
         return Err(format!("{hidden} no se reparte entre {heads} cabezas"));
     }
-    let on = |key: &str| config.get(key).and_then(Value::as_bool).unwrap_or(false);
-    // Qwen2 has no switch for it: its attention projections always carry a bias.
-    if family == "qwen2" || on("attention_bias") {
-        return Err("usa sesgo en las proyecciones de atención y el compilador todavía no lo genera".into());
-    }
-    if on("mlp_bias") {
-        return Err("usa sesgo en la MLP y el compilador todavía no lo genera".into());
-    }
-    if on("use_sliding_window") || config.get("layer_types").and_then(Value::as_array).is_some_and(|l| l.iter().any(|t| t != "full_attention")) {
+    let on = |key: &str, default: bool| config.get(key).and_then(Value::as_bool).unwrap_or(default);
+    let attention_bias = on("attention_bias", family == "qwen2");
+    let output_bias = attention_bias && family != "qwen2";
+    let mlp_bias = on("mlp_bias", false);
+    let sliding = family == "gemma3_text";
+    let layer_kinds = config.get("layer_types").and_then(Value::as_array);
+    if !sliding && (on("use_sliding_window", false) || layer_kinds.is_some_and(|l| l.iter().any(|t| t != "full_attention"))) {
         return Err("usa capas con ventana deslizante y el compilador todavía no las genera".into());
     }
-    if let Some(act) = config.get("hidden_act").and_then(Value::as_str) {
-        if act != "silu" && act != "swish" {
-            return Err(format!("usa la activación «{act}» y el chip solo tiene SiLU"));
-        }
-    }
+    let activation = if gemma { config.get("hidden_activation").or_else(|| config.get("hidden_act")) } else { config.get("hidden_act") }.and_then(Value::as_str);
+    let gelu = match (gemma, activation) {
+        (false, None | Some("silu" | "swish")) => None,
+        (true, None) => Some(family != "gemma"),
+        (true, Some("gelu")) => Some(false),
+        (true, Some("gelu_pytorch_tanh")) => Some(true),
+        (_, Some(other)) => return Err(format!("usa la activación «{other}», que el chip no tiene")),
+    };
     let rope = config.get("rope_parameters").or_else(|| config.get("rope_scaling"));
     let rope_scaling = match rope.and_then(|r| r.get("rope_type").or_else(|| r.get("type"))).and_then(Value::as_str) {
         None | Some("default") => None,
@@ -350,30 +400,87 @@ fn compile_llama(config: &Value) -> Result<Program, String> {
         }
         Some(kind) => return Err(format!("usa un RoPE escalado («{kind}») que el compilador no genera")),
     };
-    let rope_theta = config.get("rope_theta").or_else(|| rope.and_then(|r| r.get("rope_theta"))).and_then(Value::as_f64).unwrap_or(10_000.0) as f32;
+    let default_theta = if sliding { 1_000_000.0 } else { 10_000.0 };
+    let rope_theta = config.get("rope_theta").or_else(|| rope.and_then(|r| r.get("rope_theta"))).and_then(Value::as_f64).unwrap_or(default_theta) as f32;
     let vocab = dim(config, "vocab_size")?;
     let layers = dim(config, "num_hidden_layers")?;
     let shape = Shape { hidden, intermediate: dim(config, "intermediate_size")?, heads, kv_heads, head_dim, rotary: head_dim, moe: None };
+    let window = config.get("sliding_window").and_then(Value::as_u64).unwrap_or(512) as usize;
+    let pattern = config.get("sliding_window_pattern").or_else(|| config.get("_sliding_window_pattern")).and_then(Value::as_u64).unwrap_or(6) as usize;
+    let scale_dim = if four_norms { config.get("query_pre_attn_scalar").and_then(Value::as_f64).unwrap_or(head_dim as f64) as usize } else { head_dim };
 
-    let mut e = Emit { program: empty_program(family, vocab, hidden, layers, rope_theta), layer: None, norm_offset: 0.0 };
+    // Gemma 2 caps its scores unless its config says null; nothing else does.
+    let softcap = |key: &str, default: f64| -> Option<f32> {
+        match config.get(key) {
+            Some(Value::Null) => None,
+            Some(value) => value.as_f64().map(|v| v as f32),
+            None => (family == "gemma2").then_some(default as f32),
+        }
+    };
+    let mut e = Emit { program: empty_program(family, vocab, hidden, layers, rope_theta), layer: None, norm_offset: if gemma { 1.0 } else { 0.0 } };
     e.program.rope_scaling = rope_scaling;
+    if sliding {
+        e.program.local_rope_theta = Some(config.get("rope_local_base_freq").and_then(Value::as_f64).unwrap_or(10_000.0) as f32);
+    }
     e.program.rms_epsilon = config.get("rms_norm_eps").and_then(Value::as_f64).unwrap_or(1e-6);
     let mut x = e.buf(hidden);
     e.op("Leer embedding", Op::EmbRead { table: "model.embed_tokens".into(), dst: x });
+    if gemma {
+        let scaled = e.buf(hidden);
+        e.op("Escalar embedding", Op::Scale { src: x, factor: (hidden as f32).sqrt(), dst: scaled });
+        x = scaled;
+    }
     for i in 0..layers {
         e.layer = Some(i as u32);
         let prefix = format!("model.layers.{i}");
+        let local = sliding && match layer_kinds {
+            Some(kinds) => kinds.get(i).is_some_and(|k| k == "sliding_attention"),
+            None => !(i + 1).is_multiple_of(pattern),
+        };
+        let layer = PlainLayer {
+            head_norms: family == "qwen3" || family == "gemma3_text",
+            attention_bias,
+            output_bias,
+            scale_dim,
+            rope_table: local as usize,
+            window: local.then_some(window),
+            softcap: softcap("attn_logit_softcapping", 50.0),
+        };
         let normed = e.norm("Normalizar entrada", x, format!("{prefix}.input_layernorm"), hidden, hidden);
-        let mixed = plain_attention(&mut e, &shape, &prefix, normed, family == "qwen3");
-        x = emit_layer_tail(&mut e, &shape, &prefix, x, mixed);
+        let mixed = plain_attention(&mut e, &shape, &prefix, normed, &layer);
+        if four_norms {
+            let after_attention = e.norm("Normalizar atención", mixed, format!("{prefix}.post_attention_layernorm"), hidden, hidden);
+            let h = e.buf(hidden);
+            e.op("Residual", Op::Add { a: x, b: after_attention, dst: h });
+            let before_mlp = e.norm("Normalizar antes de la MLP", h, format!("{prefix}.pre_feedforward_layernorm"), hidden, hidden);
+            let down = plain_mlp(&mut e, &shape, &prefix, before_mlp, gelu, mlp_bias);
+            let after_mlp = e.norm("Normalizar después de la MLP", down, format!("{prefix}.post_feedforward_layernorm"), hidden, hidden);
+            let next = e.buf(hidden);
+            e.op("Residual", Op::Add { a: h, b: after_mlp, dst: next });
+            x = next;
+        } else {
+            let after_mixer = e.buf(hidden);
+            e.op("Residual", Op::Add { a: x, b: mixed, dst: after_mixer });
+            let before_mlp = e.norm("Normalizar", after_mixer, format!("{prefix}.post_attention_layernorm"), hidden, hidden);
+            let down = plain_mlp(&mut e, &shape, &prefix, before_mlp, gelu, mlp_bias);
+            let next = e.buf(hidden);
+            e.op("Residual", Op::Add { a: after_mixer, b: down, dst: next });
+            x = next;
+        }
     }
     e.layer = None;
     e.program.logits_from = e.program.ops.len();
     let normed = e.norm("Norma final", x, "model.norm".into(), hidden, hidden);
     e.program.final_hidden = normed;
     // With tied embeddings there is one table in memory, read both ways.
-    let head = if on("tie_word_embeddings") { "model.embed_tokens" } else { "lm_head" };
-    e.program.logits = e.matvec("Salida de vocabulario", head.into(), normed, vocab);
+    let head = if on("tie_word_embeddings", gemma) { "model.embed_tokens" } else { "lm_head" };
+    let mut logits = e.matvec("Salida de vocabulario", head.into(), normed, vocab);
+    if let Some(cap) = softcap("final_logit_softcapping", 30.0) {
+        let capped = e.buf(vocab);
+        e.op("Limitar logits", Op::SoftCap { src: logits, cap, dst: capped });
+        logits = capped;
+    }
+    e.program.logits = logits;
     Ok(e.program)
 }
 
@@ -392,6 +499,7 @@ fn empty_program(family: &str, vocab: usize, hidden: usize, num_layers: usize, r
         conv_slots: Vec::new(),
         rope_theta,
         rope_scaling: None,
+        local_rope_theta: None,
         rms_epsilon: 1e-6,
         final_hidden: 0,
         draft: None,
@@ -559,7 +667,7 @@ mod tests {
     fn what_a_checkpoint_needs_and_the_chip_lacks_is_refused() {
         let base = r#""model_type":"llama","hidden_size":16,"num_attention_heads":2,"intermediate_size":32,"vocab_size":8,"num_hidden_layers":1"#;
         assert!(compile_model(&format!("{{{base}}}")).is_ok());
-        for (extra, word) in [(r#""mlp_bias":true"#, "MLP"), (r#""hidden_act":"gelu""#, "gelu"), (r#""rope_scaling":{"rope_type":"yarn","factor":8.0}"#, "yarn"), (r#""quantization_config":{"quant_method":"gptq"}"#, "gptq")] {
+        for (extra, word) in [(r#""hidden_act":"gelu""#, "gelu"), (r#""rope_scaling":{"rope_type":"yarn","factor":8.0}"#, "yarn"), (r#""quantization_config":{"quant_method":"gptq"}"#, "gptq")] {
             let error = compile_model(&format!("{{{base},{extra}}}")).unwrap_err();
             assert!(error.contains(word), "{error}");
         }
@@ -582,7 +690,7 @@ mod tests {
         for inst in &program.ops {
             let (reads, writes): (Vec<Buf>, Vec<Buf>) = match &inst.op {
                 Op::EmbRead { dst, .. } => (vec![], vec![*dst]),
-                Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } => (vec![*src], vec![*dst]),
+                Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Gelu { src, dst, .. } | Op::Scale { src, dst, .. } | Op::SoftCap { src, dst, .. } | Op::AddWeight { src, dst, .. } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } => (vec![*src], vec![*dst]),
                 Op::Add { a, b, dst } | Op::MulElem { a, b, dst } => (vec![*a, *b], vec![*dst]),
                 Op::SplitQueryGate { src, query, gate, .. } => (vec![*src], vec![*query, *gate]),
                 Op::Rope { buf, .. } => (vec![*buf], vec![*buf]),

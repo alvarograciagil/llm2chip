@@ -220,7 +220,7 @@ mod tests {
         let gemma = r#"{"model_type":"gemma2","hidden_size":2304,"intermediate_size":9216,"vocab_size":256000,"num_hidden_layers":26,"num_attention_heads":8,"head_dim":288}"#;
         let g = ModelGraph::from_config_json("g", gemma).unwrap();
         assert!(!g.tensors.iter().any(|t| t.block == Block::Head), "Gemma comparte embedding y salida salvo que el config diga otra cosa");
-        assert!(approximate_family("gemma2") && !approximate_family("mistral"));
+        assert!(approximate_family("phi3") && !approximate_family("gemma2"));
     }
 
     #[test]

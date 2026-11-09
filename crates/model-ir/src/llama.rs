@@ -9,7 +9,7 @@ use serde_json::Value;
 /// Architectures with this adapter's layer shape, whatever they are called.
 pub(crate) const FAMILIES: [&str; 9] = ["llama", "mistral", "qwen2", "qwen3", "granite", "phi3", "gemma", "gemma2", "gemma3_text"];
 /// Those with a different activation or extra norms, which the shape does not capture.
-pub(crate) const APPROXIMATE: [&str; 5] = ["granite", "phi3", "gemma", "gemma2", "gemma3_text"];
+pub(crate) const APPROXIMATE: [&str; 2] = ["granite", "phi3"];
 
 struct Dims {
     hidden: u64,

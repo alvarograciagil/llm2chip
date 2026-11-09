@@ -157,6 +157,14 @@ impl BlockVm {
 impl BlockOps for BlockVm {
     type N = u32;
 
+    fn window_length(&self, position: u32, window: u32) -> u32 {
+        (position + 1).min(window)
+    }
+
+    fn window_slot(&self, position: u32, window: u32) -> u32 {
+        position % window
+    }
+
     fn with_window(&mut self, step: u32, _windowed: &[u32], mut body: impl FnMut(&mut Self, u32)) {
         body(self, step);
     }

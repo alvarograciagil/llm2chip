@@ -17,6 +17,9 @@ fn scratch_register(c: &DieConfig) -> u32 {
     (1 << c.reg_bits) - 2
 }
 
+pub const FN_GELU: u32 = 5;
+pub const FN_GELU_TANH: u32 = 6;
+pub const FN_TANH: u32 = 7;
 pub const FN_EXP: u32 = 0;
 pub const FN_SIGMOID: u32 = 1;
 pub const FN_RECIPROCAL: u32 = 2;
@@ -54,6 +57,9 @@ fn table_value(function: u32, index: usize, index_bits: u32, bits: u32) -> i64 {
         FN_RECIPROCAL => (if mantissa > 0.0 { 1.0 / mantissa } else { 0.0 }, RECIPROCAL_OUTPUT_EXPONENT),
         FN_INV_SQRT => (if mantissa > 0.0 { 1.0 / mantissa.sqrt() } else { 0.0 }, RECIPROCAL_OUTPUT_EXPONENT),
         FN_SOFTPLUS => ((1.0 + input.exp()).ln(), SOFTPLUS_OUTPUT_EXPONENT),
+        FN_TANH => (input.tanh(), UNIT_OUTPUT_EXPONENT),
+        FN_GELU => (0.5 * (1.0 + libm::erf(input / std::f64::consts::SQRT_2)), UNIT_OUTPUT_EXPONENT),
+        FN_GELU_TANH => (0.5 * (1.0 + ((2.0 / std::f64::consts::PI).sqrt() * (input + 0.044715 * input.powi(3))).tanh()), UNIT_OUTPUT_EXPONENT),
         _ => (0.0, 0),
     };
     ((value / 2f64.powi(exponent as i32) * (top + 1) as f64).round() as i64).clamp(-top - 1, top)
@@ -68,7 +74,7 @@ pub fn tables(c: &DieConfig) -> Vec<i64> {
     (0..1usize << (c.function_bits + c.function_select_bits))
         .map(|address| {
             let (function, index) = ((address >> c.function_bits) as u32, address & ((1 << c.function_bits) - 1));
-            if index == lowest && matches!(function, FN_SIGMOID | FN_EXP) {
+            if index == lowest && matches!(function, FN_SIGMOID | FN_EXP | FN_GELU | FN_GELU_TANH) {
                 0
             } else {
                 table_value(function, index, c.function_bits, bits)
@@ -95,6 +101,8 @@ pub struct AttentionRegs {
     pub total: u32,
     pub inverse: u32,
     pub probabilities: u32,
+    /// Registers holding `1 / cap` and `cap`, when the scores are capped.
+    pub softcap: Option<(u32, u32)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -119,6 +127,10 @@ pub enum Var {
     Token,
     Position,
     Loop(u32),
+    /// How many of the last `n` tokens exist at this position.
+    WindowLength(u32),
+    /// Where this position's token goes in a ring of `n` entries.
+    WindowSlot(u32),
 }
 
 const EXPR_TERMS: usize = 4;
@@ -260,6 +272,10 @@ pub trait BlockOps: Sized {
     /// Runs `body` for the registers that are `step` places after the ones in `windowed`.
     /// It receives the offset to add to them, which a compiled program applies at run time.
     fn with_window(&mut self, step: Self::N, windowed: &[u32], body: impl FnMut(&mut Self, u32));
+    /// How many tokens a layer that sees the last `window` of them has at `position`.
+    fn window_length(&self, position: Self::N, window: u32) -> Self::N;
+    /// Where the token at `position` goes in a store of `window` entries.
+    fn window_slot(&self, position: Self::N, window: u32) -> Self::N;
     /// `rows` rows of the matrix from `first`. It is held in register `matrix`, but
     /// `name` lets an implementation stream it from the checkpoint instead.
     #[allow(clippy::too_many_arguments)]
@@ -325,6 +341,11 @@ pub trait BlockOps: Sized {
         if let Some(scale) = score_scale {
             self.scale(scale, regs.scores, regs.top, tokens);
             self.copy_part(regs.top, 0.into(), regs.scores, 0.into(), tokens);
+        }
+        if let Some((inverse_cap, cap)) = regs.softcap {
+            self.scale(inverse_cap, regs.scores, regs.top, tokens);
+            self.function(FN_TANH, regs.top, regs.shifted, tokens);
+            self.scale(cap, regs.shifted, regs.scores, tokens);
         }
         self.maximum(regs.scores, tokens, regs.top);
         self.sub_scalar(regs.scores, regs.top, regs.shifted, tokens);
@@ -701,6 +722,16 @@ fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32)
 
 impl BlockOps for Assembly {
     type N = Expr;
+
+    fn window_length(&self, position: Expr, window: u32) -> Expr {
+        assert_eq!(position, Expr::var(Var::Position), "la ventana se mide desde la posición");
+        Expr::var(Var::WindowLength(window))
+    }
+
+    fn window_slot(&self, position: Expr, window: u32) -> Expr {
+        assert_eq!(position, Expr::var(Var::Position), "la ventana se mide desde la posición");
+        Expr::var(Var::WindowSlot(window))
+    }
 
     fn with_window(&mut self, step: Expr, windowed: &[u32], mut body: impl FnMut(&mut Self, u32)) {
         if step.is_constant() {
@@ -1084,6 +1115,8 @@ impl Behavior {
             let value = |loops: &HashMap<Var, u32>, e: Expr| e.eval(|v| match v {
                 Var::Token => token,
                 Var::Position => position,
+                Var::WindowLength(n) => (position + 1).min(n),
+                Var::WindowSlot(n) => position % n,
                 loop_variable => loops[&loop_variable],
             });
             match step {

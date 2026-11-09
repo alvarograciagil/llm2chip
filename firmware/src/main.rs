@@ -201,8 +201,10 @@ fn chain_receive() -> u32 {
 /// Starts one routine of this chip's die, without waiting for it.
 fn start_die(routine: u32, token: u32, position: u32) {
     for p in 0..info(INFO_PARAMETER_COUNT) as usize {
-        let at = INFO_PARAMETERS + 4 * p;
-        let value = info(at + 1).wrapping_mul(token).wrapping_add(info(at + 2).wrapping_mul(position)).wrapping_add(info(at + 3));
+        let at = INFO_PARAMETERS + 7 * p;
+        let window = info(at + 6);
+        let windowed = if window > 0 { info(at + 4).wrapping_mul((position + 1).min(window)).wrapping_add(info(at + 5).wrapping_mul(position % window)) } else { 0 };
+        let value = info(at + 1).wrapping_mul(token).wrapping_add(info(at + 2).wrapping_mul(position)).wrapping_add(info(at + 3)).wrapping_add(windowed);
         peripheral_write(info(at) as usize, value);
     }
     peripheral_write(REG_ENTRY, info(INFO_ENTRY_TOKEN + routine as usize));

@@ -12,6 +12,7 @@ memmap2 = "0.9"
 multiversion = "0.8"
 naga = { version = "30", features = ["wgsl-in", "spv-out"] }
 rayon = "1"
+libm = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 regex-syntax = "0.8"

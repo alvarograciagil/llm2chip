@@ -3,6 +3,7 @@
 
 use crate::weights::Weights;
 use compiler::{Inst, Op, Program, RopeScaling};
+use netlist::block::{FN_GELU, FN_GELU_TANH, FN_TANH};
 use netlist::block::{encode_vector, Assembly, AttentionRegs, BlockOps, DeltaRegs, Expr, Var, FN_EXP, FN_SIGMOID, FN_SOFTPLUS};
 use netlist::{DieConfig, DieProgram, Microprogram};
 use std::cell::Cell;
@@ -42,6 +43,10 @@ fn matrices_of(program: &Program, op: &Op) -> Vec<(String, usize, usize)> {
         }
         _ => Vec::new(),
     }
+}
+
+fn t_gelu(approximate: bool) -> u32 {
+    if approximate { FN_GELU_TANH } else { FN_GELU }
 }
 
 /// Routines of the fixed microprogram, in the order of `Microprogram::entries`.
@@ -88,8 +93,8 @@ pub struct Layout {
     /// Each head of a recurrent output keeps its own exponent until it is normalised.
     delta_parts: Vec<u32>,
     delta_outputs: HashSet<usize>,
-    rope: u32,
-    rope_table: u32,
+    rope: [u32; 2],
+    rope_table: [u32; 2],
     rope_half: usize,
     inverse_root: HashMap<usize, u32>,
     inverse_len: HashMap<usize, u32>,
@@ -154,10 +159,12 @@ impl Layout {
                 Op::RmsNorm { weight, offset, .. } => {
                     let name = format!("{weight}.weight");
                     let raw = weights.floats(&name)?;
-                    let centred = raw.iter().sum::<f32>() / raw.len() as f32 > 0.5;
+                    let centred = program.family == "qwen3_5" && raw.iter().sum::<f32>() / raw.len() as f32 > 0.5;
                     let values = raw.iter().map(|w| (*w + if centred { 0.0 } else { *offset }) as f64).collect();
                     store(name, values, &mut setup, &mut small);
                 }
+                Op::Scale { factor, .. } => store(format!("escala:{factor}"), vec![*factor as f64], &mut setup, &mut small),
+                Op::AddWeight { weight, .. } => store(weight.clone(), weights.floats(weight)?.iter().map(|v| *v as f64).collect(), &mut setup, &mut small),
                 Op::RmsGated { weight, .. } | Op::Dconv { weight, .. } => {
                     let name = format!("{weight}.weight");
                     let values = weights.floats(&name)?.iter().map(|w| *w as f64).collect();
@@ -168,7 +175,17 @@ impl Layout {
                     store(dt_bias.clone(), weights.floats(dt_bias)?.iter().map(|v| *v as f64).collect(), &mut setup, &mut small);
                     root_of(*key_dim, &mut setup, &mut inverse_root);
                 }
-                Op::AttnSum { head_dim, .. } => root_of(*head_dim, &mut setup, &mut inverse_root),
+                Op::AttnSum { scale_dim, softcap, .. } => {
+                    root_of(*scale_dim, &mut setup, &mut inverse_root);
+                    if let Some(cap) = softcap {
+                        store(format!("escala:{}", 1.0 / cap), vec![1.0 / *cap as f64], &mut setup, &mut small);
+                        store(format!("escala:{cap}"), vec![*cap as f64], &mut setup, &mut small);
+                    }
+                }
+                Op::SoftCap { cap, .. } => {
+                    store(format!("escala:{}", 1.0 / cap), vec![1.0 / *cap as f64], &mut setup, &mut small);
+                    store(format!("escala:{cap}"), vec![*cap as f64], &mut setup, &mut small);
+                }
                 _ => {}
             }
         }
@@ -194,18 +211,21 @@ impl Layout {
         setup.load_vector(minus_one, &[-1.0]);
         let epsilon = alloc(1);
         setup.load_vector(epsilon, &[program.rms_epsilon]);
-        let rope = alloc(1);
+        let rope = [alloc(1), alloc(1)];
         let rope_half = all_ops(program).find_map(|i| if let Op::Rope { rotary, .. } = i.op { Some(rotary / 2) } else { None }).unwrap_or(0);
-        let rope_table = alloc(1);
+        let rope_table = [alloc(1), alloc(1)];
         if let (Some(tokens), true) = (chip_tokens, rope_half > 0) {
-            let mut flat = Vec::with_capacity(tokens * (3 * rope_half + 1));
-            let mut exponent = 0;
-            for position in 0..tokens {
-                let (row, row_exponent) = encode_vector(&rope_row(program.rope_theta, program.rope_scaling, rope_half, position as u32), config.cell.activation_bits);
-                flat.extend(row);
-                exponent = row_exponent;
+            let tables = [(program.rope_theta, program.rope_scaling), (program.local_rope_theta.unwrap_or(program.rope_theta), None)];
+            for (index, (theta, scaling)) in tables.iter().enumerate().take(1 + program.local_rope_theta.is_some() as usize) {
+                let mut flat = Vec::with_capacity(tokens * (3 * rope_half + 1));
+                let mut exponent = 0;
+                for position in 0..tokens {
+                    let (row, row_exponent) = encode_vector(&rope_row(*theta, *scaling, rope_half, position as u32), config.cell.activation_bits);
+                    flat.extend(row);
+                    exponent = row_exponent;
+                }
+                setup.load_mantissas(rope_table[index], &flat, exponent);
             }
-            setup.load_mantissas(rope_table, &flat, exponent);
         }
         let temporaries: Vec<u32> = (0..TEMPORARIES).map(|_| alloc(1)).collect();
         let parts: Vec<u32> = (0..PARTS).map(|_| alloc(1)).collect();
@@ -378,7 +398,10 @@ impl Layout {
             return;
         }
         let (theta, scaling, half) = (program.rope_theta, program.rope_scaling, self.rope_half);
-        ops.load_row(self.rope_table, position, 3 * half as u32 + 1, self.rope, |row| rope_row(theta, scaling, half, row));
+        ops.load_row(self.rope_table[0], position, 3 * half as u32 + 1, self.rope[0], |row| rope_row(theta, scaling, half, row));
+        if let Some(local) = program.local_rope_theta {
+            ops.load_row(self.rope_table[1], position, 3 * half as u32 + 1, self.rope[1], |row| rope_row(local, None, half, row));
+        }
     }
 
     fn reg(&self, buf: usize) -> u32 {
@@ -428,6 +451,20 @@ impl Layout {
             Op::Copy { src, dst } => ops.copy_part(self.reg(*src), zero, self.reg(*dst), zero, size(*dst)),
             Op::Add { a, b, dst } => ops.add(self.reg(*a), self.reg(*b), self.reg(*dst), size(*dst)),
             Op::MulElem { a, b, dst } => ops.multiply(self.reg(*a), self.reg(*b), self.reg(*dst), size(*dst)),
+            Op::Gelu { src, approximate, dst } => {
+                let table = t_gelu(*approximate);
+                let extra = self.temporaries[39];
+                ops.function(table, self.reg(*src), extra, size(*dst));
+                ops.multiply(extra, self.reg(*src), self.reg(*dst), size(*dst));
+            }
+            Op::SoftCap { src, cap, dst } => {
+                let (scaled, shaped) = (self.temporaries[38], self.temporaries[39]);
+                ops.scale(self.small[&format!("escala:{}", 1.0 / cap)], self.reg(*src), scaled, size(*dst));
+                ops.function(FN_TANH, scaled, shaped, size(*dst));
+                ops.scale(self.small[&format!("escala:{cap}")], shaped, self.reg(*dst), size(*dst));
+            }
+            Op::Scale { src, factor, dst } => ops.scale(self.small[&format!("escala:{factor}")], self.reg(*src), self.reg(*dst), size(*dst)),
+            Op::AddWeight { src, weight, dst } => ops.add(self.reg(*src), self.small[weight], self.reg(*dst), size(*dst)),
             Op::Silu { src, dst } => self.silu(ops, self.reg(*src), self.reg(*dst), size(*dst)),
             Op::Sigmoid { src, dst } => ops.function(FN_SIGMOID, self.reg(*src), self.reg(*dst), size(*dst)),
             Op::RmsNorm { src, weight, block, dst, .. } => {
@@ -445,10 +482,10 @@ impl Layout {
                 ops.gather(&[(t[0], (heads * block) as u32)], self.reg(*query));
                 ops.gather(&[(t[1], (heads * block) as u32)], self.reg(*gate));
             }
-            Op::Rope { buf, block, .. } => {
+            Op::Rope { buf, block, table, .. } => {
                 let reg = self.reg(*buf);
                 let total = program.buffers[*buf] as u32;
-                let (d, h, rope) = (*block as u32, self.rope_half as u32, self.rope);
+                let (d, h, rope) = (*block as u32, self.rope_half as u32, self.rope[*table]);
                 ops.each((total / d).into(), |ops, head| {
                     let base = head * d;
                     ops.each(h.into(), |ops, j| {
@@ -467,19 +504,27 @@ impl Layout {
                 ops.narrow_sums(reg, rope, t[0], total.into());
                 ops.copy_part(t[0], zero, reg, zero, total.into());
             }
-            Op::KvAppend { slot, key, value } => {
+            Op::KvAppend { slot, key, value, window } => {
                 let width = program.buffers[*key] as u32;
-                let at = position * width;
+                let slot_place = match window {
+                    Some(limit) => ops.window_slot(position, *limit as u32),
+                    None => position,
+                };
+                let at = slot_place * width;
                 ops.align_to(self.reg(*key), zero, STATE_EXPONENT, self.keys[*slot], at, width.into());
                 ops.align_to(self.reg(*value), zero, STATE_EXPONENT, self.values[*slot], at, width.into());
             }
-            Op::AttnSum { slot, query, head_dim, heads, kv_heads, dst } => {
+            Op::AttnSum { slot, query, head_dim, scale_dim, heads, kv_heads, window, softcap, dst } => {
                 let group = heads / kv_heads;
-                let tokens = position + 1.into();
+                let tokens = match window {
+                    Some(limit) => ops.window_length(position, *limit as u32),
+                    None => position + 1.into(),
+                };
                 let width = (program.kv_slots[*slot].heads * head_dim) as u32;
                 let d = *head_dim as u32;
                 let (keys, values) = (self.keys[*slot], self.values[*slot]);
-                let regs = AttentionRegs { scores: t[10], top: t[11], shifted: t[12], weights: t[13], total: t[14], inverse: t[15], probabilities: t[16] };
+                let capped = softcap.map(|cap| (self.small[&format!("escala:{}", 1.0 / cap)], self.small[&format!("escala:{cap}")]));
+                let regs = AttentionRegs { scores: t[10], top: t[11], shifted: t[12], weights: t[13], total: t[14], inverse: t[15], probabilities: t[16], softcap: capped };
                 let first = self.parts[0];
                 let query = self.reg(*query);
                 ops.each((*kv_heads as u32).into(), |ops, kv_head| {
@@ -496,7 +541,7 @@ impl Layout {
                             });
                             ops.normalize(kt, tokens * d);
                             ops.normalize(vt, tokens * d);
-                            ops.attention(qh, kt, vt, self.ones, first + offset, d, tokens, Some(self.inverse_root[head_dim]), regs);
+                            ops.attention(qh, kt, vt, self.ones, first + offset, d, tokens, Some(self.inverse_root[scale_dim]), regs);
                         });
                     });
                 });

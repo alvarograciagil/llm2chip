@@ -49,6 +49,14 @@ impl Functions {
         x * self.sigmoid(x)
     }
 
+    fn tanh(self, x: f32) -> f32 {
+        self.snap(x).tanh()
+    }
+
+    fn gelu(self, x: f32, approximate: bool) -> f32 {
+        x * gelu_share(self.snap(x) as f64, approximate) as f32
+    }
+
     fn exp(self, x: f32) -> f32 {
         self.snap(x).exp()
     }
@@ -90,6 +98,15 @@ pub struct StepStats {
     pub saturated: u64,
 }
 
+/// The fraction of `x` GELU lets through: the normal distribution, or its tanh fit.
+pub fn gelu_share(x: f64, approximate: bool) -> f64 {
+    if approximate {
+        0.5 * (1.0 + ((2.0 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x * x * x)).tanh())
+    } else {
+        0.5 * (1.0 + libm::erf(x / std::f64::consts::SQRT_2))
+    }
+}
+
 struct Kv {
     keys: Vec<f32>,
     values: Vec<f32>,
@@ -106,7 +123,7 @@ pub struct Engine {
     conv: Vec<Vec<f32>>,
     position: u64,
     numeric: Numeric,
-    inverse_freq: Vec<f32>,
+    inverse_freq: [Vec<f32>; 2],
     saturated: u64,
     functions: Functions,
     rope_position: u64,
@@ -147,12 +164,13 @@ impl Engine {
                 Op::RmsNorm { weight, .. } | Op::RmsGated { weight, .. } => vec![format!("{weight}.weight")],
                 Op::Dconv { weight, .. } => vec![format!("{weight}.weight")],
                 Op::DeltaStep { a_log, dt_bias, .. } => vec![a_log.clone(), dt_bias.clone()],
+                Op::AddWeight { weight, .. } => vec![weight.clone()],
                 _ => vec![],
             };
             for name in names {
                 let mut values = weights.floats(&name)?;
                 // MLX converters store these centred on 1; the program expects 0.
-                if matches!(inst.op, Op::RmsNorm { offset, .. } if offset != 0.0) && values.iter().sum::<f32>() / values.len() as f32 > 0.5 {
+                if program.family == "qwen3_5" && matches!(inst.op, Op::RmsNorm { offset, .. } if offset != 0.0) && values.iter().sum::<f32>() / values.len() as f32 > 0.5 {
                     values.iter_mut().for_each(|v| *v -= 1.0);
                 }
                 floats.insert(name.clone(), values);
@@ -167,12 +185,15 @@ impl Engine {
             .iter()
             .find_map(|i| if let Op::Rope { rotary, .. } = i.op { Some(rotary) } else { None })
             .unwrap_or(0);
-        let inverse_freq = (0..rotary / 2)
-            .map(|i| {
-                let base = 1.0 / program.rope_theta.powf((2 * i) as f32 / rotary as f32);
-                program.rope_scaling.map_or(base, |s| s.frequency(base as f64) as f32)
-            })
-            .collect();
+        let inverse_freq = [
+            (0..rotary / 2)
+                .map(|i| {
+                    let base = 1.0 / program.rope_theta.powf((2 * i) as f32 / rotary as f32);
+                    program.rope_scaling.map_or(base, |s| s.frequency(base as f64) as f32)
+                })
+                .collect(),
+            (0..rotary / 2).map(|i| 1.0 / program.local_rope_theta.unwrap_or(program.rope_theta).powf((2 * i) as f32 / rotary as f32)).collect(),
+        ];
         let table_bits = if let Numeric::Block { table_bits, .. } = numeric { table_bits } else { None };
         Ok(Self { program, weights, floats, buffers, kv, delta, conv, position: 0, numeric, inverse_freq, saturated: 0, functions: Functions { table_bits }, rope_position: 0, draft_tokens: 0 })
     }
@@ -355,6 +376,29 @@ impl Engine {
                 self.buffers[*dst].copy_from_slice(&product);
                 self.quantize(*dst);
             }
+            Op::Gelu { src, approximate, dst } => {
+                let f = self.functions;
+                let (x, y) = pair(&mut self.buffers, *src, *dst);
+                y.iter_mut().zip(x).for_each(|(o, v)| *o = f.gelu(*v, *approximate));
+                self.quantize(*dst);
+            }
+            Op::SoftCap { src, cap, dst } => {
+                let f = self.functions;
+                let (x, y) = pair(&mut self.buffers, *src, *dst);
+                y.iter_mut().zip(x).for_each(|(o, v)| *o = f.tanh(*v / cap) * cap);
+                self.quantize(*dst);
+            }
+            Op::Scale { src, factor, dst } => {
+                let (x, y) = pair(&mut self.buffers, *src, *dst);
+                y.iter_mut().zip(x).for_each(|(o, v)| *o = v * factor);
+                self.quantize(*dst);
+            }
+            Op::AddWeight { src, weight, dst } => {
+                let w = self.floats[weight].clone();
+                let (x, y) = pair(&mut self.buffers, *src, *dst);
+                y.iter_mut().zip(x).zip(&w).for_each(|((o, v), b)| *o = v + b);
+                self.quantize(*dst);
+            }
             Op::Silu { src, dst } => {
                 let (x, y) = pair(&mut self.buffers, *src, *dst);
                 let f = self.functions;
@@ -388,9 +432,9 @@ impl Engine {
                     self.buffers[*gate][h * block..(h + 1) * block].copy_from_slice(&pair[*block..]);
                 }
             }
-            Op::Rope { buf, block, rotary } => {
+            Op::Rope { buf, block, rotary, table } => {
                 let position = self.rope_position as f32;
-                let (cos, sin): (Vec<f32>, Vec<f32>) = self.inverse_freq.iter().map(|f| ((position * f).cos(), (position * f).sin())).unzip();
+                let (cos, sin): (Vec<f32>, Vec<f32>) = self.inverse_freq[*table].iter().map(|f| ((position * f).cos(), (position * f).sin())).unzip();
                 let half = rotary / 2;
                 for head in self.buffers[*buf].chunks_exact_mut(*block) {
                     let original: Vec<f32> = head[..*rotary].to_vec();
@@ -402,15 +446,21 @@ impl Engine {
                 }
                 self.quantize(*buf);
             }
-            Op::KvAppend { slot, key, value } => {
+            Op::KvAppend { slot, key, value, window } => {
                 let (k, v) = (self.buffers[*key].clone(), self.buffers[*value].clone());
-                self.kv[*slot].keys.extend_from_slice(&k);
-                self.kv[*slot].values.extend_from_slice(&v);
+                let kv = &mut self.kv[*slot];
+                kv.keys.extend_from_slice(&k);
+                kv.values.extend_from_slice(&v);
+                if let Some(limit) = window {
+                    let excess = (kv.keys.len() / kv.width).saturating_sub(*limit) * kv.width;
+                    kv.keys.drain(..excess);
+                    kv.values.drain(..excess);
+                }
             }
-            Op::AttnSum { slot, query, head_dim, heads, kv_heads, dst } => {
+            Op::AttnSum { slot, query, head_dim, scale_dim, heads, kv_heads, softcap, dst, .. } => {
                 let kv = &self.kv[*slot];
                 let group = heads / kv_heads;
-                let scale = 1.0 / (*head_dim as f32).sqrt();
+                let scale = 1.0 / (*scale_dim as f32).sqrt();
                 let tokens = kv.keys.len() / kv.width;
                 let q = &self.buffers[*query];
                 let f = self.functions;
@@ -423,6 +473,9 @@ impl Engine {
                         for (t, s) in scores.iter_mut().enumerate() {
                             let key = &kv.keys[t * kv.width + kv_head * head_dim..t * kv.width + (kv_head + 1) * head_dim];
                             *s = qh.iter().zip(key).map(|(a, b)| a * b).sum::<f32>() * scale;
+                            if let Some(cap) = softcap {
+                                *s = f.tanh(*s / cap) * cap;
+                            }
                         }
                         let top = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                         let mut sum = 0f32;

@@ -320,7 +320,7 @@ mod tests {
         let root = scratch("tiers");
         write_model(&root.join("corre"), LLAMA, true);
         write_model(&root.join("sin-tokenizador"), LLAMA, false);
-        write_model(&root.join("solo-diseno"), &LLAMA.replace("llama", "gemma2"), true);
+        write_model(&root.join("solo-diseno"), &LLAMA.replace("llama", "phi3"), true);
         write_model(&root.join("desconocido"), r#"{"model_type":"bert"}"#, true);
         let list = scan(std::slice::from_ref(&root));
         let of = |name: &str| list.iter().find(|m| m.name == name).unwrap();

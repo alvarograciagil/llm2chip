@@ -1217,6 +1217,11 @@ pub struct Parameter {
     pub token: u32,
     pub position: u32,
     pub constant: u32,
+    /// Multiplies how many of the last `window` tokens exist.
+    pub window_length: u32,
+    /// Multiplies this position's place in a ring of `window` entries.
+    pub window_slot: u32,
+    pub window: u32,
 }
 
 impl Microprogram {
@@ -1251,7 +1256,8 @@ impl Microprogram {
 
 impl Parameter {
     pub fn value(&self, token: u32, position: u32) -> u32 {
-        self.token.wrapping_mul(token).wrapping_add(self.position.wrapping_mul(position)).wrapping_add(self.constant)
+        let windowed = if self.window > 0 { self.window_length.wrapping_mul((position + 1).min(self.window)).wrapping_add(self.window_slot.wrapping_mul(position % self.window)) } else { 0 };
+        self.token.wrapping_mul(token).wrapping_add(self.position.wrapping_mul(position)).wrapping_add(self.constant).wrapping_add(windowed)
     }
 }
 
@@ -1280,7 +1286,7 @@ fn visit_indices(steps: &[Step], f: &mut impl FnMut(Expr)) {
 }
 
 fn only_parameters(e: &Expr) -> bool {
-    e.variables().all(|(v, _)| matches!(v, Var::Token | Var::Position))
+    e.variables().all(|(v, _)| matches!(v, Var::Token | Var::Position | Var::WindowLength(_) | Var::WindowSlot(_)))
 }
 
 impl DieProgram {
@@ -1641,7 +1647,17 @@ impl DieProgram {
             .parameters
             .iter()
             .enumerate()
-            .map(|(i, value)| Parameter { register: i as u32 + 1, token: value.coefficient(Var::Token), position: value.coefficient(Var::Position), constant: value.constant() })
+            .map(|(i, value)| {
+                let mut parameter = Parameter { register: i as u32 + 1, token: value.coefficient(Var::Token), position: value.coefficient(Var::Position), constant: value.constant(), window_length: 0, window_slot: 0, window: 0 };
+                for (variable, factor) in value.variables() {
+                    match variable {
+                        Var::WindowLength(n) => (parameter.window_length, parameter.window) = (factor, n),
+                        Var::WindowSlot(n) => (parameter.window_slot, parameter.window) = (factor, n),
+                        _ => {}
+                    }
+                }
+                parameter
+            })
             .collect();
         Microprogram { words, entries, parameters }
     }
