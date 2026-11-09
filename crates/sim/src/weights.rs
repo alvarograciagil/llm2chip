@@ -33,6 +33,7 @@ pub struct Weights {
     /// Bytes of memory that rewritten tensors may still take.
     recode_budget: AtomicUsize,
     gpu_products: AtomicUsize,
+    largest: Mutex<HashMap<String, f32>>,
 }
 
 /// Smaller products finish sooner on the CPU than a GPU round trip takes.
@@ -106,7 +107,7 @@ impl Weights {
             }
             files.push(map);
         }
-        Ok(Self { accelerator: None, files, tensors, format: None, references: Mutex::new(HashMap::new()), recoded: Mutex::new(HashMap::new()), recode_budget: AtomicUsize::new(default_recode_budget()), gpu_products: AtomicUsize::new(0) })
+        Ok(Self { accelerator: None, files, tensors, format: None, references: Mutex::new(HashMap::new()), recoded: Mutex::new(HashMap::new()), recode_budget: AtomicUsize::new(default_recode_budget()), gpu_products: AtomicUsize::new(0), largest: Mutex::new(HashMap::new()) })
     }
 
     /// Makes every matrix read back as if stored in `format`.
@@ -452,6 +453,25 @@ impl Matrix<'_> {
         }
     }
 
+    /// The largest magnitude this tensor can produce, computed once.
+    fn largest_weight(&self, cols: usize) -> f32 {
+        if let Some(largest) = self.owner.largest.lock().expect("caché de máximos").get(&self.name) {
+            return *largest;
+        }
+        let Source::Packed { words_per_row, groups, scales, biases, .. } = &self.source else { return 0.0 };
+        let top = ((1u32 << (words_per_row * 32 / cols)) - 1) as f32;
+        let largest = (0..self.rows * groups)
+            .into_par_iter()
+            .with_min_len(4096)
+            .map(|i| {
+                let (scale, bias) = (half_at(scales, i), half_at(biases, i));
+                bias.abs().max((top * scale + bias).abs())
+            })
+            .reduce(|| 0.0, f32::max);
+        self.owner.largest.lock().expect("caché de máximos").insert(self.name.clone(), largest);
+        largest
+    }
+
     /// The exponent shared by the matrix's 16-bit mantissas.
     pub fn exponent(&self, cols: usize) -> i64 {
         if let Some((_, reference)) = self.requant(cols) {
@@ -534,7 +554,8 @@ impl Matrix<'_> {
         }
         match &self.source {
             Source::Packed { words_per_row, groups, words, scales, biases } => {
-                if let Some(accelerator) = self.gpu_for(rows * cols) {
+                let fits_int = |largest: f32| (largest as f64) * 2f64.powi(fraction + AFFINE_EXTRA - exponent as i32) < (1u64 << 30) as f64;
+                if let Some(accelerator) = self.gpu_for(rows * cols).filter(|_| fits_int(self.largest_weight(cols))) {
                     let tensor = PackedTensor { words, scales, biases, bits: (words_per_row * 32 / cols) as u32, stride: words_per_row * 4, groups: *groups };
                     if accelerator.exact_product(&tensor, first, x, ExactScale { shift: fraction + AFFINE_EXTRA - exponent as i32, limit }, &mut sums) {
                         self.owner.gpu_products.fetch_add(1, Ordering::Relaxed);

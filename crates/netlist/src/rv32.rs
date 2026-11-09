@@ -546,18 +546,12 @@ pub struct Retired {
 }
 
 /// Instruction-set simulator. Times every instruction exactly as the gates do.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Rv32Iss {
     pub pc: u32,
     pub regs: [u32; 32],
     pub cycle: u64,
     pub halted: bool,
-}
-
-impl Default for Rv32Iss {
-    fn default() -> Self {
-        Self { pc: 0, regs: [0; 32], cycle: 0, halted: false }
-    }
 }
 
 fn muldiv_result(funct3: u32, a: u32, b: u32) -> u32 {

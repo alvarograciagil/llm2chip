@@ -97,12 +97,13 @@ impl MetalAccelerator {
         let (Some((words, words_at)), Some((scales, scales_at)), Some((biases, biases_at))) = (self.locate(tensor.words), self.locate(tensor.scales), self.locate(tensor.biases)) else {
             return false;
         };
-        if rows * tensor.stride >= u32::MAX as usize {
+        // The kernels read whole words: a group must fill them exactly.
+        if rows * tensor.stride >= u32::MAX as usize || !(job.group_size * tensor.bits).is_multiple_of(32) {
             return false;
         }
         // Tensors are not aligned in the file: start on a word and skip the codes before the row.
         let words_start = words_at + first * tensor.stride;
-        let job = Job { skip: (words_start % 4) as u32 * 8 / tensor.bits, ..job };
+        let job = Job { skip: (words_start % 4) as u32 * 8, ..job };
         let mut scratch = self.scratch.lock().expect("búferes de Metal");
         autoreleasepool(|_| {
             if scratch.input.length() < input.len() {
