@@ -42,5 +42,8 @@ Límites de esta medida:
 | posit8 | 93.8 % | 0.0123 | 10.7 |
 | posit16 | 100.0 % | 0.0000 | 10.7 |
 | log8 | 81.2 % | 0.1800 | 37.8 |
+| log16 | 100.0 % | 0.0000 | 26.7 |
+| book4 | 43.8 % | 2.1889 | 50.9 |
+| book8 | 56.2 % | 1.2565 | 68.7 |
 
 Comando: `cargo run --release -p sim --example formats -- <carpeta> 16 <formatos...>`

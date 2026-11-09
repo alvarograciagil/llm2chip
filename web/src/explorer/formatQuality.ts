@@ -32,4 +32,7 @@ export const FORMAT_QUALITY: Record<string, { top1: number; kl: number }> = {
   "Posit8 es1": { top1: 93.8, kl: 0.0123 },
   "Posit16 es1": { top1: 100, kl: 0 },
   "LNS 8 (4 de fracción)": { top1: 81.2, kl: 0.18 },
+  "LNS 16 (8 de fracción)": { top1: 100, kl: 0 },
+  "4 bits (16 valores)": { top1: 43.8, kl: 2.1889 },
+  "8 bits (256 valores)": { top1: 56.2, kl: 1.2565 },
 };

@@ -157,7 +157,7 @@ export function Toolbar() {
         </IconButton>
         <AppearanceMenu />
         <button className={baseline ? "pill on" : "pill"} onClick={baseline ? clearBaseline : pinBaseline}>
-          {baseline ? "Quitar referencia" : "Fijar como referencia"}
+          {baseline ? "Quitar" : "Fijar"}<span className="wide-label">{baseline ? " referencia" : " como referencia"}</span>
         </button>
         <div className="anchor">
           <button className="pill" onClick={() => setSaving(!saving)}>

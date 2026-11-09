@@ -1885,9 +1885,29 @@ button.logic-step:hover {
 }
 
 /* Five views no longer fit around the title in a narrow window. */
-@media (max-width: 1000px) {
+@media (max-width: 1240px) {
   .toolbar {
     grid-template-columns: auto minmax(0, 1fr) auto;
-    gap: 8px;
+    gap: 10px;
+  }
+
+  .toolbar > .segmented,
+  .toolbar > [role="radiogroup"] {
+    justify-self: center;
+  }
+
+  .wide-label {
+    display: none;
   }
 }
+
+@media (max-width: 880px) {
+  .app-name {
+    display: none;
+  }
+
+  .toolbar .segmented button {
+    padding: 2px 6px;
+  }
+}
+

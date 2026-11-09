@@ -68,7 +68,7 @@ const PRIM_OUTPUT: Record<PrimType, string> = { and2: "y", or2: "y", xor2: "y", 
 const PIN_STEP = 18;
 const BOX_W = 164;
 const GATE = { w: 56, h: 42 };
-const PORT_W = 110;
+const PORT_W = 136;
 const PORT_H = 24;
 
 function pinsOf(inst: Instance, design: Design): { inputs: [string, number][]; outputs: [string, number][] } {
