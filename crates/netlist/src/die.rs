@@ -379,7 +379,7 @@ impl Gen {
         self.add(b.finish())
     }
 
-    fn die(&mut self, c: &DieConfig) -> String {
+    pub(crate) fn die(&mut self, c: &DieConfig) -> String {
         let cfg = c.cell;
         let (a, wide) = (cfg.activation_bits, c.wide_bits());
         let word = word_bits(c);
@@ -1033,6 +1033,36 @@ pub struct Parameter {
     pub token: u32,
     pub position: u32,
     pub constant: u32,
+}
+
+impl Microprogram {
+    /// The cycles one routine takes, which depend only on the parameters.
+    pub fn cycles(&self, config: &DieConfig, routine: usize, token: u32, position: u32) -> u64 {
+        let mask = (1u32 << config.index_bits) - 1;
+        let mut index = vec![0u32; 1 << x_bits(config)];
+        for parameter in &self.parameters {
+            index[parameter.register as usize] = parameter.value(token, position) & mask;
+        }
+        let (mut pc, mut cycles) = (self.entries[routine] as usize, 0u64);
+        loop {
+            let word = &self.words[pc];
+            cycles += word.repeat as u64 + 1;
+            if word.halt {
+                return cycles;
+            }
+            let mut next = pc + 1;
+            if word.x_write {
+                let value = index[word.x_src as usize].wrapping_add(word.literal_b) & mask;
+                if word.x_dst != 0 {
+                    index[word.x_dst as usize] = value;
+                }
+                if word.branch && value != index[word.x_limit as usize] {
+                    next = word.target as usize;
+                }
+            }
+            pc = next;
+        }
+    }
 }
 
 impl Parameter {

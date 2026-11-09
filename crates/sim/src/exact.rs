@@ -4,7 +4,7 @@ use crate::lower::Layout;
 use crate::vm::BlockVm;
 use crate::weights::Weights;
 use compiler::Program;
-use netlist::block::{exponent_register, BlockOps};
+use netlist::block::exponent_register;
 use netlist::{CellConfig, DieConfig};
 use std::sync::Arc;
 
@@ -50,23 +50,7 @@ impl ExactEngine {
 
     pub fn reset(&mut self) {
         self.vm.clear();
-        let mut by_reg: std::collections::BTreeMap<u32, Vec<(u32, i64)>> = std::collections::BTreeMap::new();
-        let mut exponents = Vec::new();
-        for ((reg, index), value) in &self.layout.setup().initial {
-            if *reg == self.exponents {
-                exponents.push((*index, *value));
-            } else {
-                by_reg.entry(*reg).or_default().push((*index, *value));
-            }
-        }
-        for (reg, mut entries) in by_reg {
-            entries.sort();
-            let mantissas: Vec<i64> = entries.iter().map(|(_, v)| *v).collect();
-            self.vm.load_mantissas(reg, &mantissas, 0);
-        }
-        for (reg, exponent) in exponents {
-            self.vm.set_exponent(reg, exponent);
-        }
+        crate::chip::load_initial(&mut self.vm, &self.layout.setup().initial, self.exponents);
         self.position = 0;
         self.draft_tokens = 0;
     }

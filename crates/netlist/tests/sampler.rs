@@ -62,7 +62,7 @@ fn gates_match_the_model() {
         let length = 1 + noise.next() as usize % 300;
         let spread = 1 << (4 + noise.next() % 11);
         let logits: Vec<i64> = (0..length).map(|_| (noise.next() % spread) as i64 - spread as i64 / 2).collect();
-        let inverse = noise.next() % 4096;
+        let inverse = noise.next() % 65536;
         let limit = 1 + noise.next() as usize % 8;
         let greedy = noise.next().is_multiple_of(8);
         let got = run_gates(&mut sim, &logits, inverse, limit, greedy);
@@ -79,7 +79,7 @@ fn a_cold_distribution_follows_the_logits() {
     let mut hits = [0; 4];
     for _ in 0..4000 {
         // One logit step of 256 units per nat, at temperature 1, with the table's 1/16 steps.
-        hits[model.sample(&logits, 16, 8, false).0 as usize] += 1;
+        hits[model.sample(&logits, 256, 8, false).0 as usize] += 1;
     }
     assert!(hits[1] > hits[3] && hits[3] > hits[0] && hits[0] > hits[2], "{hits:?}");
 }

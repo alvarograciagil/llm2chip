@@ -2,7 +2,7 @@
 //! Words 0 to 2 are the magic number and the sizes of the firmware's two memories, which
 //! the load controller copies by itself; the firmware then loads every other segment.
 
-use crate::soc::SEGMENT_TABLE_WORD;
+use crate::soc::{CONFIG_WORD, SEGMENT_TABLE_WORD};
 
 pub const MAGIC: u32 = 0x4943_324C;
 pub const HEADER_WORDS: usize = 3;
@@ -18,6 +18,7 @@ pub enum Target {
     Function = 4,
     CellWeight = 5,
     CellScale = 6,
+    SamplerTable = 7,
 }
 
 /// A block of the image and where it goes on the chip.
@@ -50,10 +51,14 @@ pub fn crc32(words: &[u32]) -> u32 {
     words.iter().fold(u32::MAX, |crc, word| crc32_word(crc, *word))
 }
 
-/// Builds the image. The segment table is placed inside the firmware's data memory.
-pub fn build_image(program: &[u32], data: &[u32], segments: &[Segment]) -> Result<Vec<u32>, String> {
-    if data.len() > SEGMENT_TABLE_WORD {
-        return Err(format!("los datos del firmware ocupan {} palabras y el límite es {SEGMENT_TABLE_WORD}", data.len()));
+/// Builds the image. The chip description and the segment table are placed inside
+/// the firmware's data memory, where it finds them without any other help.
+pub fn build_image(program: &[u32], data: &[u32], config: &[u32], segments: &[Segment]) -> Result<Vec<u32>, String> {
+    if data.len() > CONFIG_WORD {
+        return Err(format!("los datos del firmware ocupan {} palabras y el límite es {CONFIG_WORD}", data.len()));
+    }
+    if config.len() > SEGMENT_TABLE_WORD - CONFIG_WORD {
+        return Err(format!("la descripción del chip ocupa {} palabras y el límite es {}", config.len(), SEGMENT_TABLE_WORD - CONFIG_WORD));
     }
     let table_words = 1 + segments.len() * SEGMENT_FIELDS;
     let data_words = SEGMENT_TABLE_WORD + table_words;
@@ -68,6 +73,8 @@ pub fn build_image(program: &[u32], data: &[u32], segments: &[Segment]) -> Resul
     let mut image = vec![MAGIC, program.len() as u32, data_words as u32];
     image.extend_from_slice(program);
     image.extend_from_slice(data);
+    image.resize(HEADER_WORDS + program.len() + CONFIG_WORD, 0);
+    image.extend_from_slice(config);
     image.resize(HEADER_WORDS + program.len() + SEGMENT_TABLE_WORD, 0);
     image.extend(table);
     for segment in segments {

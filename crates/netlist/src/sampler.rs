@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 pub const TABLE_BITS: u32 = 8;
 /// Fractional bits of the inverse temperature.
-pub const INVERSE_FRACTION: u32 = 8;
+pub const INVERSE_FRACTION: u32 = 12;
 const SUM_BITS: usize = 24;
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -28,7 +28,7 @@ fn selector_bits(config: &SamplerConfig) -> usize {
     (config.entries as usize + 1).next_power_of_two().trailing_zeros() as usize
 }
 
-fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
+pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
     let (bits, index_bits, entries) = (c.logit_bits as usize, c.index_bits as usize, c.entries as usize);
     let count_bits = selector_bits(&c);
     let mut b = Builder::new("token_sampler", "Unidad de muestreo", "Conserva los candidatos con mayor logit y elige uno según su probabilidad, con temperatura y top-k.");

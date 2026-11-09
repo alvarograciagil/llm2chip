@@ -270,6 +270,28 @@ impl Layout {
         Ok(code.finish_program())
     }
 
+    /// Runs one routine of the microprogram directly, at software speed.
+    pub fn run_routine<O: BlockOps>(&self, ops: &mut O, program: &Program, routine: usize, token: O::N, position: O::N) -> Result<(), String> {
+        match routine {
+            ENTRY_TOKEN => self.run_range(ops, program, 0..program.logits_from, token, position, true),
+            ENTRY_LOGITS => self.run_range(ops, program, program.logits_from..program.ops.len(), token, position, false),
+            ENTRY_FEED_FROM_MAIN => {
+                self.feed_draft(ops, program, true);
+                Ok(())
+            }
+            ENTRY_FEED_FROM_DRAFT => {
+                self.feed_draft(ops, program, false);
+                Ok(())
+            }
+            ENTRY_DRAFT | ENTRY_DRAFT_LOGITS => {
+                let draft = program.draft.as_ref().ok_or("este modelo no tiene cabeza MTP")?;
+                let (list, rope) = if routine == ENTRY_DRAFT { (&draft.ops[..draft.logits_from], true) } else { (&draft.ops[draft.logits_from..], false) };
+                self.run_list(ops, program, list, token, position, rope)
+            }
+            other => Err(format!("rutina desconocida: {other}")),
+        }
+    }
+
     pub fn run_token<O: BlockOps>(&self, ops: &mut O, program: &Program, token: O::N, position: O::N, want_logits: bool) -> Result<(), String> {
         let limit = if want_logits { program.ops.len() } else { program.logits_from };
         self.run_range(ops, program, 0..limit, token, position, true)

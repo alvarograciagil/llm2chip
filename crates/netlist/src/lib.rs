@@ -2,6 +2,7 @@
 //! The schematic, the simulator and the Verilog export all read this one structure.
 
 pub mod block;
+pub mod chip;
 pub mod format;
 pub mod image;
 pub mod multiplier;

@@ -1,6 +1,7 @@
 //! Executes a compiled microprogram on real weights.
 
 pub mod accel;
+pub mod chip;
 mod exact;
 mod exec;
 pub mod lower;

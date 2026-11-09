@@ -1,4 +1,5 @@
-//! Firmware of the control CPU. Talks to the outside world only through the host port.
+//! Firmware of the control CPU: loads the model, reads text, runs the die and writes text.
+//! It talks to the outside world only through the host port.
 #![no_std]
 #![no_main]
 
@@ -17,6 +18,41 @@ const LOADER_CRC: usize = 8;
 const SEGMENT_TABLE: *const u32 = 0x1000_4000 as *const u32;
 const SEGMENT_FIELDS: usize = 7;
 
+const PERIPHERALS: *mut u32 = 0x4000_0000 as *mut u32;
+const REG_ENTRY: usize = 32;
+const REG_STATUS: usize = 33;
+const REG_VECTOR_ADDRESS: usize = 34;
+const REG_VECTOR_DATA: usize = 35;
+const REG_SAMPLE_BASE: usize = 36;
+const REG_SAMPLE_COUNT: usize = 37;
+const REG_SAMPLE_INVERSE: usize = 38;
+const REG_SAMPLE_LIMIT: usize = 39;
+const REG_SAMPLE_GREEDY: usize = 40;
+const REG_SAMPLE_SEED: usize = 41;
+const REG_SAMPLE_START: usize = 42;
+const REG_SAMPLE_DONE: usize = 43;
+const REG_SAMPLE_TOKEN: usize = 44;
+
+/// The description the image builder leaves in data memory.
+const INFO: *const u32 = 0x1000_3000 as *const u32;
+const INFO_ENTRY_TOKEN: usize = 0;
+const INFO_ENTRY_LOGITS: usize = 1;
+const INFO_LOGITS: usize = 2;
+const INFO_LOGITS_EXPONENT: usize = 3;
+const INFO_VOCABULARY: usize = 4;
+const INFO_MAX_NEW: usize = 5;
+const INFO_GREEDY: usize = 6;
+const INFO_LIMIT: usize = 7;
+const INFO_TEMPERATURE: usize = 8;
+const INFO_SEED: usize = 9;
+const INFO_ACTIVATION_BITS: usize = 10;
+const INFO_PARAMETER_COUNT: usize = 11;
+const INFO_PARAMETERS: usize = 12;
+const INFO_BYTE_TO_TOKEN: usize = INFO_PARAMETERS + 4 * 16;
+const INFO_TOKEN_TO_BYTE: usize = INFO_BYTE_TO_TOKEN + 256;
+
+const MAX_PROMPT: usize = 64;
+
 global_asm!(
     r#"
     .section .text.entry
@@ -33,6 +69,18 @@ _start:
     ebreak
 "#
 );
+
+fn info(field: usize) -> u32 {
+    unsafe { read_volatile(INFO.add(field)) }
+}
+
+fn peripheral_write(register: usize, value: u32) {
+    unsafe { write_volatile(PERIPHERALS.add(register), value) }
+}
+
+fn peripheral_read(register: usize) -> u32 {
+    unsafe { read_volatile(PERIPHERALS.add(register)) }
+}
 
 fn receive() -> u8 {
     unsafe {
@@ -65,15 +113,67 @@ fn load_segments() {
     }
 }
 
+/// Runs one routine of the die for this token and position.
+fn run_die(entry: u32, token: u32, position: u32) {
+    for p in 0..info(INFO_PARAMETER_COUNT) as usize {
+        let at = INFO_PARAMETERS + 4 * p;
+        let value = info(at + 1).wrapping_mul(token).wrapping_add(info(at + 2).wrapping_mul(position)).wrapping_add(info(at + 3));
+        peripheral_write(info(at) as usize, value);
+    }
+    peripheral_write(REG_ENTRY, entry);
+    while peripheral_read(REG_STATUS) == 0 {}
+}
+
+/// Inverse temperature for the sampling unit: mantissa steps per table step.
+fn sampling_inverse() -> u32 {
+    peripheral_write(REG_VECTOR_ADDRESS, info(INFO_LOGITS_EXPONENT));
+    let raw = peripheral_read(REG_VECTOR_DATA) as i32;
+    let unused = 32 - info(INFO_ACTIVATION_BITS);
+    let exponent = (raw << unused) >> unused;
+    let doubled = 1 + exponent;
+    let scaled = if doubled >= 0 { (256u32 << doubled.min(16)) / info(INFO_TEMPERATURE).max(1) } else { (256u32 >> (-doubled).min(16)) / info(INFO_TEMPERATURE).max(1) };
+    scaled.min(0xFFFF)
+}
+
+fn sample() -> u32 {
+    peripheral_write(REG_SAMPLE_BASE, info(INFO_LOGITS));
+    peripheral_write(REG_SAMPLE_COUNT, info(INFO_VOCABULARY));
+    peripheral_write(REG_SAMPLE_INVERSE, sampling_inverse());
+    peripheral_write(REG_SAMPLE_LIMIT, info(INFO_LIMIT));
+    peripheral_write(REG_SAMPLE_GREEDY, info(INFO_GREEDY));
+    peripheral_write(REG_SAMPLE_START, 1);
+    while peripheral_read(REG_SAMPLE_DONE) == 0 {}
+    peripheral_read(REG_SAMPLE_TOKEN)
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn main() {
     load_segments();
+    peripheral_write(REG_SAMPLE_SEED, info(INFO_SEED));
+    let (entry_token, entry_logits) = (info(INFO_ENTRY_TOKEN), info(INFO_ENTRY_LOGITS));
+    let mut prompt = [0u32; MAX_PROMPT];
+    let mut length = 0;
     loop {
         let byte = receive();
-        if byte == 0 {
-            return;
+        if byte == 0 || length == MAX_PROMPT {
+            break;
         }
-        send(byte.to_ascii_uppercase());
+        prompt[length] = info(INFO_BYTE_TO_TOKEN + byte as usize);
+        length += 1;
+    }
+
+    let mut position = 0;
+    for token in &prompt[..length] {
+        run_die(entry_token, *token, position);
+        position += 1;
+    }
+    let mut last = prompt[length.saturating_sub(1)];
+    for _ in 0..info(INFO_MAX_NEW) {
+        run_die(entry_logits, last, position - 1);
+        last = sample();
+        send(info(INFO_TOKEN_TO_BYTE + last as usize) as u8);
+        run_die(entry_token, last, position);
+        position += 1;
     }
 }
 

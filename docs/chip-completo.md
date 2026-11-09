@@ -29,10 +29,10 @@ El chip recibe bytes de texto y devuelve bytes de texto. El tokenizado, la infer
 | Puerto de host y FIFO | Entrada y salida de bytes | En puertas |
 | CPU de control RV32IM | Firmware | En puertas e ISS, ciclo a ciclo |
 | SRAM de instrucciones y datos | Firmware y vocabulario | En puertas |
-| Controlador de carga y DMA | Imagen hacia celdas, tablas y microcódigo, con arranque propio y CRC | En puertas e ISS; salidas sin conectar al die |
+| Controlador de carga y DMA | Imagen hacia celdas, tablas y microcódigo, con arranque propio y CRC | En puertas e ISS, conectado al die |
 | Red de escritura de pesos | Lleva cada palabra a su celda | Solo puertos de carga directos |
 | ECC, CRC, BIST y reparación | Fiabilidad y celdas defectuosas | Solo área |
-| Unidad de muestreo y RNG | Top-k y temperatura sobre los logits | En puertas y modelo, sin conectar al die |
+| Unidad de muestreo y RNG | Top-k y temperatura sobre los logits | En puertas y modelo, conectada al die |
 | Planificador de tokens y MTP | Decide qué ejecuta cada die, y deshace | En software |
 | Reloj, reset y gestión de energía | Secuencia de reset, puertas de reloj | Falta |
 | Depuración y contadores | JTAG, trazas, rendimiento | Falta |
@@ -62,6 +62,10 @@ Perfiles de partida:
 - **Puertas completas:** todo en puertas con un modelo diminuto, de los bytes de entrada a los de salida.
 
 Cada ciclo que muestra la app indica si se ha simulado o estimado, según lo que se haya omitido.
+
+## Chip completo en puertas
+
+`chip_design` une la CPU, las memorias, el controlador de carga, el die y la unidad de muestreo. Con un modelo diminuto, el firmware real recibe bytes, carga la imagen, ejecuta los tokens y devuelve bytes. El resultado y los ciclos coinciden con el nivel de instrucción (CPU en ISS y die en la máquina exacta): 525.668 ciclos en los dos.
 
 ## Por qué no todo en puertas con Qwen
 

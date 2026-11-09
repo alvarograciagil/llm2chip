@@ -25,10 +25,15 @@ pub const LOADER_START: u32 = LOADER_BASE + 24;
 pub const LOADER_BUSY: u32 = LOADER_BASE + 28;
 pub const LOADER_CRC: u32 = LOADER_BASE + 32;
 
+pub const PERIPHERAL_BASE: u32 = 0x4000_0000;
+/// Word of data memory where the image builder places the chip description.
+pub const CONFIG_WORD: usize = 0x0C00;
 /// Word of data memory where the image builder places the segment table.
 pub const SEGMENT_TABLE_WORD: usize = 0x1000;
 /// The widest thing the load controller writes, in 32-bit image words.
-pub const LOAD_LANES: usize = 5;
+pub const LOAD_LANES: usize = 7;
+/// Word-address bits of the peripheral bus.
+pub const PERIPHERAL_BITS: u32 = 10;
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct SocConfig {
@@ -387,7 +392,7 @@ fn loader(gen: &mut Gen) -> String {
     gen.add(b.finish())
 }
 
-fn soc(gen: &mut Gen, config: SocConfig) -> String {
+pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     let cpu = core(gen);
     let queue = fifo(gen, config.fifo_bits);
     let load = loader(gen);
@@ -411,6 +416,11 @@ fn soc(gen: &mut Gen, config: SocConfig) -> String {
     let load_addr = b.output("load_addr", 32);
     let load_data = b.output("load_data", 32 * LOAD_LANES as u32);
     let booting = b.output("booting", 1)[0];
+    let peripheral_write = b.output("peripheral_write", 1)[0];
+    let peripheral_read = b.output("peripheral_read", 1)[0];
+    let peripheral_address = b.output("peripheral_address", PERIPHERAL_BITS);
+    let peripheral_wdata = b.output("peripheral_wdata", 32);
+    let peripheral_rdata = b.input("peripheral_rdata", 32);
 
     let loader_busy = b.wire("loader_busy", 1)[0];
     let loader_crc = b.wire("loader_crc", 32);
@@ -465,6 +475,18 @@ fn soc(gen: &mut Gen, config: SocConfig) -> String {
         let loader_write = l.and(is_loader, any_write);
         l.b.or_to(loader_write, Bit::Zero, loader_reg_write);
 
+        let is_peripheral = l.equals(&top, PERIPHERAL_BASE >> 28);
+        let write_peripheral = l.and(is_peripheral, any_write);
+        let read_peripheral = l.and(is_peripheral, dmem_re);
+        l.b.or_to(write_peripheral, Bit::Zero, peripheral_write);
+        l.b.or_to(read_peripheral, Bit::Zero, peripheral_read);
+        for (from, to) in dmem_addr[2..].iter().zip(&peripheral_address) {
+            l.b.or_to(*from, Bit::Zero, *to);
+        }
+        for (from, to) in dmem_wdata.iter().zip(&peripheral_wdata) {
+            l.b.or_to(*from, Bit::Zero, *to);
+        }
+
         l.b.group("Carga en las memorias");
         let boot_write = l.and(load_valid, booting);
         let to_program = l.equals(&load_target, 0);
@@ -515,6 +537,8 @@ fn soc(gen: &mut Gen, config: SocConfig) -> String {
         };
         let want_crc = l.and(loader_read, reads_crc);
         let (pick_busy, pick_crc, busy_seen) = (l.fresh(), l.fresh(), l.fresh());
+        let pick_peripheral = l.fresh();
+        l.connect_flops(&[read_peripheral], &[pick_peripheral]);
         l.connect_flops(&[is_ram, want_rx_data, want_rx_status, want_tx_status, status_rx_now, status_tx_now, want_busy, want_crc, loader_busy], &[pick_ram, pick_rx_data, pick_rx_status, pick_tx_status, status_rx, status_tx, pick_busy, pick_crc, busy_seen]);
         let rx_word: Vec<Bit> = rx_out.iter().copied().chain(std::iter::repeat_n(Bit::Zero, 24)).collect();
         let rx_status_word: Vec<Bit> = std::iter::once(status_rx).chain(std::iter::repeat_n(Bit::Zero, 31)).collect();
@@ -527,6 +551,7 @@ fn soc(gen: &mut Gen, config: SocConfig) -> String {
         let busy_word: Vec<Bit> = std::iter::once(busy_seen).chain(std::iter::repeat_n(Bit::Zero, 31)).collect();
         value = l.mux_bus(pick_busy, &value, &busy_word);
         value = l.mux_bus(pick_crc, &value, &loader_crc);
+        value = l.mux_bus(pick_peripheral, &value, &peripheral_rdata);
         read_data = value;
         for (from, to) in read_data.iter().zip(&dmem_rdata) {
             l.b.or_to(*from, Bit::Zero, *to);
@@ -605,8 +630,30 @@ pub struct LoadWrite {
     pub words: Vec<u32>,
 }
 
+/// What sits on the peripheral bus when the CPU runs at instruction level.
+pub trait Peripheral {
+    fn read(&mut self, register: u32, cycle: u64) -> u32;
+    fn write(&mut self, register: u32, value: u32, cycle: u64);
+    /// One write of the load controller outside the firmware's memories.
+    fn load(&mut self, write: &LoadWrite);
+}
+
+/// An empty peripheral bus.
+#[derive(Default)]
+pub struct NoPeripheral;
+
+impl Peripheral for NoPeripheral {
+    fn read(&mut self, _register: u32, _cycle: u64) -> u32 {
+        0
+    }
+
+    fn write(&mut self, _register: u32, _value: u32, _cycle: u64) {}
+
+    fn load(&mut self, _write: &LoadWrite) {}
+}
+
 /// The same machine at instruction level, for firmware runs too long for gates.
-pub struct SocBus {
+pub struct SocBus<P = NoPeripheral> {
     pub program: Vec<u32>,
     pub ram: Vec<u32>,
     pub rx: VecDeque<u8>,
@@ -617,26 +664,33 @@ pub struct SocBus {
     now: u64,
     busy_until: Option<u64>,
     crc: u32,
+    pub peripheral: P,
 }
 
-impl SocBus {
-    pub fn new(config: SocConfig, program: &[u32], data: &[u32], input: &[u8]) -> Self {
+impl SocBus<NoPeripheral> {
+    pub fn booted(config: SocConfig, image: &[u32], input: &[u8]) -> Result<Self, String> {
+        Self::booted_with(config, image, input, NoPeripheral)
+    }
+}
+
+impl<P: Peripheral> SocBus<P> {
+    pub fn new(config: SocConfig, program: &[u32], data: &[u32], input: &[u8], peripheral: P) -> Self {
         let mut image = vec![0; 1 << config.program_bits];
         image[..program.len()].copy_from_slice(program);
         let mut ram = vec![0; 1 << config.data_bits];
         ram[..data.len()].copy_from_slice(data);
-        Self { program: image, ram, rx: input.iter().copied().collect(), tx: Vec::new(), image: Vec::new(), writes: Vec::new(), registers: [0; 6], now: 0, busy_until: None, crc: 0 }
+        Self { program: image, ram, rx: input.iter().copied().collect(), tx: Vec::new(), image: Vec::new(), writes: Vec::new(), registers: [0; 6], now: 0, busy_until: None, crc: 0, peripheral }
     }
 
     /// The state right after the load controller has copied the firmware from `image`.
-    pub fn booted(config: SocConfig, image: &[u32], input: &[u8]) -> Result<Self, String> {
+    pub fn booted_with(config: SocConfig, image: &[u32], input: &[u8], peripheral: P) -> Result<Self, String> {
         if image.len() < crate::image::HEADER_WORDS || image[0] != crate::image::MAGIC {
             return Err("la imagen no empieza por la cabecera del chip".into());
         }
         let (program_words, data_words) = (image[1] as usize, image[2] as usize);
         let program_start = crate::image::HEADER_WORDS;
         let data_start = program_start + program_words;
-        let mut bus = Self::new(config, &image[program_start..data_start], &image[data_start..data_start + data_words], input);
+        let mut bus = Self::new(config, &image[program_start..data_start], &image[data_start..data_start + data_words], input, peripheral);
         bus.image = image.to_vec();
         Ok(bus)
     }
@@ -651,13 +705,15 @@ impl SocBus {
             for word in &words {
                 self.crc = crate::image::crc32_word(self.crc, *word);
             }
-            self.writes.push(LoadWrite { target, unit, address: address + element, words });
+            let write = LoadWrite { target, unit, address: address + element, words };
+            self.peripheral.load(&write);
+            self.writes.push(write);
         }
         self.busy_until = Some(self.now + count as u64 * (2 * beats as u64 + 1));
     }
 }
 
-impl Rv32Bus for SocBus {
+impl<P: Peripheral> Rv32Bus for SocBus<P> {
     fn at_cycle(&mut self, cycle: u64) {
         self.now = cycle;
     }
@@ -680,6 +736,7 @@ impl Rv32Bus for SocBus {
                 8 => self.crc,
                 _ => 0,
             },
+            4 => self.peripheral.read((address >> 2) & ((1 << PERIPHERAL_BITS) - 1), self.now),
             _ => 0,
         }
     }
@@ -700,6 +757,7 @@ impl Rv32Bus for SocBus {
                 6 => self.start_transfer(),
                 _ => {}
             },
+            4 => self.peripheral.write((address >> 2) & ((1 << PERIPHERAL_BITS) - 1), data, self.now),
             _ => {}
         }
     }
