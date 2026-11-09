@@ -266,7 +266,7 @@ impl Simulator {
     pub fn set_wide(&mut self, port: &str, value: u128) -> Result<(), SimError> {
         let bits = self.ports.get(port).ok_or_else(|| SimError(format!("puerto desconocido: {port}")))?;
         for (i, s) in bits.iter().enumerate() {
-            self.values[*s] = ((value >> i) & 1) as u8;
+            self.values[*s] = (value.checked_shr(i as u32).unwrap_or(0) & 1) as u8;
         }
         Ok(())
     }
