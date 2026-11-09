@@ -26,7 +26,8 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let resources = app.path().resource_dir()?;
-            let child = Command::new(resources.join("engine/server")).env("LLM2CHIP_DIST", resources.join("web")).spawn()?;
+            let engine = format!("engine/server{}", std::env::consts::EXE_SUFFIX);
+            let child = Command::new(resources.join(engine)).env("LLM2CHIP_DIST", resources.join("web")).spawn()?;
             app.manage(Engine(Mutex::new(Some(child))));
             if !wait_for_engine() {
                 return Err("el motor local no ha arrancado".into());

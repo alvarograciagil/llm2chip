@@ -126,7 +126,7 @@ body,
 body {
   background: var(--window);
   color: var(--label);
-  font: 13px/1.38 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  font: 13px/1.38 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", Roboto, Cantarell, "Noto Sans", sans-serif;
   letter-spacing: -0.003em;
   -webkit-font-smoothing: antialiased;
 }

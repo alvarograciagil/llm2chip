@@ -43,7 +43,7 @@ struct ModelEntry {
 }
 
 fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+    PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default())
 }
 
 fn describe(dir: &Path) -> Option<ModelEntry> {

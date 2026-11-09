@@ -40,7 +40,7 @@ export interface Scene {
 }
 
 const ARRAY_IDS = ["cell_weights", "cell_macs", "scale_units", "activation_noc"];
-const FONT = '-apple-system, "SF Pro Text", "Helvetica Neue", sans-serif';
+const FONT = '-apple-system, "SF Pro Text", "Helvetica Neue", "Segoe UI", Roboto, Cantarell, "Noto Sans", sans-serif';
 /** Below this cell size in pixels, the array is one texture; above, cells are real. */
 const CELL_MIN_PX = 8;
 const CELL_DETAIL_PX = 64;
