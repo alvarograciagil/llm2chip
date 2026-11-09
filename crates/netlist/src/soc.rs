@@ -177,16 +177,12 @@ fn loader(gen: &mut Gen) -> String {
     let steps: Vec<Bit> = boot.clone();
     let [ask_program, wait_program, copy_program, ask_data, wait_data, copy_data, begin] = [steps[0], steps[1], steps[2], steps[3], steps[4], steps[5], steps[6]];
     let header_request = l.or(ask_program, ask_data);
-    let header_wait = l.or(wait_program, wait_data);
     let got_program = l.and(wait_program, image_valid);
     let got_data = l.and(wait_data, image_valid);
     let got_header = l.or(got_program, got_data);
 
     l.b.group("Transferencia");
-    let dma_active = {
-        let any = l.any(&[request, wait, emit]);
-        any
-    };
+    let dma_active = l.any(&[request, wait, emit]);
     let response = l.and(wait, image_valid);
     let last_beat = {
         let next_beat: Vec<Bit> = counter_step(&mut l, &beat, Bit::One);
@@ -233,15 +229,6 @@ fn loader(gen: &mut Gen) -> String {
 
     l.b.group("Arranque");
     let keep = l.not(reset);
-    let first = {
-        let t = l.and(reset, Bit::One);
-        t
-    };
-    let hold_header = {
-        let no = l.not(image_valid);
-        l.and(header_wait, no)
-    };
-    let _ = hold_header;
     let keep_wait_program = {
         let no = l.not(image_valid);
         l.and(wait_program, no)
@@ -261,7 +248,7 @@ fn loader(gen: &mut Gen) -> String {
     };
     let finish_program = l.and(copy_program, dma_done);
     let finish_data = l.and(copy_data, dma_done);
-    let step_ask_program = first;
+    let step_ask_program = reset;
     let step_wait_program = {
         let t = l.or(ask_program, keep_wait_program);
         l.and(t, keep)
