@@ -134,7 +134,7 @@ pub trait BlockOps {
     fn move_element(&mut self, from: Place, to: Place);
     /// `dst[0]` becomes the largest of `src[..len]`, sharing `src`'s exponent.
     fn maximum(&mut self, src: u32, len: u32, dst: u32);
-    /// `dst[i]` becomes 1 when `a[i] == b[0]`, otherwise 0.
+    /// `dst[i]` becomes 1 at the first element equal to `b[0]`, and 0 everywhere else.
     fn mark_equal(&mut self, a: u32, b: u32, dst: u32, len: u32);
     fn set_exponent(&mut self, reg: u32, exponent: i64);
     fn subtract_exponent(&mut self, reg: u32, amount: i64);
@@ -650,6 +650,10 @@ impl BlockOps for Assembly {
 
     fn mark_equal(&mut self, a: u32, b: u32, dst: u32, len: u32) {
         self.clear_shifts();
+        let mut clear = Alu::new(OP_MOV);
+        clear.magnitude_clear = true;
+        clear.write = false;
+        self.steps.push(clear);
         for i in 0..len {
             self.binary(OP_EQUAL, (a, i), (b, 0), (dst, i));
         }
@@ -689,6 +693,7 @@ pub struct Behavior {
     wide_shift: u32,
     magnitude: u64,
     wide_magnitude: u64,
+    equal_seen: bool,
     accumulator: i128,
 }
 
@@ -713,6 +718,7 @@ impl Behavior {
             wide_shift: 0,
             magnitude: 0,
             wide_magnitude: 0,
+            equal_seen: false,
             accumulator: 0,
         }
     }
@@ -740,6 +746,7 @@ impl Behavior {
         let bits = self.bits;
         if s.magnitude_clear {
             self.magnitude = 0;
+            self.equal_seen = false;
         }
         if s.accumulator_clear {
             self.accumulator = 0;
@@ -750,8 +757,8 @@ impl Behavior {
         let a = self.get(s.a);
         let b = self.get(s.b);
         let wide_value = self.wide.get(&s.a.1).copied().unwrap_or(0);
-        let aligned_a = a >> self.shift_a.min(63);
-        let aligned_b = b >> self.shift_b.min(63);
+        let aligned_a = round_right(a as i128, self.shift_a.min(63), bits);
+        let aligned_b = round_right(b as i128, self.shift_b.min(63), bits);
 
         let result = match s.op {
             OP_ADD => wrap(aligned_a as i128 + aligned_b as i128, bits),
@@ -775,7 +782,8 @@ impl Behavior {
             }
             OP_WIDE_OUT => round_right(wide_value as i128, self.wide_shift.min(63), bits),
             OP_EQUAL => {
-                if wrap(aligned_a as i128 - aligned_b as i128, bits) == 0 {
+                if wrap(aligned_a as i128 - aligned_b as i128, bits) == 0 && !self.equal_seen {
+                    self.equal_seen = true;
                     (1i64 << (bits - 1)) - 1
                 } else {
                     0

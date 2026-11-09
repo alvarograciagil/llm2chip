@@ -3,6 +3,7 @@ use crate::optim::catalog;
 use crate::params::{ChipParams, KvBackend, LinkKind, WeightBackend};
 use crate::tech::{node, TechNode};
 use netlist::format::WeightCoding;
+use netlist::multiplier::MultiplierKind;
 use netlist::{cell_design, CellConfig, Simulator};
 use model_ir::{Block, ModelGraph, StageKind, WeightTensor};
 use serde::Serialize;
@@ -240,7 +241,13 @@ fn stage_totals(model: &ModelGraph, p: &ChipParams) -> StageTotals {
 /// Logic area of one cell, from the gates its generated netlist actually contains.
 fn netlist_cell_um2(tech: &TechNode, p: &ChipParams, widest: u32, addr_bits: u32) -> f64 {
     let config = CellConfig { weight_bits: widest, ..p.cell_config(addr_bits) };
-    cell_design(config)
+    // Yosys and ABC shrink each generated multiplier by a measured factor (tests/golden/synthesis.md).
+    let optimized = match p.multiplier_kind {
+        MultiplierKind::Array => 0.65,
+        MultiplierKind::Wallace => 0.78,
+        MultiplierKind::Booth => 0.75,
+    };
+    let area: f64 = cell_design(config)
         .flat_counts()
         .iter()
         .map(|(gate, count)| {
@@ -255,7 +262,8 @@ fn netlist_cell_um2(tech: &TechNode, p: &ChipParams, widest: u32, addr_bits: u32
                     _ => 0.0,
                 }
         })
-        .sum()
+        .sum();
+    optimized * area
 }
 
 struct Multiplier {

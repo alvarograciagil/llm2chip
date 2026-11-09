@@ -118,7 +118,7 @@ impl BlockVm {
         let left = wrap16(e - exponent).max(0);
         let right = wrap16(exponent - e).max(0);
         (0..len)
-            .map(|i| saturating_left(self.get(src, from + i) >> shift_amount(right).min(63), shift_amount(left)))
+            .map(|i| saturating_left(round_right(self.get(src, from + i) as i128, shift_amount(right).min(63), 16), shift_amount(left)))
             .collect()
     }
 
@@ -162,7 +162,7 @@ impl BlockOps for BlockVm {
         let shift_b = shift_amount(wrap16(common - eb)).min(63);
         let results: Vec<i64> = (0..len)
             .map(|i| {
-                let (x, y) = (self.get(a.0, a.1 + i) >> shift_a, self.get(b.0, b.1 + i * b_stride) >> shift_b);
+                let (x, y) = (round_right(self.get(a.0, a.1 + i) as i128, shift_a, 16), round_right(self.get(b.0, b.1 + i * b_stride) as i128, shift_b, 16));
                 wrap16(if subtract { x - y } else { x + y })
             })
             .collect();
@@ -258,7 +258,7 @@ impl BlockOps for BlockVm {
         for (reg, len) in parts {
             let shift = shift_amount(wrap16(largest - self.exp(*reg))).min(63);
             for i in 0..*len {
-                self.set(dst, offset + i, self.get(*reg, i) >> shift);
+                self.set(dst, offset + i, round_right(self.get(*reg, i) as i128, shift, 16));
             }
             offset += len;
         }
@@ -284,8 +284,11 @@ impl BlockOps for BlockVm {
 
     fn mark_equal(&mut self, a: u32, b: u32, dst: u32, len: u32) {
         let target = self.get(b, 0);
+        let mut seen = false;
         for i in 0..len {
-            self.set(dst, i, if wrap16(self.get(a, i) - target) == 0 { TOP } else { 0 });
+            let first = !seen && wrap16(self.get(a, i) - target) == 0;
+            seen |= first;
+            self.set(dst, i, if first { TOP } else { 0 });
         }
         self.set_exp(dst, 0);
     }

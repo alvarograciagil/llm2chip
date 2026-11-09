@@ -500,8 +500,8 @@ impl Gen {
         let shift_a = held_shift(&mut b, "shift_a", load_shift_a, &low);
         let shift_b = held_shift(&mut b, "shift_b", load_shift_b, &low);
         let shift_left = held_shift(&mut b, "shift_left", load_shift_left, &low);
-        let aligned_a = barrel_right(&mut b, &mux_a, "align_a", &read_a, &shift_a);
-        let aligned_b = barrel_right(&mut b, &mux_a, "align_b", &read_b, &shift_b);
+        let aligned_a = self.rounded_right(&mut b, "align_a", &read_a, &shift_a, a as usize);
+        let aligned_b = self.rounded_right(&mut b, "align_b", &read_b, &shift_b, a as usize);
 
         b.group("Unidad vectorial");
         let product = b.wire("product", 2 * a);
@@ -640,7 +640,21 @@ impl Gen {
         }
         let same = b.wire("eq_same", 1)[0];
         b.not_to(any_difference, same);
-        let mut equal = vec![same; a as usize];
+        // Only the first match in a scan counts, so ties cannot select extra elements.
+        let seen = b.wire("eq_seen", 1)[0];
+        let first_match = and_not(&mut b, same, seen, "eq_first");
+        let mut is_equal = Bit::One;
+        for (i, bit) in op.iter().enumerate() {
+            let next = b.wire(&format!("is_eq{i}"), 1)[0];
+            b.and_to(is_equal, *bit, next);
+            is_equal = next;
+        }
+        let now_seen = b.wire("eq_now", 1)[0];
+        b.and_to(is_equal, first_match, now_seen);
+        let seen_any = bus_or(&mut b, seen, now_seen, "eq_any_seen");
+        let keep_seen = and_not(&mut b, seen_any, magnitude_clear, "eq_seen_d");
+        b.dff_to(keep_seen, seen);
+        let mut equal = vec![first_match; a as usize];
         equal[a as usize - 1] = Bit::Zero;
         let leaves: Vec<Vec<Bit>> = vec![
             sum.clone(),

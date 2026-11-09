@@ -11,6 +11,8 @@ use std::collections::{HashMap, HashSet};
 
 /// KV entries, convolution history and expert outputs use this fixed exponent.
 const STATE_EXPONENT: i64 = 6;
+/// Expert outputs are small; a coarser exponent would leave them only a few bits.
+const EXPERT_EXPONENT: i64 = 2;
 /// Added to every squared norm, as the reference model does.
 const EPSILON: f64 = 1e-6;
 const ONES_LENGTH: usize = 512;
@@ -495,7 +497,7 @@ impl Layout {
 
         // Every expert's output goes on one exponent, ready to be weighted.
         let outputs = t[48];
-        ops.set_exponent(outputs, STATE_EXPONENT);
+        ops.set_exponent(outputs, EXPERT_EXPONENT);
         let (gate, up, product, down) = (t[34], t[35], t[36], t[37]);
         for e in 0..experts {
             if ops.known_zero(scores, e) {
@@ -506,7 +508,7 @@ impl Layout {
             self.silu(ops, gate, t[38], intermediate);
             ops.multiply(t[38], up, product, intermediate);
             ops.matvec(&matrix("switch_mlp.down_proj"), reg_of("switch_mlp.down_proj"), e * hidden, product, down, hidden, intermediate);
-            ops.align_to(down, 0, STATE_EXPONENT, outputs, e * hidden, hidden);
+            ops.align_to(down, 0, EXPERT_EXPONENT, outputs, e * hidden, hidden);
         }
         let mixed = t[47];
         ops.dots(scores, outputs, mixed, hidden, experts, |j, e| Some(((scores, e), (outputs, e * hidden + j))));
