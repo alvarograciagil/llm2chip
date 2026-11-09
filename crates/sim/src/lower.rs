@@ -779,23 +779,26 @@ impl Layout {
                 let reg = self.reg(*buf);
                 let total = program.buffers[*buf] as u32;
                 let (d, h, rope) = (*block as u32, self.rope_half as u32, self.rope[*table]);
-                ops.each((total / d).into(), |ops, head| {
-                    let base = head * d;
-                    ops.each(h.into(), |ops, j| {
-                        let at = base + j;
-                        ops.sum_products(at, &[((reg, at), (rope, j)), ((reg, at + h.into()), (rope, j + h.into()))]);
-                    });
-                    ops.each(h.into(), |ops, j| {
-                        let at = base + j + h.into();
-                        ops.sum_products(at, &[((reg, at), (rope, j)), ((reg, base + j), (rope, j + (2 * h).into()))]);
-                    });
-                    ops.each((d - 2 * h).into(), |ops, j| {
-                        let at = base + j + (2 * h).into();
-                        ops.sum_products(at, &[((reg, at), (rope, (3 * h).into()))]);
+                // One table of factors for each element, so each head is one pair of sweeps.
+                let (cos, sin, first) = (t[50], t[51], self.parts[0]);
+                let rotary = 2 * h;
+                ops.copy_part(rope, zero, cos, zero, h.into());
+                ops.copy_part(rope, zero, cos, h.into(), h.into());
+                ops.copy_part(rope, h.into(), sin, zero, h.into());
+                ops.copy_part(rope, rotary.into(), sin, h.into(), h.into());
+                ops.each((d - rotary).into(), |ops, j| ops.move_element((rope, (3 * h).into()), (cos, j + rotary.into())));
+                let heads = total / d;
+                ops.each_head(heads, 1, |ops, head, _| {
+                    ops.with_window(head, &[first], |ops, offset| {
+                        let (x, swapped) = (t[52], t[53]);
+                        ops.copy_part(reg, head * d, x, zero, d.into());
+                        ops.copy_part(x, h.into(), swapped, zero, h.into());
+                        ops.copy_part(x, zero, swapped, h.into(), h.into());
+                        ops.rotate(x, swapped, (cos, sin), first + offset, d, rotary);
                     });
                 });
-                ops.narrow_sums(reg, rope, t[0], total.into());
-                ops.copy_part(t[0], zero, reg, zero, total.into());
+                let parts: Vec<(u32, u32)> = (0..heads as usize).map(|part| (self.parts[part], d)).collect();
+                ops.gather_heads(&parts, reg);
             }
             Op::KvAppend { slot, key, value, window } => {
                 let width = program.buffers[*key] as u32;
@@ -803,9 +806,8 @@ impl Layout {
                     Some(limit) => ops.window_slot(position, *limit as u32),
                     None => position,
                 };
-                let at = slot_place * width;
                 ops.store_key(self.reg(*key), STATE_EXPONENT, self.keys[*slot], slot_place, width);
-                ops.align_to(self.reg(*value), zero, STATE_EXPONENT, self.values[*slot], at, width.into());
+                ops.store_key(self.reg(*value), STATE_EXPONENT, self.values[*slot], slot_place, width);
             }
             Op::AttnSum { slot, query, head_dim, scale_dim, heads, kv_heads, window, softcap, dst } => {
                 let group = heads / kv_heads;

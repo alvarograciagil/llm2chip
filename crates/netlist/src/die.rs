@@ -921,6 +921,17 @@ impl Gen {
             let host_reading = bus_or(&mut b, start, halt_flag, "host_reads");
             b.inst("raddr_select", &mux_addr, &[("s", vec![host_reading]), ("a", addr_a), ("b", vec_addr.clone()), ("y", raddr_a.clone())]);
 
+            let lane_products: Vec<Vec<Bit>> = (0..lanes).map(|lane| b.wire(&format!("lane_product{lane}"), 2 * a)).collect();
+            // In a block of a variable-length scan, the last one may be only partly used.
+            let scanned_lane: Vec<Bit> = {
+                let mut l = Logic { b: &mut b, next: 49_500 };
+                let last_block = l.and(fields["repeat_x"][0], word_done);
+                let whole = l.not(last_block);
+                (0..lanes as u32).map(|lane| {
+                    let reached = at_least(&mut l, &repeat_limit[..lane_bits], lane);
+                    l.or(whole, reached)
+                }).collect()
+            };
             // Elements sit in as many banks as lanes, by the low bits of their index, so a
             // whole block can be read and written at once and a single element still can.
             let vector_flag = fields["vector"][0];
@@ -933,7 +944,8 @@ impl Gen {
                 for (lane, result) in lane_results.iter().enumerate() {
                     let here = l.equals(&waddr[..lane_bits], lane as u32);
                     let alone = l.and(we, here);
-                    let write = l.or(alone, written_together);
+                    let masked = l.and(written_together, scanned_lane[lane]);
+                    let write = l.or(alone, masked);
                     let data = if lane == 0 { wdata.clone() } else { l.mux_bus(written_together, &wdata, result) };
                     let (name_a, name_b) = if lanes == 1 { ("vectors_a".to_string(), "vectors_b".to_string()) } else { (format!("vectors_a{lane}"), format!("vectors_b{lane}")) };
                     let (read_this_a, read_this_b) = (l.b.wire(&format!("{name_a}_data"), a), l.b.wire(&format!("{name_b}_data"), a));
@@ -1032,16 +1044,6 @@ impl Gen {
             let magnitude_d = b.wire("magnitude_d", a);
             let block_scan = b.wire("magnitude_block", 1)[0];
             b.and_to(scan, vector_flag, block_scan);
-            // In a block of a variable-length scan, the last one may be only partly used.
-            let scanned_lane: Vec<Bit> = {
-                let mut l = Logic { b: &mut b, next: 49_500 };
-                let last_block = l.and(fields["repeat_x"][0], word_done);
-                let whole = l.not(last_block);
-                (0..lanes as u32).map(|lane| {
-                    let reached = at_least(&mut l, &repeat_limit[..lane_bits], lane);
-                    l.or(whole, reached)
-                }).collect()
-            };
             for i in 0..a as usize {
                 let differs = b.wire(&format!("mag_differs{i}"), 1)[0];
                 if i == top {
@@ -1081,7 +1083,26 @@ impl Gen {
             let accumulator_clear = ctl("accumulator_clear", &mut b, &fields);
             let accumulator = b.wire("accumulator", accumulator_bits);
             let product_sign = product[2 * a as usize - 1];
-            let extended: Vec<Bit> = (0..accumulator_bits as usize).map(|i| product.get(i).copied().unwrap_or(product_sign)).collect();
+            let plain_input: Vec<Bit> = (0..accumulator_bits as usize).map(|i| product.get(i).copied().unwrap_or(product_sign)).collect();
+            // A block adds up the product of every lane at once.
+            let extended: Vec<Bit> = if lanes == 1 {
+                plain_input
+            } else {
+                let mut l = Logic { b: &mut b, next: 54_000 };
+                let widen = |l: &mut Logic, lane: usize| -> Vec<Bit> {
+                    let source = if lane == 0 { &product } else { &lane_products[lane] };
+                    let sign = source[2 * a as usize - 1];
+                    (0..accumulator_bits as usize).map(|i| {
+                        let bit = source.get(i).copied().unwrap_or(sign);
+                        if lane == 0 { bit } else { l.and(bit, scanned_lane[lane]) }
+                    }).collect()
+                };
+                let block = (1..lanes).fold(widen(&mut l, 0), |sum, lane| {
+                    let term = widen(&mut l, lane);
+                    l.adder(&sum, &term, Bit::Zero).0
+                });
+                l.mux_bus(vector_flag, &plain_input, &block)
+            };
             let acc_sum = b.wire("acc_sum", accumulator_bits);
             let unused = b.wire("acc_carry", 1);
             b.inst("acc_adder", &acc_adder, &[("a", accumulator.clone()), ("b", extended), ("cin", vec![Bit::Zero]), ("sum", acc_sum.clone()), ("cout", unused)]);
@@ -1291,7 +1312,7 @@ impl Gen {
                 };
                 let lane_a = self.rounded_right(&mut b, &name("align_a"), &operand_a, &shift_a, a as usize);
                 let lane_b = self.rounded_right(&mut b, &name("align_b"), &operand_b, &shift_b, a as usize);
-                let product = b.wire(&name("product"), 2 * a);
+                let product = lane_products[lane].clone();
                 b.inst(&name("multiplier"), &mult, &[("weight", operand_a.clone()), ("x", operand_b.clone()), ("product", product.clone())]);
                 let flipped = b.wire(&name("flipped"), a);
                 for i in 0..a as usize {
@@ -1923,7 +1944,7 @@ impl DieProgram {
                     self.alu(&bound);
                 }
                 Step::Repeat { variable, count, body } => self.compile_loop(*variable, *count, body),
-                Step::Stream { variable, count, body } => self.stream(*variable, *count, body),
+                Step::Stream { variable, count, in_elements, body } => self.stream(*variable, *count, *in_elements, body),
                 Step::Combine { .. } => self.combine(step),
                 Step::Clustered { vars, assignments, body } => self.clustered(vars, assignments, body),
                 Step::CellSeek { weights, factors } => self.cell_seek(*weights, *factors),
@@ -1948,7 +1969,7 @@ impl DieProgram {
     }
 
     /// One element per cycle: each word reads one, computes the last and writes an earlier one.
-    fn stream(&mut self, variable: Var, count: Expr, step: &Alu<Expr>) {
+    fn stream(&mut self, variable: Var, count: Expr, in_elements: bool, step: &Alu<Expr>) {
         let moves = |index: Expr| index.coefficient(variable) != 0;
         let mut temporaries = Vec::new();
         let place = |this: &mut Self, index: Expr, temporaries: &mut Vec<u32>| {
@@ -1961,7 +1982,8 @@ impl DieProgram {
         let (fixed_a, fixed_b) = (!moves(step.a.1), !moves(step.b.1));
         let extra = usize::from(step.op == OP_FUNCTION);
         let written = 2 + extra;
-        let n = if count.is_constant() { count.constant() as usize } else { usize::MAX / 2 };
+        let by_blocks = count.is_constant() && !in_elements;
+        let n = if by_blocks { count.constant() as usize } else { usize::MAX / 2 };
 
         let word = |k: usize| {
             let mut w = ControlWord { vector: step.vector, window_x, from_cluster: step.from_cluster, ..Default::default() };
@@ -1979,7 +2001,7 @@ impl DieProgram {
             }
             w
         };
-        if count.is_constant() {
+        if by_blocks {
             self.emit_stream(n, written, true, word);
         } else {
             let leading = if step.write { written } else { 1 };
