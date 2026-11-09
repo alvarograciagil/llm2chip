@@ -171,6 +171,7 @@ function ModelSection() {
   const nodes = useDesign((s) => s.nodes);
   const node = useDesign((s) => s.params.node) as string;
   const setParam = useDesign((s) => s.setParam);
+  const setView = useDesign((s) => s.setView);
 
   const onFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -204,6 +205,9 @@ function ModelSection() {
           </select>
         </div>
       </div>
+      <button className="row link-row" onClick={() => setView("modelos")}>
+        Buscar otros modelos…
+      </button>
       <label className="row link-row">
         Cargar config.json de otro modelo…
         <input type="file" accept=".json,application/json" onChange={onFile} />

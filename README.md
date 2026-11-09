@@ -60,6 +60,19 @@ Todos los chips de un sistema salen de la misma netlist y leen la misma imagen. 
 - **Esquemático:** el circuito real por áreas, hasta la puerta lógica, simulable paso a paso.
 - **Simulador:** escribe un texto y ejecútalo sobre el chip, eligiendo cuánto simular de cada bloque.
 - **Explorador:** barridos, frontera de Pareto, comparación de formatos y calibración.
+- **Modelos:** carpetas donde buscar, y búsqueda y descarga desde Hugging Face.
+
+### Modelos que se pueden adaptar
+
+| Nivel | Arquitecturas | Qué permite |
+|---|---|---|
+| Simulable | Qwen3.5 (con y sin MoE), Llama (incluido el RoPE de Llama 3), Mistral, Qwen3 | Diseñar su chip y ejecutar sus pesos reales |
+| Solo diseño | Qwen2 | Estimar y dibujar su chip |
+| Diseño aproximado | Gemma 1 a 3, Phi-3, Granite | Estimar su chip por su forma de capas; su activación o sus normas extra no se modelan |
+
+Para diseñar un chip basta el `config.json`, así que un modelo de Hugging Face se puede evaluar sin descargar sus pesos. Si un modelo necesita algo que el chip no tiene, la aplicación dice qué es.
+
+Las descargas toman solo safetensors y metadatos, nunca archivos pickle ni código del repositorio. Se fijan a una revisión, se reanudan si se cortan y comprueban cada archivo de pesos con su SHA-256. Los modelos restringidos piden aceptar su licencia en Hugging Face y un token de lectura, que se toma de `HF_TOKEN`, de `huggingface-cli` o de la propia aplicación y se guarda solo en este equipo.
 
 ### Cuánto simular
 
@@ -101,7 +114,7 @@ Para pasar todas las comprobaciones:
 scripts/check.sh
 ```
 
-Windows tiene los equivalentes `.ps1`. Los pesos no se incluyen: el simulador busca modelos en `~/.mtplx/models` y en la caché de Hugging Face.
+Windows tiene los equivalentes `.ps1`. Los pesos no se incluyen: la aplicación busca en `~/.llm2chip/models`, `~/.mtplx/models`, la caché de Hugging Face y las carpetas que añadas en la vista Modelos.
 
 ## Qué está verificado
 
@@ -109,6 +122,7 @@ Windows tiene los equivalentes `.ps1`. Los pesos no se incluyen: el simulador bu
 - Con una misma imagen, dos chips idénticos en una placa simulada, con retardos y bits invertidos en los enlaces, generan el mismo texto y los mismos logits que uno solo.
 - La máquina de enteros exactos coincide bit a bit con las puertas en todos los búferes de esos modelos.
 - Qwen3.8-27B real se ejecuta de principio a fin con el firmware del chip. Su tokenizador coincide con la biblioteca de referencia en los textos de prueba.
+- Llama, Llama 3, Mistral y Qwen3 con pesos aleatorios diminutos dan los mismos logits que `mlx-lm`, token a token.
 - Cada formato de peso y cada multiplicador se comprueban contra la aritmética de referencia, y el Verilog y el VHDL exportados se ejecutan en simuladores externos.
 
 Los detalles y mediciones están en [`docs/`](docs) y [`tests/golden/`](tests/golden).

@@ -2,7 +2,7 @@
 //! The same code drives the gates (through microcode) and the exact virtual machine.
 
 use crate::weights::Weights;
-use compiler::{Inst, Op, Program};
+use compiler::{Inst, Op, Program, RopeScaling};
 use netlist::block::{encode_vector, Assembly, AttentionRegs, BlockOps, DeltaRegs, Expr, Var, FN_EXP, FN_SIGMOID, FN_SOFTPLUS};
 use netlist::{DieConfig, DieProgram, Microprogram};
 use std::cell::Cell;
@@ -53,11 +53,12 @@ pub const ENTRY_DRAFT: usize = 4;
 pub const ENTRY_DRAFT_LOGITS: usize = 5;
 
 /// Cosines and sines for one position, with the 1 that leaves the other dimensions alone.
-fn rope_row(theta: f32, half: usize, position: u32) -> Vec<f64> {
+fn rope_row(theta: f32, scaling: Option<RopeScaling>, half: usize, position: u32) -> Vec<f64> {
     let rotary = 2 * half;
     let (mut cos, mut sin) = (Vec::new(), Vec::new());
     for i in 0..half {
-        let frequency = 1.0 / (theta as f64).powf((2 * i) as f64 / rotary as f64);
+        let base = 1.0 / (theta as f64).powf((2 * i) as f64 / rotary as f64);
+        let frequency = scaling.map_or(base, |s| s.frequency(base));
         cos.push((position as f64 * frequency).cos());
         sin.push((position as f64 * frequency).sin());
     }
@@ -200,7 +201,7 @@ impl Layout {
             let mut flat = Vec::with_capacity(tokens * (3 * rope_half + 1));
             let mut exponent = 0;
             for position in 0..tokens {
-                let (row, row_exponent) = encode_vector(&rope_row(program.rope_theta, rope_half, position as u32), config.cell.activation_bits);
+                let (row, row_exponent) = encode_vector(&rope_row(program.rope_theta, program.rope_scaling, rope_half, position as u32), config.cell.activation_bits);
                 flat.extend(row);
                 exponent = row_exponent;
             }
@@ -376,8 +377,8 @@ impl Layout {
         if self.rope_half == 0 {
             return;
         }
-        let (theta, half) = (program.rope_theta, self.rope_half);
-        ops.load_row(self.rope_table, position, 3 * half as u32 + 1, self.rope, |row| rope_row(theta, half, row));
+        let (theta, scaling, half) = (program.rope_theta, program.rope_scaling, self.rope_half);
+        ops.load_row(self.rope_table, position, 3 * half as u32 + 1, self.rope, |row| rope_row(theta, scaling, half, row));
     }
 
     fn reg(&self, buf: usize) -> u32 {

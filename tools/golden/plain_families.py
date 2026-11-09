@@ -17,6 +17,10 @@ TOKENS = [3, 1, 4, 1, 5, 9, 2, 6]
 HIDDEN, HEADS, VOCAB = 16, 2, 32
 CASES = {
     "llama": {"num_key_value_heads": 2, "tie_word_embeddings": False},
+    "llama3": {
+        "model_type": "llama", "num_key_value_heads": 2, "tie_word_embeddings": False, "max_position_embeddings": 128,
+        "rope_scaling": {"rope_type": "llama3", "factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0, "original_max_position_embeddings": 32},
+    },
     "mistral": {"num_key_value_heads": 1, "tie_word_embeddings": False},
     "qwen3": {"num_key_value_heads": 1, "head_dim": 8, "tie_word_embeddings": True, "max_position_embeddings": 64, "rope_theta": 1000.0},
 }
@@ -24,7 +28,7 @@ CASES = {
 root = pathlib.Path(sys.argv[1])
 for family, extra in CASES.items():
     config = {
-        "model_type": family, "hidden_size": HIDDEN, "intermediate_size": 32, "vocab_size": VOCAB,
+        "model_type": extra.pop("model_type", family), "hidden_size": HIDDEN, "intermediate_size": 32, "vocab_size": VOCAB,
         "num_hidden_layers": 2, "num_attention_heads": HEADS, "rms_norm_eps": 1e-5,
         **extra,
     }

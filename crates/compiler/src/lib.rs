@@ -72,11 +72,36 @@ pub struct Program {
     pub delta_slots: Vec<usize>,
     pub conv_slots: Vec<(usize, usize)>,
     pub rope_theta: f32,
+    pub rope_scaling: Option<RopeScaling>,
     /// The small constant that keeps the RMS norms' square root defined.
     pub rms_epsilon: f64,
     /// The hidden state after the final norm, the input of a draft step.
     pub final_hidden: Buf,
     pub draft: Option<DraftProgram>,
+}
+
+/// Llama 3's lengthening of the slow rotary waves, for contexts beyond its training.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct RopeScaling {
+    pub factor: f64,
+    pub low: f64,
+    pub high: f64,
+    pub trained_context: f64,
+}
+
+impl RopeScaling {
+    pub fn frequency(&self, base: f64) -> f64 {
+        let wavelength = std::f64::consts::TAU / base;
+        let (low_wave, high_wave) = (self.trained_context / self.low, self.trained_context / self.high);
+        if wavelength > low_wave {
+            base / self.factor
+        } else if wavelength > high_wave {
+            let smooth = (self.trained_context / wavelength - self.low) / (self.high - self.low);
+            base * ((1.0 - smooth) / self.factor + smooth)
+        } else {
+            base
+        }
+    }
 }
 
 /// The MTP head: predicts the token after next from a hidden state and a token.
@@ -252,6 +277,9 @@ pub const SIMULATED_FAMILIES: [&str; 7] = ["qwen3_5", "qwen3_5_text", "qwen3_5_m
 /// Compiles any supported checkpoint from its `config.json`.
 pub fn compile_model(config: &str) -> Result<Program, String> {
     let value: Value = serde_json::from_str(config).map_err(|e| e.to_string())?;
+    if let Some(method) = value.get("quantization_config").and_then(|q| q.get("quant_method")).and_then(Value::as_str) {
+        return Err(format!("sus pesos están cuantizados con «{method}», un formato que no se lee todavía"));
+    }
     match value.get("model_type").and_then(Value::as_str) {
         Some("qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text") => compile_qwen3_5(config),
         Some("llama" | "mistral" | "qwen2" | "qwen3") => compile_llama(&value),
@@ -313,17 +341,22 @@ fn compile_llama(config: &Value) -> Result<Program, String> {
         }
     }
     let rope = config.get("rope_parameters").or_else(|| config.get("rope_scaling"));
-    if let Some(kind) = rope.and_then(|r| r.get("rope_type").or_else(|| r.get("type"))).and_then(Value::as_str) {
-        if kind != "default" {
-            return Err(format!("usa un RoPE escalado («{kind}») y el compilador solo genera el estándar"));
+    let rope_scaling = match rope.and_then(|r| r.get("rope_type").or_else(|| r.get("type"))).and_then(Value::as_str) {
+        None | Some("default") => None,
+        Some("llama3") => {
+            let rope = rope.unwrap_or(&Value::Null);
+            let number = |key: &str, default: f64| rope.get(key).and_then(Value::as_f64).unwrap_or(default);
+            Some(RopeScaling { factor: number("factor", 1.0), low: number("low_freq_factor", 1.0), high: number("high_freq_factor", 4.0), trained_context: number("original_max_position_embeddings", 8192.0) })
         }
-    }
+        Some(kind) => return Err(format!("usa un RoPE escalado («{kind}») que el compilador no genera")),
+    };
     let rope_theta = config.get("rope_theta").or_else(|| rope.and_then(|r| r.get("rope_theta"))).and_then(Value::as_f64).unwrap_or(10_000.0) as f32;
     let vocab = dim(config, "vocab_size")?;
     let layers = dim(config, "num_hidden_layers")?;
     let shape = Shape { hidden, intermediate: dim(config, "intermediate_size")?, heads, kv_heads, head_dim, rotary: head_dim, moe: None };
 
     let mut e = Emit { program: empty_program(family, vocab, hidden, layers, rope_theta), layer: None, norm_offset: 0.0 };
+    e.program.rope_scaling = rope_scaling;
     e.program.rms_epsilon = config.get("rms_norm_eps").and_then(Value::as_f64).unwrap_or(1e-6);
     let mut x = e.buf(hidden);
     e.op("Leer embedding", Op::EmbRead { table: "model.embed_tokens".into(), dst: x });
@@ -358,6 +391,7 @@ fn empty_program(family: &str, vocab: usize, hidden: usize, num_layers: usize, r
         delta_slots: Vec::new(),
         conv_slots: Vec::new(),
         rope_theta,
+        rope_scaling: None,
         rms_epsilon: 1e-6,
         final_hidden: 0,
         draft: None,
@@ -513,11 +547,8 @@ mod tests {
     #[test]
     fn plain_models_cost_what_the_estimator_counts() {
         let config = include_str!("../../../models/llama-3.1-8b.json");
-        let mut value: Value = serde_json::from_str(config).unwrap();
-        value.as_object_mut().unwrap().remove("rope_scaling");
-        let text = value.to_string();
-        let program = compile_model(&text).unwrap();
-        let graph = ModelGraph::from_config_json("llama", &text).unwrap();
+        let program = compile_model(config).unwrap();
+        let graph = ModelGraph::from_config_json("llama", config).unwrap();
         let expected: u64 = graph.stages.iter().map(|s| if let StageKind::Matvec { weights } = s.kind { weights } else { 0 }).sum();
         let found: u64 = program.ops.iter().map(|i| if let Op::Matvec { src, dst, .. } = &i.op { (program.buffers[*src] * program.buffers[*dst]) as u64 } else { 0 }).sum();
         assert_eq!(found, expected);
@@ -528,7 +559,7 @@ mod tests {
     fn what_a_checkpoint_needs_and_the_chip_lacks_is_refused() {
         let base = r#""model_type":"llama","hidden_size":16,"num_attention_heads":2,"intermediate_size":32,"vocab_size":8,"num_hidden_layers":1"#;
         assert!(compile_model(&format!("{{{base}}}")).is_ok());
-        for (extra, word) in [(r#""mlp_bias":true"#, "MLP"), (r#""hidden_act":"gelu""#, "gelu"), (r#""rope_scaling":{"rope_type":"llama3","factor":8.0}"#, "llama3")] {
+        for (extra, word) in [(r#""mlp_bias":true"#, "MLP"), (r#""hidden_act":"gelu""#, "gelu"), (r#""rope_scaling":{"rope_type":"yarn","factor":8.0}"#, "yarn"), (r#""quantization_config":{"quant_method":"gptq"}"#, "gptq")] {
             let error = compile_model(&format!("{{{base},{extra}}}")).unwrap_err();
             assert!(error.contains(word), "{error}");
         }

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { Adaptation } from "../models/modelsStore";
 import { useDesign } from "../store";
 
 export interface ServerModel {
@@ -7,6 +8,8 @@ export interface ServerModel {
   architecture: string;
   supported: boolean;
   size_gb: number;
+  config: string;
+  adaptation: Adaptation;
 }
 
 export type Numeric = "float" | "fixed" | "exact";

@@ -627,7 +627,16 @@ input[type="range"]::-webkit-slider-thumb {
 
 .link-row {
   position: relative;
+  display: block;
   color: var(--accent);
+}
+
+button.link-row {
+  width: 100%;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
 }
 
 .link-row input {
@@ -1953,3 +1962,199 @@ button.logic-step:hover {
   }
 }
 
+
+.models-stage {
+  overflow-y: auto;
+}
+
+.models-column {
+  display: grid;
+  align-content: start;
+  justify-items: stretch;
+  gap: 12px;
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 14px;
+}
+
+.models-column > .segmented {
+  justify-self: center;
+}
+
+.models-empty {
+  margin: 24px 0;
+  text-align: center;
+}
+
+.model-search,
+.inline-form {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.model-search input,
+.inline-form input {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-search input {
+  padding: 5px 9px;
+  border: 0.5px solid var(--separator);
+  border-radius: 6px;
+  background: var(--group-solid);
+  color: var(--label);
+  font: inherit;
+}
+
+.model-list {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 9px;
+  background: var(--group);
+  list-style: none;
+}
+
+.model-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+}
+
+.model-row + .model-row {
+  border-top: 0.5px solid var(--separator);
+}
+
+.model-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+button.model-toggle {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--label);
+  font: inherit;
+  text-align: left;
+}
+
+.model-reason {
+  margin: 3px 0 0;
+  color: var(--orange);
+}
+
+.model-path {
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: var(--label-3);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-actions {
+  display: grid;
+  gap: 5px;
+  flex: none;
+}
+
+.model-actions.inline {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.tier {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 9px;
+  font-size: 11px;
+}
+
+.tier.full {
+  background: color-mix(in srgb, var(--green) 18%, transparent);
+  color: var(--label);
+}
+
+.tier.part {
+  background: var(--orange-bg);
+  color: var(--label);
+}
+
+.tier.none {
+  background: var(--control);
+  color: var(--label-2);
+}
+
+.repo-details {
+  margin-top: 4px;
+}
+
+.folder,
+.job-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.folder span,
+.job-head strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plain-paths {
+  margin: 0;
+  padding: 0;
+  color: var(--label-3);
+  font-size: 11px;
+  list-style: none;
+}
+
+.plain-paths li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job progress {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.link-button {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+}
+
+@media (max-width: 720px) {
+  .model-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .model-actions {
+    display: flex;
+    flex-wrap: wrap;
+  }
+}

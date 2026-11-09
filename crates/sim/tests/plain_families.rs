@@ -5,7 +5,7 @@ use serde_json::Value;
 use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
 use std::path::PathBuf;
 
-const FAMILIES: [&str; 3] = ["llama", "mistral", "qwen3"];
+const FAMILIES: [&str; 4] = ["llama", "llama3", "mistral", "qwen3"];
 
 fn case(family: &str) -> (PathBuf, String, Vec<u32>, Vec<Vec<f32>>) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/plain").join(family);
@@ -45,4 +45,18 @@ fn the_die_arithmetic_keeps_the_same_choice() {
             assert_eq!(best(logits), best(reference), "{family}, token {position}");
         }
     }
+}
+
+#[test]
+fn llama_3_depends_on_its_scaled_waves() {
+    let (dir, config, tokens, expected) = case("llama3");
+    let mut program = compile_model(&config).unwrap();
+    assert!(program.rope_scaling.take().is_some());
+    let mut engine = Engine::new(program, Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
+    let mut largest = 0f32;
+    for (token, reference) in tokens.iter().zip(&expected) {
+        let (logits, _) = Runner::step(&mut engine, *token, true).unwrap();
+        largest = logits.unwrap().iter().zip(reference).fold(largest, |most, (got, want)| most.max((got - want).abs()));
+    }
+    assert!(largest > 0.05, "sin escalar se aleja solo {largest}");
 }

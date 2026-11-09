@@ -167,6 +167,7 @@ export function SimulatorPanel() {
   const formatLabel = matchingPreset(params) ?? "personalizado";
   const report = useDesign((s) => s.report);
   const { connect, set, load } = state;
+  const setView = useDesign((s) => s.setView);
 
   useEffect(() => {
     void connect();
@@ -205,12 +206,13 @@ export function SimulatorPanel() {
           <select value={state.path} onChange={(e) => set({ path: e.target.value })}>
             {state.models.map((m) => (
               <option key={m.path} value={m.path} disabled={!m.supported}>
-                {m.name}{m.supported ? "" : " (no soportado)"}
+                {m.name}{m.supported ? "" : " (no simulable)"}
               </option>
             ))}
           </select>
         </label>
         {selected && <p className="muted-text">{selected.architecture} · {formatNumber(selected.size_gb)} GB</p>}
+        <button className="link-button" onClick={() => setView("modelos")}>Añadir o descargar modelos…</button>
         <Segmented
           label="Aritmética"
           value={state.numeric}

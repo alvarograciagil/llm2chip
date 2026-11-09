@@ -142,6 +142,7 @@ export function Toolbar() {
           ["esquematico", "Esquemático"],
           ["simulador", "Simulador"],
           ["explorador", "Explorador"],
+          ["modelos", "Modelos"],
         ]}
         onChange={setView}
       />

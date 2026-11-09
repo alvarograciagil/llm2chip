@@ -167,7 +167,12 @@ impl Engine {
             .iter()
             .find_map(|i| if let Op::Rope { rotary, .. } = i.op { Some(rotary) } else { None })
             .unwrap_or(0);
-        let inverse_freq = (0..rotary / 2).map(|i| 1.0 / program.rope_theta.powf((2 * i) as f32 / rotary as f32)).collect();
+        let inverse_freq = (0..rotary / 2)
+            .map(|i| {
+                let base = 1.0 / program.rope_theta.powf((2 * i) as f32 / rotary as f32);
+                program.rope_scaling.map_or(base, |s| s.frequency(base as f64) as f32)
+            })
+            .collect();
         let table_bits = if let Numeric::Block { table_bits, .. } = numeric { table_bits } else { None };
         Ok(Self { program, weights, floats, buffers, kv, delta, conv, position: 0, numeric, inverse_freq, saturated: 0, functions: Functions { table_bits }, rope_position: 0, draft_tokens: 0 })
     }
