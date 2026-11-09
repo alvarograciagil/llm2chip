@@ -43,6 +43,7 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     let function_address = (c.die.function_bits + c.die.function_select_bits) as usize;
     let limit_bits = (c.sampler.entries as usize + 1).next_power_of_two().trailing_zeros() as usize;
 
+    assert_eq!(c.sampler.lanes, 1, "el die reducido solo entrega un logit por ciclo");
     let mut b = Builder::new("llm2chip_top", "Chip completo", "CPU de control, memorias, controlador de carga, die de inferencia y unidad de muestreo, con el puerto de host y el de imagen como únicos contactos con el exterior.");
     let reset = b.input("reset", 1)[0];
     let cpu_hold = b.input("cpu_hold", 1)[0];
@@ -335,9 +336,9 @@ impl<E: DieEngine> Peripheral for ChipModel<E> {
             REG_SAMPLE_SEED => self.sampler.rng = value,
             REG_SAMPLE_START => {
                 let logits: Vec<i64> = (0..self.sample_count).map(|i| self.engine.read(self.sample_base + i)).collect();
-                let (token, cycles) = self.sampler.sample(&logits, self.inverse, self.limit as usize, self.greedy);
-                self.sampler_token = token;
-                self.sampler_done_at = Some(cycle + logits.len() as u64 + cycles);
+                let sampled = self.sampler.sample(&logits, self.inverse, self.limit as usize, self.greedy);
+                self.sampler_token = sampled.token;
+                self.sampler_done_at = Some(cycle + sampled.stream_cycles + sampled.finish_cycles);
             }
             _ => {}
         }

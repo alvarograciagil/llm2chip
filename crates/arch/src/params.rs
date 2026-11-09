@@ -91,6 +91,8 @@ pub struct ChipParams {
     pub vector_lanes_per_die: u64,
     pub vector_bits: u32,
     pub function_units_per_die: u32,
+    /// Logits the sampling unit takes in per cycle.
+    pub sampler_lanes: u32,
 
     pub weight_backend: WeightBackend,
     pub kv_backend: KvBackend,
@@ -137,6 +139,7 @@ impl Default for ChipParams {
             vector_lanes_per_die: 32_768,
             vector_bits: 16,
             function_units_per_die: 16,
+            sampler_lanes: 64,
             weight_backend: WeightBackend::Sram,
             kv_backend: KvBackend::Sram,
             hbm_stacks: 8,

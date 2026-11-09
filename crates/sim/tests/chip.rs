@@ -86,7 +86,7 @@ fn text_goes_through_the_whole_chip_in_gates() {
     let program = compile_qwen3_5(CONFIG).unwrap();
 
     let die = netlist::DieConfig { microcode_bits: 15, ..die_config() };
-    let config = ChipConfig { soc: SocConfig { program_bits: 12, data_bits: 13, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4 } };
+    let config = ChipConfig { soc: SocConfig { program_bits: 12, data_bits: 13, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), die, Some(CHIP_TOKENS)).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: [u32::MAX, u32::MAX], byte_to_token: (0..256).map(|b| b % 8).collect(), token_to_byte: (0..8).map(|t| b'a' as u32 + t).collect() };

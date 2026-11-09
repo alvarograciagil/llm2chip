@@ -189,6 +189,7 @@ export const PARAM_GROUPS: Group[] = [
     open: false,
     fields: [
       { kind: "range", key: "vector_lanes_per_die", label: "Carriles por die", min: 1, max: 512000, log: true, integer: true, help: "Calculan atención, regla delta y puertas, que multiplican activaciones entre sí." },
+      { kind: "range", key: "sampler_lanes", label: "Logits por ciclo al muestrear", min: 1, max: 4096, log: true, integer: true, help: "Cuántos logits compara a la vez la unidad de muestreo. Si son pocos, elegir el token retrasa al chip." },
       { kind: "range", key: "vector_bits", label: "Bits por carril", min: 8, max: 32, step: 1, integer: true },
       { kind: "range", key: "function_units_per_die", label: "Unidades de función", min: 1, max: 128, step: 1, integer: true },
     ],

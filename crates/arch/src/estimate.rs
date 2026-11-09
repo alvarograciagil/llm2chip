@@ -319,6 +319,21 @@ fn weight_multiplier(tech: &TechNode, p: &ChipParams, widest: u32, cell_bits: f6
     }
 }
 
+/// Candidates the sampling unit keeps.
+const SAMPLER_ENTRIES: f64 = 64.0;
+
+/// Cycles sampling adds to each generated token. Logits are filtered as `lm_head`
+/// produces them, so only a unit too narrow to keep up delays the die.
+fn sampling_cycles(p: &ChipParams, model: &ModelGraph) -> f64 {
+    let vocabulary = model.vocab_size as f64;
+    let head = vocabulary * model.hidden_size as f64 / p.macs_per_die as f64;
+    let stream = vocabulary / p.sampler_lanes.max(1) as f64;
+    // A random stream improves on the k-th best about k·ln(n/k) times.
+    let insertions = SAMPLER_ENTRIES * (1.0 + (vocabulary / SAMPLER_ENTRIES).max(1.0).ln());
+    let selection = 2.0 + 3.0 * SAMPLER_ENTRIES;
+    (stream - head).max(0.0) + insertions + selection
+}
+
 struct AreaInputs<'a> {
     tech: &'a TechNode,
     p: &'a ChipParams,
@@ -444,6 +459,13 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
             "Permite deshacer el estado cuando se rechaza un token especulado.");
     }
 
+    let logit_bits = p.activation_bits as f64;
+    let index_bits = (model.vocab_size.max(2) as f64).log2().ceil();
+    let sampler_um2 = SAMPLER_ENTRIES * ((logit_bits + index_bits) * (tech.ff_um2 + tech.mux_um2) + logit_bits * tech.fa_um2)
+        + p.sampler_lanes as f64 * logit_bits * tech.fa_um2
+        + 24.0 * 16.0 * tech.fa_um2;
+    push("sampler", "Unidad de muestreo", sampler_um2 * um2 * ROUTING_OVERHEAD / d,
+        "Conserva los mejores logits y elige el siguiente token, con top-k y temperatura.");
     push("control", "Secuenciador y microprograma", 0.8,
         "Ejecuta el microprograma que dirige cada etapa.");
     push("system", "CPU de control y carga", (tech.cpu_mm2 + tech.io_mm2) / d,
@@ -713,7 +735,8 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
     // Weights and state share the same external channel when both live there.
     let shared_memory = p.weight_backend == WeightBackend::ExternalDdr && p.kv_backend == KvBackend::ExternalDdr;
     let memory_time = if shared_memory { weight_time + kv_time } else { weight_time.max(kv_time) };
-    let token_time = compute_time.max(memory_time);
+    let sampling = sampling_cycles(p, model);
+    let token_time = (compute_time + sampling / (freq * 1e9)).max(memory_time);
     let stream_rate = 1.0 / token_time;
     let prefill_rate = (d / compute_time).min(1.0 / memory_time.max(1e-12));
 
@@ -814,6 +837,7 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
                 format!("{:.0} MB a {} bits, repartidos entre {dies} dies.", state_bits / 8e6, p.delta_state_bits)),
             "mtp_rollback" => (0.0, 0.0, 0.0, format!("{depth} copias del estado recurrente.")),
             "control" => (1.0, 0.0, 0.0, "Área fija estimada por die.".into()),
+            "sampler" => (0.0, 0.0, 0.0, format!("{} carriles de filtro y {} candidatos.", p.sampler_lanes, SAMPLER_ENTRIES)),
             "links" => (link_cycles / total_cycles, 0.0, link_bytes, "Un punto de enlace por die.".into()),
             _ => (0.0, 0.0, 0.0, "Área fija estimada.".into()),
         };
@@ -850,6 +874,8 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
     m("tok_s", "Velocidad", "Generación con un usuario", effective_rate, "tok/s", Supuesta,
         if depth > 0 { format!("Incluye MTP: {tokens_per_round:.2} tokens por ronda con las tasas de aceptación medidas por MTPLX.") }
         else { "Un token recorre todas las etapas antes de empezar el siguiente.".into() });
+    m("sampling_cycles", "Velocidad", "Muestreo por token", sampling, "ciclos", Derivada,
+        "Filtra los logits mientras salen de lm_head; solo cuenta lo que no se solapa con el cálculo.".into());
     m("tok_s_base", "Velocidad", "Sin especulación", stream_rate, "tok/s", Supuesta,
         "Inverso del tiempo de un token.".into());
     m("prefill_tok_s", "Velocidad", "Lectura de prompt", prefill_rate, "tok/s", Supuesta,

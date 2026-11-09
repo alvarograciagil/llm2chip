@@ -191,6 +191,9 @@ struct Fidelity {
     /// How many cycles the die takes per token, from the design being evaluated.
     #[serde(default)]
     cycles_per_token: f64,
+    /// Logits the sampling unit takes in per cycle, from the design being evaluated.
+    #[serde(default)]
+    sampler_lanes: u32,
 }
 
 async fn generate_socket(ws: WebSocketUpgrade, State(app): State<App>) -> Response {
@@ -261,8 +264,8 @@ fn sample(logits: &[f32], temperature: f32, top_k: usize, seed: &mut u64) -> u32
 const SAMPLER_ENTRIES: u32 = 64;
 const FLOW_BITS: u32 = 16;
 
-fn sampler_model(vocabulary: usize, seed: u32) -> SamplerModel {
-    let config = SamplerConfig { logit_bits: FLOW_BITS, index_bits: usize::BITS - vocabulary.leading_zeros(), entries: SAMPLER_ENTRIES };
+fn sampler_model(vocabulary: usize, seed: u32, lanes: u32) -> SamplerModel {
+    let config = SamplerConfig { logit_bits: FLOW_BITS, index_bits: usize::BITS - vocabulary.leading_zeros(), entries: SAMPLER_ENTRIES, lanes: lanes.max(1).next_power_of_two() };
     SamplerModel { config, rng: seed.max(1), table: exponential_table() }
 }
 
@@ -271,7 +274,7 @@ fn sample_on_unit(unit: &mut SamplerModel, logits: &[f32], temperature: f32, top
     let values: Vec<f64> = logits.iter().map(|v| *v as f64).collect();
     let (mantissas, exponent) = encode_vector(&values, FLOW_BITS);
     let inverse = (2f64.powi(exponent as i32 + 1 + 16 - FLOW_BITS as i32) / temperature.max(1e-3) as f64).min(65535.0) as u32;
-    unit.sample(&mantissas, inverse, top_k.clamp(1, SAMPLER_ENTRIES as usize), temperature <= 0.0).0
+    unit.sample(&mantissas, inverse, top_k.clamp(1, SAMPLER_ENTRIES as usize), temperature <= 0.0).token
 }
 
 /// Runs the chip's real firmware at instruction level around the loaded engine.
@@ -303,7 +306,7 @@ fn run_firmware(loaded: &mut Loaded, ids: &[u32], request: &GenerateRequest, sen
     input.extend(u32::MAX.to_le_bytes());
 
     let Loaded { engine, tokenizer, .. } = loaded;
-    let unit = sampler_model(vocabulary, seed);
+    let unit = sampler_model(vocabulary, seed, request.fidelity.sampler_lanes);
     let runner = RunnerEngine::new(engine.as_mut(), FLOW_BITS, request.fidelity.cycles_per_token.max(0.0) as u64);
     let soc = SocConfig { program_bits: 14, data_bits: 13, fifo_bits: 6 };
     let mut bus = SocBus::booted_with(soc, &image, &input, ChipModel::new(runner, code, unit))?;
@@ -350,7 +353,7 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
         return run_firmware(loaded, &ids, &request, sender, cancelled);
     }
 
-    let mut unit = sampler_model(loaded.engine.vocabulary(), 0x1234_5679);
+    let mut unit = sampler_model(loaded.engine.vocabulary(), 0x1234_5679, request.fidelity.sampler_lanes);
     let use_unit = request.fidelity.sampler_unit;
     let mut seed = 0x9E3779B97F4A7C15u64 ^ std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
     let mut next = 0;

@@ -1,5 +1,6 @@
-//! Chooses the next token in hardware. Logits stream through a sorted list of the best
-//! candidates; one pass adds their probabilities and a second finds the chosen one.
+//! Chooses the next token in hardware. Logits arrive several per cycle and only those
+//! that beat the worst candidate enter the sorted list; one pass adds the candidates'
+//! probabilities and a second finds the chosen one.
 
 use crate::cell::Gen;
 use crate::rv32::{constant, Logic};
@@ -17,6 +18,8 @@ pub struct SamplerConfig {
     pub logit_bits: u32,
     pub index_bits: u32,
     pub entries: u32,
+    /// Logits received per cycle; a power of two.
+    pub lanes: u32,
 }
 
 /// `exp(-i / 16)` as 16-bit values.
@@ -38,12 +41,15 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
     let seed = b.input("seed", 32);
     let inverse = b.input("inverse", 16);
     let limit = b.input("limit", count_bits as u32);
-    let logit_valid = b.input("logit_valid", 1)[0];
-    let logit_data = b.input("logit_data", c.logit_bits);
+    let lanes = c.lanes.max(1) as usize;
+    let lane_bits = lanes.trailing_zeros() as usize;
+    let logit_valid = b.input("logit_valid", lanes as u32);
+    let lane_data = b.input("logit_data", c.logit_bits * lanes as u32);
     let logit_last = b.input("logit_last", 1)[0];
     let table_write = b.input("table_write", 1)[0];
     let table_address = b.input("table_address", TABLE_BITS);
     let table_data = b.input("table_data", 16);
+    let ready_out = b.output("ready", 1)[0];
     let done_out = b.output("done", 1)[0];
     let token_out = b.output("token", c.index_bits);
 
@@ -65,9 +71,66 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
         let values: Vec<Vec<Bit>> = (0..entries).map(|_| l.fresh_bus(bits)).collect();
         let indices: Vec<Vec<Bit>> = (0..entries).map(|_| l.fresh_bus(index_bits)).collect();
         let used: Vec<Bit> = (0..entries).map(|_| l.fresh()).collect();
-        let position = l.fresh_bus(index_bits);
+        let position = l.fresh_bus(index_bits - lane_bits);
 
-        let accept = l.and(streaming, logit_valid);
+        l.b.group("Filtro de logits");
+        // A lane is a candidate only if it beats the worst of a full list, so after the
+        // first few logits almost every group passes straight through.
+        let handled = l.fresh_bus(lanes);
+        let full = used[entries - 1];
+        let incoming: Vec<Vec<Bit>> = lane_data.chunks(bits).map(|lane| lane.to_vec()).collect();
+        let candidates: Vec<Bit> = (0..lanes)
+            .map(|lane| {
+                let widen = |v: &[Bit]| -> Vec<Bit> { v.iter().copied().chain([v[bits - 1]]).collect() };
+                let (left, right) = (widen(&values[entries - 1]), widen(&incoming[lane]));
+                let inverted: Vec<Bit> = right.iter().map(|x| l.not(*x)).collect();
+                let (difference, _) = l.adder(&left, &inverted, Bit::One);
+                let beats_worst = difference[bits];
+                let not_full = l.not(full);
+                let passes = l.or(not_full, beats_worst);
+                let waiting = l.not(handled[lane]);
+                let wanted = l.and(logit_valid[lane], waiting);
+                l.and(wanted, passes)
+            })
+            .collect();
+        let mut seen = Bit::Zero;
+        let first: Vec<Bit> = candidates
+            .iter()
+            .map(|candidate| {
+                let free = l.not(seen);
+                let chosen = l.and(*candidate, free);
+                seen = l.or(seen, *candidate);
+                chosen
+            })
+            .collect();
+        let others: Vec<Bit> = candidates.iter().zip(&first).map(|(candidate, chosen)| { let not_chosen = l.not(*chosen); l.and(*candidate, not_chosen) }).collect();
+        let more = l.any(&others);
+        let ready = l.not(more);
+        l.b.or_to(ready, Bit::Zero, ready_out);
+        let chosen_lane: Vec<Bit> = (0..lane_bits)
+            .map(|bit| {
+                let hits: Vec<Bit> = first.iter().enumerate().filter(|(lane, _)| lane >> bit & 1 == 1).map(|(_, chosen)| *chosen).collect();
+                l.any(&hits)
+            })
+            .collect();
+        let logit_data: Vec<Bit> = (0..bits)
+            .map(|bit| {
+                let hits: Vec<Bit> = first.iter().zip(&incoming).map(|(chosen, lane)| l.and(*chosen, lane[bit])).collect();
+                l.any(&hits)
+            })
+            .collect();
+        let any_valid = l.any(&logit_valid);
+        let group_present = l.and(streaming, any_valid);
+        let group_done = l.and(group_present, ready);
+        let held: Vec<Bit> = handled.iter().zip(&first).map(|(old, chosen)| l.or(*old, *chosen)).collect();
+        let cleared = constant(0, lanes);
+        let waiting_group = l.not(group_done);
+        let next_handled = l.mux_bus(waiting_group, &cleared, &held);
+        l.connect_flops(&next_handled, &handled);
+        let candidate_index: Vec<Bit> = chosen_lane.iter().chain(&position).copied().collect();
+
+        l.b.group("Candidatos");
+        let accept = l.and(streaming, seen);
         let stays: Vec<Bit> = (0..entries)
             .map(|j| {
                 // value >= new, as signed numbers, keeps the earlier of two equal logits ahead.
@@ -88,7 +151,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
                 l.and(moves, open)
             };
             let incoming_value = if j == 0 { logit_data.clone() } else { l.mux_bus(take_new, &values[j - 1], &logit_data) };
-            let incoming_index = if j == 0 { position.clone() } else { l.mux_bus(take_new, &indices[j - 1], &position) };
+            let incoming_index = if j == 0 { candidate_index.clone() } else { l.mux_bus(take_new, &indices[j - 1], &candidate_index) };
             let incoming_used = if j == 0 { Bit::One } else { l.or(take_new, used[j - 1]) };
             let write = {
                 let moves = l.not(stays[j]);
@@ -104,7 +167,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
             l.connect_flops(&next_index, &indices[j]);
             l.connect_flops(&[next_used], &[used[j]]);
         }
-        let mut carry = accept;
+        let mut carry = group_done;
         let next_position: Vec<Bit> = position
             .iter()
             .map(|bit| {
@@ -180,7 +243,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
         let stored = l.mux_bus(adding, &sum, &added);
         let zero = constant(0, SUM_BITS);
         let begin_first = {
-            let ended = l.and(accept, logit_last);
+            let ended = l.and(group_done, logit_last);
             let not_greedy = l.not(greedy);
             l.and(ended, not_greedy)
         };
@@ -228,7 +291,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
             l.and(second_add, ending)
         };
         let ended_greedy = {
-            let t = l.and(accept, logit_last);
+            let t = l.and(group_done, logit_last);
             l.and(t, greedy)
         };
         let advance_cursor = {
@@ -251,7 +314,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
         let next_cursor = l.mux_bus(reset_cursor, &moved, &zero_cursor);
         l.connect_flops(&next_cursor, &cursor);
 
-        let stream_ending = l.and(accept, logit_last);
+        let stream_ending = l.and(group_done, logit_last);
         let keep_streaming = {
             let t = l.not(stream_ending);
             let u = l.and(streaming, t);
@@ -312,6 +375,16 @@ pub fn sampler_design(config: SamplerConfig) -> Design {
     Design { top, modules: gen.modules }
 }
 
+/// The token chosen and how long it took.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sampled {
+    pub token: u32,
+    /// Cycles to take in every logit, including stalls for candidates that arrive together.
+    pub stream_cycles: u64,
+    /// Cycles after the last logit until `done` is set.
+    pub finish_cycles: u64,
+}
+
 /// The unit at instruction level: same choice and same number of cycles.
 #[derive(Clone, Debug)]
 pub struct SamplerModel {
@@ -321,19 +394,30 @@ pub struct SamplerModel {
 }
 
 impl SamplerModel {
-    /// The chosen token and the cycles after the last logit until `done` is set.
-    pub fn sample(&mut self, logits: &[i64], inverse: u32, limit: usize, greedy: bool) -> (u32, u64) {
+    pub fn sample(&mut self, logits: &[i64], inverse: u32, limit: usize, greedy: bool) -> Sampled {
         let capacity = self.config.entries as usize;
         let mut best: Vec<(i64, u32)> = Vec::with_capacity(capacity + 1);
-        for (index, value) in logits.iter().enumerate() {
-            let at = best.iter().position(|(v, _)| v < value).unwrap_or(best.len());
-            if at < capacity {
-                best.insert(at, (*value, index as u32));
+        let lanes = self.config.lanes.max(1) as usize;
+        let mut stream_cycles = 0;
+        for (group, values) in logits.chunks(lanes).enumerate() {
+            // Every cycle compares the lanes still waiting against the current worst.
+            let mut handled = vec![false; values.len()];
+            loop {
+                stream_cycles += 1;
+                let passes = |v: i64| best.len() < capacity || best.last().is_some_and(|(worst, _)| *worst < v);
+                let waiting: Vec<usize> = (0..values.len()).filter(|i| !handled[*i] && passes(values[*i])).collect();
+                let Some(&lane) = waiting.first() else { break };
+                let at = best.iter().position(|(v, _)| *v < values[lane]).unwrap_or(best.len());
+                best.insert(at, (values[lane], (group * lanes + lane) as u32));
                 best.truncate(capacity);
+                handled[lane] = true;
+                if waiting.len() == 1 {
+                    break;
+                }
             }
         }
         if greedy {
-            return (best[0].1, 1);
+            return Sampled { token: best[0].1, stream_cycles, finish_cycles: 1 };
         }
         let usable = limit.min(best.len());
         let top = best[0].0;
@@ -359,6 +443,6 @@ impl SamplerModel {
         x ^= x >> 17;
         x ^= x << 5;
         self.rng = x;
-        (best[chosen].1, 1 + 2 * usable as u64 + 1 + 2 * steps as u64)
+        Sampled { token: best[chosen].1, stream_cycles, finish_cycles: 1 + 2 * usable as u64 + 1 + 2 * steps as u64 }
     }
 }

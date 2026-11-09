@@ -32,7 +32,7 @@ El chip recibe bytes de texto y devuelve bytes de texto. El tokenizado, la infer
 | Controlador de carga y DMA | Imagen hacia celdas, tablas y microcódigo, con arranque propio y CRC | En puertas e ISS, conectado al die |
 | Red de escritura de pesos | Lleva cada palabra a su celda | Solo puertos de carga directos |
 | ECC, CRC, BIST y reparación | Fiabilidad y celdas defectuosas | Solo área |
-| Unidad de muestreo y RNG | Top-k y temperatura sobre los logits | En puertas y modelo, conectada al die |
+| Unidad de muestreo y RNG | Top-k y temperatura sobre los logits, con filtro de varios carriles | En puertas y modelo, conectada al die |
 | Planificador de tokens y MTP | Decide qué ejecuta cada die, y deshace | En software |
 | Reloj, reset y gestión de energía | Secuencia de reset, puertas de reloj | Falta |
 | Depuración y contadores | JTAG, trazas, rendimiento | Falta |
@@ -67,11 +67,11 @@ Cada ciclo que muestra la app indica si se ha simulado o estimado, según lo que
 
 `chip_design` une la CPU, las memorias, el controlador de carga, el die y la unidad de muestreo. Con un modelo diminuto, el firmware real recibe bytes, carga la imagen, ejecuta los tokens y devuelve bytes. El resultado y los ciclos coinciden con el nivel de instrucción (CPU en ISS y die en la máquina exacta): 525.668 ciclos en los dos.
 
-## Coste del muestreo medido
+## Coste del muestreo
 
-Con Qwen3.8 en el flujo real, 17 tokens de prompt y 6 generados suman 7,5 millones de ciclos, y 1,5 millones quedan fuera del die. Casi todo ese sobrecoste es leer los 248.000 logits de uno en uno: unos 250.000 ciclos por token generado, frente a los 262.000 que tarda el die en inferirlo. La unidad actual casi duplica el tiempo por token.
+Leer los 248.000 logits de Qwen3.8 de uno en uno costaba casi tanto como inferir el token. La unidad compara ahora varios logits por ciclo con el peor candidato de su lista, y solo los que lo superan entran en ella. Son unas 500 inserciones por token, así que casi ningún grupo se detiene.
 
-La propuesta es filtrar en paralelo: cada carril compara sus logits con el peor candidato de la lista y solo los que lo superan pasan a la lista ordenada. En 248.000 logits eso son unas 500 inserciones, muy pocas para frenar el flujo. Además, los logits pueden leerse mientras salen de `lm_head`, sin una pasada aparte.
+Con Qwen3.8 en el flujo real y 64 carriles, los ciclos fuera del die bajan de 1.502.415 a 37.162 para 17 tokens de prompt y 6 generados, con el mismo texto. El estimador supone además que los logits se filtran mientras salen de `lm_head`, y cuenta 787 ciclos por token. El die reducido solo entrega un logit por ciclo, así que en el chip completo en puertas se usa un carril; varios carriles se verifican en la unidad por separado.
 
 ## Pesos grabados
 
