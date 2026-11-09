@@ -89,7 +89,7 @@ fn text_goes_through_the_whole_chip_in_gates() {
     let config = ChipConfig { soc: SocConfig { program_bits: 12, data_bits: 13, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4 } };
     let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), die, Some(CHIP_TOKENS)).unwrap();
     let code = layout.microprogram(&program).unwrap();
-    let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, byte_to_token: (0..256).map(|b| b % 8).collect(), token_to_byte: (0..8).map(|t| b'a' as u32 + t).collect() };
+    let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: [u32::MAX, u32::MAX], byte_to_token: (0..256).map(|b| b % 8).collect(), token_to_byte: (0..8).map(|t| b'a' as u32 + t).collect() };
     let info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
     let segments = image_segments(&die, &code, &layout);
     eprintln!("{} segmentos, microprograma de {} palabras", segments.len(), code.words.len());
@@ -98,7 +98,7 @@ fn text_goes_through_the_whole_chip_in_gates() {
 
     let input = b"hoy\0";
     let engine = VmEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
-    let model = ChipModel::new(config, engine, code.clone(), SamplerModel { config: config.sampler, rng: 0, table: exponential_table() });
+    let model = ChipModel::new(engine, code.clone(), SamplerModel { config: config.sampler, rng: 0, table: exponential_table() });
     let mut bus = SocBus::booted_with(config.soc, &image, input, model).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {

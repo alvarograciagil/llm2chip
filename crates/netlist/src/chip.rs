@@ -264,6 +264,8 @@ pub fn chip_design(config: ChipConfig) -> Design {
 /// Runs the die's routines at software speed, on the same registers as the gates.
 pub trait DieEngine {
     fn run(&mut self, routine: usize, token: u32, position: u32);
+    /// How long the die is busy with that routine.
+    fn cycles(&self, routine: usize, token: u32, position: u32) -> u64;
     /// Reads a vector register element or exponent, by its full address.
     fn read(&mut self, address: u32) -> i64;
 }
@@ -271,7 +273,6 @@ pub trait DieEngine {
 /// The chip's peripherals at instruction level, with the same timing as the gates.
 /// A status read answers one cycle after its address, so the times here are one early.
 pub struct ChipModel<E> {
-    pub config: ChipConfig,
     pub engine: E,
     pub code: Microprogram,
     pub sampler: SamplerModel,
@@ -288,8 +289,8 @@ pub struct ChipModel<E> {
 }
 
 impl<E: DieEngine> ChipModel<E> {
-    pub fn new(config: ChipConfig, engine: E, code: Microprogram, sampler: SamplerModel) -> Self {
-        Self { config, engine, code, sampler, parameters: [0; 32], vector_address: 0, sample_base: 0, sample_count: 0, inverse: 0, limit: 0, greedy: false, die_free_at: 0, sampler_done_at: None, sampler_token: 0 }
+    pub fn new(engine: E, code: Microprogram, sampler: SamplerModel) -> Self {
+        Self { engine, code, sampler, parameters: [0; 32], vector_address: 0, sample_base: 0, sample_count: 0, inverse: 0, limit: 0, greedy: false, die_free_at: 0, sampler_done_at: None, sampler_token: 0 }
     }
 
     /// Recovers the token and position from the parameter registers.
@@ -322,7 +323,7 @@ impl<E: DieEngine> Peripheral for ChipModel<E> {
                 let routine = self.code.entries.iter().position(|e| *e == value).expect("rutina desconocida");
                 let (token, position) = self.token_and_position();
                 self.engine.run(routine, token, position);
-                self.die_free_at = cycle + self.code.cycles(&self.config.die, routine, token, position);
+                self.die_free_at = cycle + self.engine.cycles(routine, token, position);
             }
             REG_VECTOR_ADDRESS => self.vector_address = value,
             REG_SAMPLE_BASE => self.sample_base = value,
@@ -361,7 +362,10 @@ pub const INFO_TEMPERATURE: usize = 8;
 pub const INFO_SEED: usize = 9;
 pub const INFO_ACTIVATION_BITS: usize = 10;
 pub const INFO_PARAMETER_COUNT: usize = 11;
-pub const INFO_PARAMETERS: usize = 12;
+pub const INFO_RAW_TOKENS: usize = 12;
+pub const INFO_STOP_FIRST: usize = 13;
+pub const INFO_STOP_SECOND: usize = 14;
+pub const INFO_PARAMETERS: usize = 15;
 pub const INFO_PARAMETER_SLOTS: usize = 16;
 pub const INFO_BYTE_TO_TOKEN: usize = INFO_PARAMETERS + 4 * INFO_PARAMETER_SLOTS;
 pub const INFO_TOKEN_TO_BYTE: usize = INFO_BYTE_TO_TOKEN + 256;
@@ -375,6 +379,10 @@ pub struct GenerationSetup {
     /// Temperature times 256.
     pub temperature: u32,
     pub seed: u32,
+    /// The host exchanges 32-bit token numbers instead of text.
+    pub raw_tokens: bool,
+    /// Tokens that end the generation; `u32::MAX` means none.
+    pub stop: [u32; 2],
     pub byte_to_token: Vec<u32>,
     pub token_to_byte: Vec<u32>,
 }
@@ -393,6 +401,9 @@ pub fn chip_info(c: &DieConfig, code: &Microprogram, logits_register: u32, vocab
     info[INFO_TEMPERATURE] = setup.temperature;
     info[INFO_SEED] = setup.seed;
     info[INFO_ACTIVATION_BITS] = c.cell.activation_bits;
+    info[INFO_RAW_TOKENS] = setup.raw_tokens as u32;
+    info[INFO_STOP_FIRST] = setup.stop[0];
+    info[INFO_STOP_SECOND] = setup.stop[1];
     assert!(code.parameters.len() <= INFO_PARAMETER_SLOTS, "demasiados parámetros");
     info[INFO_PARAMETER_COUNT] = code.parameters.len() as u32;
     for p in &code.parameters {

@@ -11,6 +11,15 @@ use axum::{
 use compiler::compile_qwen3_5;
 use serde::{Deserialize, Serialize};
 use netlist::format::WeightFormat;
+use netlist::block::encode_vector;
+use netlist::chip::{chip_info, ChipModel, GenerationSetup};
+use netlist::image::build_image;
+use netlist::rv32::Rv32Iss;
+use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
+use netlist::soc::{FirmwareImage, SocBus, SocConfig};
+use netlist::{CellConfig, DieConfig, Microprogram, Parameter};
+use sim::chip::{RunnerEngine, FLOW_REGISTER_BITS, FLOW_INDEX_BITS};
+use sim::lower::{ENTRY_LOGITS, ENTRY_TOKEN};
 use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -19,6 +28,8 @@ use tokio::sync::mpsc;
 
 const PORT: u16 = 7878;
 const STOP_TOKENS: [u32; 2] = [248046, 248044];
+const FIRMWARE: &[u8] = include_bytes!("../../../firmware/prebuilt/firmware.elf");
+const FLOW_LOGITS_REGISTER: u32 = 1;
 
 struct Loaded {
     name: String,
@@ -164,6 +175,22 @@ struct GenerateRequest {
     /// Also runs the draft head and reports how often it guessed right.
     #[serde(default)]
     mtp_depth: usize,
+    /// How much of the chip around the die to simulate.
+    #[serde(default)]
+    fidelity: Fidelity,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+struct Fidelity {
+    /// The chip's real firmware runs on an instruction-level CPU and drives the engine.
+    #[serde(default)]
+    firmware: bool,
+    /// Sampling goes through the model of the chip's unit instead of software.
+    #[serde(default)]
+    sampler_unit: bool,
+    /// How many cycles the die takes per token, from the design being evaluated.
+    #[serde(default)]
+    cycles_per_token: f64,
 }
 
 async fn generate_socket(ws: WebSocketUpgrade, State(app): State<App>) -> Response {
@@ -231,6 +258,85 @@ fn sample(logits: &[f32], temperature: f32, top_k: usize, seed: &mut u64) -> u32
     indexed[0].0 as u32
 }
 
+const SAMPLER_ENTRIES: u32 = 64;
+const FLOW_BITS: u32 = 16;
+
+fn sampler_model(vocabulary: usize, seed: u32) -> SamplerModel {
+    let config = SamplerConfig { logit_bits: FLOW_BITS, index_bits: usize::BITS - vocabulary.leading_zeros(), entries: SAMPLER_ENTRIES };
+    SamplerModel { config, rng: seed.max(1), table: exponential_table() }
+}
+
+/// The same choice the chip's sampling unit would make for these logits.
+fn sample_on_unit(unit: &mut SamplerModel, logits: &[f32], temperature: f32, top_k: usize) -> u32 {
+    let values: Vec<f64> = logits.iter().map(|v| *v as f64).collect();
+    let (mantissas, exponent) = encode_vector(&values, FLOW_BITS);
+    let inverse = (2f64.powi(exponent as i32 + 1 + 16 - FLOW_BITS as i32) / temperature.max(1e-3) as f64).min(65535.0) as u32;
+    unit.sample(&mantissas, inverse, top_k.clamp(1, SAMPLER_ENTRIES as usize), temperature <= 0.0).0
+}
+
+/// Runs the chip's real firmware at instruction level around the loaded engine.
+fn run_firmware(loaded: &mut Loaded, ids: &[u32], request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    if request.mtp_depth > 0 {
+        return Err("la cabeza MTP todavía no funciona con la CPU simulada".into());
+    }
+    let firmware = FirmwareImage::from_elf(FIRMWARE)?;
+    let vocabulary = loaded.engine.vocabulary();
+    let cell = CellConfig { weight_bits: 8, activation_bits: FLOW_BITS, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array };
+    let die = DieConfig { cells: 1, cell, scale_bits: 16, reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, broadcast_stages: 1, function_bits: 12, function_select_bits: 3 };
+    let code = Microprogram { words: Vec::new(), entries: vec![ENTRY_TOKEN as u32, ENTRY_LOGITS as u32], parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0 }] };
+    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u32);
+    let setup = GenerationSetup {
+        max_new: request.max_tokens as u32,
+        greedy: request.temperature <= 0.0,
+        limit: request.top_k.clamp(1, SAMPLER_ENTRIES as usize) as u32,
+        temperature: (request.temperature.max(0.0) * 256.0).round().max(1.0) as u32,
+        seed,
+        raw_tokens: true,
+        stop: STOP_TOKENS,
+        byte_to_token: Vec::new(),
+        token_to_byte: Vec::new(),
+    };
+    let info = chip_info(&die, &code, FLOW_LOGITS_REGISTER, vocabulary as u32, &setup);
+    let image = build_image(&firmware.program, &firmware.data, &info, &[])?;
+    let mut input: Vec<u8> = ids.iter().flat_map(|t| t.to_le_bytes()).collect();
+    input.extend(u32::MAX.to_le_bytes());
+
+    let Loaded { engine, tokenizer, .. } = loaded;
+    let unit = sampler_model(vocabulary, seed);
+    let runner = RunnerEngine::new(engine.as_mut(), FLOW_BITS, request.fidelity.cycles_per_token.max(0.0) as u64);
+    let soc = SocConfig { program_bits: 14, data_bits: 13, fifo_bits: 6 };
+    let mut bus = SocBus::booted_with(soc, &image, &input, ChipModel::new(runner, code, unit))?;
+    let mut cpu = Rv32Iss::default();
+    let (mut emitted, mut reported, mut shown) = (0, 0, 0);
+    let mut output: Vec<u32> = Vec::new();
+    while !cpu.halted {
+        if cancelled.load(Relaxed) {
+            return Ok(());
+        }
+        cpu.step(&mut bus);
+        let runner = &mut bus.peripheral.engine;
+        if let Some(error) = runner.error.take() {
+            return Err(error);
+        }
+        while reported < runner.steps && reported < ids.len() {
+            reported += 1;
+            let _ = sender.blocking_send(serde_json::json!({ "type": "prefill", "done": reported, "total": ids.len(), "seconds": runner.last_seconds }));
+        }
+        while bus.tx.len() / 4 > emitted {
+            let at = emitted * 4;
+            output.push(u32::from_le_bytes([bus.tx[at], bus.tx[at + 1], bus.tx[at + 2], bus.tx[at + 3]]));
+            emitted += 1;
+            let decoded = tokenizer.decode(&output, true).map_err(|e| e.to_string())?;
+            let piece = if decoded.ends_with('\u{FFFD}') { String::new() } else { let part = decoded[shown..].to_string(); shown = decoded.len(); part };
+            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "id": output[emitted - 1], "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle }));
+        }
+    }
+    let runner = &bus.peripheral.engine;
+    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": output.len(), "chip": { "cycles": cpu.cycle, "die_cycles": runner.die_cycles } }));
+    Ok(())
+}
+
 fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> {
     use std::sync::atomic::Ordering::Relaxed;
     let mut guard = app.loaded.lock().unwrap();
@@ -240,7 +346,12 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     let ids = loaded.tokenizer.encode(text, false).map_err(|e| e.to_string())?.get_ids().to_vec();
     loaded.engine.reset();
     let _ = sender.blocking_send(serde_json::json!({ "type": "start", "prompt_tokens": ids.len() }));
+    if request.fidelity.firmware {
+        return run_firmware(loaded, &ids, &request, sender, cancelled);
+    }
 
+    let mut unit = sampler_model(loaded.engine.vocabulary(), 0x1234_5679);
+    let use_unit = request.fidelity.sampler_unit;
     let mut seed = 0x9E3779B97F4A7C15u64 ^ std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
     let mut next = 0;
     for (i, id) in ids.iter().enumerate() {
@@ -252,7 +363,7 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
         let (logits, stats) = loaded.engine.step(*id, last || wants_mtp)?;
         if last {
             if let Some(l) = logits {
-                next = sample(l, request.temperature, request.top_k, &mut seed);
+                next = if use_unit { sample_on_unit(&mut unit, l, request.temperature, request.top_k) } else { sample(l, request.temperature, request.top_k, &mut seed) };
             }
         }
         if wants_mtp && loaded.engine.has_draft_head() {
@@ -281,7 +392,8 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
         let saturated = stats.saturated;
         let seconds = stats.seconds;
         let token = next;
-        next = sample(logits.ok_or("sin logits")?, request.temperature, request.top_k, &mut seed);
+        let logits = logits.ok_or("sin logits")?;
+        next = if use_unit { sample_on_unit(&mut unit, logits, request.temperature, request.top_k) } else { sample(logits, request.temperature, request.top_k, &mut seed) };
 
         if request.mtp_depth > 0 {
             // Score earlier guesses against what the main model actually produced.

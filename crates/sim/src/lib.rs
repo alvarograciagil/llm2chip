@@ -17,6 +17,8 @@ pub use weights::{SamplerConfig, Weights};
 /// What the server needs from any execution engine.
 pub trait Runner: Send {
     fn reset(&mut self);
+    /// The length of the logits vector.
+    fn vocabulary(&self) -> usize;
     fn step(&mut self, token: u32, want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String>;
     fn has_draft_head(&self) -> bool;
     fn draft_tokens(&self) -> usize;
@@ -29,6 +31,9 @@ pub trait Runner: Send {
 impl Runner for Engine {
     fn reset(&mut self) {
         Engine::reset(self)
+    }
+    fn vocabulary(&self) -> usize {
+        Engine::vocabulary(self)
     }
     fn step(&mut self, token: u32, want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
         Engine::step(self, token, want_logits)
@@ -56,6 +61,9 @@ impl Runner for Engine {
 impl Runner for ExactEngine {
     fn reset(&mut self) {
         ExactEngine::reset(self)
+    }
+    fn vocabulary(&self) -> usize {
+        ExactEngine::vocabulary(self)
     }
     fn step(&mut self, token: u32, want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
         let started = std::time::Instant::now();

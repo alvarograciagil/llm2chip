@@ -55,6 +55,10 @@ impl ExactEngine {
         self.draft_tokens = 0;
     }
 
+    pub fn vocabulary(&self) -> usize {
+        self.program.vocab
+    }
+
     pub fn register_of(&self, buffer: usize) -> u32 {
         self.layout.register_of(buffer)
     }

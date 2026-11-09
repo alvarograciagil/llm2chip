@@ -47,11 +47,14 @@ const INFO_TEMPERATURE: usize = 8;
 const INFO_SEED: usize = 9;
 const INFO_ACTIVATION_BITS: usize = 10;
 const INFO_PARAMETER_COUNT: usize = 11;
-const INFO_PARAMETERS: usize = 12;
+const INFO_RAW_TOKENS: usize = 12;
+const INFO_STOP_FIRST: usize = 13;
+const INFO_STOP_SECOND: usize = 14;
+const INFO_PARAMETERS: usize = 15;
 const INFO_BYTE_TO_TOKEN: usize = INFO_PARAMETERS + 4 * 16;
 const INFO_TOKEN_TO_BYTE: usize = INFO_BYTE_TO_TOKEN + 256;
 
-const MAX_PROMPT: usize = 64;
+const END_OF_TOKENS: u32 = u32::MAX;
 
 global_asm!(
     r#"
@@ -128,9 +131,10 @@ fn run_die(entry: u32, token: u32, position: u32) {
 fn sampling_inverse() -> u32 {
     peripheral_write(REG_VECTOR_ADDRESS, info(INFO_LOGITS_EXPONENT));
     let raw = peripheral_read(REG_VECTOR_DATA) as i32;
-    let unused = 32 - info(INFO_ACTIVATION_BITS);
+    let bits = info(INFO_ACTIVATION_BITS);
+    let unused = 32 - bits;
     let exponent = (raw << unused) >> unused;
-    let doubled = 1 + exponent;
+    let doubled = 17 + exponent - bits as i32;
     let scaled = if doubled >= 0 { (256u32 << doubled.min(16)) / info(INFO_TEMPERATURE).max(1) } else { (256u32 >> (-doubled).min(16)) / info(INFO_TEMPERATURE).max(1) };
     scaled.min(0xFFFF)
 }
@@ -146,32 +150,51 @@ fn sample() -> u32 {
     peripheral_read(REG_SAMPLE_TOKEN)
 }
 
+/// The next token from the host, or `None` once the prompt is over.
+fn next_token() -> Option<u32> {
+    if info(INFO_RAW_TOKENS) != 0 {
+        let mut token = 0u32;
+        for shift in 0..4 {
+            token |= (receive() as u32) << (8 * shift);
+        }
+        return (token != END_OF_TOKENS).then_some(token);
+    }
+    let byte = receive();
+    (byte != 0).then(|| info(INFO_BYTE_TO_TOKEN + byte as usize))
+}
+
+fn emit(token: u32) {
+    if info(INFO_RAW_TOKENS) != 0 {
+        for shift in 0..4 {
+            send((token >> (8 * shift)) as u8);
+        }
+    } else {
+        send(info(INFO_TOKEN_TO_BYTE + token as usize) as u8);
+    }
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn main() {
     load_segments();
     peripheral_write(REG_SAMPLE_SEED, info(INFO_SEED));
     let (entry_token, entry_logits) = (info(INFO_ENTRY_TOKEN), info(INFO_ENTRY_LOGITS));
-    let mut prompt = [0u32; MAX_PROMPT];
-    let mut length = 0;
-    loop {
-        let byte = receive();
-        if byte == 0 || length == MAX_PROMPT {
-            break;
-        }
-        prompt[length] = info(INFO_BYTE_TO_TOKEN + byte as usize);
-        length += 1;
-    }
-
-    let mut position = 0;
-    for token in &prompt[..length] {
-        run_die(entry_token, *token, position);
+    let (mut last, mut position) = (0, 0);
+    while let Some(token) = next_token() {
+        run_die(entry_token, token, position);
+        last = token;
         position += 1;
     }
-    let mut last = prompt[length.saturating_sub(1)];
+    if position == 0 {
+        return;
+    }
+    let (first_stop, second_stop) = (info(INFO_STOP_FIRST), info(INFO_STOP_SECOND));
     for _ in 0..info(INFO_MAX_NEW) {
         run_die(entry_logits, last, position - 1);
         last = sample();
-        send(info(INFO_TOKEN_TO_BYTE + last as usize) as u8);
+        if last == first_stop || last == second_stop {
+            return;
+        }
+        emit(last);
         run_die(entry_token, last, position);
         position += 1;
     }

@@ -4,7 +4,7 @@ import { scheduleDesign, type Schedule, type ScheduledStage } from "../engine";
 import { formatNumber } from "../format";
 import { useDesign } from "../store";
 import { matchingPreset } from "../params";
-import { useSimulator, type WeightFormat } from "./simulatorStore";
+import { useSimulator, type Numeric, type WeightFormat } from "./simulatorStore";
 
 const KIND_LABEL: Record<ScheduledStage["kind"], string> = {
   matvec: "Matriz × vector",
@@ -81,6 +81,23 @@ function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
       </div>
     </div>
   );
+}
+
+type Profile = "fast" | "arithmetic" | "flow" | "custom";
+
+const PROFILES: Record<Exclude<Profile, "custom">, { numeric: Numeric; useGpu: boolean; firmware: boolean; samplerUnit: boolean }> = {
+  fast: { numeric: "float", useGpu: true, firmware: false, samplerUnit: false },
+  arithmetic: { numeric: "exact", useGpu: true, firmware: false, samplerUnit: false },
+  flow: { numeric: "exact", useGpu: true, firmware: true, samplerUnit: true },
+};
+
+const NUMERIC_NAME: Record<Numeric, string> = { float: "Coma flotante", fixed: "Exponente por vector", exact: "Enteros exactos" };
+
+const loadedNumeric = (s: { numeric: Numeric; numericLoaded: Numeric | null }) => s.numericLoaded ?? s.numeric;
+
+function profileOf(s: { numeric: Numeric; useGpu: boolean; firmware: boolean; samplerUnit: boolean }): Profile {
+  const same = (p: (typeof PROFILES)[keyof typeof PROFILES]) => p.numeric === s.numeric && p.useGpu === s.useGpu && p.firmware === s.firmware && p.samplerUnit === s.samplerUnit;
+  return (Object.keys(PROFILES) as (keyof typeof PROFILES)[]).find((k) => same(PROFILES[k])) ?? "custom";
 }
 
 export function SimulatorView() {
@@ -236,6 +253,34 @@ export function SimulatorPanel() {
         {state.loaded && <p className="muted-text">Cargado: {state.loaded} · {state.accelerator ?? "CPU"}</p>}
       </div>
 
+      <h3>Qué se simula</h3>
+      <div className="inset padded form">
+        <Segmented
+          label="Perfil"
+          value={profileOf(state)}
+          options={[["fast", "Rápida"], ["arithmetic", "Aritmética real"], ["flow", "Flujo real"], ["custom", "A medida"]]}
+          onChange={(profile) => {
+            if (profile !== "custom") set(PROFILES[profile]);
+          }}
+        />
+        <label className="check">
+          <input type="checkbox" checked={state.firmware} onChange={(e) => set({ firmware: e.target.checked })} />
+          CPU y firmware del chip
+        </label>
+        <p className="muted-text">El firmware real corre instrucción a instrucción y gobierna el die por sus registros.</p>
+        <label className="check">
+          <input type="checkbox" checked={state.samplerUnit || state.firmware} disabled={state.firmware} onChange={(e) => set({ samplerUnit: e.target.checked })} />
+          Unidad de muestreo del chip
+        </label>
+        <p className="muted-text">Elige cada token con la misma lógica que el circuito, top-k incluido. Con la CPU siempre se usa.</p>
+        <dl className="metrics">
+          <div><dt>Núcleo de inferencia</dt><dd>{NUMERIC_NAME[state.numeric]}{state.useGpu ? " · GPU" : ""}</dd></div>
+          <div><dt>Tokenizador</dt><dd>Fuera del chip</dd></div>
+          <div><dt>Carga de pesos</dt><dd>Directa del checkpoint</dd></div>
+        </dl>
+        {state.numeric !== loadedNumeric(state) && state.loaded && <p className="muted-text">Recarga el modelo para aplicar la aritmética elegida.</p>}
+      </div>
+
       <h3>Generación</h3>
       <div className="inset padded form">
         <label>
@@ -259,6 +304,8 @@ export function SimulatorPanel() {
         <div><dt>Simulación</dt><dd>{mean ? `${formatNumber(mean)} s/token` : "—"}</dd></div>
         <div><dt>Este chip, estimado</dt><dd>{formatNumber(chipRate)} tok/s</dd></div>
         <div><dt>Más rápido que simularlo</dt><dd>{mean ? `×${formatNumber(chipRate * mean)}` : "—"}</dd></div>
+        {state.chip && <div><dt>Ciclos del chip, con firmware</dt><dd>{formatNumber(state.chip.cycles)}</dd></div>}
+        {state.chip && <div><dt>Fuera del die (CPU y muestreo)</dt><dd>{formatNumber(state.chip.cycles - state.chip.dieCycles)} ciclos</dd></div>}
         {state.acceptance.tries.map((tries, depth) => (
           <div key={depth}><dt>Aciertos MTP a profundidad {depth + 1}</dt><dd>{tries ? `${formatNumber((state.acceptance.hits[depth] / tries) * 100)} %` : "—"}</dd></div>
         ))}

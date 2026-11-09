@@ -5,7 +5,8 @@ use crate::lower::Layout;
 use crate::vm::BlockVm;
 use crate::weights::Weights;
 use compiler::Program;
-use netlist::block::{exponent_register, tables, BlockOps, Place};
+use crate::Runner;
+use netlist::block::{encode_vector, exponent_register, tables, BlockOps, Place};
 use netlist::chip::DieEngine;
 use netlist::die::word_bits;
 use netlist::image::{Segment, Target};
@@ -37,6 +38,8 @@ pub(crate) fn load_initial(vm: &mut BlockVm, initial: &HashMap<Place, i64>, expo
 
 /// The die's routines on the exact machine, with registers numbered as in the gates.
 pub struct VmEngine {
+    config: DieConfig,
+    code: Microprogram,
     program: Program,
     layout: Layout,
     vm: BlockVm,
@@ -51,13 +54,18 @@ impl VmEngine {
         let exponents = exponent_register(&config);
         let mut vm = BlockVm::new(&config, layout.registers_used() as usize + 8, Some(weights));
         load_initial(&mut vm, &layout.setup().initial, exponents);
-        Ok(Self { program, layout, vm, index_bits: config.index_bits, exponents })
+        let code = layout.microprogram(&program)?;
+        Ok(Self { config, code, program, layout, vm, index_bits: config.index_bits, exponents })
     }
 }
 
 impl DieEngine for VmEngine {
     fn run(&mut self, routine: usize, token: u32, position: u32) {
         self.layout.run_routine(&mut self.vm, &self.program, routine, token, position).expect("rutina del die");
+    }
+
+    fn cycles(&self, routine: usize, token: u32, position: u32) -> u64 {
+        self.code.cycles(&self.config, routine, token, position)
     }
 
     fn read(&mut self, address: u32) -> i64 {
@@ -67,6 +75,72 @@ impl DieEngine for VmEngine {
         } else {
             self.vm.mantissa(register, index)
         }
+    }
+}
+
+/// Addresses of the logits and their exponent when the die runs as one software engine.
+pub const FLOW_INDEX_BITS: u32 = 18;
+pub const FLOW_REGISTER_BITS: u32 = 12;
+
+/// Any engine behind the die's registers, so the real firmware can drive a real model.
+pub struct RunnerEngine<'a> {
+    engine: &'a mut dyn Runner,
+    /// A token waits here until it is known whether its logits are wanted.
+    pending: Option<u32>,
+    mantissas: Vec<i64>,
+    exponent: i64,
+    bits: u32,
+    cycles_per_token: u64,
+    pub steps: usize,
+    pub last_seconds: f64,
+    pub saturated: u64,
+    pub die_cycles: u64,
+    pub error: Option<String>,
+}
+
+impl<'a> RunnerEngine<'a> {
+    pub fn new(engine: &'a mut dyn Runner, bits: u32, cycles_per_token: u64) -> Self {
+        Self { engine, pending: None, mantissas: Vec::new(), exponent: 0, bits, cycles_per_token, steps: 0, last_seconds: 0.0, saturated: 0, die_cycles: 0, error: None }
+    }
+
+    fn step(&mut self, token: u32, want_logits: bool) {
+        match self.engine.step(token, want_logits) {
+            Ok((logits, stats)) => {
+                self.steps += 1;
+                self.last_seconds = stats.seconds;
+                self.saturated += stats.saturated;
+                if let Some(logits) = logits {
+                    let values: Vec<f64> = logits.iter().map(|v| *v as f64).collect();
+                    (self.mantissas, self.exponent) = encode_vector(&values, self.bits);
+                }
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+}
+
+impl DieEngine for RunnerEngine<'_> {
+    fn run(&mut self, routine: usize, token: u32, _position: u32) {
+        if let Some(previous) = self.pending.take() {
+            self.step(previous, routine == crate::lower::ENTRY_LOGITS);
+        }
+        if routine == crate::lower::ENTRY_TOKEN {
+            self.die_cycles += self.cycles_per_token;
+            self.pending = Some(token);
+        }
+    }
+
+    fn cycles(&self, routine: usize, _token: u32, _position: u32) -> u64 {
+        if routine == crate::lower::ENTRY_TOKEN { self.cycles_per_token } else { 0 }
+    }
+
+    fn read(&mut self, address: u32) -> i64 {
+        let register = address >> FLOW_INDEX_BITS;
+        if register == (1 << FLOW_REGISTER_BITS) - 1 {
+            return self.exponent;
+        }
+        self.mantissas.get((address & ((1 << FLOW_INDEX_BITS) - 1)) as usize).copied().unwrap_or(0)
     }
 }
 

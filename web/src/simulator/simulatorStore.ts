@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useDesign } from "../store";
 
 export interface ServerModel {
   name: string;
@@ -29,12 +30,16 @@ interface SimulatorState {
   useGpu: boolean;
   loading: boolean;
   numeric: Numeric;
+  numericLoaded: Numeric | null;
   activationBits: number;
   stateBits: number;
   tableBits: number;
   useDesignFormat: boolean;
   designFormat: WeightFormat | null;
   mtpDepth: number;
+  firmware: boolean;
+  samplerUnit: boolean;
+  chip: { cycles: number; dieCycles: number } | null;
   acceptance: { hits: number[]; tries: number[] };
   prompt: string;
   maxTokens: number;
@@ -71,12 +76,16 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   useGpu: true,
   loading: false,
   numeric: "float",
+  numericLoaded: null,
   activationBits: 16,
   stateBits: 16,
   tableBits: 12,
   useDesignFormat: false,
   designFormat: null,
   mtpDepth: 0,
+  firmware: false,
+  samplerUnit: false,
+  chip: null,
   acceptance: { hits: [], tries: [] },
   prompt: "¿Cuál es la capital de Francia? Responde en una frase.",
   maxTokens: 64,
@@ -122,20 +131,23 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
       const response = await fetch("/api/load", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       if (!response.ok) throw new Error(await message(response));
       const { loaded, accelerator } = await response.json();
-      set({ loaded, accelerator, loading: false });
+      set({ loaded, accelerator, loading: false, numericLoaded: numeric });
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e), loading: false });
     }
   },
 
   generate() {
-    const { prompt, maxTokens, temperature, topK, mtpDepth } = get();
+    const { prompt, maxTokens, temperature, topK, mtpDepth, firmware, samplerUnit } = get();
+    const metric = (id: string) => useDesign.getState().report?.metrics.find((m) => m.id === id)?.value ?? 0;
+    const rate = metric("tok_s");
+    const fidelity = { firmware, sampler_unit: samplerUnit || firmware, cycles_per_token: rate > 0 ? (metric("freq_ghz") * 1e9) / rate : 0 };
     socket?.close();
-    set({ output: "", running: true, error: null, phase: "Conectando", tokens: 0, prefilled: 0, promptTokens: 0, seconds: [], saturated: 0, acceptance: { hits: [], tries: [] } });
+    set({ chip: null, output: "", running: true, error: null, phase: "Conectando", tokens: 0, prefilled: 0, promptTokens: 0, seconds: [], saturated: 0, acceptance: { hits: [], tries: [] } });
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${location.host}/api/generate`);
     socket = ws;
-    ws.onopen = () => ws.send(JSON.stringify({ prompt, max_tokens: maxTokens, temperature, top_k: topK, mtp_depth: mtpDepth }));
+    ws.onopen = () => ws.send(JSON.stringify({ prompt, max_tokens: maxTokens, temperature, top_k: topK, mtp_depth: mtpDepth, fidelity }));
     ws.onerror = () => set({ error: "Se perdió la conexión con el motor.", running: false });
     ws.onclose = () => set({ running: false });
     ws.onmessage = (event) => {
@@ -154,7 +166,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
         }));
       }
       if (data.type === "done") {
-        set({ phase: "Terminado", running: false });
+        set({ phase: "Terminado", running: false, chip: data.chip ? { cycles: data.chip.cycles, dieCycles: data.chip.die_cycles } : null });
         ws.close();
       }
       if (data.type === "error") {

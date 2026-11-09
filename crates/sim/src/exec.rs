@@ -172,6 +172,10 @@ impl Engine {
         Ok(Self { program, weights, floats, buffers, kv, delta, conv, position: 0, numeric, inverse_freq, saturated: 0, functions: Functions { table_bits }, rope_position: 0, draft_tokens: 0 })
     }
 
+    pub fn vocabulary(&self) -> usize {
+        self.program.vocab
+    }
+
     pub fn reset(&mut self) {
         self.position = 0;
         self.draft_tokens = 0;
