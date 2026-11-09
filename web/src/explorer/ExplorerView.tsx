@@ -247,7 +247,7 @@ function FormatComparison() {
       <div className="card-title">
         <h2>Formatos de pesos</h2>
       </div>
-      <p className="muted-text plot-sub">El circuito de cada formato con este diseño, de menor a mayor área. Clic en una fila para usarlo. Top-1 es la coincidencia con coma flotante en 16 tokens de Qwen3.8 real. Ese modelo ya viene cuantizado a 4 bits, así que los formatos pequeños pueden salir mejor de lo que saldrían con pesos originales.</p>
+      <p className="muted-text plot-sub">El circuito de cada formato con este diseño, de menor a mayor área. Clic en una fila para usarlo. Top-1 es la coincidencia con coma flotante en 16 o 64 tokens de Qwen3.8 real. Ese modelo ya viene cuantizado a 4 bits, así que los formatos pequeños pueden salir mejor de lo que saldrían con pesos originales.</p>
       <div className="format-table">
         <table className="front">
           <thead>

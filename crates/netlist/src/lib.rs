@@ -10,6 +10,7 @@ pub mod demo;
 pub mod export;
 pub mod die;
 pub mod rv32;
+pub mod sampler;
 mod sim;
 pub mod soc;
 mod verilog;

@@ -47,3 +47,19 @@ Límites de esta medida:
 | book8 | 56.2 % | 1.2565 | 68.7 |
 
 Comando: `cargo run --release -p sim --example formats -- <carpeta> 16 <formatos...>`
+
+## Medición con 64 tokens
+
+Con más tokens, cada coincidencia vale 1,6 puntos. Los libros de códigos se midieron tras cambiar su inicialización a valores repartidos por todo el rango.
+
+| formato | top-1 | KL media | s/token |
+|---|---|---|---|
+| nvfp4 | 90.6 % | 0.0510 | 4.2 |
+| mxfp4 | 93.8 % | 0.1073 | 2.7 |
+| fp8 | 95.3 % | 0.0052 | 3.2 |
+| q8 | 93.8 % | 0.0265 | 3.0 |
+| mlx4 | 93.8 % | 0.0053 | 1.3 |
+| q6 | 65.6 % | 0.6837 | 2.8 |
+| posit8 | 93.8 % | 0.0099 | 3.1 |
+| book4 | 57.8 % | 1.3339 | 4.2 |
+| book8 | 73.4 % | 0.8838 | 4.6 |

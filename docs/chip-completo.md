@@ -32,7 +32,7 @@ El chip recibe bytes de texto y devuelve bytes de texto. El tokenizado, la infer
 | Controlador de carga y DMA | Imagen hacia celdas, tablas y microcódigo, con arranque propio y CRC | En puertas e ISS; salidas sin conectar al die |
 | Red de escritura de pesos | Lleva cada palabra a su celda | Solo puertos de carga directos |
 | ECC, CRC, BIST y reparación | Fiabilidad y celdas defectuosas | Solo área |
-| Unidad de muestreo y RNG | Top-k y temperatura sobre los logits | Falta |
+| Unidad de muestreo y RNG | Top-k y temperatura sobre los logits | En puertas y modelo, sin conectar al die |
 | Planificador de tokens y MTP | Decide qué ejecuta cada die, y deshace | En software |
 | Reloj, reset y gestión de energía | Secuencia de reset, puertas de reloj | Falta |
 | Depuración y contadores | JTAG, trazas, rendimiento | Falta |
