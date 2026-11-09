@@ -11,7 +11,7 @@ fn cell(fixed_weights: bool) -> CellConfig {
 }
 
 fn die(fixed_weights: bool) -> DieConfig {
-    DieConfig { cells: 3, cell: CellConfig { addr_bits: 4, ..cell(fixed_weights) }, scale_bits: 16, reg_bits: 3, index_bits: 4, microcode_bits: 9, broadcast_stages: 2, function_bits: 8, function_select_bits: 3 }
+    DieConfig { cells: 3, cell: CellConfig { addr_bits: 4, ..cell(fixed_weights) }, scale_bits: 16, reg_bits: 3, index_bits: 4, microcode_bits: 9, broadcast_stages: 2, function_bits: 8, function_select_bits: 3, features: Default::default() }
 }
 
 const WEIGHTS: [u64; 4] = [3, 0xFE, 5, 0x81];

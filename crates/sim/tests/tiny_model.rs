@@ -298,3 +298,34 @@ fn tiny_model_runs_whole_on_the_gates() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
+fn a_die_built_for_its_program_runs_it_identically_with_less_logic() {
+    let dir = std::env::temp_dir().join(format!("llm2chip-trim-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+    let c = die_config();
+    let mut general = gates_after(&program, &dir, c, &[3, 5]);
+    let trimmed = DieConfig { features: netlist::DieFeatures::of(&general.code), ..c };
+    let mut specific = gates_after(&program, &dir, trimmed, &[3, 5]);
+    assert_eq!(specific.code.words.len(), general.code.words.len(), "el programa no depende del recorte");
+    assert_eq!(specific.cycles, general.cycles, "ciclos");
+    let register = general.layout.logits_register(&program);
+    let read = |run: &mut GateRun, config: &DieConfig| -> Vec<u64> {
+        (0..8u32).map(|i| {
+            run.sim.set("vec_addr", (register as u64) << config.index_bits | i as u64).unwrap();
+            run.sim.tick();
+            run.sim.settle();
+            run.sim.get("vec_out").unwrap()
+        }).collect()
+    };
+    assert_eq!(read(&mut specific, &trimmed), read(&mut general, &c), "logits");
+    let count = |config: DieConfig| netlist::die_design(config).flat_counts().iter().filter(|(k, _)| *k != "sram").map(|(_, v)| *v).sum::<u64>();
+    let (before, after) = (count(c), count(trimmed));
+    eprintln!("puertas y biestables: {before} generales, {after} para este programa");
+    assert!(after < before);
+    assert!(netlist::word_bits(&trimmed) < netlist::word_bits(&c));
+    std::fs::remove_dir_all(dir).unwrap();
+}

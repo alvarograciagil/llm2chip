@@ -19,7 +19,7 @@ fn exact_config(bits: u32) -> DieConfig {
         microcode_bits: 18,
         broadcast_stages: 1,
         function_bits: 12,
-        function_select_bits: 3,
+        function_select_bits: 3, features: Default::default(),
     }
 }
 

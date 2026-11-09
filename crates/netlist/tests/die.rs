@@ -14,7 +14,7 @@ fn config() -> DieConfig {
         microcode_bits: 9,
         broadcast_stages: 2,
         function_bits: 8,
-        function_select_bits: 3,
+        function_select_bits: 3, features: Default::default(),
     }
 }
 

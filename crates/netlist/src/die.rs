@@ -24,6 +24,63 @@ pub struct DieConfig {
     pub function_bits: u32,
     /// log2 of the number of function tables.
     pub function_select_bits: u32,
+    /// What this die's fixed microprogram actually uses.
+    #[serde(skip)]
+    pub features: DieFeatures,
+}
+
+/// The parts of the general die that one microprogram needs. A die built with these
+/// runs that microprogram and no other; `Default` keeps everything, for any program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DieFeatures {
+    /// One bit per `OP_*` result that is ever selected.
+    pub ops: u32,
+    /// How many bits of each control field are ever set, in `field_layout` order.
+    pub widths: [u8; FIELD_COUNT],
+    /// Index registers in use, counting the always-zero first one.
+    pub x_registers: u32,
+}
+
+impl Default for DieFeatures {
+    fn default() -> Self {
+        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX }
+    }
+}
+
+impl DieFeatures {
+    pub fn is_general(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Exactly what this microprogram needs.
+    pub fn of(code: &Microprogram) -> Self {
+        // Additions are also how the comparator and the sequencer's own results are made.
+        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1 };
+        let mut highest_x = 0;
+        for word in &code.words {
+            features.ops |= 1 << word.op;
+            for (width, value) in features.widths.iter_mut().zip(word.field_values()) {
+                *width = (*width).max((u128::BITS - value.leading_zeros()) as u8);
+            }
+            highest_x = highest_x.max(word.offset_a).max(word.offset_b).max(word.offset_dst).max(word.x_dst).max(word.x_src).max(word.x_limit);
+        }
+        for parameter in &code.parameters {
+            highest_x = highest_x.max(parameter.register);
+        }
+        features.x_registers = highest_x + 1;
+        features
+    }
+
+    /// What dies running either program need, for chips built identical to each other.
+    pub fn union(self, other: Self) -> Self {
+        let mut widths = self.widths;
+        widths.iter_mut().zip(other.widths).for_each(|(a, b)| *a = (*a).max(b));
+        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers) }
+    }
+
+    fn uses(&self, op: u32) -> bool {
+        self.ops >> op & 1 == 1
+    }
 }
 
 impl DieConfig {
@@ -86,6 +143,8 @@ pub struct ControlWord {
 }
 
 const REPEAT_BITS: u32 = 12;
+pub const FIELD_COUNT: usize = 43;
+const LINK_SEND_FIELD: usize = 17;
 
 pub const OP_ADD: u32 = 0;
 pub const OP_MUL: u32 = 1;
@@ -106,7 +165,12 @@ pub const OP_EQUAL: u32 = 15;
 const OP_BITS: u32 = 4;
 const SHIFT_REG_BITS: u32 = 6;
 
+/// Each field's name and how many bits of the word it takes on this die.
 fn field_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
+    full_layout(c).into_iter().zip(c.features.widths).map(|((name, width), used)| (name, width.min(used as u32))).collect()
+}
+
+fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
     vec![
         ("reg_a", c.reg_bits),
         ("reg_b", c.reg_bits),
@@ -160,9 +224,8 @@ pub fn x_bits(c: &DieConfig) -> u32 {
 }
 
 impl ControlWord {
-    /// The word as 32-bit pieces, least significant first.
-    pub fn encode_words(&self, c: &DieConfig) -> Vec<u32> {
-        let values = [
+    fn field_values(&self) -> [u128; FIELD_COUNT] {
+        [
             self.reg_a as u128,
             self.reg_b as u128,
             self.reg_dst as u128,
@@ -206,7 +269,12 @@ impl ControlWord {
             self.branch as u128,
             self.x_limit as u128,
             self.target as u128,
-        ];
+        ]
+    }
+
+    /// The word as 32-bit pieces, least significant first.
+    pub fn encode_words(&self, c: &DieConfig) -> Vec<u32> {
+        let values = self.field_values();
         let mut words = vec![0u32; word_bits(c).div_ceil(32) as usize];
         let mut offset = 0usize;
         for ((_, width), value) in field_layout(c).iter().zip(values) {
@@ -438,10 +506,12 @@ impl Gen {
 
         let mut fields: BTreeMap<&str, Vec<Bit>> = BTreeMap::new();
         let mut offset = 0usize;
-        for (name, width) in field_layout(c) {
-            let raw: Vec<Bit> = code[offset..offset + width as usize].to_vec();
+        for ((name, stored), (_, full)) in field_layout(c).into_iter().zip(full_layout(c)) {
+            // What this microprogram never sets reads as zero, and the logic behind it goes.
+            let mut raw: Vec<Bit> = code[offset..offset + stored as usize].to_vec();
+            raw.resize(full as usize, Bit::Zero);
             fields.insert(name, raw);
-            offset += width as usize;
+            offset += stored as usize;
         }
 
         // `running` gates every control line so the idle machine does nothing.
@@ -520,7 +590,7 @@ impl Gen {
         {
             let width = c.index_bits as usize;
             let mut l = Logic { b: &mut b, next: 0 };
-            let stored: Vec<Vec<Bit>> = (0..1usize << x_bits(c)).map(|i| if i == 0 { vec![Bit::Zero; width] } else { l.fresh_bus(width) }).collect();
+            let stored: Vec<Vec<Bit>> = (0..1usize << x_bits(c)).map(|i| if i == 0 || i as u32 >= c.features.x_registers { vec![Bit::Zero; width] } else { l.fresh_bus(width) }).collect();
             offset_a = l.select(&fields["offset_a"], &stored);
             offset_b = l.select(&fields["offset_b"], &stored);
             offset_dst = l.select(&fields["offset_dst"], &stored);
@@ -533,7 +603,7 @@ impl Gen {
             let target_register = l.mux_bus(param_write, &fields["x_dst"], &param_index);
             let data = l.mux_bus(param_write, &sum, &param_data);
             let any_write = l.or(param_write, x_write);
-            for (i, q) in stored.iter().enumerate().skip(1) {
+            for (i, q) in stored.iter().enumerate().take(c.features.x_registers as usize).skip(1) {
                 let selected = l.equals(&target_register, i as u32);
                 let write = l.and(selected, any_write);
                 let d = l.mux_bus(write, q, &data);
@@ -771,23 +841,25 @@ impl Gen {
         b.dff_to(keep_seen, seen);
         let mut equal = vec![first_match; a as usize];
         equal[a as usize - 1] = Bit::Zero;
+        let zero_leaf = vec![Bit::Zero; a as usize];
+        let chosen_leaf = |op: u32, leaf: Vec<Bit>| if c.features.uses(op) { leaf } else { zero_leaf.clone() };
         let leaves: Vec<Vec<Bit>> = vec![
             sum.clone(),
-            shifted,
-            table_out,
-            chain_shifted[..a as usize].to_vec(),
-            sum,
-            maximum,
-            leading,
-            aligned_a,
-            saturated,
-            acc_shifted[..a as usize].to_vec(),
-            immediate,
-            parity,
-            link_in.clone(),
-            wide_leading,
-            wide_shifted,
-            equal,
+            chosen_leaf(OP_MUL, shifted),
+            chosen_leaf(OP_FUNCTION, table_out),
+            chosen_leaf(OP_CELLS, chain_shifted[..a as usize].to_vec()),
+            chosen_leaf(OP_SUB, sum),
+            chosen_leaf(OP_MAX, maximum),
+            chosen_leaf(OP_LZC, leading),
+            chosen_leaf(OP_MOV, aligned_a),
+            chosen_leaf(OP_SHIFT_LEFT, saturated),
+            chosen_leaf(OP_ACCUMULATOR, acc_shifted[..a as usize].to_vec()),
+            chosen_leaf(OP_IMMEDIATE, immediate),
+            chosen_leaf(OP_PARITY, parity),
+            chosen_leaf(OP_LINK, link_in.clone()),
+            chosen_leaf(OP_WIDE_LZC, wide_leading),
+            chosen_leaf(OP_WIDE_OUT, wide_shifted),
+            chosen_leaf(OP_EQUAL, equal),
         ];
         let result = mux_tree(&mut b, &mux_a, leaves, &op);
         // While the link holds the sequencer back, the result in flight must stay put.
@@ -798,6 +870,7 @@ impl Gen {
         // The sequencer waits when it needs a word that has not arrived or cannot send one.
         b.group("Enlace entre dies");
         let link_send = ctl("link_send", &mut b, &fields);
+        let has_link = c.features.uses(OP_LINK) || c.features.widths[LINK_SEND_FIELD] > 0;
         let endpoint = self.link_endpoint(a);
         let can_send = b.wire("link_can_send", 1)[0];
         let has_data = b.wire("link_has_data", 1)[0];
@@ -816,22 +889,31 @@ impl Gen {
             let pop = l.and(reads_link, running);
             l.b.or_to(pop, Bit::Zero, link_pop);
         }
-        b.inst("link", &endpoint, &[
-            ("tx_send", vec![link_send]),
-            ("tx_data", write_data),
-            ("tx_can_send", vec![can_send]),
-            ("pin_tx_valid", link_tx_valid),
-            ("pin_tx_bits", link_tx_bits),
-            ("pin_tx_ready", link_tx_ready),
-            ("pin_rx_valid", link_rx_valid),
-            ("pin_rx_bits", link_rx_bits),
-            ("pin_rx_ready", link_rx_ready),
-            ("rx_pop", vec![link_pop]),
-            ("rx_data", link_in),
-            ("rx_has_data", vec![has_data]),
-            ("corrected", link_corrected),
-            ("failed", link_failed),
-        ]);
+        if has_link {
+            b.inst("link", &endpoint, &[
+                ("tx_send", vec![link_send]),
+                ("tx_data", write_data),
+                ("tx_can_send", vec![can_send]),
+                ("pin_tx_valid", link_tx_valid),
+                ("pin_tx_bits", link_tx_bits),
+                ("pin_tx_ready", link_tx_ready),
+                ("pin_rx_valid", link_rx_valid),
+                ("pin_rx_bits", link_rx_bits),
+                ("pin_rx_ready", link_rx_ready),
+                ("rx_pop", vec![link_pop]),
+                ("rx_data", link_in),
+                ("rx_has_data", vec![has_data]),
+                ("corrected", link_corrected),
+                ("failed", link_failed),
+            ]);
+        } else {
+            // A die that never talks to a neighbour has no endpoint at all.
+            b.or_to(Bit::One, Bit::Zero, can_send);
+            b.or_to(Bit::Zero, Bit::Zero, has_data);
+            for bit in link_in.iter().chain(&link_tx_valid).chain(&link_tx_bits).chain(&link_rx_ready).chain(&link_corrected).chain(&link_failed) {
+                b.or_to(Bit::Zero, Bit::Zero, *bit);
+            }
+        }
 
         // --- Activation network ---
         b.group("Red de activaciones");
@@ -1064,7 +1146,11 @@ pub fn package_design(config: DieConfig, dies: u32, link_stages: u32) -> Design 
 pub fn die_design(config: DieConfig) -> Design {
     let mut gen = Gen { modules: BTreeMap::new() };
     let top = gen.die(&config);
-    Design { top, modules: gen.modules }
+    let mut design = Design { top, modules: gen.modules };
+    if !config.features.is_general() {
+        crate::optimize::trim_top(&mut design);
+    }
+    design
 }
 
 /// Lays operations out on a per-cycle timeline and compresses it into microcode.
