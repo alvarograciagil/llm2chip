@@ -270,6 +270,56 @@ impl Layout {
         Ok(code.finish_program())
     }
 
+    /// The microprogram of one die of several: its part of the model plus the transfers.
+    pub fn die_microprogram(&self, program: &Program, plan: &[Range<usize>], die: usize) -> Result<Microprogram, String> {
+        let token = Expr::var(Var::Token);
+        let position = Expr::var(Var::Position);
+        let last = die + 1 == plan.len();
+        let first = die == 0;
+        let several = plan.len() > 1;
+        let mut code = DieProgram::new(self.config);
+
+        let mut asm = Assembly::new(&self.config);
+        if !first {
+            let input = program.crossing(plan[die].start)?;
+            asm.receive(self.reg(input), (program.buffers[input] as u32).into());
+        }
+        self.run_list(&mut asm, program, &program.ops[plan[die].clone()], token, position, true)?;
+        if !last {
+            let output = program.crossing(plan[die + 1].start)?;
+            asm.send(self.reg(output), (program.buffers[output] as u32).into());
+        } else if several {
+            asm.send_signal();
+        }
+        if first && several {
+            asm.receive_signal();
+        }
+        code.assemble(&asm.steps);
+        code.next_entry();
+
+        let mut asm = Assembly::new(&self.config);
+        let logits_length: Expr = (program.vocab as u32).into();
+        if last {
+            self.run_list(&mut asm, program, &program.ops[program.logits_from..], token, position, false)?;
+            if several {
+                asm.send(self.reg(program.logits), logits_length);
+            }
+        } else if first {
+            asm.receive(self.reg(program.logits), logits_length);
+        }
+        code.assemble(&asm.steps);
+        Ok(code.finish_program())
+    }
+
+    /// Forgets the weights of every matrix that the given operations do not use.
+    pub fn keep_weights_of(&mut self, program: &Program, plan: &[Range<usize>], die: usize) {
+        let last = die + 1 == plan.len();
+        let tail = program.logits_from..program.ops.len();
+        let used: HashSet<String> = plan[die].clone().chain(if last { tail } else { 0..0 }).flat_map(|i| matrices_of(program, &program.ops[i].op)).map(|(name, ..)| name).collect();
+        let dropped: HashSet<u32> = self.weights.iter().filter(|(name, _)| !used.contains(*name)).map(|(_, reg)| *reg).collect();
+        self.setup.initial.retain(|(register, _), _| !dropped.contains(register));
+    }
+
     /// Runs one routine of the microprogram directly, at software speed.
     pub fn run_routine<O: BlockOps>(&self, ops: &mut O, program: &Program, routine: usize, token: O::N, position: O::N) -> Result<(), String> {
         match routine {

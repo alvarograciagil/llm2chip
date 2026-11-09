@@ -528,7 +528,9 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
         "Vocabulario y fusiones que el firmware usa para convertir texto en tokens y volver.");
     push("control", "Secuenciador y microprograma", 0.8,
         "Ejecuta el microprograma que dirige cada etapa.");
-    push("system", "CPU de control y carga", (tech.cpu_mm2 + tech.io_mm2) / d,
+    // Interchangeable dies all carry the CPU, even though only the first one leads.
+    let control_share = if p.die_mode == DieMode::Identical { 1.0 } else { 1.0 / d };
+    push("system", "CPU de control y carga", (tech.cpu_mm2 + tech.io_mm2) * control_share,
         if p.weight_backend == WeightBackend::Rom {
             "Tokenizador, muestreo y carga del microprograma. Los pesos ya vienen grabados."
         } else {

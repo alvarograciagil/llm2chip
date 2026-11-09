@@ -25,12 +25,17 @@ pub const REG_SAMPLE_SEED: u32 = 41;
 pub const REG_SAMPLE_START: u32 = 42;
 pub const REG_SAMPLE_DONE: u32 = 43;
 pub const REG_SAMPLE_TOKEN: u32 = 44;
+pub const REG_DIE_ID: u32 = 45;
+pub const REG_CHAIN_DATA: u32 = 46;
+pub const REG_CHAIN_STATUS: u32 = 47;
 
 /// What the debug port shows for each value of `debug_select`.
 pub const DEBUG_CYCLES: u64 = 0;
 pub const DEBUG_DIE_BUSY: u64 = 1;
 pub const DEBUG_SAMPLER_BUSY: u64 = 2;
 pub const DEBUG_CPU_PC: u64 = 3;
+pub const DEBUG_LINK_CORRECTED: u64 = 4;
+pub const DEBUG_LINK_FAILED: u64 = 5;
 /// Cycles the chip keeps itself in reset after the external signal is released.
 pub const RESET_STRETCH: u64 = 15;
 
@@ -67,7 +72,22 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     let booting = b.output("booting", 1);
     let image_req_valid = b.output("image_req_valid", 1);
     let image_req_addr = b.output("image_req_addr", 32);
-    let debug_select = b.input("debug_select", 2);
+    let die_id = b.input("die_id", 4);
+    let control_bits = crate::link::wire_bits(32);
+    let data_bits = crate::link::wire_bits(c.die.cell.activation_bits);
+    let link_tx_valid = b.output("link_tx_valid", 1);
+    let link_tx_bits = b.output("link_tx_bits", data_bits);
+    let link_tx_ready = b.input("link_tx_ready", 1);
+    let link_rx_valid = b.input("link_rx_valid", 1);
+    let link_rx_bits = b.input("link_rx_bits", data_bits);
+    let link_rx_ready = b.output("link_rx_ready", 1);
+    let chain_tx_valid = b.output("chain_tx_valid", 1);
+    let chain_tx_bits = b.output("chain_tx_bits", control_bits);
+    let chain_tx_ready = b.input("chain_tx_ready", 1);
+    let chain_rx_valid = b.input("chain_rx_valid", 1);
+    let chain_rx_bits = b.input("chain_rx_bits", control_bits);
+    let chain_rx_ready = b.output("chain_rx_ready", 1);
+    let debug_select = b.input("debug_select", 3);
     let debug_value = b.output("debug_value", 32);
 
     let load_valid = b.wire("load_valid", 1)[0];
@@ -115,6 +135,11 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     let vector_out = b.wire("vector_out", activation as u32);
     let sampler_done = b.wire("sampler_done", 1);
     let sampler_token = b.wire("sampler_token", c.sampler.index_bits);
+    let (link_corrected, link_failed) = (b.wire("link_corrected", 1)[0], b.wire("link_failed", 1)[0]);
+    let (chain_corrected, chain_failed) = (b.wire("chain_corrected", 1)[0], b.wire("chain_failed", 1)[0]);
+    let (chain_can_send, chain_has_data) = (b.wire("chain_can_send", 1), b.wire("chain_has_data", 1));
+    let chain_word = b.wire("chain_word", 32);
+    let (chain_send, chain_pop) = (b.wire("chain_send", 1)[0], b.wire("chain_pop", 1)[0]);
     let external_reset = reset;
     let reset = internal_reset;
     let mut die_pins: Vec<(&str, Vec<Bit>)> = vec![("halted", die_halted.clone()), ("vec_out", vector_out.clone())];
@@ -251,10 +276,15 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
             ("load_fn", vec![load_fn]),
             ("fn_addr", load_addr[..function_address].to_vec()),
             ("cell_data", load_data[..cell_bits].to_vec()),
-            ("link_in", vec![Bit::Zero; activation]),
+            ("link_tx_valid", link_tx_valid),
+            ("link_tx_bits", link_tx_bits),
+            ("link_tx_ready", link_tx_ready),
+            ("link_rx_valid", link_rx_valid),
+            ("link_rx_bits", link_rx_bits),
+            ("link_rx_ready", link_rx_ready),
+            ("link_corrected", vec![link_corrected]),
+            ("link_failed", vec![link_failed]),
         ]);
-        let link_out = l.fresh_bus(activation);
-        die_pins.push(("link_out", link_out));
         sampler_pins.extend([
             ("start", vec![sample_start]),
             ("greedy", greedy.clone()),
@@ -287,11 +317,39 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
                 q
             })
             .collect();
-        let leaves: Vec<Vec<Bit>> = counters.into_iter().chain([cpu_pc.clone()]).collect();
+        let any_corrected = l.or(link_corrected, chain_corrected);
+        let any_failed = l.or(link_failed, chain_failed);
+        let link_counters: Vec<Vec<Bit>> = [any_corrected, any_failed]
+            .into_iter()
+            .map(|event| {
+                let q = l.fresh_bus(32);
+                let mut carry = event;
+                let stepped: Vec<Bit> = q.iter().map(|bit| { let out = l.xor(*bit, carry); carry = l.and(*bit, carry); out }).collect();
+                let cleared = constant(0, 32);
+                let next = l.mux_bus(external_reset, &stepped, &cleared);
+                l.connect_flops(&next, &q);
+                q
+            })
+            .collect();
+        let mut leaves: Vec<Vec<Bit>> = counters.into_iter().chain([cpu_pc.clone()]).chain(link_counters).collect();
+        leaves.resize(8, constant(0, 32));
         let shown = l.select(&debug_select, &leaves);
         for (from, to) in shown.iter().zip(&debug_value) {
             l.b.or_to(*from, Bit::Zero, *to);
         }
+
+        l.b.group("Cadena de control");
+        let send_word = hit(&mut l, REG_CHAIN_DATA);
+        l.b.or_to(send_word, Bit::Zero, chain_send);
+        let chain_read = {
+            let selected = l.equals(&bus_address, REG_CHAIN_DATA);
+            l.and(selected, bus_read)
+        };
+        l.b.or_to(chain_read, Bit::Zero, chain_pop);
+        // The bus answers a cycle late, by when the queue has moved on.
+        let chain_held = l.fresh_bus(32);
+        let next_chain = l.mux_bus(chain_read, &chain_held, &chain_word);
+        l.connect_flops(&next_chain, &chain_held);
 
         l.b.group("Lectura de registros");
         let selected = l.fresh_bus(PERIPHERAL_BITS as usize);
@@ -301,7 +359,7 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
         let sign = vector_out[activation - 1];
         let vector_word: Vec<Bit> = vector_out.iter().copied().chain(std::iter::repeat_n(sign, 32 - activation)).collect();
         let mut value = constant(0, 32);
-        for (register, word) in [(REG_STATUS, widen(&die_halted)), (REG_VECTOR_DATA, vector_word), (REG_SAMPLE_DONE, widen(&sampler_done)), (REG_SAMPLE_TOKEN, widen(&sampler_token))] {
+        for (register, word) in [(REG_STATUS, widen(&die_halted)), (REG_VECTOR_DATA, vector_word), (REG_SAMPLE_DONE, widen(&sampler_done)), (REG_SAMPLE_TOKEN, widen(&sampler_token)), (REG_DIE_ID, widen(&die_id)), (REG_CHAIN_DATA, chain_held.clone()), (REG_CHAIN_STATUS, widen(&[chain_has_data[0], chain_can_send[0]]))] {
             let chosen = l.equals(&selected, register);
             value = l.mux_bus(chosen, &value, &word);
         }
@@ -309,6 +367,24 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
             l.b.or_to(*from, Bit::Zero, *to);
         }
     }
+    b.group("Cadena de control");
+    let chain = gen.link_endpoint(32);
+    b.inst("chain", &chain, &[
+        ("tx_send", vec![chain_send]),
+        ("tx_data", bus_wdata.clone()),
+        ("tx_can_send", chain_can_send),
+        ("pin_tx_valid", chain_tx_valid),
+        ("pin_tx_bits", chain_tx_bits),
+        ("pin_tx_ready", chain_tx_ready),
+        ("pin_rx_valid", chain_rx_valid),
+        ("pin_rx_bits", chain_rx_bits),
+        ("pin_rx_ready", chain_rx_ready),
+        ("rx_pop", vec![chain_pop]),
+        ("rx_data", chain_word),
+        ("rx_has_data", chain_has_data),
+        ("corrected", vec![chain_corrected]),
+        ("failed", vec![chain_failed]),
+    ]);
     b.group("Die de inferencia");
     b.inst("die", &die, &die_pins);
     b.group("Unidad de muestreo");
@@ -430,7 +506,8 @@ pub const INFO_PARAMETER_COUNT: usize = 11;
 pub const INFO_RAW_TOKENS: usize = 12;
 pub const INFO_STOP_FIRST: usize = 13;
 pub const INFO_STOP_SECOND: usize = 14;
-pub const INFO_PARAMETERS: usize = 15;
+pub const INFO_DIES: usize = 15;
+pub const INFO_PARAMETERS: usize = 16;
 pub const INFO_PARAMETER_SLOTS: usize = 16;
 
 /// Settings for generating text.
@@ -446,6 +523,8 @@ pub struct GenerationSetup {
     pub raw_tokens: bool,
     /// Tokens that end the generation; `u32::MAX` means none.
     pub stop: [u32; 2],
+    /// Chips sharing the model; the first one talks to the host.
+    pub dies: u32,
 }
 
 /// The chip description the firmware reads from its data memory.
@@ -465,6 +544,7 @@ pub fn chip_info(c: &DieConfig, code: &Microprogram, logits_register: u32, vocab
     info[INFO_RAW_TOKENS] = setup.raw_tokens as u32;
     info[INFO_STOP_FIRST] = setup.stop[0];
     info[INFO_STOP_SECOND] = setup.stop[1];
+    info[INFO_DIES] = setup.dies;
     assert!(code.parameters.len() <= INFO_PARAMETER_SLOTS, "demasiados parámetros");
     info[INFO_PARAMETER_COUNT] = code.parameters.len() as u32;
     for p in &code.parameters {

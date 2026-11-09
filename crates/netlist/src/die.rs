@@ -415,8 +415,16 @@ impl Gen {
         let cell_data = b.input("cell_data", c.scale_bits.max(cfg.weight_bits).max(a));
         let halted = b.output("halted", 1)[0];
         let vec_out = b.output("vec_out", a);
-        let link_in = b.input("link_in", a);
-        let link_out = b.output("link_out", a);
+        let link_tx_valid = b.output("link_tx_valid", 1);
+        let link_tx_bits = b.output("link_tx_bits", crate::link::wire_bits(a));
+        let link_tx_ready = b.input("link_tx_ready", 1);
+        let link_rx_valid = b.input("link_rx_valid", 1);
+        let link_rx_bits = b.input("link_rx_bits", crate::link::wire_bits(a));
+        let link_rx_ready = b.output("link_rx_ready", 1);
+        let link_corrected = b.output("link_corrected", 1);
+        let link_failed = b.output("link_failed", 1);
+        let link_in = b.wire("link_in", a);
+        let link_stall = b.wire("link_stall", 1)[0];
 
         // --- Sequencer ---
         b.group("Secuenciador");
@@ -443,7 +451,11 @@ impl Gen {
         let not_halted = b.wire("not_halted", 1)[0];
         b.not_to(halt_flag, not_halted);
         let running = b.wire("running", 1)[0];
-        b.and_to(not_halted, started, running);
+        let unstalled = b.wire("not_stalled", 1)[0];
+        b.not_to(link_stall, unstalled);
+        let active = b.wire("sequencer_active", 1)[0];
+        b.and_to(not_halted, started, active);
+        b.and_to(active, unstalled, running);
         let gated = |b: &mut Builder, name: &str, bit: Bit| -> Bit {
             let y = b.wire(name, 1)[0];
             b.and_to(running, bit, y);
@@ -772,20 +784,54 @@ impl Gen {
             acc_shifted[..a as usize].to_vec(),
             immediate,
             parity,
-            link_in,
+            link_in.clone(),
             wide_leading,
             wide_shifted,
             equal,
         ];
         let result = mux_tree(&mut b, &mux_a, leaves, &op);
-        b.inst("result_reg", &reg_a, &[("d", result), ("q", write_data.clone())]);
+        // While the link holds the sequencer back, the result in flight must stay put.
+        let result_held = b.wire("result_held", a);
+        b.inst("result_hold", &mux_a, &[("s", vec![link_stall]), ("a", result), ("b", write_data.clone()), ("y", result_held.clone())]);
+        b.inst("result_reg", &reg_a, &[("d", result_held), ("q", write_data.clone())]);
 
-        // The link register keeps the last value sent until the next send.
+        // The sequencer waits when it needs a word that has not arrived or cannot send one.
         b.group("Enlace entre dies");
         let link_send = ctl("link_send", &mut b, &fields);
-        let held = b.wire("link_held", a);
-        b.inst("link_select", &mux_a, &[("s", vec![link_send]), ("a", link_out.clone()), ("b", write_data), ("y", held.clone())]);
-        b.inst("link_reg", &reg_a, &[("d", held), ("q", link_out)]);
+        let endpoint = self.link_endpoint(a);
+        let can_send = b.wire("link_can_send", 1)[0];
+        let has_data = b.wire("link_has_data", 1)[0];
+        let link_pop = b.wire("link_pop", 1)[0];
+        {
+            let mut l = Logic { b: &mut b, next: 20_000 };
+            let reads_link = l.equals(&op, OP_LINK);
+            let empty = l.not(has_data);
+            let starved = l.and(reads_link, empty);
+            let blocked = {
+                let full = l.not(can_send);
+                l.and(fields["link_send"][0], full)
+            };
+            let stall = l.or(starved, blocked);
+            l.b.or_to(stall, Bit::Zero, link_stall);
+            let pop = l.and(reads_link, running);
+            l.b.or_to(pop, Bit::Zero, link_pop);
+        }
+        b.inst("link", &endpoint, &[
+            ("tx_send", vec![link_send]),
+            ("tx_data", write_data),
+            ("tx_can_send", vec![can_send]),
+            ("pin_tx_valid", link_tx_valid),
+            ("pin_tx_bits", link_tx_bits),
+            ("pin_tx_ready", link_tx_ready),
+            ("pin_rx_valid", link_rx_valid),
+            ("pin_rx_bits", link_rx_bits),
+            ("pin_rx_ready", link_rx_ready),
+            ("rx_pop", vec![link_pop]),
+            ("rx_data", link_in),
+            ("rx_has_data", vec![has_data]),
+            ("corrected", link_corrected),
+            ("failed", link_failed),
+        ]);
 
         // --- Activation network ---
         b.group("Red de activaciones");
@@ -956,7 +1002,7 @@ impl Gen {
     /// Several dies in a ring, each link pipelined by `link_stages` registers.
     fn package(&mut self, c: &DieConfig, dies: u32, link_stages: u32) -> String {
         let die = self.die(c);
-        let bits = c.cell.activation_bits;
+        let bits = crate::link::wire_bits(c.cell.activation_bits);
         let reg = self.register(bits);
         let template = self.modules[&die].clone();
         let mut b = Builder::new("llm2chip_package", "Paquete", "Varios dies conectados en anillo: cada uno pasa su vector de activación al siguiente.");
@@ -966,7 +1012,8 @@ impl Gen {
             let mut pins = std::collections::HashMap::new();
             for port in &template.ports {
                 let width = template.nets[port.net].width;
-                let bits = if port.name.starts_with("link_") {
+                let on_ring = ["link_tx_valid", "link_tx_bits", "link_tx_ready", "link_rx_valid", "link_rx_bits", "link_rx_ready"].contains(&port.name.as_str());
+                let bits = if on_ring {
                     b.wire(&format!("d{d}_{}", port.name), width)
                 } else if port.dir == crate::Dir::Input {
                     b.input(&format!("d{d}_{}", port.name), width)
@@ -983,16 +1030,24 @@ impl Gen {
             b.inst(&format!("die{d}"), &die, &conns);
 
             b.group("Enlaces");
-            let mut signal = wires[d]["link_out"].clone();
+            let target = (d + 1) % dies as usize;
+            let mut data = wires[d]["link_tx_bits"].clone();
+            let mut valid = wires[d]["link_tx_valid"][0];
+            let mut ready = wires[target]["link_rx_ready"][0];
             for stage in 0..link_stages {
                 let q = b.wire(&format!("link{d}_stage{stage}"), bits);
-                b.inst(&format!("link{d}_reg{stage}"), &reg, &[("d", signal), ("q", q.clone())]);
-                signal = q;
+                b.inst(&format!("link{d}_reg{stage}"), &reg, &[("d", data), ("q", q.clone())]);
+                data = q;
+                let (next_valid, next_ready) = (b.wire(&format!("link{d}_valid{stage}"), 1)[0], b.wire(&format!("link{d}_ready{stage}"), 1)[0]);
+                b.dff_to(valid, next_valid);
+                b.dff_to(ready, next_ready);
+                (valid, ready) = (next_valid, next_ready);
             }
-            let target = (d + 1) % dies as usize;
-            for (i, bit) in signal.iter().enumerate() {
-                b.xor_to(*bit, Bit::Zero, wires[target]["link_in"][i]);
+            for (i, bit) in data.iter().enumerate() {
+                b.xor_to(*bit, Bit::Zero, wires[target]["link_rx_bits"][i]);
             }
+            b.xor_to(valid, Bit::Zero, wires[target]["link_rx_valid"][0]);
+            b.xor_to(ready, Bit::Zero, wires[d]["link_tx_ready"][0]);
         }
         self.add(b.finish())
     }

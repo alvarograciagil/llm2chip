@@ -80,6 +80,20 @@ Con «Circuito a medida», cada combinación de parámetros genera su propia cel
 
 Los múltiplos precalculados salen perdiendo en los casos medidos: quitan el multiplicador, pero multiplican por 5 los bits que hay que repartir a cada celda. Saltar ceros tampoco compensa con los ceros reales de Qwen, un 10,6 % a 4 bits y un 1,6 % a 8.
 
+## Varios chips
+
+Todos los chips salen de la misma netlist y se distinguen por los pines `die_id`. Cada uno lleva CPU, memorias, controlador de carga, die y muestreo. El de `die_id` 0 es el maestro: habla con el host, tokeniza y muestrea. Los demás cargan su imagen y obedecen.
+
+| Pines | Función |
+|---|---|
+| `link_tx_*`, `link_rx_*` | Datos entre dies, en anillo: activaciones y, del último al primero, los logits |
+| `chain_tx_*`, `chain_rx_*` | Órdenes del maestro: rutina, token y posición, de chip en chip |
+| `image_req_*`, `image_resp_*` | Cada chip pide su parte de la imagen |
+| `die_id` | Identidad del chip, fijada en la placa |
+| `reset`, `host_*`, `debug_*` | Reset, host (solo se usa en el maestro) y depuración |
+
+Cada palabra lleva un código que corrige un bit y detecta dos, y una señal de válido y otra de listo. No hay reintento: un error doble se cuenta, pero el dato llega mal. El reloj sigue siendo común en la simulación, así que falta el cruce entre dominios de reloj. Los chips tampoco se descubren solos: el número de chips, la identidad y el reparto de capas vienen de la imagen y de los pines.
+
 ## Pesos grabados
 
 El parámetro «Pesos» decide si el modelo se puede cambiar. Con ROM, los pesos, las escalas y los sesgos de cada celda se fijan al fabricar: la celda pierde los puertos de carga y el selector de direcciones, el die pierde la red que escribe en las celdas, y el arranque ya no los transfiere. El microprograma, las tablas y el firmware siguen siendo cargables, así que el chip se puede corregir sin máscaras nuevas, pero no cambiar de modelo.

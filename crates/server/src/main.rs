@@ -329,6 +329,7 @@ fn run_firmware(loaded: &mut Loaded, text: &str, ids: &[u32], request: &Generate
         seed,
         raw_tokens: !request.fidelity.tokenizer,
         stop: STOP_TOKENS,
+        dies: 1,
     };
     let info = chip_info(&die, &code, FLOW_LOGITS_REGISTER, vocabulary as u32, &setup);
     let use_tables = request.fidelity.tokenizer;

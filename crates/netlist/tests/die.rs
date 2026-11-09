@@ -139,7 +139,6 @@ fn two_dies_pass_a_value_over_the_link() {
     let code0 = sender.finish();
 
     let mut receiver = DieProgram::new(c);
-    receiver.wait(10 + LINK_STAGES as usize);
     let mut receive = Alu::new(OP_LINK);
     receive.dst = (1, 0);
     receiver.alu(&receive);

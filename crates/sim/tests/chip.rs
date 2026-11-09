@@ -93,7 +93,7 @@ fn text_goes_through_the_whole_chip_in_gates() {
     let config = ChipConfig { soc: SocConfig { program_bits: 12, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), die, Some(CHIP_TOKENS)).unwrap();
     let code = layout.microprogram(&program).unwrap();
-    let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: [u32::MAX, u32::MAX] };
+    let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: [u32::MAX, u32::MAX], dies: 1 };
     let info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
     let mut segments = image_segments(&die, &code, &layout);
     // A sample of the model's own weights goes through the real controller into a cell.

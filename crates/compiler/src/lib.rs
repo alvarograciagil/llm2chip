@@ -33,6 +33,23 @@ pub enum Op {
     Moe { prefix: String, src: Buf, dst: Buf, experts: usize, top_k: usize, intermediate: usize, shared_intermediate: usize },
 }
 
+impl Op {
+    /// The buffers this operation reads and the ones it writes.
+    pub fn buffers(&self) -> (Vec<Buf>, Vec<Buf>) {
+        match self {
+            Op::EmbRead { dst, .. } => (vec![], vec![*dst]),
+            Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } | Op::Moe { src, dst, .. } => (vec![*src], vec![*dst]),
+            Op::Add { a, b, dst } | Op::MulElem { a, b, dst } | Op::Concat { a, b, dst } => (vec![*a, *b], vec![*dst]),
+            Op::SplitQueryGate { src, query, gate, .. } => (vec![*src], vec![*query, *gate]),
+            Op::Rope { buf, .. } => (vec![*buf], vec![*buf]),
+            Op::KvAppend { key, value, .. } => (vec![*key, *value], vec![]),
+            Op::AttnSum { query, dst, .. } => (vec![*query], vec![*dst]),
+            Op::DeltaStep { mixed, a, b, dst, .. } => (vec![*mixed, *a, *b], vec![*dst]),
+            Op::RmsGated { src, z, dst, .. } => (vec![*src, *z], vec![*dst]),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Inst {
     pub op: Op,
@@ -75,6 +92,49 @@ pub struct DraftProgram {
 pub struct KvShape {
     pub head_dim: usize,
     pub heads: usize,
+}
+
+impl Program {
+    /// Splits the work before the logits among `dies`, cutting between layers.
+    pub fn split(&self, dies: usize) -> Result<Vec<std::ops::Range<usize>>, String> {
+        let dies = dies.max(1);
+        if dies > self.num_layers.max(1) {
+            return Err(format!("{dies} dies para {} capas", self.num_layers));
+        }
+        let mut ranges = Vec::with_capacity(dies);
+        let mut start = 0;
+        for die in 1..dies {
+            let boundary = (die * self.num_layers / dies) as u32;
+            let end = self.ops.iter().position(|inst| inst.layer == Some(boundary)).ok_or("capa sin operaciones")?;
+            ranges.push(start..end);
+            start = end;
+        }
+        ranges.push(start..self.logits_from);
+        Ok(ranges)
+    }
+
+    /// The one buffer that has to cross the cut before operation `cut`.
+    pub fn crossing(&self, cut: usize) -> Result<Buf, String> {
+        let mut last_writer = vec![None; self.buffers.len()];
+        let mut crossing: Vec<Buf> = Vec::new();
+        for (index, inst) in self.ops.iter().enumerate() {
+            let (reads, writes) = inst.op.buffers();
+            if index >= cut {
+                for buffer in reads {
+                    if last_writer[buffer].is_some_and(|w: usize| w < cut) && !crossing.contains(&buffer) {
+                        crossing.push(buffer);
+                    }
+                }
+            }
+            for buffer in writes {
+                last_writer[buffer] = Some(index);
+            }
+        }
+        match crossing.as_slice() {
+            [one] => Ok(*one),
+            other => Err(format!("el corte en {cut} cruza {} vectores", other.len())),
+        }
+    }
 }
 
 struct Emit {

@@ -3,7 +3,7 @@
 //! `BlockOps` describes the arithmetic once. `Assembly` turns it into microcode for
 //! the gates, and a virtual machine elsewhere runs the same semantics at full speed.
 
-use crate::die::{OP_ADD, OP_EQUAL, OP_FUNCTION, OP_IMMEDIATE, OP_LZC, OP_MAX, OP_MOV, OP_MUL, OP_PARITY, OP_SHIFT_LEFT, OP_SUB, OP_WIDE_LZC, OP_WIDE_OUT};
+use crate::die::{OP_ADD, OP_EQUAL, OP_FUNCTION, OP_IMMEDIATE, OP_LINK, OP_LZC, OP_MAX, OP_MOV, OP_MUL, OP_PARITY, OP_SHIFT_LEFT, OP_SUB, OP_WIDE_LZC, OP_WIDE_OUT};
 use crate::DieConfig;
 use std::collections::HashMap;
 
@@ -602,6 +602,45 @@ impl Assembly {
         s.function = function;
         s.dst = dst;
         self.push(s);
+    }
+
+    /// Sends a register's exponent and its first `len` values to the next chip.
+    pub fn send(&mut self, reg: u32, len: Expr) {
+        self.clear_shifts();
+        self.send_place(self.exponent(reg));
+        self.each(len, |s, i| s.send_place((reg, i)));
+    }
+
+    /// Fills a register with what `send` delivered.
+    pub fn receive(&mut self, reg: u32, len: Expr) {
+        self.receive_place(self.exponent(reg));
+        self.each(len, |s, i| s.receive_place((reg, i)));
+    }
+
+    /// Tells the next chip that this one has finished.
+    pub fn send_signal(&mut self) {
+        self.clear_shifts();
+        self.immediate(1, self.sc(1));
+        self.send_place(self.sc(1));
+    }
+
+    /// Waits for `send_signal`.
+    pub fn receive_signal(&mut self) {
+        self.receive_place(self.sc(1));
+    }
+
+    fn send_place(&mut self, place: At<Expr>) {
+        let mut word = alu(OP_MOV);
+        word.a = place;
+        word.write = false;
+        word.link_send = true;
+        self.push(word);
+    }
+
+    fn receive_place(&mut self, place: At<Expr>) {
+        let mut word = alu(OP_LINK);
+        word.dst = place;
+        self.push(word);
     }
 
     fn scan_and_shift(&mut self, reg: u32, len: Expr) {

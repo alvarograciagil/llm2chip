@@ -32,11 +32,13 @@ const REG_SAMPLE_SEED: usize = 41;
 const REG_SAMPLE_START: usize = 42;
 const REG_SAMPLE_DONE: usize = 43;
 const REG_SAMPLE_TOKEN: usize = 44;
+const REG_DIE_ID: usize = 45;
+const REG_CHAIN_DATA: usize = 46;
+const REG_CHAIN_STATUS: usize = 47;
 
 /// The description the image builder leaves in data memory.
 const INFO: *const u32 = 0x1000_3000 as *const u32;
 const INFO_ENTRY_TOKEN: usize = 0;
-const INFO_ENTRY_LOGITS: usize = 1;
 const INFO_LOGITS: usize = 2;
 const INFO_LOGITS_EXPONENT: usize = 3;
 const INFO_VOCABULARY: usize = 4;
@@ -50,7 +52,8 @@ const INFO_PARAMETER_COUNT: usize = 11;
 const INFO_RAW_TOKENS: usize = 12;
 const INFO_STOP_FIRST: usize = 13;
 const INFO_STOP_SECOND: usize = 14;
-const INFO_PARAMETERS: usize = 15;
+const INFO_DIES: usize = 15;
+const INFO_PARAMETERS: usize = 16;
 
 /// The tokenizer's tables, which the image builder leaves after the segment table.
 const TOKENIZER: *const u32 = 0x1000_8000 as *const u32;
@@ -70,6 +73,8 @@ const TOK_TEXT_CAPACITY: usize = 12;
 const MAX_SYMBOLS: usize = 512;
 
 const END_OF_TOKENS: u32 = u32::MAX;
+const ROUTINE_TOKEN: u32 = 0;
+const ROUTINE_LOGITS: u32 = 1;
 
 global_asm!(
     r#"
@@ -131,15 +136,54 @@ fn load_segments() {
     }
 }
 
-/// Runs one routine of the die for this token and position.
-fn run_die(entry: u32, token: u32, position: u32) {
+fn chain_send(word: u32) {
+    while peripheral_read(REG_CHAIN_STATUS) & 2 == 0 {}
+    peripheral_write(REG_CHAIN_DATA, word);
+}
+
+fn chain_receive() -> u32 {
+    while peripheral_read(REG_CHAIN_STATUS) & 1 == 0 {}
+    peripheral_read(REG_CHAIN_DATA)
+}
+
+/// Starts one routine of this chip's die, without waiting for it.
+fn start_die(routine: u32, token: u32, position: u32) {
     for p in 0..info(INFO_PARAMETER_COUNT) as usize {
         let at = INFO_PARAMETERS + 4 * p;
         let value = info(at + 1).wrapping_mul(token).wrapping_add(info(at + 2).wrapping_mul(position)).wrapping_add(info(at + 3));
         peripheral_write(info(at) as usize, value);
     }
-    peripheral_write(REG_ENTRY, entry);
+    peripheral_write(REG_ENTRY, info(INFO_ENTRY_TOKEN + routine as usize));
+}
+
+fn wait_for_die() {
     while peripheral_read(REG_STATUS) == 0 {}
+}
+
+/// Orders a routine on every chip: the command goes down the chain before this die starts.
+fn run_die(routine: u32, token: u32, position: u32) {
+    if info(INFO_DIES) > 1 {
+        chain_send(routine);
+        chain_send(token);
+        chain_send(position);
+    }
+    start_die(routine, token, position);
+    wait_for_die();
+}
+
+/// What every chip but the first does: obey the chain and pass the commands on.
+fn serve_chain(id: u32) -> ! {
+    let forward = id + 1 < info(INFO_DIES);
+    loop {
+        let (routine, token, position) = (chain_receive(), chain_receive(), chain_receive());
+        if forward {
+            chain_send(routine);
+            chain_send(token);
+            chain_send(position);
+        }
+        start_die(routine, token, position);
+        wait_for_die();
+    }
 }
 
 /// Inverse temperature for the sampling unit: mantissa steps per table step.
@@ -430,8 +474,12 @@ fn emit(token: u32) {
 #[unsafe(no_mangle)]
 extern "C" fn main() {
     load_segments();
+    let id = peripheral_read(REG_DIE_ID);
+    if id != 0 {
+        serve_chain(id);
+    }
     peripheral_write(REG_SAMPLE_SEED, info(INFO_SEED));
-    let (entry_token, entry_logits) = (info(INFO_ENTRY_TOKEN), info(INFO_ENTRY_LOGITS));
+    let (entry_token, entry_logits) = (ROUTINE_TOKEN, ROUTINE_LOGITS);
     let (mut last, mut position) = (0, 0);
     read_prompt(&mut |token| {
         run_die(entry_token, token, position);
