@@ -31,7 +31,7 @@ El chip recibe bytes de texto y devuelve bytes de texto. El tokenizado, la infer
 | SRAM de instrucciones y datos | Firmware y vocabulario | En puertas |
 | Controlador de carga y DMA | Imagen hacia celdas, tablas y microcódigo, con arranque propio y CRC | En puertas e ISS, conectado al die |
 | Red de escritura de pesos | Lleva cada palabra a su celda | Solo puertos de carga directos |
-| ECC, CRC, BIST y reparación | Fiabilidad y celdas defectuosas | Solo área |
+| ECC, CRC, BIST y reparación | Fiabilidad y celdas defectuosas | ECC en puertas en la celda, CRC en la carga; autotest y filas de reserva verificados como bloque, sin conectar a todas las memorias |
 | Unidad de muestreo y RNG | Top-k y temperatura sobre los logits, con filtro de varios carriles | En puertas y modelo, conectada al die |
 | Tokenizador en firmware | BPE con sus tablas en memoria de datos; no aplica NFC | En ISS con Qwen real y en puertas con tablas diminutas |
 | Planificador de tokens y MTP | Decide qué ejecuta cada die, y deshace | En software |

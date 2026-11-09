@@ -208,6 +208,7 @@ impl ChipParams {
             exponent_bits: self.weight_coding.legal_exponent_bits(weight_bits, self.weight_exponent_bits),
             multiplier: self.multiplier_kind,
             fixed_weights: self.weight_backend == WeightBackend::Rom,
+            ecc: self.weight_backend == WeightBackend::Sram && !self.has("sin_ecc_con_refresco"),
         };
         config.accumulator_bits = config.accumulator_bits.max(config.required_accumulator());
         config

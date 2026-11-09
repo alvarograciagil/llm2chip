@@ -45,6 +45,8 @@ struct Memory {
     wdata: Vec<usize>,
     rdata: Vec<usize>,
     cells: Vec<u128>,
+    /// `(address, bit, value)` of every defective bit, which always read as `value`.
+    stuck: Vec<(usize, u32, bool)>,
 }
 
 pub struct Simulator {
@@ -120,6 +122,7 @@ impl Elaborator<'_> {
                     wdata: conns["wdata"].clone(),
                     rdata: conns["rdata"].clone(),
                     cells: vec![0; 1usize << addr_bits],
+                    stuck: Vec::new(),
                 }),
                 InstKind::Prim(Prim::Rom { addr_bits, .. }) => self.memories.push(Memory {
                     path: format!("{path}/{}", inst.name),
@@ -129,6 +132,7 @@ impl Elaborator<'_> {
                     wdata: Vec::new(),
                     rdata: conns["rdata"].clone(),
                     cells: vec![0; 1usize << addr_bits],
+                    stuck: Vec::new(),
                 }),
                 InstKind::Prim(Prim::Sram { addr_bits, .. }) => self.memories.push(Memory {
                     path: format!("{path}/{}", inst.name),
@@ -138,6 +142,7 @@ impl Elaborator<'_> {
                     wdata: conns["wdata"].clone(),
                     rdata: conns["rdata"].clone(),
                     cells: vec![0; 1usize << addr_bits],
+                    stuck: Vec::new(),
                 }),
             }
         }
@@ -237,6 +242,19 @@ impl Simulator {
         Ok(())
     }
 
+    /// Inverts one stored bit, as a particle strike would.
+    pub fn flip_memory_bit(&mut self, path: &str, address: usize, bit: u32) -> Result<(), SimError> {
+        let value = self.peek_memory(path, address).ok_or_else(|| SimError(format!("dirección fuera de {path}: {address}")))?;
+        self.poke_memory(path, address, value ^ (1 << bit))
+    }
+
+    /// Makes one bit defective: from now on it reads as `value`, whatever is written.
+    pub fn stick_memory_bit(&mut self, path: &str, address: usize, bit: u32, value: bool) -> Result<(), SimError> {
+        let memory = self.memories.iter_mut().find(|m| m.path == path).ok_or_else(|| SimError(format!("memoria desconocida: {path}")))?;
+        memory.stuck.push((address, bit, value));
+        Ok(())
+    }
+
     pub fn peek_memory(&self, path: &str, address: usize) -> Option<u128> {
         self.memories.iter().find(|m| m.path == path).and_then(|m| m.cells.get(address).copied())
     }
@@ -290,7 +308,13 @@ impl Simulator {
         let mut reads: Vec<u128> = Vec::with_capacity(self.memories.len());
         for m in &mut self.memories {
             let addr = read(&self.values, &m.addr) as usize & (m.cells.len() - 1);
-            reads.push(m.cells[addr]);
+            let mut word = m.cells[addr];
+            for (at, bit, value) in &m.stuck {
+                if *at == addr {
+                    word = if *value { word | 1 << bit } else { word & !(1 << bit) };
+                }
+            }
+            reads.push(word);
             if self.values[m.we] == 1 {
                 let target = read(&self.values, &m.write_addr) as usize & (m.cells.len() - 1);
                 m.cells[target] = read(&self.values, &m.wdata);

@@ -23,9 +23,21 @@ pub struct CellConfig {
     pub multiplier: MultiplierKind,
     /// The weights are fixed at manufacture: the cell reads a ROM and has no way to write it.
     pub fixed_weights: bool,
+    /// Weights are stored in words with error correction. Ignored for fixed weights.
+    pub ecc: bool,
 }
 
 impl CellConfig {
+    /// Weights held in each protected word: about 64 bits' worth.
+    pub fn ecc_lanes(&self) -> u32 {
+        1 << (64 / self.weight_bits.max(1)).max(1).ilog2()
+    }
+
+    /// Whether this cell really protects its memory.
+    pub fn has_ecc(&self) -> bool {
+        self.ecc && !self.fixed_weights && self.addr_bits > self.ecc_lanes().ilog2()
+    }
+
     /// Cycles from presenting an input until the accumulator has absorbed it.
     pub fn latency(&self) -> u32 {
         let table = (self.coding == WeightCoding::Codebook) as u32;
@@ -45,6 +57,7 @@ impl CellConfig {
             exponent_bits: self.coding.legal_exponent_bits(weight_bits, self.exponent_bits),
             multiplier: self.multiplier,
             fixed_weights: self.fixed_weights,
+            ecc: self.ecc,
         }
     }
 }
@@ -305,6 +318,41 @@ impl Gen {
         self.add(b.finish())
     }
 
+    /// Weight memory organised in words of several weights plus their check bits.
+    /// Whole words arrive already encoded, so the encoder can be shared by many cells.
+    fn protected_memory(&mut self, b: &mut Builder, c: &CellConfig, address: Vec<Bit>, load_en: Bit, load_addr: Vec<Bit>, load_data: Vec<Bit>, weight: Vec<Bit>) {
+        let lane_bits = c.ecc_lanes().trailing_zeros() as usize;
+        let w = c.weight_bits as usize;
+        let word_bits = c.ecc_lanes() * c.weight_bits;
+        let check_width = crate::reliability::check_bits(word_bits);
+        let decoder = self.secded_decoder(word_bits);
+        let corrected_out = b.output("ecc_corrected", 1);
+        let failed_out = b.output("ecc_failed", 1);
+        let stored_check = b.wire("stored_check", check_width);
+        let stored_word = b.wire("stored_word", word_bits);
+
+        b.group("Memoria de pesos");
+        let (word_address, lane_now);
+        {
+            let mut l = crate::rv32::Logic { b, next: 0 };
+            word_address = l.mux_bus(load_en, &address[lane_bits..], &load_addr);
+            lane_now = l.fresh_bus(lane_bits);
+            l.connect_flops(&address[..lane_bits], &lane_now);
+        }
+        let mut full_read = stored_word.clone();
+        full_read.extend(&stored_check);
+        b.sram("weight_sram", c.addr_bits - lane_bits as u32, word_bits + check_width, &[("addr", word_address), ("we", vec![load_en]), ("wdata", load_data), ("rdata", full_read)]);
+        let corrected = b.wire("corrected_word", word_bits);
+        b.group("Corrección de errores");
+        b.inst("ecc_decoder", &decoder, &[("data", stored_word), ("check", stored_check), ("corrected", corrected.clone()), ("fixed", corrected_out), ("failed", failed_out)]);
+        let mut l = crate::rv32::Logic { b, next: 1000 };
+        let leaves: Vec<Vec<Bit>> = corrected.chunks(w).map(|lane| lane.to_vec()).collect();
+        let chosen = l.select(&lane_now, &leaves);
+        for (from, to) in chosen.iter().zip(&weight) {
+            l.b.or_to(*from, Bit::Zero, *to);
+        }
+    }
+
     pub(crate) fn cell(&mut self, c: CellConfig) -> String {
         let (w, a, acc) = (c.weight_bits, c.activation_bits, c.accumulator_bits);
         let significand = c.significand_bits();
@@ -326,7 +374,14 @@ impl Gen {
         );
         let clear = b.input("clear", 1)[0];
         let clear_total = b.input("clear_total", 1)[0];
-        let load_ports = (!c.fixed_weights).then(|| (b.input("load_en", 1), b.input("load_addr", c.addr_bits), b.input("load_data", w)));
+        let protected = c.has_ecc();
+        let (load_addr_bits, load_data_bits) = if protected {
+            let word = c.ecc_lanes() * w;
+            (c.addr_bits - c.ecc_lanes().trailing_zeros(), word + crate::reliability::check_bits(word))
+        } else {
+            (c.addr_bits, w)
+        };
+        let load_ports = (!c.fixed_weights).then(|| (b.input("load_en", 1), b.input("load_addr", load_addr_bits), b.input("load_data", load_data_bits)));
         let run = b.input("run", 1)[0];
         let x = b.input("x", a);
         let total = b.output("total", acc);
@@ -338,6 +393,9 @@ impl Gen {
         b.inst("counter", &counter, &[("clear", vec![clear]), ("advance", vec![run]), ("address", address.clone())]);
         let weight = b.wire("weight", w);
         match load_ports {
+            Some((load_en, load_addr, load_data)) if protected => {
+                self.protected_memory(&mut b, &c, address, load_en[0], load_addr, load_data, weight.clone());
+            }
             Some((load_en, load_addr, load_data)) => {
                 let addr_mux = self.mux_bus(c.addr_bits);
                 let mem_addr = b.wire("mem_addr", c.addr_bits);

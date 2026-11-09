@@ -316,7 +316,7 @@ impl DieSimulation {
         let config = if kind == "mlp" {
             DieConfig {
                 cells: 3,
-                cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: p.mac_stages, adder_stages: p.adder_stages, addr_bits: 4, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: p.weight_backend == arch::WeightBackend::Rom },
+                cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: p.mac_stages, adder_stages: p.adder_stages, addr_bits: 4, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: p.weight_backend == arch::WeightBackend::Rom, ecc: false },
                 scale_bits: 16,
                 reg_bits: 3,
                 index_bits: 4,

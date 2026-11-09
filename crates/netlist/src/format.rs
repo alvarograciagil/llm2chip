@@ -343,7 +343,7 @@ impl Gen {
 /// measured by running the real cell gates on pseudo-random weights and activations.
 pub fn switching_per_mac(config: CellConfig) -> f64 {
     // A stored weight toggles the same gates however it got into the memory.
-    let config = CellConfig { fixed_weights: false, ..config.checked() };
+    let config = CellConfig { fixed_weights: false, ecc: false, ..config.checked() };
     let design = crate::cell_design(config);
     let Ok(mut sim) = crate::Simulator::new(&design) else { return 0.0 };
     const WORDS: u64 = 8;

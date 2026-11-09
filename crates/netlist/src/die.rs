@@ -261,7 +261,8 @@ impl Gen {
         if self.modules.contains_key(&name) {
             return name;
         }
-        let cfg = c.cell;
+        // The reduced die writes its weights one at a time, so it has no protected words.
+        let cfg = CellConfig { ecc: false, ..c.cell };
         let (a, acc, s, wide) = (cfg.activation_bits, cfg.accumulator_bits, c.scale_bits, c.wide_bits());
         let compute = self.cell(cfg);
         let scale_mul = self.multiplier(s, acc, 1);

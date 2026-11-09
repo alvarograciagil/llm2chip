@@ -17,7 +17,7 @@ fn main() {
         (MultiplierKind::Wallace, WeightCoding::Log, 8, 4),
         (MultiplierKind::Wallace, WeightCoding::Codebook, 4, 0),
     ] {
-        let mut c = CellConfig { weight_bits: bits, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 3, coding, exponent_bits: exponent, multiplier: kind, fixed_weights: false };
+        let mut c = CellConfig { weight_bits: bits, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 3, coding, exponent_bits: exponent, multiplier: kind, fixed_weights: false, ecc: false };
         c.accumulator_bits = c.accumulator_bits.max(c.required_accumulator());
         println!("{kind:?} {coding:?} {bits}: {:.1}", switching_per_mac(c));
     }

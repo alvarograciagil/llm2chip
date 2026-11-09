@@ -5,6 +5,7 @@ pub mod block;
 pub mod chip;
 pub mod format;
 pub mod image;
+pub mod reliability;
 pub mod multiplier;
 mod cell;
 pub mod demo;

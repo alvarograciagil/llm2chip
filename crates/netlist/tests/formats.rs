@@ -18,7 +18,7 @@ impl Rng {
 }
 
 fn config(coding: WeightCoding, weight_bits: u32, exponent_bits: u32, mac_stages: u32) -> CellConfig {
-    let mut c = CellConfig { weight_bits, activation_bits: 16, accumulator_bits: 32, mac_stages, adder_stages: 1, addr_bits: 4, coding, exponent_bits, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false };
+    let mut c = CellConfig { weight_bits, activation_bits: 16, accumulator_bits: 32, mac_stages, adder_stages: 1, addr_bits: 4, coding, exponent_bits, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false };
     c.accumulator_bits = c.required_accumulator().max(32);
     c
 }
