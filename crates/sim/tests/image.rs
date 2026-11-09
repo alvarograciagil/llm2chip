@@ -84,18 +84,21 @@ mod chip_image {
         // Each cell receives its rows as codes plus factors, in the order it reads them.
         let weights = sim::Weights::open(&dir).unwrap();
         let matrix = weights.matrix("lm_head").unwrap();
-        let (cols, groups) = (8, matrix.cell_groups(8).1);
+        // This checkpoint is in floating point, so each code is a 16-bit mantissa.
+        let cols = *weights.shape("lm_head.weight").unwrap().last().unwrap();
+        let groups = matrix.cell_groups(cols).1;
         let exponent = matrix.exponent(cols);
-        let row_bytes = cols / 2 + 8 * groups;
+        let code_bytes = 2 * cols;
+        let row_bytes = code_bytes + 8 * groups;
         let mut seen = 0;
         for cell in 0..3usize {
             let bytes = image.cell_weights("lm_head", cell as u64).unwrap();
             for (index, row) in bytes.chunks(row_bytes).enumerate() {
                 let (codes, factors) = matrix.cell_row(cell + 3 * index, cols, exponent, 16).unwrap();
-                let decoded: Vec<i64> = row[..cols / 2].iter().flat_map(|b| [(*b as i8) << 4 >> 4, *b as i8 >> 4]).map(i64::from).collect();
+                let decoded: Vec<i64> = row[..code_bytes].chunks(2).map(|b| i64::from(i16::from_le_bytes([b[0], b[1]]))).collect();
                 assert_eq!(decoded, codes, "códigos de la fila {}", cell + 3 * index);
                 for (group, (scale, bias)) in factors.iter().enumerate() {
-                    let at = cols / 2 + 8 * group;
+                    let at = code_bytes + 8 * group;
                     assert_eq!(i64::from(i32::from_le_bytes(row[at..at + 4].try_into().unwrap())), *scale);
                     assert_eq!(i64::from(i32::from_le_bytes(row[at + 4..at + 8].try_into().unwrap())), *bias);
                 }

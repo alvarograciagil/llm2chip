@@ -150,13 +150,8 @@ impl Expr {
     }
 
     /// This index without its part in `variable`.
-    pub fn without(mut self, variable: Var) -> Self {
-        for term in self.terms.iter_mut() {
-            if term.is_some_and(|(v, _)| v == variable) {
-                *term = None;
-            }
-        }
-        self
+    pub fn without(self, variable: Var) -> Self {
+        self.variables().filter(|(v, _)| *v != variable).fold(Self::from(self.constant), |sum, (v, c)| sum + Self::var(v) * c)
     }
 
     /// True when `by` divides every value this index can take.

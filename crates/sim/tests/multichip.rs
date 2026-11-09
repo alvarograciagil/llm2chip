@@ -65,7 +65,7 @@ impl Wire {
             bits ^= 1 << first;
             *flips += 1;
             // Every so often a second bit goes too, which only a repeat can repair.
-            if noise.next().is_multiple_of(DOUBLE_EVERY) {
+            if u64::from(*flips - 1).is_multiple_of(DOUBLE_EVERY) {
                 bits ^= 1 << ((first + 1 + noise.next() % (width - 1)) % width);
                 *doubles += 1;
             }
