@@ -510,6 +510,9 @@ impl Gen {
         let link_rx_valid = b.input("link_rx_valid", 1);
         let link_rx_bits = b.input("link_rx_bits", crate::link::wire_bits(a));
         let link_rx_ready = b.output("link_rx_ready", 1);
+        let link_tx_ack = b.input("link_tx_ack", crate::link::ACK_BITS as u32);
+        let link_rx_ack = b.output("link_rx_ack", crate::link::ACK_BITS as u32);
+        let link_rx_stall = b.input("link_rx_stall", 1);
         let link_corrected = b.output("link_corrected", 1);
         let link_failed = b.output("link_failed", 1);
         let link_in = b.wire("link_in", a);
@@ -943,6 +946,10 @@ impl Gen {
                 ("pin_rx_valid", link_rx_valid),
                 ("pin_rx_bits", link_rx_bits),
                 ("pin_rx_ready", link_rx_ready),
+                ("pin_tx_ack", link_tx_ack),
+                ("pin_rx_ack", link_rx_ack.clone()),
+                ("pin_rx_stall", link_rx_stall),
+                ("core_stall", vec![Bit::Zero]),
                 ("rx_pop", vec![link_pop]),
                 ("rx_data", link_in),
                 ("rx_has_data", vec![has_data]),
@@ -953,7 +960,7 @@ impl Gen {
             // A die that never talks to a neighbour has no endpoint at all.
             b.or_to(Bit::One, Bit::Zero, can_send);
             b.or_to(Bit::Zero, Bit::Zero, has_data);
-            for bit in link_in.iter().chain(&link_tx_valid).chain(&link_tx_bits).chain(&link_rx_ready).chain(&link_corrected).chain(&link_failed) {
+            for bit in link_in.iter().chain(&link_tx_valid).chain(&link_tx_bits).chain(&link_rx_ready).chain(&link_rx_ack).chain(&link_corrected).chain(&link_failed) {
                 b.or_to(Bit::Zero, Bit::Zero, *bit);
             }
         }
@@ -1137,7 +1144,7 @@ impl Gen {
             let mut pins = std::collections::HashMap::new();
             for port in &template.ports {
                 let width = template.nets[port.net].width;
-                let on_ring = ["link_tx_valid", "link_tx_bits", "link_tx_ready", "link_rx_valid", "link_rx_bits", "link_rx_ready"].contains(&port.name.as_str());
+                let on_ring = ["link_tx_valid", "link_tx_bits", "link_tx_ready", "link_tx_ack", "link_rx_valid", "link_rx_bits", "link_rx_ready", "link_rx_ack"].contains(&port.name.as_str());
                 let bits = if on_ring {
                     b.wire(&format!("d{d}_{}", port.name), width)
                 } else if port.dir == crate::Dir::Input {
@@ -1173,6 +1180,9 @@ impl Gen {
             }
             b.xor_to(valid, Bit::Zero, wires[target]["link_rx_valid"][0]);
             b.xor_to(ready, Bit::Zero, wires[d]["link_tx_ready"][0]);
+            for (from, to) in wires[target]["link_rx_ack"].iter().zip(&wires[d]["link_tx_ack"]) {
+                b.xor_to(*from, Bit::Zero, *to);
+            }
         }
         self.add(b.finish())
     }

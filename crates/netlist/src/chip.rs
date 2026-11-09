@@ -82,12 +82,18 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     let link_rx_valid = b.input("link_rx_valid", 1);
     let link_rx_bits = b.input("link_rx_bits", data_bits);
     let link_rx_ready = b.output("link_rx_ready", 1);
+    let link_tx_ack = b.input("link_tx_ack", crate::link::ACK_BITS as u32);
+    let link_rx_ack = b.output("link_rx_ack", crate::link::ACK_BITS as u32);
+    let link_rx_stall = b.input("link_rx_stall", 1);
     let chain_tx_valid = b.output("chain_tx_valid", 1);
     let chain_tx_bits = b.output("chain_tx_bits", control_bits);
     let chain_tx_ready = b.input("chain_tx_ready", 1);
     let chain_rx_valid = b.input("chain_rx_valid", 1);
     let chain_rx_bits = b.input("chain_rx_bits", control_bits);
     let chain_rx_ready = b.output("chain_rx_ready", 1);
+    let chain_tx_ack = b.input("chain_tx_ack", crate::link::ACK_BITS as u32);
+    let chain_rx_ack = b.output("chain_rx_ack", crate::link::ACK_BITS as u32);
+    let chain_rx_stall = b.input("chain_rx_stall", 1);
     let debug_select = b.input("debug_select", 3);
     let debug_value = b.output("debug_value", 32);
 
@@ -283,6 +289,9 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
             ("link_rx_valid", link_rx_valid),
             ("link_rx_bits", link_rx_bits),
             ("link_rx_ready", link_rx_ready),
+            ("link_tx_ack", link_tx_ack),
+            ("link_rx_ack", link_rx_ack),
+            ("link_rx_stall", link_rx_stall),
             ("link_corrected", vec![link_corrected]),
             ("link_failed", vec![link_failed]),
         ]);
@@ -377,6 +386,10 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
         ("pin_tx_valid", chain_tx_valid),
         ("pin_tx_bits", chain_tx_bits),
         ("pin_tx_ready", chain_tx_ready),
+        ("pin_tx_ack", chain_tx_ack),
+        ("pin_rx_ack", chain_rx_ack),
+        ("pin_rx_stall", chain_rx_stall),
+        ("core_stall", vec![Bit::Zero]),
         ("pin_rx_valid", chain_rx_valid),
         ("pin_rx_bits", chain_rx_bits),
         ("pin_rx_ready", chain_rx_ready),

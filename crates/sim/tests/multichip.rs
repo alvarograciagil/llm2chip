@@ -39,6 +39,7 @@ impl Noise {
 
 /// Often enough to hit a run of a few words, rarely enough to stay correctable.
 const FLIP_EVERY: u64 = 8;
+const DOUBLE_EVERY: u64 = 12;
 
 /// One direction of a link on the board: wires with delay, gaps and the odd flipped bit.
 struct Wire {
@@ -46,34 +47,43 @@ struct Wire {
     to: usize,
     prefix: (&'static str, &'static str),
     forward: VecDeque<(u64, u128)>,
-    backward: VecDeque<u64>,
+    backward: VecDeque<(u64, u64)>,
     width: u32,
 }
 
 impl Wire {
     fn new(from: usize, to: usize, prefix: (&'static str, &'static str), width: u32) -> Self {
-        Self { from, to, prefix, forward: VecDeque::from(vec![(0, 0); WIRE_DELAY]), backward: VecDeque::from(vec![0; WIRE_DELAY]), width }
+        Self { from, to, prefix, forward: VecDeque::from(vec![(0, 0); WIRE_DELAY]), backward: VecDeque::from(vec![(0, 0); WIRE_DELAY]), width }
     }
 
     /// Drives the receiving pins with what left the other chip `WIRE_DELAY` cycles ago.
-    fn drive(&mut self, chips: &mut [Simulator], noise: &mut Noise, flips: &mut u32) {
+    fn drive(&mut self, chips: &mut [Simulator], noise: &mut Noise, flips: &mut u32, doubles: &mut u32) {
         let (mut valid, mut bits) = self.forward.pop_front().unwrap();
         if valid == 1 && noise.next().is_multiple_of(FLIP_EVERY) {
-            bits ^= 1 << (noise.next() % self.width as u64);
+            let width = self.width as u64;
+            let first = noise.next() % width;
+            bits ^= 1 << first;
             *flips += 1;
+            // Every so often a second bit goes too, which only a repeat can repair.
+            if noise.next().is_multiple_of(DOUBLE_EVERY) {
+                bits ^= 1 << ((first + 1 + noise.next() % (width - 1)) % width);
+                *doubles += 1;
+            }
         }
         chips[self.to].set(&format!("{}_valid", self.prefix.1), valid).unwrap();
         chips[self.to].set_wide(&format!("{}_bits", self.prefix.1), bits).unwrap();
         // Now and then the board holds the sender back for a cycle.
-        let ready = self.backward.pop_front().unwrap() & u64::from(!noise.next().is_multiple_of(5));
+        let (ready, ack) = self.backward.pop_front().unwrap();
+        let ready = ready & u64::from(!noise.next().is_multiple_of(5));
         chips[self.from].set(&format!("{}_ready", self.prefix.0), ready).unwrap();
+        chips[self.from].set(&format!("{}_ack", self.prefix.0), ack).unwrap();
         valid = 0;
         let _ = valid;
     }
 
     fn sample(&mut self, chips: &[Simulator]) {
         self.forward.push_back((chips[self.from].get(&format!("{}_valid", self.prefix.0)).unwrap(), chips[self.from].get_wide(&format!("{}_bits", self.prefix.0)).unwrap()));
-        self.backward.push_back(chips[self.to].get(&format!("{}_ready", self.prefix.1)).unwrap());
+        self.backward.push_back((chips[self.to].get(&format!("{}_ready", self.prefix.1)).unwrap(), chips[self.to].get(&format!("{}_ack", self.prefix.1)).unwrap()));
     }
 }
 
@@ -85,6 +95,7 @@ struct Board<'a> {
     image: &'a [u32],
     noise: Noise,
     flips: u32,
+    doubles: u32,
     input: &'a [u8],
     fed: usize,
     output: Vec<u8>,
@@ -112,14 +123,14 @@ impl<'a> Board<'a> {
                 wires.push(Wire::new(from, to, ("chain_tx", "chain_rx"), netlist::link::wire_bits(32)));
             }
         }
-        Self { chips, wires, pending: vec![None; count], image, noise: Noise(0x0BAD_C0DE_1234_5678), flips: 0, input, fed: 0, output: Vec::new(), cycles: 0 }
+        Self { chips, wires, pending: vec![None; count], image, noise: Noise(0x0BAD_C0DE_1234_5678), flips: 0, doubles: 0, input, fed: 0, output: Vec::new(), cycles: 0 }
     }
 
     /// Runs until the leading chip stops.
     fn run(&mut self, limit: u64) {
         loop {
             for wire in &mut self.wires {
-                wire.drive(&mut self.chips, &mut self.noise, &mut self.flips);
+                wire.drive(&mut self.chips, &mut self.noise, &mut self.flips, &mut self.doubles);
             }
             for (chip, pending) in self.chips.iter_mut().zip(&self.pending) {
                 chip.set("image_resp_valid", pending.is_some() as u64).unwrap();
@@ -208,8 +219,9 @@ fn the_same_image_adapts_to_one_or_two_chips() {
     };
     let corrected: u64 = board.chips.iter_mut().map(|chip| debug(chip, DEBUG_LINK_CORRECTED)).sum();
     let failed: u64 = board.chips.iter_mut().map(|chip| debug(chip, DEBUG_LINK_FAILED)).sum();
-    assert_eq!(failed, 0);
-    assert_eq!(corrected, board.flips as u64, "cada bit invertido debe constar como corregido");
+    assert!(board.doubles > 0, "la prueba debe forzar repeticiones");
+    assert_eq!(failed, board.doubles as u64, "cada palabra con dos bits malos consta como fallida");
+    assert_eq!(corrected, (board.flips - board.doubles) as u64, "cada bit suelto invertido consta como corregido");
 
     let logits_register = Layout::new(&program, &Weights::open(&setup.dir).unwrap(), setup.die, Some(CHIP_TOKENS)).unwrap().logits_register(&program);
     for index in 0..8 {
