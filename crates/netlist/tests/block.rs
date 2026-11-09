@@ -1,7 +1,7 @@
 //! Attention and the delta rule, run as microprograms on the gates. Each result is
 //! checked against the integer behavioural model and against ordinary floating point.
 
-use netlist::block::{exponent_register, tables, Alu, Assembly, AttentionRegs, Behavior, BlockOps, DeltaRegs, FN_SIGMOID, FN_SOFTPLUS};
+use netlist::block::{KeyStore, exponent_register, tables, Alu, Assembly, AttentionRegs, Behavior, BlockOps, DeltaRegs, FN_SIGMOID, FN_SOFTPLUS};
 use netlist::die::{OP_ADD, OP_FUNCTION, OP_IMMEDIATE, OP_LZC, OP_MAX, OP_MOV, OP_MUL, OP_PARITY, OP_SHIFT_LEFT, OP_SUB};
 use netlist::demo::{attention_demo, block_config, block_host_steps, delta_demo, read_block_value};
 use netlist::{to_verilog, verilog_testbench, TestStep, die_design, CellConfig, DieConfig, DieProgram, Simulator};
@@ -150,7 +150,7 @@ fn softmax_attention_matches_floating_point() {
     asm.load_vector(2, &v);
     asm.load_vector(3, &ones);
     let regs = AttentionRegs { scores: 5, top: 6, shifted: 7, weights: 8, total: 9, inverse: 10, probabilities: 11 , softcap: None};
-    asm.attention(0, 1, 2, 3, 4, width as u32, (tokens as u32).into(), None, regs);
+    asm.attention(0, KeyStore { keys: 1, values: 2, stride: width as u32, offset: 0.into() }, 3, 4, width as u32, (tokens as u32).into(), None, regs);
 
     let mut sim = run_gates(c, &asm);
     let mut model = Behavior::new(&c, &asm.initial);

@@ -187,10 +187,12 @@ pub struct ControlWord {
     pub wide_accumulate: bool,
     /// The sum starts from zero instead of what the wide memory holds.
     pub wide_fresh: bool,
+    /// The word repeats as many times as `index[x_limit]` says, not as its own field.
+    pub repeat_x: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 57;
+pub const FIELD_COUNT: usize = 58;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
@@ -279,6 +281,7 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("fixed_b", 1),
         ("wide_accumulate", 1),
         ("wide_fresh", 1),
+        ("repeat_x", 1),
     ]
 }
 
@@ -347,6 +350,7 @@ impl ControlWord {
             self.fixed_b as u128,
             self.wide_accumulate as u128,
             self.wide_fresh as u128,
+            self.repeat_x as u128,
         ]
     }
 
@@ -392,6 +396,11 @@ fn and_not(b: &mut Builder, enable: Bit, value: Bit, name: &str) -> Bit {
 }
 
 /// Loadable counter: `clear` wins, then `advance` increments.
+/// Whether `bits` holds at least `value`.
+fn at_least(l: &mut Logic, bits: &[Bit], value: u32) -> Bit {
+    bits.iter().enumerate().fold(Bit::One, |reached, (i, bit)| if value >> i & 1 == 1 { l.and(*bit, reached) } else { l.or(*bit, reached) })
+}
+
 /// An index that moves a whole block of elements at a time while `block` is set.
 fn index_counter(gen: &mut Gen, b: &mut Builder, (name, wires): (&str, usize), width: u32, (clear, advance): (Bit, Bit), block: Bit, lane_bits: usize) -> Vec<Bit> {
     if lane_bits == 0 {
@@ -660,14 +669,26 @@ impl Gen {
         b.xor_to(halt_flag, Bit::Zero, halted);
 
         // Repeat counter: counts up to the word's repeat field, then the PC moves on.
-        let repeat_module = self.address_counter(REPEAT_BITS);
-        let repeat = b.wire("repeat_count", REPEAT_BITS);
+        // A word may repeat as often as an index register says, in elements or in blocks.
+        let repeat_limit = b.wire("repeat_limit", c.index_bits);
+        let lane_shift = c.features.lane_bits as usize;
+        let repeat_bits = REPEAT_BITS.max(c.index_bits);
+        let repeat_module = self.address_counter(repeat_bits);
+        let repeat = b.wire("repeat_count", repeat_bits);
         let word_done = b.wire("word_done", 1)[0];
         let clear_repeat = bus_or(&mut b, word_done, start, "repeat_clear");
         b.inst("repeat_counter", &repeat_module, &[("clear", vec![clear_repeat]), ("advance", vec![running]), ("address", repeat.clone())]);
-        let target = fields["repeat"].clone();
+        let target: Vec<Bit> = {
+            let mut l = Logic { b: &mut b, next: 49_000 };
+            let from_register = fields["repeat_x"][0];
+            let shifted: Vec<Bit> = (0..repeat_bits as usize).map(|i| repeat_limit.get(i + lane_shift).copied().unwrap_or(Bit::Zero)).collect();
+            let plain: Vec<Bit> = (0..repeat_bits as usize).map(|i| repeat_limit.get(i).copied().unwrap_or(Bit::Zero)).collect();
+            let counted = l.mux_bus(fields["vector"][0], &plain, &shifted);
+            let literal: Vec<Bit> = (0..repeat_bits as usize).map(|i| fields["repeat"].get(i).copied().unwrap_or(Bit::Zero)).collect();
+            l.mux_bus(from_register, &literal, &counted)
+        };
         let mut equal = Bit::One;
-        for i in 0..REPEAT_BITS as usize {
+        for i in 0..repeat_bits as usize {
             let diff = b.wire(&format!("rep_diff{i}"), 1)[0];
             b.xor_to(repeat[i], target[i], diff);
             let same = b.wire(&format!("rep_same{i}"), 1)[0];
@@ -728,6 +749,9 @@ impl Gen {
             window_dst = gate(&mut l, fields["window_dst"][0]);
             let source = l.select(&fields["x_src"], &stored);
             let limit = l.select(&fields["x_limit"], &stored);
+            for (from, to) in limit.iter().zip(&repeat_limit) {
+                l.b.or_to(*from, Bit::Zero, *to);
+            }
             let sum = l.fresh_bus(width);
             let carry = l.fresh();
             l.b.inst("x_step", &x_adder, &[("a", source), ("b", fields["literal_b"].clone()), ("cin", vec![Bit::Zero]), ("sum", sum.clone()), ("cout", vec![carry])]);
@@ -755,7 +779,6 @@ impl Gen {
 
         // --- Vector registers ---
         b.group("Banco de vectores");
-        let lane_shift = c.features.lane_bits as usize;
         let read_index = index_counter(self, &mut b, ("read_index", 46_000), c.index_bits, (read_reset, read_step), fields["vector"][0], lane_shift);
         let chain_write = b.wire("chain_write", 1)[0];
         let counted_write = bus_or(&mut b, wide_from_chain, fields["wide_accumulate"][0], "counted_wide_write");
@@ -913,6 +936,16 @@ impl Gen {
         let magnitude_d = b.wire("magnitude_d", a);
         let block_scan = b.wire("magnitude_block", 1)[0];
         b.and_to(scan, vector_flag, block_scan);
+        // In a block of a variable-length scan, the last one may be only partly used.
+        let scanned_lane: Vec<Bit> = {
+            let mut l = Logic { b: &mut b, next: 49_500 };
+            let last_block = l.and(fields["repeat_x"][0], word_done);
+            let whole = l.not(last_block);
+            (0..lanes as u32).map(|lane| {
+                let reached = at_least(&mut l, &repeat_limit[..lane_bits], lane);
+                l.or(whole, reached)
+            }).collect()
+        };
         for i in 0..a as usize {
             let differs = b.wire(&format!("mag_differs{i}"), 1)[0];
             if i == top {
@@ -925,7 +958,9 @@ impl Gen {
                     let here = b.wire(&format!("mag_lane{lane}_{i}"), 1)[0];
                     b.xor_to(bank[i], bank[top], here);
                     let counted = b.wire(&format!("mag_counted{lane}_{i}"), 1)[0];
-                    b.and_to(block_scan, here, counted);
+                    let live = b.wire(&format!("mag_live{lane}_{i}"), 1)[0];
+                    b.and_to(block_scan, scanned_lane[lane], live);
+                    b.and_to(live, here, counted);
                     let merged = b.wire(&format!("mag_any{lane}_{i}"), 1)[0];
                     b.or_to(any, counted, merged);
                     any = merged;
@@ -1504,7 +1539,12 @@ impl Microprogram {
         let (mut pc, mut cycles) = (self.entries[routine] as usize, 0u64);
         loop {
             let word = &self.words[pc];
-            cycles += word.repeat as u64 + 1;
+            cycles += if word.repeat_x {
+                let blocks = if word.vector { config.features.lane_bits } else { 0 };
+                (index[word.x_limit as usize] >> blocks) as u64 + 1
+            } else {
+                word.repeat as u64 + 1
+            };
             if word.halt {
                 return cycles;
             }
@@ -1550,12 +1590,14 @@ fn visit_indices(steps: &[Step], f: &mut impl FnMut(Expr)) {
                 f(alu.window);
             }
             Step::Repeat { body, .. } => visit_indices(body, f),
-            Step::Combine { weights, start, window, .. } => {
+            Step::Combine { weights, start, width, window, .. } => {
+                f(*width);
                 f(weights.1);
                 f(*start);
                 f(*window);
             }
-            Step::Stream { body, .. } => {
+            Step::Stream { body, count, .. } => {
+                f(*count);
                 f(body.a.1);
                 f(body.b.1);
                 f(body.dst.1);
@@ -1753,7 +1795,7 @@ impl DieProgram {
     }
 
     /// One element per cycle: each word reads one, computes the last and writes an earlier one.
-    fn stream(&mut self, variable: Var, count: u32, step: &Alu<Expr>) {
+    fn stream(&mut self, variable: Var, count: Expr, step: &Alu<Expr>) {
         let moves = |index: Expr| index.coefficient(variable) != 0;
         let mut temporaries = Vec::new();
         let place = |this: &mut Self, index: Expr, temporaries: &mut Vec<u32>| {
@@ -1765,7 +1807,8 @@ impl DieProgram {
         let window_x = if step.window_a || step.window_b || step.window_dst { self.resolve(step.window).1 } else { 0 };
         let (fixed_a, fixed_b) = (!moves(step.a.1), !moves(step.b.1));
         let extra = usize::from(step.op == OP_FUNCTION);
-        let (n, written) = (count as usize, 2 + extra);
+        let written = 2 + extra;
+        let n = if count.is_constant() { count.constant() as usize } else { usize::MAX / 2 };
 
         let word = |k: usize| {
             let mut w = ControlWord { vector: step.vector, window_x, ..Default::default() };
@@ -1775,7 +1818,7 @@ impl DieProgram {
                 (w.reg_b, w.literal_b, w.offset_b, w.window_b, w.fixed_b) = (step.b.0, literal_b, offset_b, step.window_b, fixed_b);
             }
             if (1..n + 1 + extra).contains(&k) {
-                (w.op, w.shift, w.function, w.magnitude_scan, w.accumulate) = (step.op, step.shift, step.function, step.magnitude_scan && k <= n, step.accumulate && k <= n);
+                (w.op, w.shift, w.function, w.magnitude_scan, w.accumulate, w.wide_scan) = (step.op, step.shift, step.function, step.magnitude_scan && k <= n, step.accumulate && k <= n, step.wide_scan && k <= n);
                 (w.broadcast_a, w.broadcast_b) = (step.broadcast_a, step.broadcast_b);
             }
             if (written..n + written).contains(&k) {
@@ -1783,10 +1826,33 @@ impl DieProgram {
             }
             w
         };
-        self.emit_stream(n, written, true, word);
+        if count.is_constant() {
+            self.emit_stream(n, written, true, word);
+        } else {
+            let leading = if step.write { written } else { 1 };
+            self.emit_variable_stream(count, leading, &mut temporaries, word);
+        }
         for temporary in temporaries {
             self.release(temporary);
         }
+    }
+
+    /// A stream whose length is only known at run time. What runs off the end is read
+    /// and computed but never written, so the words need no tail.
+    fn emit_variable_stream(&mut self, count: Expr, leading: usize, temporaries: &mut Vec<u32>, word: impl Fn(usize) -> ControlWord) {
+        let (literal, register) = self.resolve(count);
+        let last = self.allocate();
+        temporaries.push(last);
+        self.set_index(last, register, literal.wrapping_sub(1));
+        let start = self.end();
+        let w = self.slot(start);
+        (w.read_reset, w.write_reset) = (true, true);
+        for k in 0..leading {
+            let at = self.end();
+            *self.slot(at) = word(k);
+        }
+        let at = self.end();
+        *self.slot(at) = ControlWord { repeat_x: true, x_limit: last, ..word(leading) };
     }
 
     /// Lays out the words of a stream of `n` elements whose results land `written` later.
@@ -1826,7 +1892,28 @@ impl DieProgram {
         let window_x = if window_a || window_b { self.resolve(window).1 } else { 0 };
         let lane_bits = self.config.features.lane_bits;
         let lanes = 1u32 << lane_bits;
-        let (blocks, rest) = if width.is_multiple_of(lanes) && start.is_multiple_of(lanes) { (width / lanes, 0) } else { (0, width) };
+        let aligned = start.is_multiple_of(lanes);
+        if !width.is_constant() {
+            let vector = aligned && lanes > 1;
+            let word = |k: usize| {
+                let mut w = ControlWord { vector, window_x, wide_accumulate: true, ..Default::default() };
+                w.read_step = true;
+                (w.reg_a, w.literal_a, w.offset_a, w.window_a, w.fixed_a) = (weights.0, literal_a, offset_a, window_a, true);
+                (w.reg_b, w.offset_b, w.window_b) = (matrix, offset_b, window_b);
+                if k >= 1 {
+                    (w.broadcast_a, w.wide_fresh) = (vector, fresh);
+                }
+                w.wide_write = k >= 2;
+                w
+            };
+            self.emit_variable_stream(width, 2, &mut temporaries, word);
+            for temporary in temporaries {
+                self.release(temporary);
+            }
+            return;
+        }
+        let width = width.constant();
+        let (blocks, rest) = if width.is_multiple_of(lanes) && aligned { (width / lanes, 0) } else { (0, width) };
         let word = |k: usize, n: usize, vector: bool| {
             let mut w = ControlWord { vector, window_x, wide_accumulate: true, ..Default::default() };
             if k < n {
@@ -2070,7 +2157,7 @@ impl DieProgram {
                     let mut candidate = *word;
                     candidate.repeat = last.repeat;
                     let effect = word.halt || word.x_write || word.branch;
-                    if word.repeat == 0 && !effect && candidate.encode_words(&self.config) == last.encode_words(&self.config) && last.repeat < (1 << REPEAT_BITS) - 1 {
+                    if word.repeat == 0 && !word.repeat_x && !last.repeat_x && !effect && candidate.encode_words(&self.config) == last.encode_words(&self.config) && last.repeat < (1 << REPEAT_BITS) - 1 {
                         last.repeat += 1;
                         continue;
                     }

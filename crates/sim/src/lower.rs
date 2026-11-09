@@ -4,7 +4,7 @@
 use crate::weights::{CellRow, Weights};
 use compiler::{Inst, Op, Program, RopeScaling};
 use netlist::block::{FN_GELU, FN_GELU_TANH, FN_TANH};
-use netlist::block::{encode_vector, Assembly, AttentionRegs, BlockOps, CellMatrix, DeltaRegs, Expr, Var, FN_EXP, FN_SIGMOID, FN_SOFTPLUS};
+use netlist::block::{encode_vector, Assembly, AttentionRegs, BlockOps, CellMatrix, DeltaRegs, Expr, KeyStore, Var, FN_EXP, FN_SIGMOID, FN_SOFTPLUS};
 use netlist::{DieConfig, DieProgram, Microprogram};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -210,6 +210,7 @@ pub struct Layout {
     cell_plan: Vec<CellEntry>,
     in_cells: HashMap<String, CellMatrix>,
     lookup_tables: HashSet<String>,
+    key_capacity: Option<u32>,
 }
 
 impl Layout {
@@ -390,12 +391,13 @@ impl Layout {
         if next >= (1 << config.reg_bits) - 2 {
             return Err(format!("faltan registros: se necesitan {next}"));
         }
+        let key_capacity = chip_tokens.filter(|_| cells && config.features.combines()).map(|tokens| (tokens as u32).next_multiple_of(1 << config.features.lane_bits));
         let (in_cells, cell_weights, cell_factors) = place_in_cells(&cell_plan, config.cells as usize);
         let reach = 1u64 << config.index_bits.min(config.cell.addr_bits);
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
         }
-        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, rope, rope_table, rope_half, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables })
+        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, rope, rope_table, rope_half, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -495,7 +497,23 @@ impl Layout {
     fn assembly(&self) -> Assembly {
         let mut asm = Assembly::new(&self.config);
         asm.in_cells = self.in_cells.clone();
+        asm.key_capacity = self.key_capacity;
         asm
+    }
+
+    /// The cycles each operation of the token routine takes on this die, in program order.
+    pub fn cycles_by_op(&self, program: &Program, token: u32, position: u32) -> Result<Vec<(String, u64)>, String> {
+        let mut list = Vec::new();
+        for inst in &program.ops[..program.logits_from] {
+            let mut asm = self.assembly();
+            self.run_list(&mut asm, program, std::slice::from_ref(inst), Expr::var(Var::Token), Expr::var(Var::Position), true)?;
+            let mut code = DieProgram::new(self.config);
+            code.assemble(&asm.steps);
+            let code = code.finish_program();
+            let name = format!("{:?}", inst.op);
+            list.push((name.split([' ', '{', '(']).next().unwrap_or("").to_string(), code.cycles(&self.config, 0, token, position)));
+        }
+        Ok(list)
     }
 
     /// How deep the weight and factor memories of each cell must be.
@@ -699,7 +717,7 @@ impl Layout {
                         ops.normalize(t[5], rope.into());
                         self.rotate_pairs(ops, t[5], rope, t[6]);
                         ops.gather(&[(t[4], lora), (t[6], rope)], t[7]);
-                        ops.attention(t[7], t[2], t[2], self.ones, t[8], width, tokens, Some(scale), regs);
+                        ops.attention(t[7], KeyStore { keys: t[2], values: t[2], stride: width, offset: zero }, self.ones, t[8], width, tokens, Some(scale), regs);
                         ops.matvec(unembed, self.weights[unembed], h * value_dim, t[8], first + offset, value_dim, lora);
                     });
                 });
@@ -763,7 +781,7 @@ impl Layout {
                     None => position,
                 };
                 let at = slot_place * width;
-                ops.align_to(self.reg(*key), zero, STATE_EXPONENT, self.keys[*slot], at, width.into());
+                ops.store_key(self.reg(*key), STATE_EXPONENT, self.keys[*slot], slot_place, width);
                 ops.align_to(self.reg(*value), zero, STATE_EXPONENT, self.values[*slot], at, width.into());
             }
             Op::AttnSum { slot, query, head_dim, scale_dim, heads, kv_heads, window, softcap, dst } => {
@@ -783,17 +801,11 @@ impl Layout {
                     ops.each((group as u32).into(), |ops, shared| {
                         let h = kv_head * group as u32 + shared;
                         ops.with_window(h, &[first], |ops, offset| {
-                            let (qh, kt, vt) = (t[20], t[21], t[22]);
+                            let qh = t[20];
                             ops.copy_part(query, h * d, qh, zero, d.into());
                             ops.normalize(qh, d.into());
-                            ops.each(tokens, |ops, token_index| {
-                                let from = token_index * width + kv_head * d;
-                                ops.copy_part(keys, from, kt, token_index * d, d.into());
-                                ops.copy_part(values, from, vt, token_index * d, d.into());
-                            });
-                            ops.normalize(kt, tokens * d);
-                            ops.normalize(vt, tokens * d);
-                            ops.attention(qh, kt, vt, self.ones, first + offset, d, tokens, Some(self.inverse_root[scale_dim]), regs);
+                            let store = KeyStore { keys, values, stride: width, offset: kv_head * d };
+                            ops.attention(qh, store, self.ones, first + offset, d, tokens, Some(self.inverse_root[scale_dim]), regs);
                         });
                     });
                 });

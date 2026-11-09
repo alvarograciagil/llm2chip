@@ -277,9 +277,9 @@ pub trait BlockOps: Sized {
     fn sum_products(&mut self, set: Self::N, pairs: &[Pair<Self::N>]);
     /// Turns the first `sets` full-precision sums into `dst`, sharing one exponent.
     fn narrow_sums(&mut self, a: u32, b: u32, dst: u32, sets: Self::N);
-    /// `dst[j] = Σ weights[t] · matrix[t · width + j]`, for hardware that can add whole rows.
-    fn row_combination(&mut self, weights: u32, matrix: u32, dst: u32, width: u32, count: Self::N) {
-        self.dots(weights, matrix, dst, width.into(), count, |j, t| ((weights, t), (matrix, t * width + j)));
+    /// `dst[j] = Σ weights[t] · matrix[t · stride + offset + j]`, for hardware that can add whole rows.
+    fn row_combination(&mut self, weights: u32, matrix: u32, dst: u32, (width, stride, offset): (u32, u32, Self::N), count: Self::N) {
+        self.dots(weights, matrix, dst, width.into(), count, |j, t| ((weights, t), (matrix, t * stride + offset + j)));
     }
     fn function(&mut self, function: u32, src: u32, dst: u32, len: Self::N);
     fn reciprocal(&mut self, src: u32, dst: u32);
@@ -360,9 +360,21 @@ pub trait BlockOps: Sized {
     }
 
     /// Softmax attention: `query` against `tokens` keys, then the weighted sum of values.
+    /// Keeps the key of one token at its place in the store.
+    fn store_key(&mut self, src: u32, exponent: i64, keys: u32, slot: Self::N, width: u32) {
+        self.align_to(src, 0.into(), exponent, keys, slot * width, width.into());
+    }
+
+    /// `dst[t]` becomes the product of a query with the key of every stored token.
+    fn score_keys(&mut self, query: u32, store: KeyStore<Self::N>, dst: u32, width: u32, tokens: Self::N) {
+        let KeyStore { keys, stride, offset, .. } = store;
+        self.dots(query, keys, dst, tokens, width.into(), |t, j| ((query, j), (keys, t * stride + offset + j)));
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn attention(&mut self, query: u32, keys: u32, values: u32, ones: u32, dst: u32, width: u32, tokens: Self::N, score_scale: Option<u32>, regs: AttentionRegs) {
-        self.dots(query, keys, regs.scores, tokens, width.into(), |t, j| ((query, j), (keys, t * width + j)));
+    fn attention(&mut self, query: u32, store: KeyStore<Self::N>, ones: u32, dst: u32, width: u32, tokens: Self::N, score_scale: Option<u32>, regs: AttentionRegs) {
+        self.score_keys(query, store, regs.scores, width, tokens);
+        let KeyStore { values, stride, offset, .. } = store;
         if let Some(scale) = score_scale {
             self.scale(scale, regs.scores, regs.top, tokens);
             self.copy_part(regs.top, 0.into(), regs.scores, 0.into(), tokens);
@@ -378,19 +390,19 @@ pub trait BlockOps: Sized {
         self.dots(regs.weights, ones, regs.total, 1.into(), tokens, |_, t| ((regs.weights, t), (ones, t)));
         self.reciprocal(regs.total, regs.inverse);
         self.scale(regs.inverse, regs.weights, regs.probabilities, tokens);
-        self.row_combination(regs.probabilities, values, dst, width, tokens);
+        self.row_combination(regs.probabilities, values, dst, (width, stride, offset), tokens);
     }
 
     /// One Gated DeltaNet head: the delta rule on a `key × value` state matrix.
     fn delta_step(&mut self, r: DeltaRegs, key: u32, value: u32) {
         let cells = key * value;
         self.scale(r.decay, r.state, r.state, cells.into());
-        self.row_combination(r.key, r.state, r.memory, value, key.into());
+        self.row_combination(r.key, r.state, r.memory, (value, value, 0.into()), key.into());
         self.add_sub(true, (r.value, 0.into()), (r.memory, 0.into()), 1, r.error, value.into());
         self.scale(r.beta, r.error, r.delta, value.into());
         // The output reads the old state and the update apart, before rounding merges them:
         // the update's contribution is often a tiny difference that rounding would erase.
-        self.row_combination(r.query, r.state, r.next, value, key.into());
+        self.row_combination(r.query, r.state, r.next, (value, value, 0.into()), key.into());
         self.dot(r.key, r.query, r.memory, key.into());
         self.scale(r.memory, r.delta, r.update, value.into());
         self.add(r.next, r.update, r.out, value.into());
@@ -557,9 +569,9 @@ pub enum Step {
     One(Alu<Expr>),
     Repeat { variable: Var, count: Expr, body: Vec<Step> },
     /// A single-operation loop that issues one element, or block, per cycle.
-    Stream { variable: Var, count: u32, body: Alu<Expr> },
+    Stream { variable: Var, count: Expr, body: Alu<Expr> },
     /// `wide[j] += weights · matrix[start + j]` for every `j` of a row, or from zero if `fresh`.
-    Combine { weights: At<Expr>, matrix: u32, start: Expr, width: u32, fresh: bool, window: Expr, window_a: bool, window_b: bool },
+    Combine { weights: At<Expr>, matrix: u32, start: Expr, width: Expr, fresh: bool, window: Expr, window_a: bool, window_b: bool },
     /// Moves every cell to where a matrix starts.
     CellSeek { weights: Expr, factors: Expr },
     /// Clears the row totals and restarts the input vector.
@@ -568,6 +580,16 @@ pub enum Step {
     CellGroup { src: u32, length: u32 },
     /// The totals of the first `rows` cells go to the wide memory.
     CellDrain { rows: u32 },
+}
+
+/// Where the attention of one head reads its keys and values: each token's row starts
+/// `stride` further on, and this head's part of it `offset` into the row.
+#[derive(Clone, Copy, Debug)]
+pub struct KeyStore<N> {
+    pub keys: u32,
+    pub values: u32,
+    pub stride: u32,
+    pub offset: N,
 }
 
 /// Below this a loop is not worth the words it takes to set up a stream.
@@ -608,13 +630,15 @@ pub struct Assembly {
     cells: u32,
     streams: bool,
     combines: bool,
+    /// With keys kept in columns, how many tokens each column has room for.
+    pub key_capacity: Option<u32>,
     /// Matrices the cells hold. Any other is computed from the vector registers.
     pub in_cells: HashMap<String, CellMatrix>,
 }
 
 impl Assembly {
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -652,12 +676,38 @@ impl Assembly {
         self.steps.push(Step::CellDrain { rows });
     }
 
+    /// Sets the shifters so that a vector of `src` lands on the fixed `exponent`.
+    fn load_alignment(&mut self, src: u32, exponent: i64) {
+        let e = self.exponent(src);
+        self.immediate(exponent, self.sc(8));
+        self.binary(OP_SUB, e, self.sc(8), self.sc(9));
+        self.immediate(0, self.sc(10));
+        self.binary(OP_MAX, self.sc(9), self.sc(10), self.sc(11));
+        self.binary(OP_SUB, self.sc(8), e, self.sc(12));
+        self.binary(OP_MAX, self.sc(12), self.sc(10), self.sc(13));
+        self.load_shifts(Some(self.sc(13)), None, Some(self.sc(11)));
+    }
+
     /// Runs `emit` for each element, whole blocks at a time where the die has lanes.
     /// A block needs a known length and operands that start on a block boundary, and
     /// none of its elements may change an operand another lane is taking whole.
     fn elements(&mut self, len: Expr, starts: &[Expr], independent: bool, mut emit: impl FnMut(&mut Self, Expr, bool)) {
         let lanes = 1u32 << self.lane_bits;
         let aligned = starts.iter().all(|s| s.is_multiple_of(lanes));
+        if lanes > 1 && self.streams && independent && aligned && !len.is_constant() {
+            // Blocks past the end only touch places nothing reads afterwards.
+            let variable = Var::Loop(self.loops);
+            self.loops += 1;
+            let outer = std::mem::take(&mut self.steps);
+            emit(self, Expr::var(variable) * lanes, true);
+            let inner = std::mem::replace(&mut self.steps, outer);
+            if let [Step::One(step)] = inner.as_slice() {
+                if can_stream(variable, step, lanes) {
+                    self.steps.push(Step::Stream { variable, count: len, body: *step });
+                    return;
+                }
+            }
+        }
         if lanes == 1 || !independent || !aligned || !len.is_constant() || len.constant() < lanes {
             self.each(len, |s, i| emit(s, i, false));
             return self.stream_last(1);
@@ -677,19 +727,11 @@ impl Assembly {
         let Some(Step::Repeat { variable, count, body }) = self.steps.last() else {
             return;
         };
-        let ([Step::One(step)], true) = (body.as_slice(), count.is_constant() && count.constant() >= MIN_STREAM) else {
+        let ([Step::One(step)], true) = (body.as_slice(), !count.is_constant() || count.constant() >= MIN_STREAM) else {
             return;
         };
-        let (variable, count, step) = (*variable, count.constant(), *step);
-        let stride = |index: Expr| index.coefficient(variable);
-        let moves_with = |index: Expr| stride(index) == 0 || stride(index) == unit;
-        // Results land two or three cycles after the read, so nothing may read a place
-        // an earlier element of the same stream is still going to write.
-        let safe = |operand: At<Expr>| operand.0 != step.dst.0 || (stride(operand.1) == unit && operand.1 == step.dst.1);
-        let plain = !(step.load_shift_a || step.load_shift_b || step.load_shift_left || step.load_wide_shift || step.link_send || step.magnitude_clear || step.accumulator_clear || step.wide_clear || step.wide_scan || step.wide_write) && step.literal.is_none();
-        let streamable = matches!(step.op, OP_ADD | OP_SUB | OP_MUL | OP_MOV | OP_FUNCTION | OP_SHIFT_LEFT);
-        let scans = !step.write;
-        if plain && streamable && (scans || stride(step.dst.1) == unit) && moves_with(step.a.1) && moves_with(step.b.1) && (scans || (safe(step.a) && safe(step.b))) {
+        let (variable, count, step) = (*variable, *count, *step);
+        if can_stream(variable, &step, unit) {
             *self.steps.last_mut().expect("bucle") = Step::Stream { variable, count, body: step };
         }
     }
@@ -849,6 +891,18 @@ fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32)
             Step::CellSeek { .. } | Step::CellPass | Step::CellDrain { .. } => {}
         }
     }
+}
+
+/// Whether one loop can issue an element per cycle: results land two or three cycles
+/// after the read, so nothing may read a place an earlier element is still to write.
+fn can_stream(variable: Var, step: &Alu<Expr>, unit: u32) -> bool {
+    let stride = |index: Expr| index.coefficient(variable);
+    let moves_with = |index: Expr| stride(index) == 0 || stride(index) == unit;
+    let safe = |operand: At<Expr>| operand.0 != step.dst.0 || (stride(operand.1) == unit && operand.1 == step.dst.1);
+    let plain = !(step.load_shift_a || step.load_shift_b || step.load_shift_left || step.load_wide_shift || step.link_send || step.magnitude_clear || step.accumulator_clear || step.wide_clear || step.wide_write) && step.literal.is_none();
+    let streamable = matches!(step.op, OP_ADD | OP_SUB | OP_MUL | OP_MOV | OP_FUNCTION | OP_SHIFT_LEFT | OP_WIDE_OUT);
+    let scans = !step.write;
+    plain && streamable && (scans || stride(step.dst.1) == unit) && moves_with(step.a.1) && moves_with(step.b.1) && (scans || (safe(step.a) && safe(step.b)))
 }
 
 impl BlockOps for Assembly {
@@ -1018,15 +1072,15 @@ impl BlockOps for Assembly {
     }
 
     /// Narrows the wide sums to mantissas, shifting only as much as the largest needs.
-    fn row_combination(&mut self, weights: u32, matrix: u32, dst: u32, width: u32, count: Expr) {
+    fn row_combination(&mut self, weights: u32, matrix: u32, dst: u32, (width, stride, offset): (u32, u32, Expr), count: Expr) {
         if !self.combines || width < MIN_STREAM {
-            return self.dots(weights, matrix, dst, width.into(), count, |j, t| ((weights, t), (matrix, t * width + j)));
+            return self.dots(weights, matrix, dst, width.into(), count, |j, t| ((weights, t), (matrix, t * stride + offset + j)));
         }
         // A zero weight clears every sum, whatever the matrix holds.
         let zero = self.sc(10);
         self.immediate(0, zero);
-        self.steps.push(Step::Combine { weights: zero, matrix, start: 0.into(), width, fresh: true, window: 0.into(), window_a: false, window_b: false });
-        self.each(count, |s, t| s.steps.push(Step::Combine { weights: (weights, t), matrix, start: t * width, width, fresh: false, window: 0.into(), window_a: false, window_b: false }));
+        self.steps.push(Step::Combine { weights: zero, matrix, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false });
+        self.each(count, |s, t| s.steps.push(Step::Combine { weights: (weights, t), matrix, start: t * stride + offset, width: width.into(), fresh: false, window: 0.into(), window_a: false, window_b: false }));
         self.narrow_sums(weights, matrix, dst, width.into());
     }
 
@@ -1042,6 +1096,7 @@ impl BlockOps for Assembly {
             scan.wide_scan = true;
             s.push(scan);
         });
+        self.stream_last(1);
         let mut count = alu(OP_WIDE_LZC);
         count.dst = self.sc(0);
         self.push(count);
@@ -1060,6 +1115,7 @@ impl BlockOps for Assembly {
             out.dst = (dst, set);
             s.push(out);
         });
+        self.stream_last(1);
         self.binary(OP_ADD, self.exponent(a), self.exponent(b), self.sc(5));
         self.binary(OP_ADD, self.sc(5), self.sc(4), self.sc(6));
         self.immediate(1 - self.bits as i64, self.sc(7));
@@ -1146,15 +1202,39 @@ impl BlockOps for Assembly {
         self.normalize(dst, offset.into());
     }
 
+    fn store_key(&mut self, src: u32, exponent: i64, keys: u32, slot: Expr, width: u32) {
+        let Some(capacity) = self.key_capacity else {
+            return self.align_to(src, 0.into(), exponent, keys, slot * width, width.into());
+        };
+        // The tokens of one column sit in consecutive places, one for each lane.
+        self.load_alignment(src, exponent);
+        self.each(width.into(), |s, j| {
+            let mut right = alu(OP_MOV);
+            right.a = (src, j);
+            right.dst = (keys, j * capacity + slot);
+            s.push(right);
+            let mut left = alu(OP_SHIFT_LEFT);
+            left.a = right.dst;
+            left.dst = right.dst;
+            s.push(left);
+        });
+        self.clear_shifts();
+    }
+
+    fn score_keys(&mut self, query: u32, store: KeyStore<Expr>, dst: u32, width: u32, tokens: Expr) {
+        let KeyStore { keys, stride, offset, .. } = store;
+        let Some(capacity) = self.key_capacity else {
+            return self.dots(query, keys, dst, tokens, width.into(), |t, j| ((query, j), (keys, t * stride + offset + j)));
+        };
+        let zero = self.sc(10);
+        self.immediate(0, zero);
+        self.steps.push(Step::Combine { weights: zero, matrix: keys, start: 0.into(), width: tokens, fresh: true, window: 0.into(), window_a: false, window_b: false });
+        self.each(width.into(), |s, j| s.steps.push(Step::Combine { weights: (query, j), matrix: keys, start: (offset + j) * capacity, width: tokens, fresh: false, window: 0.into(), window_a: false, window_b: false }));
+        self.narrow_sums(query, keys, dst, tokens);
+    }
+
     fn align_to(&mut self, src: u32, from: Expr, exponent: i64, dst: u32, to: Expr, len: Expr) {
-        let e = self.exponent(src);
-        self.immediate(exponent, self.sc(8));
-        self.binary(OP_SUB, e, self.sc(8), self.sc(9));
-        self.immediate(0, self.sc(10));
-        self.binary(OP_MAX, self.sc(9), self.sc(10), self.sc(11));
-        self.binary(OP_SUB, self.sc(8), e, self.sc(12));
-        self.binary(OP_MAX, self.sc(12), self.sc(10), self.sc(13));
-        self.load_shifts(Some(self.sc(13)), None, Some(self.sc(11)));
+        self.load_alignment(src, exponent);
         let apart = src != dst || from == to;
         self.elements(len, &[from, to], true, |s, i, vector| {
             let mut right = alu(OP_MOV);
@@ -1329,7 +1409,7 @@ impl Behavior {
                     }
                 }
                 Step::Stream { variable, count, body } => {
-                    for i in 0..*count {
+                    for i in 0..value(loops, *count) {
                         loops.insert(*variable, i);
                         self.walk(&[Step::One(*body)], token, position, loops);
                     }

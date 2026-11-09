@@ -136,7 +136,7 @@ Es un diseño de arquitectura y lógica, no un layout fabricable: no hay colocac
 
 - Área, energía y velocidad son estimaciones, parte derivadas del circuito generado y parte calibradas con chips publicados. La aplicación indica el origen de cada cifra.
 - Los modelos reales no se simulan puerta a puerta, sino con una máquina verificada contra las puertas en modelos diminutos.
-- Los microprogramas de modelos reales ya hacen sus productos matriz-vector en las celdas: en Qwen3.8 el token pasa de 124.000 M de ciclos en serie a 238 M con 4096 celdas, 32 carriles, bucles en flujo continuo y filas sumadas en paralelo. Aún está lejos de la velocidad del plano y del explorador, que salen del estimador y no de contar esos ciclos.
+- Los microprogramas de modelos reales ya hacen sus productos matriz-vector en las celdas: en Qwen3.8 el token pasa de 124.000 M de ciclos en serie a 78 M en la posición 100 y 119 M en la 4000, con 136.000 celdas y 32 carriles. Aún está lejos de la velocidad del plano y del explorador, que salen del estimador y no de contar esos ciclos.
 - En modelos diminutos, el firmware carga las celdas por el controlador de carga, y así se comprueba en puertas con uno y dos chips. En modelos reales, la imagen ya guarda las matrices en el formato de las celdas, pero falta el paso de arranque que las lleva hasta ellas, y las tablas de embeddings siguen en registros.
 - Los paquetes de Windows y Linux y el backend de Vulkan todavía no se han ejecutado en esos sistemas.
 

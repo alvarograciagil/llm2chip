@@ -1,7 +1,7 @@
 //! A worked example the die executes: one gated MLP layer with a residual.
 //! Used by the tests and shown live in the app.
 
-use crate::block::{exponent_register, tables, Assembly, AttentionRegs, BlockOps, DeltaRegs};
+use crate::block::{KeyStore, exponent_register, tables, Assembly, AttentionRegs, BlockOps, DeltaRegs};
 use crate::verilog::TestStep;
 use crate::{CellConfig, ControlWord, DieConfig, DieProgram, Simulator};
 
@@ -204,7 +204,7 @@ pub fn attention_demo(c: &DieConfig) -> BlockDemo {
     assembly.load_vector(2, &v);
     assembly.load_vector(3, &vec![1.0; tokens]);
     let regs = AttentionRegs { scores: 5, top: 6, shifted: 7, weights: 8, total: 9, inverse: 10, probabilities: 11 , softcap: None};
-    assembly.attention(0, 1, 2, 3, 4, width as u32, (tokens as u32).into(), None, regs);
+    assembly.attention(0, KeyStore { keys: 1, values: 2, stride: width as u32, offset: 0.into() }, 3, 4, width as u32, (tokens as u32).into(), None, regs);
 
     let scores: Vec<f64> = (0..tokens).map(|t| (0..width).map(|j| q[j] * k[t * width + j]).sum()).collect();
     let top = scores.iter().copied().fold(f64::MIN, f64::max);
