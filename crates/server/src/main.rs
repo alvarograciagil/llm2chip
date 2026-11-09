@@ -25,8 +25,7 @@ use netlist::rv32::Rv32Iss;
 use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
 use netlist::soc::{FirmwareImage, SocBus, SocConfig};
 use netlist::{CellConfig, DieConfig, Microprogram, Parameter};
-use sim::chip::{RunnerEngine, FLOW_REGISTER_BITS, FLOW_INDEX_BITS};
-use sim::lower::{ENTRY_LOGITS, ENTRY_TOKEN};
+use sim::chip::{RunnerEngine, FLOW_DRAFT_REGISTER, FLOW_REGISTER_BITS, FLOW_INDEX_BITS};
 use sim::image::{load_or_build, verify, write_chip_image, ImageRequest, LoadReport};
 use sim::tokenizer::TokenizerTables;
 use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
@@ -153,6 +152,106 @@ async fn hub_clear_token(State(app): State<App>) -> Response {
     match app.hub.clear_token() {
         Ok(()) => Json(app.hub.token_status()).into_response(),
         Err(message) => refused(message),
+    }
+}
+
+#[derive(Deserialize)]
+struct LabRequest {
+    path: String,
+    prompt: String,
+    new_tokens: usize,
+    activation_bits: u32,
+    state_bits: u32,
+    table_bits: Option<u32>,
+}
+
+fn relative_error(fixed: &[f32], float: &[f32]) -> f64 {
+    let (mut difference, mut size) = (0f64, 0f64);
+    for (a, b) in fixed.iter().zip(float) {
+        difference += ((a - b) as f64).powi(2);
+        size += (*b as f64).powi(2);
+    }
+    (difference / size.max(1e-30)).sqrt()
+}
+
+/// Runs the same tokens in floating point and in the chip's arithmetic and compares them.
+fn run_lab(catalog: &Catalog, request: LabRequest) -> Result<serde_json::Value, String> {
+    let dir = PathBuf::from(&request.path);
+    let entry = catalog.find(&request.path).ok_or("el modelo no está en las carpetas conocidas")?;
+    if !entry.supported {
+        return Err(entry.adaptation.reason.unwrap_or_else(|| "esta arquitectura todavía no se puede ejecutar".into()));
+    }
+    let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| e.to_string())?;
+    let program = compile_model(&entry.config)?;
+    let prompt = PromptStyle::read(&dir, &program.family, &tokenizer);
+    let (text, add_special) = prompt.render(&request.prompt, false)?;
+    let mut tokens = tokenizer.encode(text.as_str(), add_special).map_err(|e| e.to_string())?.get_ids().to_vec();
+    let prompt_tokens = tokens.len();
+    if prompt_tokens == 0 {
+        return Err("el texto no produce ningún token".into());
+    }
+    // The output of each layer is what its last operation writes.
+    let mut layer_outputs: Vec<(u32, usize)> = Vec::new();
+    for inst in &program.ops {
+        if let (Some(layer), Some(buffer)) = (inst.layer, inst.op.buffers().1.first().copied()) {
+            match layer_outputs.last_mut() {
+                Some(last) if last.0 == layer => last.1 = buffer,
+                _ => layer_outputs.push((layer, buffer)),
+            }
+        }
+    }
+    let mode = Numeric::Block { activation_bits: request.activation_bits.clamp(4, 24), state_bits: request.state_bits.clamp(4, 24), table_bits: request.table_bits.map(|b| b.clamp(4, 16)) };
+    let mut float = Engine::new(compile_model(&entry.config)?, Weights::open(&dir)?, Numeric::Float)?;
+    let mut fixed = Engine::new(compile_model(&entry.config)?, Weights::open(&dir)?, mode)?;
+    let mut layer_errors = vec![0f64; layer_outputs.len()];
+    let (mut by_token, mut state_by_token, mut agreements, mut first_divergence) = (Vec::new(), Vec::new(), 0usize, None);
+    let total = prompt_tokens + request.new_tokens.clamp(1, 256);
+    let mut position = 0;
+    while position < total {
+        let token = *tokens.get(position).ok_or("faltan tokens")?;
+        let wanted = position + 1 >= prompt_tokens;
+        let best = |logits: &[f32]| logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(i, _)| i as u32);
+        let float_logits = float.step(token, wanted)?.0.map(<[f32]>::to_vec);
+        let fixed_logits = fixed.step(token, wanted)?.0.map(<[f32]>::to_vec);
+        for (slot, (_, buffer)) in layer_errors.iter_mut().zip(&layer_outputs) {
+            *slot += relative_error(fixed.buffer(*buffer), float.buffer(*buffer));
+        }
+        let drift: Vec<f64> = fixed.recurrent_state().zip(float.recurrent_state()).map(|(a, b)| relative_error(a, b)).collect();
+        state_by_token.push(if drift.is_empty() { 0.0 } else { drift.iter().sum::<f64>() / drift.len() as f64 });
+        if let (Some(a), Some(b)) = (&fixed_logits, &float_logits) {
+            by_token.push(relative_error(a, b));
+            let (mine, theirs) = (best(a), best(b));
+            if mine == theirs {
+                agreements += 1;
+            } else if first_divergence.is_none() {
+                first_divergence = Some(position + 1 - prompt_tokens);
+            }
+            if position + 1 == tokens.len() {
+                tokens.push(theirs);
+            }
+        }
+        position += 1;
+    }
+    let steps = total as f64;
+    let compared = by_token.len();
+    Ok(serde_json::json!({
+        "layers": layer_outputs.iter().zip(&layer_errors).map(|((layer, _), error)| serde_json::json!({ "layer": layer, "error": error / steps })).collect::<Vec<_>>(),
+        "logits_error": by_token,
+        "state_error": state_by_token,
+        "prompt_tokens": prompt_tokens,
+        "agreements": agreements,
+        "compared": compared,
+        "first_divergence": first_divergence,
+        "has_state": !program.delta_slots.is_empty(),
+    }))
+}
+
+async fn lab(State(app): State<App>, Json(request): Json<LabRequest>) -> Response {
+    let catalog = app.catalog.clone();
+    match tokio::task::spawn_blocking(move || run_lab(&catalog, request)).await {
+        Ok(Ok(result)) => Json(result).into_response(),
+        Ok(Err(message)) => refused(message),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
@@ -440,17 +539,22 @@ fn take_text(bytes: &[u8], shown: &mut usize) -> String {
     String::from_utf8_lossy(&pending[..valid]).into_owned()
 }
 
+/// The first `depth` counters the firmware reported for the draft head.
+fn draft_counts(counts: &[u32; 4], depth: usize) -> Vec<u32> {
+    counts[..depth.min(4)].to_vec()
+}
+
 /// Runs the chip's real firmware at instruction level around the loaded engine.
 fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32], request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> {
     use std::sync::atomic::Ordering::Relaxed;
-    if request.mtp_depth > 0 {
-        return Err("la cabeza MTP todavía no funciona con la CPU simulada".into());
+    if request.mtp_depth > 0 && !loaded.engine.has_draft_head() {
+        return Err("este modelo no trae cabeza MTP".into());
     }
     let firmware = FirmwareImage::from_elf(FIRMWARE)?;
     let vocabulary = loaded.engine.vocabulary();
     let cell = CellConfig { weight_bits: 8, activation_bits: FLOW_BITS, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false };
     let die = DieConfig { cells: 1, cell, scale_bits: 16, reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: Default::default() };
-    let code = Microprogram { words: Vec::new(), entries: vec![ENTRY_TOKEN as u32, ENTRY_LOGITS as u32], parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }] };
+    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }] };
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u32);
     let setup = GenerationSetup {
         max_new: request.max_tokens as u32,
@@ -460,6 +564,8 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
         seed,
         raw_tokens: !request.fidelity.tokenizer,
         stop: loaded.prompt.stop.clone(),
+        draft_depth: request.mtp_depth.min(3) as u32,
+        draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS,
     };
     let info = chip_info(&die, &code, FLOW_LOGITS_REGISTER, vocabulary as u32, &setup);
     let use_tables = request.fidelity.tokenizer;
@@ -508,7 +614,7 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
             while emitted + 1 < bus.peripheral.engine.generated {
                 emitted += 1;
                 let piece = take_text(&bus.tx, &mut shown);
-                let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle }));
+                let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth) }));
             }
             continue;
         }
@@ -518,14 +624,14 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
             emitted += 1;
             let decoded = tokenizer.decode(&output, true).map_err(|e| e.to_string())?;
             let piece = if decoded.ends_with('\u{FFFD}') { String::new() } else { let part = decoded[shown..].to_string(); shown = decoded.len(); part };
-            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "id": output[emitted - 1], "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle }));
+            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "id": output[emitted - 1], "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth) }));
         }
     }
     if use_tables {
         let piece = take_text(&bus.tx, &mut shown);
         if !piece.is_empty() {
             emitted += 1;
-            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle }));
+            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth) }));
         }
     } else {
         emitted = output.len();
@@ -706,6 +812,7 @@ async fn main() {
         .route("/api/hf/downloads", get(hub_jobs).post(hub_download))
         .route("/api/hf/cancel", post(hub_cancel))
         .route("/api/hf/discard", post(hub_discard))
+        .route("/api/lab", post(lab))
         .route("/api/image", get(image_status).post(image_start))
         .route("/api/image/cancel", post(image_cancel))
         .route("/api/hf/token", put(hub_set_token).get(hub_token).delete(hub_clear_token))

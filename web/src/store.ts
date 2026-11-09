@@ -23,7 +23,7 @@ export type Selection =
 
 export type Overlay = "funcion" | "capa" | "actividad" | "energia" | "ancho" | "densidad";
 export type SidebarTab = "parametros" | "optimizaciones";
-export type View = "plano" | "funcionamiento" | "esquematico" | "simulador" | "explorador" | "modelos";
+export type View = "plano" | "funcionamiento" | "esquematico" | "simulador" | "explorador" | "modelos" | "numerico";
 export type Appearance = "auto" | "light" | "dark";
 
 export interface SavedDesign {

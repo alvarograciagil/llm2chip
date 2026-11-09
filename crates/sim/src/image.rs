@@ -178,7 +178,7 @@ fn fitted_die(program: &Program, weights: &Weights, request: &ImageRequest) -> R
 
 /// One boot plan per chip count, all on the same hardware.
 fn boot_plans(program: &Program, weights: &Weights, die: DieConfig, request: &ImageRequest) -> Result<Vec<Vec<ChipPart>>, String> {
-    let setup = GenerationSetup { max_new: 256, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: false, stop: request.stop.clone() };
+    let setup = GenerationSetup { max_new: 256, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: false, stop: request.stop.clone(), draft_depth: 0, draft_logits: 0 };
     let tokens = request.context_tokens as usize;
     let mut built: Vec<Vec<(Layout, Microprogram)>> = Vec::new();
     for chips in &request.chips {

@@ -9,6 +9,7 @@ import { SimulatorPanel, SimulatorView } from "./simulator/SimulatorView";
 import { SchematicPanel } from "./schematic/SchematicPanel";
 import { SchematicView } from "./schematic/SchematicView";
 import { ModelsPanel, ModelsView } from "./models/ModelsView";
+import { NumericPanel, NumericView } from "./numeric/NumericView";
 import { useCellSim } from "./schematic/simStore";
 import { useDesign } from "./store";
 
@@ -55,6 +56,8 @@ export function App() {
         {view === "simulador" && <SimulatorPanel />}
         {view === "explorador" && <ExplorerView />}
         {view === "explorador" && <CalibrationPanel />}
+        {view === "numerico" && <NumericView />}
+        {view === "numerico" && <NumericPanel />}
         {view === "modelos" && <ModelsView />}
         {view === "modelos" && <ModelsPanel />}
       </main>

@@ -449,6 +449,9 @@ pub struct ChipModel<E> {
     /// Cycles the die has been busy, as the chip's own counter would read.
     pub die_busy: u64,
     parameters: [u32; 32],
+    /// What the firmware reports of the draft head, by how far ahead it guessed.
+    pub draft_hits: [u32; 4],
+    pub draft_tries: [u32; 4],
     vector_address: u32,
     sample_base: u32,
     sample_count: u32,
@@ -462,7 +465,7 @@ pub struct ChipModel<E> {
 
 impl<E: DieEngine> ChipModel<E> {
     pub fn new(engine: E, code: Microprogram, sampler: SamplerModel) -> Self {
-        Self { engine, code, sampler, die_busy: 0, parameters: [0; 32], vector_address: 0, sample_base: 0, sample_count: 0, inverse: 0, limit: 0, greedy: false, die_free_at: 0, sampler_done_at: None, sampler_token: 0 }
+        Self { engine, code, sampler, die_busy: 0, parameters: [0; 32], draft_hits: [0; 4], draft_tries: [0; 4], vector_address: 0, sample_base: 0, sample_count: 0, inverse: 0, limit: 0, greedy: false, die_free_at: 0, sampler_done_at: None, sampler_token: 0 }
     }
 
     /// Recovers the token and position from the parameter registers.
@@ -506,6 +509,11 @@ impl<E: DieEngine> Peripheral for ChipModel<E> {
             REG_SAMPLE_LIMIT => self.limit = value,
             REG_SAMPLE_GREEDY => self.greedy = value & 1 == 1,
             REG_SAMPLE_SEED => self.sampler.rng = value,
+            REG_DRAFT_RESULT => {
+                let depth = (value >> 1) as usize & 3;
+                self.draft_tries[depth] += 1;
+                self.draft_hits[depth] += value & 1;
+            }
             REG_SAMPLE_START => {
                 let logits: Vec<i64> = (0..self.sample_count).map(|i| self.engine.read(self.sample_base + i)).collect();
                 let sampled = self.sampler.sample(&logits, self.inverse, self.limit as usize, self.greedy);
@@ -539,7 +547,11 @@ pub const INFO_PARAMETER_COUNT: usize = 11;
 pub const INFO_RAW_TOKENS: usize = 12;
 pub const INFO_STOP_COUNT: usize = 13;
 pub const INFO_STOP_TABLE: usize = 14;
-pub const INFO_PARAMETERS: usize = 15;
+pub const INFO_DRAFT_DEPTH: usize = 15;
+pub const INFO_DRAFT_LOGITS: usize = 16;
+pub const INFO_ENTRIES: usize = 17;
+pub const INFO_PARAMETERS: usize = 18;
+pub const REG_DRAFT_RESULT: u32 = 48;
 pub const INFO_PARAMETER_SLOTS: usize = 16;
 
 /// Settings for generating text.
@@ -555,6 +567,10 @@ pub struct GenerationSetup {
     pub raw_tokens: bool,
     /// Tokens that end the generation, as many as the model has.
     pub stop: Vec<u32>,
+    /// How many tokens ahead the draft head guesses; zero leaves it unused.
+    pub draft_depth: u32,
+    /// Where the draft head leaves its logits.
+    pub draft_logits: u32,
 }
 
 /// The chip description the firmware reads from its data memory.
@@ -580,5 +596,9 @@ pub fn chip_info(c: &DieConfig, code: &Microprogram, logits_register: u32, vocab
     }
     info[INFO_STOP_TABLE] = info.len() as u32;
     info.extend_from_slice(&setup.stop);
+    info[INFO_DRAFT_DEPTH] = setup.draft_depth;
+    info[INFO_DRAFT_LOGITS] = setup.draft_logits;
+    info[INFO_ENTRIES] = info.len() as u32;
+    info.extend_from_slice(&code.entries);
     info
 }

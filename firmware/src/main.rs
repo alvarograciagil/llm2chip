@@ -41,7 +41,6 @@ const REG_CHAIN_STATUS: usize = 47;
 
 /// The description the image builder leaves in data memory.
 const DEFAULT_INFO: usize = 0x0C00;
-const INFO_ENTRY_TOKEN: usize = 0;
 const INFO_LOGITS: usize = 2;
 const INFO_LOGITS_EXPONENT: usize = 3;
 const INFO_VOCABULARY: usize = 4;
@@ -55,7 +54,10 @@ const INFO_PARAMETER_COUNT: usize = 11;
 const INFO_RAW_TOKENS: usize = 12;
 const INFO_STOP_COUNT: usize = 13;
 const INFO_STOP_TABLE: usize = 14;
-const INFO_PARAMETERS: usize = 15;
+const INFO_DRAFT_DEPTH: usize = 15;
+const INFO_DRAFT_LOGITS: usize = 16;
+const INFO_ENTRIES: usize = 17;
+const INFO_PARAMETERS: usize = 18;
 
 /// The tokenizer's tables, which the image builder leaves after the segment table.
 const TOKENIZER: *const u32 = 0x1000_8000 as *const u32;
@@ -63,6 +65,12 @@ const TOKENIZER: *const u32 = 0x1000_8000 as *const u32;
 const END_OF_TOKENS: u32 = u32::MAX;
 const ROUTINE_TOKEN: u32 = 0;
 const ROUTINE_LOGITS: u32 = 1;
+const ROUTINE_FEED_FROM_MAIN: u32 = 2;
+const ROUTINE_FEED_FROM_DRAFT: u32 = 3;
+const ROUTINE_DRAFT: u32 = 4;
+const ROUTINE_DRAFT_LOGITS: u32 = 5;
+const REG_DRAFT_RESULT: usize = 48;
+const MAX_DRAFT_DEPTH: usize = 3;
 
 global_asm!(
     r#"
@@ -207,7 +215,7 @@ fn start_die(routine: u32, token: u32, position: u32) {
         let value = info(at + 1).wrapping_mul(token).wrapping_add(info(at + 2).wrapping_mul(position)).wrapping_add(info(at + 3)).wrapping_add(windowed);
         peripheral_write(info(at) as usize, value);
     }
-    peripheral_write(REG_ENTRY, info(INFO_ENTRY_TOKEN + routine as usize));
+    peripheral_write(REG_ENTRY, info(info(INFO_ENTRIES) as usize + routine as usize));
 }
 
 fn wait_for_die() {
@@ -250,6 +258,18 @@ fn sampling_inverse() -> u32 {
     let doubled = 17 + exponent - bits as i32;
     let scaled = if doubled >= 0 { (256u32 << doubled.min(16)) / info(INFO_TEMPERATURE).max(1) } else { (256u32 >> (-doubled).min(16)) / info(INFO_TEMPERATURE).max(1) };
     scaled.min(0xFFFF)
+}
+
+/// The token the draft head finds most likely.
+fn sample_draft() -> u32 {
+    peripheral_write(REG_SAMPLE_BASE, info(INFO_DRAFT_LOGITS));
+    peripheral_write(REG_SAMPLE_COUNT, info(INFO_VOCABULARY));
+    peripheral_write(REG_SAMPLE_INVERSE, 0xFFFF);
+    peripheral_write(REG_SAMPLE_LIMIT, 1);
+    peripheral_write(REG_SAMPLE_GREEDY, 1);
+    peripheral_write(REG_SAMPLE_START, 1);
+    while peripheral_read(REG_SAMPLE_DONE) == 0 {}
+    peripheral_read(REG_SAMPLE_TOKEN)
 }
 
 fn sample() -> u32 {
@@ -339,8 +359,15 @@ extern "C" fn main() {
     }
     peripheral_write(REG_SAMPLE_SEED, info(INFO_SEED));
     let (entry_token, entry_logits) = (ROUTINE_TOKEN, ROUTINE_LOGITS);
-    let (mut last, mut position) = (0, 0);
+    let depth = (info(INFO_DRAFT_DEPTH) as usize).min(MAX_DRAFT_DEPTH);
+    let (mut last, mut position, mut draft_position) = (0, 0, 0u32);
     read_prompt(&mut |token| {
+        // The draft head reads the state before each token, to predict the one after it.
+        if depth > 0 && position > 0 {
+            run_die(ROUTINE_FEED_FROM_MAIN, 0, 0);
+            run_die(ROUTINE_DRAFT, token, draft_position);
+            draft_position += 1;
+        }
         run_die(entry_token, token, position);
         last = token;
         position += 1;
@@ -351,15 +378,53 @@ extern "C" fn main() {
     let stops = info(INFO_STOP_TABLE) as usize..(info(INFO_STOP_TABLE) + info(INFO_STOP_COUNT)) as usize;
     // Raw mode has no tokenizer in memory to ask.
     let mut decoding = if info(INFO_RAW_TOKENS) != 0 { Decoding::default() } else { tokenizer().decoding() };
+    let mut pending = [(0u32, [0u32; MAX_DRAFT_DEPTH]); MAX_DRAFT_DEPTH + 1];
+    let (mut waiting, mut produced, mut previous) = (0usize, 0u32, 0u32);
     for _ in 0..info(INFO_MAX_NEW) {
         run_die(entry_logits, last, position - 1);
         last = sample();
         if stops.clone().any(|at| info(at) == last) {
             return;
         }
+        if depth > 0 {
+            if produced > 0 {
+                // Earlier guesses are scored against what the model really produced.
+                let mut kept = 0;
+                for index in 0..waiting {
+                    let (from, guesses) = pending[index];
+                    let ahead = produced.wrapping_sub(from) as usize;
+                    if (1..=depth).contains(&ahead) {
+                        peripheral_write(REG_DRAFT_RESULT, ((ahead as u32 - 1) << 1) | (guesses[ahead - 1] == previous) as u32);
+                    }
+                    if ahead < depth {
+                        pending[kept] = pending[index];
+                        kept += 1;
+                    }
+                }
+                waiting = kept;
+                let mut guess = last;
+                let mut guesses = [0u32; MAX_DRAFT_DEPTH];
+                run_die(ROUTINE_FEED_FROM_MAIN, 0, 0);
+                for (step, slot) in guesses.iter_mut().enumerate().take(depth) {
+                    run_die(ROUTINE_DRAFT_LOGITS, guess, draft_position + step as u32);
+                    guess = sample_draft();
+                    *slot = guess;
+                    run_die(ROUTINE_FEED_FROM_DRAFT, 0, 0);
+                }
+                if waiting < pending.len() {
+                    pending[waiting] = (produced + 1, guesses);
+                    waiting += 1;
+                }
+            }
+            run_die(ROUTINE_FEED_FROM_MAIN, 0, 0);
+            run_die(ROUTINE_DRAFT, last, draft_position);
+            draft_position += 1;
+        }
         emit(last, &mut decoding);
         run_die(entry_token, last, position);
         position += 1;
+        produced += 1;
+        previous = last;
     }
 }
 

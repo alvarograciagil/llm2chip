@@ -80,6 +80,7 @@ impl DieEngine for VmEngine {
 }
 
 /// Addresses of the logits and their exponent when the die runs as one software engine.
+pub const FLOW_DRAFT_REGISTER: u32 = 2;
 pub const FLOW_INDEX_BITS: u32 = 18;
 pub const FLOW_REGISTER_BITS: u32 = 12;
 
@@ -90,6 +91,7 @@ pub struct RunnerEngine<'a> {
     pending: Option<u32>,
     mantissas: Vec<i64>,
     exponent: i64,
+    draft_mantissas: Vec<i64>,
     bits: u32,
     cycles_per_token: u64,
     pub steps: usize,
@@ -105,7 +107,7 @@ pub struct RunnerEngine<'a> {
 
 impl<'a> RunnerEngine<'a> {
     pub fn new(engine: &'a mut dyn Runner, bits: u32, cycles_per_token: u64) -> Self {
-        Self { engine, pending: None, mantissas: Vec::new(), exponent: 0, bits, cycles_per_token, steps: 0, last_seconds: 0.0, saturated: 0, die_cycles: 0, error: None, tokens: Vec::new(), generated: 0 }
+        Self { engine, pending: None, mantissas: Vec::new(), exponent: 0, draft_mantissas: Vec::new(), bits, cycles_per_token, steps: 0, last_seconds: 0.0, saturated: 0, die_cycles: 0, error: None, tokens: Vec::new(), generated: 0 }
     }
 
     fn step(&mut self, token: u32, want_logits: bool) {
@@ -126,9 +128,29 @@ impl<'a> RunnerEngine<'a> {
 }
 
 impl DieEngine for RunnerEngine<'_> {
-    fn run(&mut self, routine: usize, token: u32, _position: u32) {
+    fn run(&mut self, routine: usize, token: u32, position: u32) {
+        use crate::lower::{ENTRY_DRAFT, ENTRY_DRAFT_LOGITS, ENTRY_FEED_FROM_DRAFT, ENTRY_FEED_FROM_MAIN, ENTRY_LOGITS};
         if let Some(previous) = self.pending.take() {
-            self.step(previous, routine == crate::lower::ENTRY_LOGITS);
+            self.step(previous, routine == ENTRY_LOGITS || routine == ENTRY_FEED_FROM_MAIN);
+        }
+        match routine {
+            ENTRY_FEED_FROM_MAIN => return self.engine.feed_draft_from_main(),
+            ENTRY_FEED_FROM_DRAFT => return self.engine.feed_draft_from_draft(),
+            ENTRY_DRAFT | ENTRY_DRAFT_LOGITS => {
+                if (position as usize) < self.engine.draft_tokens() {
+                    self.engine.truncate_draft(position as usize);
+                }
+                match self.engine.draft(token, routine == ENTRY_DRAFT_LOGITS) {
+                    Ok(Some(logits)) => {
+                        let values: Vec<f64> = logits.iter().map(|v| *v as f64).collect();
+                        self.draft_mantissas = encode_vector(&values, self.bits).0;
+                    }
+                    Ok(None) => {}
+                    Err(error) => self.error = Some(error),
+                }
+                return;
+            }
+            _ => {}
         }
         if routine == crate::lower::ENTRY_TOKEN {
             self.die_cycles += self.cycles_per_token;
@@ -148,7 +170,8 @@ impl DieEngine for RunnerEngine<'_> {
         if register == (1 << FLOW_REGISTER_BITS) - 1 {
             return self.exponent;
         }
-        self.mantissas.get((address & ((1 << FLOW_INDEX_BITS) - 1)) as usize).copied().unwrap_or(0)
+        let source = if register == FLOW_DRAFT_REGISTER { &self.draft_mantissas } else { &self.mantissas };
+        source.get((address & ((1 << FLOW_INDEX_BITS) - 1)) as usize).copied().unwrap_or(0)
     }
 }
 

@@ -2158,3 +2158,61 @@ button.model-toggle {
     flex-wrap: wrap;
   }
 }
+
+.lab-bars {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: var(--group);
+}
+
+.lab-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) 76px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.lab-label {
+  color: var(--label-2);
+}
+
+.lab-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--control);
+}
+
+.lab-track i {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+.lab-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.lab-summary {
+  margin: 0;
+}
+
+.lab-summary div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+}
+
+.lab-summary dt {
+  color: var(--label-2);
+}
+
+.lab-summary dd {
+  margin: 0;
+}

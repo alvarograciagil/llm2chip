@@ -136,12 +136,13 @@ fn assert_vm_matches_gates(program: &compiler::Program, config: &str, dir: &Path
     }
 }
 
-#[test]
-fn draft_head_runs_on_the_gates() {
-    let config = CONFIG.replacen(r#""model_type": "qwen3_5_text","#, r#""model_type": "qwen3_5_text", "mtp_num_hidden_layers": 1,"#, 1);
-    let dir = std::env::temp_dir().join(format!("llm2chip-mtp-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    make_checkpoint(&dir);
+fn draft_config() -> String {
+    CONFIG.replacen(r#""model_type": "qwen3_5_text","#, r#""model_type": "qwen3_5_text", "mtp_num_hidden_layers": 1,"#, 1)
+}
+
+fn draft_checkpoint(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    make_checkpoint(dir);
     let mut rng = Rng(0xABCD_0123_4567_89EF);
     let mut w = Writer::default();
     for name in ["mtp.pre_fc_norm_embedding", "mtp.pre_fc_norm_hidden", "mtp.norm", "mtp.layers.0.input_layernorm", "mtp.layers.0.post_attention_layernorm", "mtp.layers.0.self_attn.q_norm", "mtp.layers.0.self_attn.k_norm"] {
@@ -157,6 +158,13 @@ fn draft_head_runs_on_the_gates() {
     w.matrix(&p("mlp.up_proj"), 16, 8, &mut rng);
     w.matrix(&p("mlp.down_proj"), 8, 16, &mut rng);
     w.write(&dir.join("mtp.safetensors"));
+}
+
+#[test]
+fn draft_head_runs_on_the_gates() {
+    let config = draft_config();
+    let dir = std::env::temp_dir().join(format!("llm2chip-mtp-{}", std::process::id()));
+    draft_checkpoint(&dir);
 
     let program = compile_qwen3_5(&config).unwrap();
     let tokens = [3u32, 7];
@@ -354,4 +362,90 @@ fn sliding_windows_and_biases_run_on_the_gates() {
             }
         }
     }
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "millones de instrucciones: solo con optimizaciones")]
+fn the_firmware_scores_the_draft_head_like_the_software() {
+    use netlist::chip::{chip_info, ChipModel, GenerationSetup};
+    use netlist::image::build_image;
+    use netlist::rv32::Rv32Iss;
+    use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
+    use netlist::soc::{FirmwareImage, SocBus, SocConfig};
+    use netlist::Parameter;
+    use sim::chip::{RunnerEngine, FLOW_DRAFT_REGISTER, FLOW_INDEX_BITS, FLOW_REGISTER_BITS};
+
+    let dir = std::env::temp_dir().join(format!("llm2chip-mtp-firmware-{}", std::process::id()));
+    draft_checkpoint(&dir);
+    let config = draft_config();
+    let engine = || Engine::new(compile_qwen3_5(&config).unwrap(), Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
+    let best = |v: &[f32]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
+    let (prompt, depth, count) = ([3u32, 7, 1], 2usize, 6usize);
+
+    let (mut hits, mut tries) = ([0u32; 4], [0u32; 4]);
+    let mut software = engine();
+    let mut next = 0;
+    for (i, id) in prompt.iter().enumerate() {
+        let (logits, _) = software.step(*id, true).unwrap();
+        if i + 1 == prompt.len() {
+            next = best(logits.unwrap());
+        }
+        software.feed_draft_from_main();
+        let following = if i + 1 == prompt.len() { next } else { prompt[i + 1] };
+        software.draft(following, false).unwrap();
+    }
+    let mut output: Vec<u32> = Vec::new();
+    let mut pending: Vec<(usize, Vec<u32>)> = Vec::new();
+    for _ in 0..count {
+        output.push(next);
+        let (logits, _) = software.step(next, true).unwrap();
+        next = best(logits.unwrap());
+        let position = output.len();
+        pending.retain(|(from, guesses)| {
+            let ahead = position - from;
+            if ahead >= 1 && ahead <= guesses.len() {
+                tries[ahead - 1] += 1;
+                hits[ahead - 1] += (guesses[ahead - 1] == output[position - 1]) as u32;
+            }
+            ahead < guesses.len()
+        });
+        let mark = software.draft_tokens();
+        let (mut guess, mut guesses) = (next, Vec::new());
+        software.feed_draft_from_main();
+        for _ in 0..depth {
+            guess = best(software.draft(guess, true).unwrap().unwrap());
+            guesses.push(guess);
+            software.feed_draft_from_draft();
+        }
+        software.truncate_draft(mark);
+        pending.push((position + 1, guesses));
+        software.feed_draft_from_main();
+        software.draft(next, false).unwrap();
+    }
+
+    let firmware = FirmwareImage::from_elf(include_bytes!("../../../firmware/prebuilt/firmware.elf")).unwrap();
+    let cell = die_config().cell;
+    let die = DieConfig { reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, ..die_config() };
+    let _ = cell;
+    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }] };
+    let setup = GenerationSetup { max_new: count as u32 + 1, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: depth as u32, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS };
+    let info = chip_info(&die, &code, 1, 8, &setup);
+    let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
+    let input: Vec<u8> = prompt.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect();
+    let mut chip_engine = engine();
+    let runner = RunnerEngine::new(&mut chip_engine, 16, 0);
+    let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
+    let mut bus = SocBus::booted_with(SocConfig { program_bits: 14, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
+    let mut cpu = Rv32Iss::default();
+    while !cpu.halted {
+        cpu.step(&mut bus);
+        assert!(cpu.cycle < 200_000_000, "el firmware no termina");
+    }
+    assert!(bus.peripheral.engine.error.is_none(), "{:?}", bus.peripheral.engine.error);
+    let tokens: Vec<u32> = bus.tx.as_chunks::<4>().0.iter().map(|t| u32::from_le_bytes(*t)).collect();
+    assert_eq!(tokens[..count], output[..count], "los tokens generados");
+    assert_eq!(bus.peripheral.draft_tries[..depth], tries[..depth], "intentos");
+    assert_eq!(bus.peripheral.draft_hits[..depth], hits[..depth], "aciertos");
+    assert!(tries[0] > 0);
+    std::fs::remove_dir_all(dir).unwrap();
 }

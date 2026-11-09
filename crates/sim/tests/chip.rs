@@ -92,7 +92,7 @@ fn text_goes_through_the_whole_chip_in_gates() {
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), die, Some(CHIP_TOKENS)).unwrap();
     let code = layout.microprogram(&program).unwrap();
-    let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new() };
+    let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0 };
     let info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
     let mut segments = image_segments(&die, &code, &layout);
     // A sample of the model's own weights goes through the real controller into a cell.
@@ -151,7 +151,7 @@ fn any_token_on_the_stop_list_ends_the_answer() {
     let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), die, Some(CHIP_TOKENS)).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let generate = |stop: Vec<u32>| {
-        let setup = GenerationSetup { max_new: 1, greedy: true, limit: 4, temperature: 256, seed: 1, raw_tokens: false, stop };
+        let setup = GenerationSetup { max_new: 1, greedy: true, limit: 4, temperature: 256, seed: 1, raw_tokens: false, stop, draft_depth: 0, draft_logits: 0 };
         let info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
         let image = build_image(&firmware.program, &firmware.data, &info, &tiny_tokenizer().to_words(), &image_segments(&die, &code, &layout)).unwrap();
         let engine = VmEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
