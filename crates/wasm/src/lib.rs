@@ -299,7 +299,7 @@ impl DieSimulation {
         let p: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&e.to_string()))?;
         if kind == "boot" {
             let config = demo::block_config();
-            let chip = ChipConfig { soc: SocConfig { program_bits: 12, data_bits: 13, fifo_bits: 6 }, die: config, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+            let chip = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 13, fifo_bits: 6 }, die: config, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
             let design = chip_design(chip);
             let mut sim = Simulator::new(&design).map_err(|e| JsError::new(&e.0))?;
             sim.set("reset", 1).map_err(|e| JsError::new(&e.0))?;

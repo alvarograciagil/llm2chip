@@ -7,7 +7,7 @@ use netlist::Simulator;
 use std::path::Path;
 use std::process::Command;
 
-const CONFIG: SocConfig = SocConfig { program_bits: 12, data_bits: 13, fifo_bits: 6 };
+const CONFIG: SocConfig = SocConfig { program_bits: 13, data_bits: 13, fifo_bits: 6 };
 
 fn build_firmware() -> Option<FirmwareImage> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../firmware");

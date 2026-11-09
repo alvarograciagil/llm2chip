@@ -363,7 +363,7 @@ fn take_text(bytes: &[u8], shown: &mut usize) -> String {
 }
 
 /// Runs the chip's real firmware at instruction level around the loaded engine.
-fn run_firmware(loaded: &mut Loaded, text: &str, ids: &[u32], request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32], request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> {
     use std::sync::atomic::Ordering::Relaxed;
     if request.mtp_depth > 0 {
         return Err("la cabeza MTP todavía no funciona con la CPU simulada".into());
@@ -386,7 +386,9 @@ fn run_firmware(loaded: &mut Loaded, text: &str, ids: &[u32], request: &Generate
     let info = chip_info(&die, &code, FLOW_LOGITS_REGISTER, vocabulary as u32, &setup);
     let use_tables = request.fidelity.tokenizer;
     if use_tables && loaded.firmware_tables.is_none() {
-        loaded.firmware_tables = Some(TokenizerTables::from_file(&loaded.dir.join("tokenizer.json"))?.to_words());
+        let mut tables = TokenizerTables::from_file(&loaded.dir.join("tokenizer.json"))?;
+        tables.set_add_special(add_special);
+        loaded.firmware_tables = Some(tables.to_words());
     }
     let tables: &[u32] = if use_tables { loaded.firmware_tables.as_deref().unwrap_or_default() } else { &[] };
     let image = build_image(&firmware.program, &firmware.data, &info, tables, &[])?;
@@ -397,7 +399,8 @@ fn run_firmware(loaded: &mut Loaded, text: &str, ids: &[u32], request: &Generate
     };
 
     let Loaded { engine, tokenizer, .. } = loaded;
-    let data_bits = if use_tables { 22 } else { 13 };
+    // The memory the chip needs for this model's tables and its image layout.
+    let data_bits = (image.len().max(1 << 13).next_power_of_two().ilog2()).max(13);
     let unit = sampler_model(vocabulary, seed, request.fidelity.sampler_lanes);
     let runner = RunnerEngine::new(engine.as_mut(), FLOW_BITS, request.fidelity.cycles_per_token.max(0.0) as u64);
     let soc = SocConfig { program_bits: 14, data_bits, fifo_bits: 6 };
@@ -446,6 +449,9 @@ fn run_firmware(loaded: &mut Loaded, text: &str, ids: &[u32], request: &Generate
         emitted = output.len();
     }
     let runner = &bus.peripheral.engine;
+    if use_tables && runner.tokens.is_empty() && !ids.is_empty() {
+        return Err("el texto no cabe en la memoria de trabajo del tokenizador del chip".into());
+    }
     let tokenizer_match = use_tables.then(|| runner.tokens.len() >= ids.len() && runner.tokens[..ids.len()] == *ids);
     let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": emitted, "chip": { "cycles": cpu.cycle, "die_cycles": runner.die_cycles, "tokenizer_match": tokenizer_match } }));
     Ok(())
@@ -460,7 +466,7 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     loaded.engine.reset();
     let _ = sender.blocking_send(serde_json::json!({ "type": "start", "prompt_tokens": ids.len() }));
     if request.fidelity.firmware {
-        return run_firmware(loaded, &text, &ids, &request, sender, cancelled);
+        return run_firmware(loaded, &text, add_special, &ids, &request, sender, cancelled);
     }
 
     let mut unit = sampler_model(loaded.engine.vocabulary(), 0x1234_5679, request.fidelity.sampler_lanes);

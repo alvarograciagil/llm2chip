@@ -16,6 +16,13 @@ pub const CONFIG: &str = r#"{
   "rope_parameters": { "rope_theta": 10000.0 }
 }"#;
 
+/// Eight letters, one token each: enough for the chip tests' text in very little memory.
+pub fn tiny_tokenizer() -> sim::tokenizer::TokenizerTables {
+    let json = r#"{"added_tokens":[],"normalizer":null,"pre_tokenizer":null,"post_processor":null,"decoder":{"type":"Fuse"},
+      "model":{"type":"BPE","vocab":{"h":0,"y":1,"c":2,"d":3,"e":4,"f":5,"g":6,"o":7},"merges":[]}}"#;
+    sim::tokenizer::TokenizerTables::from_json(json, 64, 256).unwrap()
+}
+
 pub fn die_config() -> DieConfig {
     DieConfig {
         cells: 1,

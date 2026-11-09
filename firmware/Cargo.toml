@@ -11,6 +11,9 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[dependencies]
+tokenizer-rt = { path = "../crates/tokenizer-rt" }
+
 [profile.release]
 opt-level = "s"
 lto = true

@@ -9,7 +9,6 @@ use netlist::soc::{FirmwareImage, SocBus, SocConfig};
 use netlist::{Design, DieConfig, Simulator};
 use sim::chip::{plan_parts, VmEngine};
 use sim::lower::Layout;
-use sim::tokenizer::TokenizerTables;
 use sim::Weights;
 use std::collections::VecDeque;
 use std::path::Path;
@@ -163,8 +162,8 @@ fn setup(name: &str, firmware: &FirmwareImage) -> Setup {
     make_checkpoint(&dir);
     let program = compile_qwen3_5(CONFIG).unwrap();
     let die = DieConfig { microcode_bits: 15, ..die_config() };
-    let config = ChipConfig { soc: SocConfig { program_bits: 12, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
-    let tables = TokenizerTables { byte_symbols: (0..256).map(|b| b % 8).collect(), letters: vec![(97, 122)], token_bytes: (0..8).map(|t| vec![b'a' + t]).collect(), text_capacity: 64, ..Default::default() };
+    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let tables = tiny_tokenizer();
     let generation = GenerationSetup { max_new: 1, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: [u32::MAX, u32::MAX] };
     let plans: Vec<_> = [1, 2].iter().map(|chips| plan_parts(&program, &dir, die, CHIP_TOKENS, &generation, *chips).unwrap()).collect();
     let image = build_plan_image(&firmware.program, &firmware.data, &tables.to_words(), &plans).unwrap();

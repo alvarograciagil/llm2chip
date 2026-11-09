@@ -10,7 +10,6 @@ use netlist::soc::{FirmwareImage, SocBus, SocConfig};
 use netlist::Simulator;
 use sim::chip::{image_segments, VmEngine};
 use sim::lower::Layout;
-use sim::tokenizer::TokenizerTables;
 use sim::Weights;
 use std::path::Path;
 use std::process::Command;
@@ -90,7 +89,7 @@ fn text_goes_through_the_whole_chip_in_gates() {
     let program = compile_qwen3_5(CONFIG).unwrap();
 
     let die = netlist::DieConfig { microcode_bits: 15, ..die_config() };
-    let config = ChipConfig { soc: SocConfig { program_bits: 12, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), die, Some(CHIP_TOKENS)).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: [u32::MAX, u32::MAX] };
@@ -100,7 +99,7 @@ fn text_goes_through_the_whole_chip_in_gates() {
     let sample = sim::image::sample_codes(&Weights::open(&dir).unwrap(), "model.embed_tokens.weight", 8).unwrap();
     segments.push(Segment { target: Target::CellWeight, unit: 0, address: 0, beats: 1, words: sample.clone() });
     eprintln!("{} segmentos, microprograma de {} palabras", segments.len(), code.words.len());
-    let tables = TokenizerTables { byte_symbols: (0..256).map(|b| b % 8).collect(), letters: vec![(97, 122)], token_bytes: (0..8).map(|t| vec![b'a' + t]).collect(), text_capacity: 64, ..Default::default() };
+    let tables = tiny_tokenizer();
     let image = build_image(&firmware.program, &firmware.data, &info, &tables.to_words(), &segments).unwrap();
     eprintln!("imagen de {} palabras", image.len());
 
