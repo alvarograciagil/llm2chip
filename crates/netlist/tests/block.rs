@@ -27,9 +27,7 @@ fn mask(v: i64, bits: u32) -> u128 {
 /// Loads the program through the host ports, runs it, and returns the simulator.
 fn run_gates(c: DieConfig, asm: &Assembly) -> Simulator {
     let mut program = DieProgram::new(c);
-    for step in &asm.steps {
-        program.alu(step);
-    }
+    program.assemble(&asm.steps);
     let words = program.finish();
     assert!(words.len() < 1 << c.microcode_bits, "microprograma demasiado largo: {}", words.len());
 
@@ -95,8 +93,8 @@ fn block_multiply_and_add_track_real_numbers() {
     let b = [100.0, 0.5, -2.0, 8.0];
     asm.load_vector(0, &a);
     asm.load_vector(1, &b);
-    asm.multiply(0, 1, 2, 4);
-    asm.add(0, 1, 3, 4);
+    asm.multiply(0, 1, 2, 4.into());
+    asm.add(0, 1, 3, 4.into());
 
     let mut sim = run_gates(c, &asm);
     let mut model = Behavior::new(&c, &asm.initial);
@@ -117,8 +115,8 @@ fn norms_and_function_tables_work_in_gates() {
     asm.load_vector(0, &x);
     asm.rms_normalize(0, 1, 4, (2, 3), None, None);
     asm.l2_normalize(0, 4, 4, (5, 6), None);
-    asm.function(FN_SIGMOID, 0, 7, 4);
-    asm.function(FN_SOFTPLUS, 0, 8, 4);
+    asm.function(FN_SIGMOID, 0, 7, 4.into());
+    asm.function(FN_SOFTPLUS, 0, 8, 4.into());
 
     let mut sim = run_gates(c, &asm);
     let mut model = Behavior::new(&c, &asm.initial);
@@ -152,7 +150,7 @@ fn softmax_attention_matches_floating_point() {
     asm.load_vector(2, &v);
     asm.load_vector(3, &ones);
     let regs = AttentionRegs { scores: 5, top: 6, shifted: 7, weights: 8, total: 9, inverse: 10, probabilities: 11 };
-    asm.attention(0, 1, 2, 3, 4, width as u32, tokens as u32, None, regs);
+    asm.attention(0, 1, 2, 3, 4, width as u32, (tokens as u32).into(), None, regs);
 
     let mut sim = run_gates(c, &asm);
     let mut model = Behavior::new(&c, &asm.initial);
@@ -258,7 +256,7 @@ fn every_single_operation_matches_the_model() {
         mk(netlist::die::OP_WIDE_LZC, (0, 0), (0, 0), 17),
     ];
     steps.retain(|_| true);
-    asm.steps = steps;
+    asm.steps = steps.into_iter().map(Into::into).collect();
 
     let mut sim = run_gates(c, &asm);
     let mut model = Behavior::new(&c, &asm.initial);

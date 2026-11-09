@@ -244,6 +244,16 @@ impl Simulator {
         Ok(())
     }
 
+    /// Sets a port of any width from 32-bit words, least significant first.
+    pub fn set_words(&mut self, port: &str, words: &[u32]) -> Result<(), SimError> {
+        let bits = self.ports.get(port).ok_or_else(|| SimError(format!("puerto desconocido: {port}")))?;
+        for (i, s) in bits.iter().enumerate() {
+            let word = words.get(i / 32).copied().unwrap_or(0);
+            self.values[*s] = (word >> (i % 32) & 1) as u8;
+        }
+        Ok(())
+    }
+
     /// Propagates the current inputs through the combinational logic.
     pub fn settle(&mut self) {
         let v = &mut self.values;

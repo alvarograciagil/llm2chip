@@ -177,7 +177,7 @@ pub fn attention_demo(c: &DieConfig) -> BlockDemo {
     assembly.load_vector(2, &v);
     assembly.load_vector(3, &vec![1.0; tokens]);
     let regs = AttentionRegs { scores: 5, top: 6, shifted: 7, weights: 8, total: 9, inverse: 10, probabilities: 11 };
-    assembly.attention(0, 1, 2, 3, 4, width as u32, tokens as u32, None, regs);
+    assembly.attention(0, 1, 2, 3, 4, width as u32, (tokens as u32).into(), None, regs);
 
     let scores: Vec<f64> = (0..tokens).map(|t| (0..width).map(|j| q[j] * k[t * width + j]).sum()).collect();
     let top = scores.iter().copied().fold(f64::MIN, f64::max);
@@ -221,9 +221,7 @@ pub fn delta_demo(c: &DieConfig) -> BlockDemo {
 pub fn block_host_steps(c: DieConfig, assembly: &Assembly) -> Vec<TestStep> {
     let step = |pairs: Vec<(&str, u128)>| TestStep { inputs: pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect() };
     let mut program = DieProgram::new(c);
-    for alu in &assembly.steps {
-        program.alu(alu);
-    }
+    program.assemble(&assembly.steps);
     let mut steps = vec![step(vec![("start", 1)])];
     for (i, word) in program.finish().iter().enumerate() {
         steps.push(step(vec![("load_code", 1), ("code_addr", i as u128), ("code_data", word.encode(&c))]));

@@ -22,7 +22,7 @@ El chip recibe bytes de texto y devuelve bytes de texto. El tokenizado, la infer
 | Red de activaciones | Distribución y suma | En puertas |
 | Carriles vectoriales | Atención, delta, puertas de la MLP | En puertas, un carril |
 | Tablas de función | SiLU, sigmoide, exp, raíz | En puertas |
-| Registros vectoriales y microsecuenciador | Control de cada etapa | En puertas |
+| Registros vectoriales y microsecuenciador | Control de cada etapa, bucles y parámetros | En puertas, con microprograma fijo |
 | Enlace entre dies | Paso de activaciones | En puertas |
 | SRAM KV y estado DeltaNet | Memoria del modelo | Modelo funcional y área |
 | Bus interno del sistema | Une CPU, memorias y periféricos | En puertas |
@@ -89,9 +89,13 @@ Hoy los pesos se escriben directamente en la memoria simulada. El cambio central
 
 **Inyección de fallos.** La simulación podrá invertir bits y marcar celdas defectuosas, para comprobar que ECC, CRC y reparación actúan como deben.
 
-## Decisión pendiente: microprograma por token
+## Microprograma fijo
 
-Hoy el programa de cada token lo genera el host, porque depende del token, de su posición y del tamaño de la caché KV. Un chip real no puede depender de eso. La propuesta es un microprograma fijo, cargado una sola vez desde la imagen, con registros de parámetros (token, posición, longitud de la caché) y bucles en el secuenciador. Hasta tenerlo no se puede conectar el firmware al die para generar texto en puertas.
+El microprograma se carga una sola vez desde la imagen y no depende del token ni de la posición. El secuenciador tiene registros de índice que suman un desplazamiento a cada operando, y un salto condicional para los bucles. La CPU escribe los parámetros (fila del embedding, posición en la caché, tokens de contexto) y arranca una de las rutinas: token, logits, y las de la cabeza MTP.
+
+Los senos y cosenos de RoPE pasan a una tabla en memoria con una fila por posición. Es la parte que más crece con el contexto (cada posición ocupa 3·h+1 valores), así que en contextos largos convendrá sustituirla por dos tablas y suma de ángulos.
+
+La lógica por cabeza y por capa sigue desenrollada: el programa crece con el número de cabezas, aunque ya no con el de elementos. Plegar las cabezas en bucles es la mejora pendiente para que quepa Qwen3.8 completo.
 
 ## Fases
 

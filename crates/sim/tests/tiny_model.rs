@@ -1,10 +1,10 @@
 //! A complete Qwen3.5-shaped model, weights and all, executed on the gates.
 
 use compiler::compile_qwen3_5;
-use netlist::block::{tables, Assembly};
+use netlist::block::tables;
 use netlist::demo::read_block_value;
-use netlist::{die_design, CellConfig, DieConfig, DieProgram, Simulator};
-use sim::lower::Layout;
+use netlist::{die_design, CellConfig, DieConfig, Microprogram, Simulator};
+use sim::lower::{Layout, ENTRY_DRAFT, ENTRY_DRAFT_LOGITS, ENTRY_FEED_FROM_MAIN, ENTRY_LOGITS, ENTRY_TOKEN};
 use sim::{ExactEngine, Engine, Numeric, Weights};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -172,23 +172,35 @@ fn make_moe_checkpoint(dir: &Path) {
     w.write(&dir.join("model.safetensors"));
 }
 
-fn run_assembly(sim: &mut Simulator, c: &DieConfig, assembly: &Assembly) {
-    let mut microcode = DieProgram::new(*c);
-    for step in &assembly.steps {
-        microcode.alu(step);
-    }
-    let words = microcode.finish();
-    assert!(words.len() < 1 << c.microcode_bits, "{} palabras", words.len());
+/// The longest context the die of these tests is built for.
+const CHIP_TOKENS: usize = 8;
+
+/// Writes the microprogram, once, as the load controller does at start-up.
+fn load_microprogram(sim: &mut Simulator, c: &DieConfig, code: &Microprogram) {
+    assert!(code.words.len() < 1 << c.microcode_bits, "{} palabras", code.words.len());
     sim.set("start", 1).unwrap();
     sim.tick();
     sim.set("load_code", 1).unwrap();
-    for (i, word) in words.iter().enumerate() {
+    for (i, word) in code.words.iter().enumerate() {
         sim.set("code_addr", i as u64).unwrap();
-        sim.set_wide("code_data", word.encode(c)).unwrap();
+        sim.set_words("code_data", &word.encode_words(c)).unwrap();
         sim.tick();
     }
     sim.set("load_code", 0).unwrap();
-    load_assembly(sim, c, &assembly.initial);
+}
+
+/// What the firmware does for each routine: set the parameters and start the die.
+fn enter(sim: &mut Simulator, code: &Microprogram, routine: usize, token: u32, position: u32) -> u64 {
+    sim.set("start", 0).unwrap();
+    sim.set("param_write", 1).unwrap();
+    for parameter in &code.parameters {
+        sim.set("param_index", parameter.register as u64).unwrap();
+        sim.set("param_data", parameter.value(token, position) as u64).unwrap();
+        sim.tick();
+    }
+    sim.set("param_write", 0).unwrap();
+    sim.set("entry", code.entries[routine] as u64).unwrap();
+    sim.set("start", 1).unwrap();
     sim.tick();
     sim.set("start", 0).unwrap();
     let mut cycles = 0u64;
@@ -197,13 +209,21 @@ fn run_assembly(sim: &mut Simulator, c: &DieConfig, assembly: &Assembly) {
         cycles += 1;
         assert!(cycles < 20_000_000, "el secuenciador no se detiene");
     }
+    cycles
 }
 
-fn gates_after(program: &compiler::Program, dir: &Path, c: DieConfig, tokens: &[u32]) -> (Simulator, Layout) {
-    let layout = Layout::new(program, &Weights::open(dir).unwrap(), c, true).unwrap();
+struct GateRun {
+    sim: Simulator,
+    layout: Layout,
+    code: Microprogram,
+    cycles: u64,
+}
+
+fn gates_after(program: &compiler::Program, dir: &Path, c: DieConfig, tokens: &[u32]) -> GateRun {
+    let layout = Layout::new(program, &Weights::open(dir).unwrap(), c, Some(CHIP_TOKENS)).unwrap();
+    let code = layout.microprogram(program).unwrap();
     let mut sim = Simulator::new(&die_design(c)).unwrap();
-    sim.set("start", 1).unwrap();
-    sim.tick();
+    load_microprogram(&mut sim, &c, &code);
     load_assembly(&mut sim, &c, &layout.setup().initial);
     sim.set("load_fn", 1).unwrap();
     for (address, value) in tables(&c).iter().enumerate() {
@@ -212,11 +232,14 @@ fn gates_after(program: &compiler::Program, dir: &Path, c: DieConfig, tokens: &[
         sim.tick();
     }
     sim.set("load_fn", 0).unwrap();
+    let mut cycles = 0;
     for (position, token) in tokens.iter().enumerate() {
-        let assembly = layout.token(program, *token, position, position + 1 == tokens.len()).unwrap();
-        run_assembly(&mut sim, &c, &assembly);
+        cycles += enter(&mut sim, &code, ENTRY_TOKEN, *token, position as u32);
+        if position + 1 == tokens.len() {
+            cycles += enter(&mut sim, &code, ENTRY_LOGITS, *token, position as u32);
+        }
     }
-    (sim, layout)
+    GateRun { sim, layout, code, cycles }
 }
 
 fn assert_vm_matches_gates(program: &compiler::Program, config: &str, dir: &Path, c: DieConfig, tokens: &[u32], sim: &mut Simulator, layout: &Layout) {
@@ -266,12 +289,11 @@ fn draft_head_runs_on_the_gates() {
     reference.feed_draft_from_main();
     let expected = reference.draft(next, true).unwrap().unwrap().to_vec();
 
-    let c = DieConfig { reg_bits: 10, index_bits: 9, microcode_bits: 19, ..die_config() };
-    let (mut sim, layout) = gates_after(&program, &dir, c, &tokens);
-    let mut assembly = Assembly::new(&c);
-    layout.feed_draft(&mut assembly, &program, true);
-    layout.run_draft(&mut assembly, &program, next, 0, true).unwrap();
-    run_assembly(&mut sim, &c, &assembly);
+    let c = DieConfig { reg_bits: 10, index_bits: 9, ..die_config() };
+    let GateRun { mut sim, layout, code, .. } = gates_after(&program, &dir, c, &tokens);
+    enter(&mut sim, &code, ENTRY_FEED_FROM_MAIN, next, 0);
+    enter(&mut sim, &code, ENTRY_DRAFT, next, 0);
+    enter(&mut sim, &code, ENTRY_DRAFT_LOGITS, next, 0);
 
     let draft = program.draft.as_ref().unwrap();
     let got: Vec<f32> = (0..8).map(|i| read_block_value(&mut sim, c, layout.register_of(draft.logits), i).1 as f32).collect();
@@ -306,7 +328,7 @@ fn other_mantissa_widths_match_the_gates_bit_for_bit() {
         base.cell.activation_bits = bits;
         base.cell.accumulator_bits = 2 * bits;
         base.function_bits = 12.min(bits);
-        let (mut sim, layout) = gates_after(&program, &dir, base, &tokens);
+        let GateRun { mut sim, layout, .. } = gates_after(&program, &dir, base, &tokens);
         assert_vm_matches_gates(&program, CONFIG, &dir, base, &tokens, &mut sim, &layout);
     }
     std::fs::remove_dir_all(&dir).ok();
@@ -341,7 +363,7 @@ fn mixture_of_experts_runs_on_the_gates() {
     }
 
     let c = DieConfig { reg_bits: 10, index_bits: 9, ..die_config() };
-    let (mut sim, layout) = gates_after(&program, &dir, c, &tokens);
+    let GateRun { mut sim, layout, .. } = gates_after(&program, &dir, c, &tokens);
     let got: Vec<f32> = (0..8).map(|i| read_block_value(&mut sim, c, layout.logits_register(&program), i).1 as f32).collect();
     let best = |v: &[f32]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
     assert_eq!(best(&got), best(&expected), "{got:?} {expected:?}");
@@ -370,49 +392,8 @@ fn tiny_model_runs_whole_on_the_gates() {
     }
 
     let c = die_config();
-    let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), c, true).unwrap();
-    let mut sim = Simulator::new(&die_design(c)).unwrap();
-    sim.set("start", 1).unwrap();
-    sim.tick();
-    load_assembly(&mut sim, &c, &layout.setup().initial);
-    sim.set("load_fn", 1).unwrap();
-    for (address, value) in tables(&c).iter().enumerate() {
-        sim.set("fn_addr", address as u64).unwrap();
-        sim.set("cell_data", *value as u64 & mask(&c)).unwrap();
-        sim.tick();
-    }
-    sim.set("load_fn", 0).unwrap();
-
-    let mut total_cycles = 0u64;
-    for (position, token) in tokens.iter().enumerate() {
-        let assembly = layout.token(&program, *token, position, position + 1 == tokens.len()).unwrap();
-        let mut microcode = DieProgram::new(c);
-        for step in &assembly.steps {
-            microcode.alu(step);
-        }
-        let words = microcode.finish();
-        assert!(words.len() < 1 << c.microcode_bits, "{} palabras", words.len());
-
-        sim.set("start", 1).unwrap();
-        sim.tick();
-        sim.set("load_code", 1).unwrap();
-        for (i, word) in words.iter().enumerate() {
-            sim.set("code_addr", i as u64).unwrap();
-            sim.set_wide("code_data", word.encode(&c)).unwrap();
-            sim.tick();
-        }
-        sim.set("load_code", 0).unwrap();
-        load_assembly(&mut sim, &c, &assembly.initial);
-        sim.tick();
-        sim.set("start", 0).unwrap();
-        let mut cycles = 0u64;
-        while sim.get("halted").unwrap() == 0 {
-            sim.tick();
-            cycles += 1;
-            assert!(cycles < 20_000_000, "el secuenciador no se detiene");
-        }
-        total_cycles += cycles;
-    }
+    let GateRun { mut sim, layout, code, cycles: total_cycles } = gates_after(&program, &dir, c, &tokens);
+    eprintln!("microprograma: {} palabras, {} parámetros", code.words.len(), code.parameters.len());
 
     let logits_reg = layout.logits_register(&program);
     let got: Vec<f32> = (0..8).map(|i| read_block_value(&mut sim, c, logits_reg, i).1 as f32).collect();

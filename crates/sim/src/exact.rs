@@ -41,7 +41,7 @@ impl ExactEngine {
         }
         let config = exact_config(bits);
         let weights = Arc::new(weights);
-        let layout = Layout::new(&program, &weights, config, false)?;
+        let layout = Layout::new(&program, &weights, config, None)?;
         let vm = BlockVm::new(&config, layout.registers_used() as usize + 8, Some(weights));
         let mut engine = Self { program, layout, vm, position: 0, draft_tokens: 0, exponents: exponent_register(&config), logits: Vec::new() };
         engine.reset();
@@ -89,7 +89,7 @@ impl ExactEngine {
     }
 
     pub fn step(&mut self, token: u32, want_logits: bool) -> Result<Option<Vec<f32>>, String> {
-        self.layout.run_token(&mut self.vm, &self.program, token, self.position, want_logits)?;
+        self.layout.run_token(&mut self.vm, &self.program, token, self.position as u32, want_logits)?;
         self.position += 1;
         Ok(want_logits.then(|| self.vm.floats(self.layout.logits_register(&self.program), self.program.vocab)))
     }
@@ -115,7 +115,7 @@ impl ExactEngine {
     }
 
     pub fn draft(&mut self, token: u32, want_logits: bool) -> Result<Option<Vec<f32>>, String> {
-        self.layout.run_draft(&mut self.vm, &self.program, token, self.draft_tokens, want_logits)?;
+        self.layout.run_draft(&mut self.vm, &self.program, token, self.draft_tokens as u32, want_logits)?;
         self.draft_tokens += 1;
         let draft = self.program.draft.as_ref().ok_or("este modelo no tiene cabeza MTP")?;
         Ok(want_logits.then(|| self.vm.floats(self.layout.register_of(draft.logits), self.program.vocab)))

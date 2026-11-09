@@ -3,11 +3,12 @@
 
 use crate::weights::Weights;
 use compiler::{Inst, Op, Program};
-use netlist::block::{Assembly, AttentionRegs, BlockOps, DeltaRegs, FN_EXP, FN_SIGMOID, FN_SOFTPLUS};
-use netlist::DieConfig;
+use netlist::block::{encode_vector, Assembly, AttentionRegs, BlockOps, DeltaRegs, Expr, Var, FN_EXP, FN_SIGMOID, FN_SOFTPLUS};
+use netlist::{DieConfig, DieProgram, Microprogram};
 use std::cell::Cell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 /// KV entries, convolution history and expert outputs use this fixed exponent.
 const STATE_EXPONENT: i64 = 6;
@@ -44,6 +45,30 @@ fn matrices_of(program: &Program, op: &Op) -> Vec<(String, usize, usize)> {
     }
 }
 
+/// Routines of the fixed microprogram, in the order of `Microprogram::entries`.
+pub const ENTRY_TOKEN: usize = 0;
+pub const ENTRY_LOGITS: usize = 1;
+pub const ENTRY_FEED_FROM_MAIN: usize = 2;
+pub const ENTRY_FEED_FROM_DRAFT: usize = 3;
+pub const ENTRY_DRAFT: usize = 4;
+pub const ENTRY_DRAFT_LOGITS: usize = 5;
+
+/// Cosines and sines for one position, with the 1 that leaves the other dimensions alone.
+fn rope_row(theta: f32, half: usize, position: u32) -> Vec<f64> {
+    let rotary = 2 * half;
+    let (mut cos, mut sin) = (Vec::new(), Vec::new());
+    for i in 0..half {
+        let frequency = 1.0 / (theta as f64).powf((2 * i) as f64 / rotary as f64);
+        cos.push((position as f64 * frequency).cos());
+        sin.push((position as f64 * frequency).sin());
+    }
+    let mut table = cos;
+    table.extend(sin.iter().map(|s| -s));
+    table.extend(sin.iter());
+    table.push(1.0);
+    table
+}
+
 /// Where everything lives in the register file, stable across tokens.
 pub struct Layout {
     config: DieConfig,
@@ -64,6 +89,7 @@ pub struct Layout {
     delta_parts: Vec<u32>,
     delta_outputs: HashSet<usize>,
     rope: u32,
+    rope_table: u32,
     rope_half: usize,
     inverse_root: HashMap<usize, u32>,
     inverse_len: HashMap<usize, u32>,
@@ -71,9 +97,10 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Allocates registers and stores constants. With `load_matrices`, matrix weights
-    /// go into registers for the gates; otherwise they stay in the checkpoint.
-    pub fn new(program: &Program, weights: &Weights, config: DieConfig, load_matrices: bool) -> Result<Self, String> {
+    /// Allocates registers and stores constants. With `chip_tokens`, the matrix weights
+    /// and a RoPE table for that many tokens go into registers for the gates; otherwise
+    /// the weights stay in the checkpoint and RoPE is computed directly.
+    pub fn new(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: Option<usize>) -> Result<Self, String> {
         let next = Cell::new(1u32);
         let alloc = |count: u32| next.replace(next.get() + count);
         let buffers: Vec<u32> = program.buffers.iter().map(|_| alloc(1)).collect();
@@ -103,7 +130,7 @@ impl Layout {
                 if let Entry::Vacant(slot) = matrices.entry(name.clone()) {
                     let reg = alloc(1);
                     slot.insert(reg);
-                    if load_matrices {
+                    if chip_tokens.is_some() {
                         let matrix = weights.matrix(&name)?;
                         let exponent = matrix.exponent(cols);
                         let mut flat = Vec::with_capacity(rows * cols);
@@ -169,6 +196,17 @@ impl Layout {
         setup.load_vector(epsilon, &[EPSILON]);
         let rope = alloc(1);
         let rope_half = all_ops(program).find_map(|i| if let Op::Rope { rotary, .. } = i.op { Some(rotary / 2) } else { None }).unwrap_or(0);
+        let rope_table = alloc(1);
+        if let (Some(tokens), true) = (chip_tokens, rope_half > 0) {
+            let mut flat = Vec::with_capacity(tokens * (3 * rope_half + 1));
+            let mut exponent = 0;
+            for position in 0..tokens {
+                let (row, row_exponent) = encode_vector(&rope_row(program.rope_theta, rope_half, position as u32), config.cell.activation_bits);
+                flat.extend(row);
+                exponent = row_exponent;
+            }
+            setup.load_mantissas(rope_table, &flat, exponent);
+        }
         let temporaries: Vec<u32> = (0..TEMPORARIES).map(|_| alloc(1)).collect();
         let parts: Vec<u32> = (0..PARTS).map(|_| alloc(1)).collect();
         let delta_parts: Vec<u32> = (0..PARTS).map(|_| alloc(1)).collect();
@@ -177,7 +215,7 @@ impl Layout {
         if next >= (1 << config.reg_bits) - 2 {
             return Err(format!("faltan registros: se necesitan {next}"));
         }
-        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, rope, rope_half, inverse_root, inverse_len, setup })
+        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, rope, rope_table, rope_half, inverse_root, inverse_len, setup })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -196,60 +234,79 @@ impl Layout {
         self.buffers[buffer]
     }
 
-    /// The microcode and per-token constants for one token at `position`.
-    pub fn token(&self, program: &Program, token: u32, position: usize, want_logits: bool) -> Result<Assembly, String> {
-        let mut asm = Assembly::new(&self.config);
-        self.run_token(&mut asm, program, token, position, want_logits)?;
-        Ok(asm)
+    /// The whole microprogram: loaded once, then entered with the token and position
+    /// held in its parameter registers.
+    pub fn microprogram(&self, program: &Program) -> Result<Microprogram, String> {
+        let token = Expr::var(Var::Token);
+        let position = Expr::var(Var::Position);
+        let mut code = DieProgram::new(self.config);
+        let routine = |code: &mut DieProgram, build: &mut dyn FnMut(&mut Assembly) -> Result<(), String>| {
+            let mut asm = Assembly::new(&self.config);
+            build(&mut asm)?;
+            code.assemble(&asm.steps);
+            Ok::<(), String>(())
+        };
+        routine(&mut code, &mut |asm| self.run_range(asm, program, 0..program.logits_from, token, position, true))?;
+        code.next_entry();
+        routine(&mut code, &mut |asm| self.run_range(asm, program, program.logits_from..program.ops.len(), token, position, false))?;
+        code.next_entry();
+        routine(&mut code, &mut |asm| {
+            self.feed_draft(asm, program, true);
+            Ok(())
+        })?;
+        code.next_entry();
+        routine(&mut code, &mut |asm| {
+            self.feed_draft(asm, program, false);
+            Ok(())
+        })?;
+        code.next_entry();
+        if let Some(draft) = &program.draft {
+            routine(&mut code, &mut |asm| self.run_list(asm, program, &draft.ops[..draft.logits_from], token, position, true))?;
+            code.next_entry();
+            routine(&mut code, &mut |asm| self.run_list(asm, program, &draft.ops[draft.logits_from..], token, position, false))?;
+        } else {
+            code.next_entry();
+        }
+        Ok(code.finish_program())
     }
 
-    pub fn draft(&self, program: &Program, token: u32, position: usize, want_logits: bool) -> Result<Assembly, String> {
-        let mut asm = Assembly::new(&self.config);
-        self.run_draft(&mut asm, program, token, position, want_logits)?;
-        Ok(asm)
-    }
-
-    pub fn run_token<O: BlockOps>(&self, ops: &mut O, program: &Program, token: u32, position: usize, want_logits: bool) -> Result<(), String> {
+    pub fn run_token<O: BlockOps>(&self, ops: &mut O, program: &Program, token: O::N, position: O::N, want_logits: bool) -> Result<(), String> {
         let limit = if want_logits { program.ops.len() } else { program.logits_from };
-        self.load_rope(ops, program, position);
-        for inst in &program.ops[..limit] {
+        self.run_range(ops, program, 0..limit, token, position, true)
+    }
+
+    fn run_range<O: BlockOps>(&self, ops: &mut O, program: &Program, range: Range<usize>, token: O::N, position: O::N, rope: bool) -> Result<(), String> {
+        self.run_list(ops, program, &program.ops[range], token, position, rope)
+    }
+
+    fn run_list<O: BlockOps>(&self, ops: &mut O, program: &Program, list: &[Inst], token: O::N, position: O::N, rope: bool) -> Result<(), String> {
+        if rope {
+            self.load_rope(ops, program, position);
+        }
+        for inst in list {
             self.lower_op(ops, program, &inst.op, token, position)?;
         }
         Ok(())
     }
 
-    pub fn run_draft<O: BlockOps>(&self, ops: &mut O, program: &Program, token: u32, position: usize, want_logits: bool) -> Result<(), String> {
+    pub fn run_draft<O: BlockOps>(&self, ops: &mut O, program: &Program, token: O::N, position: O::N, want_logits: bool) -> Result<(), String> {
         let draft = program.draft.as_ref().ok_or("este modelo no tiene cabeza MTP")?;
         let limit = if want_logits { draft.ops.len() } else { draft.logits_from };
-        self.load_rope(ops, program, position);
-        for inst in &draft.ops[..limit] {
-            self.lower_op(ops, program, &inst.op, token, position)?;
-        }
-        Ok(())
+        self.run_list(ops, program, &draft.ops[..limit], token, position, true)
     }
 
     pub fn feed_draft<O: BlockOps>(&self, ops: &mut O, program: &Program, from_main: bool) {
         let Some(draft) = &program.draft else { return };
         let source = if from_main { program.final_hidden } else { draft.hidden_out };
-        ops.copy_part(self.reg(source), 0, self.reg(draft.hidden_in), 0, program.hidden as u32);
+        ops.copy_part(self.reg(source), 0.into(), self.reg(draft.hidden_in), 0.into(), (program.hidden as u32).into());
     }
 
-    fn load_rope<O: BlockOps>(&self, ops: &mut O, program: &Program, position: usize) {
+    fn load_rope<O: BlockOps>(&self, ops: &mut O, program: &Program, position: O::N) {
         if self.rope_half == 0 {
             return;
         }
-        let rotary = 2 * self.rope_half;
-        let (mut cos, mut sin) = (Vec::new(), Vec::new());
-        for i in 0..self.rope_half {
-            let frequency = 1.0 / (program.rope_theta as f64).powf((2 * i) as f64 / rotary as f64);
-            cos.push((position as f64 * frequency).cos());
-            sin.push((position as f64 * frequency).sin());
-        }
-        let mut table = cos;
-        table.extend(sin.iter().map(|s| -s));
-        table.extend(sin.iter());
-        table.push(1.0);
-        ops.load_vector(self.rope, &table);
+        let (theta, half) = (program.rope_theta, self.rope_half);
+        ops.load_row(self.rope_table, position, 3 * half as u32 + 1, self.rope, |row| rope_row(theta, half, row));
     }
 
     fn reg(&self, buf: usize) -> u32 {
@@ -261,41 +318,43 @@ impl Layout {
         let mut parts = Vec::new();
         for b in 0..count {
             let part = self.parts[b];
-            ops.copy_part(src, (b * block) as u32, t[40], 0, block as u32);
-            ops.normalize(t[40], block as u32);
+            ops.copy_part(src, ((b * block) as u32).into(), t[40], 0.into(), (block as u32).into());
+            ops.normalize(t[40], (block as u32).into());
             ops.rms_normalize(t[40], t[41], block as u32, (t[42], t[43]), self.inverse_len.get(&block).copied(), Some(self.epsilon));
             match weight {
-                Some(w) => ops.multiply(t[41], w, part, block as u32),
-                None => ops.copy_part(t[41], 0, part, 0, block as u32),
+                Some(w) => ops.multiply(t[41], w, part, (block as u32).into()),
+                None => ops.copy_part(t[41], 0.into(), part, 0.into(), (block as u32).into()),
             }
             parts.push((part, block as u32));
         }
         ops.gather(&parts, dst);
     }
 
-    fn silu<O: BlockOps>(&self, ops: &mut O, src: u32, dst: u32, len: u32) {
+    fn silu<O: BlockOps>(&self, ops: &mut O, src: u32, dst: u32, len: O::N) {
         let t = self.temporaries[39];
         ops.function(FN_SIGMOID, src, t, len);
         ops.multiply(t, src, dst, len);
     }
 
-    fn lower_op<O: BlockOps>(&self, ops: &mut O, program: &Program, op: &Op, token: u32, position: usize) -> Result<(), String> {
+    fn lower_op<O: BlockOps>(&self, ops: &mut O, program: &Program, op: &Op, token: O::N, position: O::N) -> Result<(), String> {
         let t = &self.temporaries;
+        let size = |buffer: usize| -> O::N { (program.buffers[buffer] as u32).into() };
+        let zero: O::N = 0.into();
         match op {
             Op::EmbRead { table, dst } => {
                 let len = program.buffers[*dst] as u32;
                 ops.copy_row(table, self.weights[table], token, len, self.reg(*dst));
-                ops.normalize(self.reg(*dst), len);
+                ops.normalize(self.reg(*dst), len.into());
             }
             Op::Matvec { matrix, src, dst } => {
                 let (rows, cols) = (program.buffers[*dst] as u32, program.buffers[*src] as u32);
                 ops.matvec(matrix, self.weights[matrix], 0, self.reg(*src), self.reg(*dst), rows, cols);
             }
-            Op::Copy { src, dst } => ops.copy_part(self.reg(*src), 0, self.reg(*dst), 0, program.buffers[*dst] as u32),
-            Op::Add { a, b, dst } => ops.add(self.reg(*a), self.reg(*b), self.reg(*dst), program.buffers[*dst] as u32),
-            Op::MulElem { a, b, dst } => ops.multiply(self.reg(*a), self.reg(*b), self.reg(*dst), program.buffers[*dst] as u32),
-            Op::Silu { src, dst } => self.silu(ops, self.reg(*src), self.reg(*dst), program.buffers[*dst] as u32),
-            Op::Sigmoid { src, dst } => ops.function(FN_SIGMOID, self.reg(*src), self.reg(*dst), program.buffers[*dst] as u32),
+            Op::Copy { src, dst } => ops.copy_part(self.reg(*src), zero, self.reg(*dst), zero, size(*dst)),
+            Op::Add { a, b, dst } => ops.add(self.reg(*a), self.reg(*b), self.reg(*dst), size(*dst)),
+            Op::MulElem { a, b, dst } => ops.multiply(self.reg(*a), self.reg(*b), self.reg(*dst), size(*dst)),
+            Op::Silu { src, dst } => self.silu(ops, self.reg(*src), self.reg(*dst), size(*dst)),
+            Op::Sigmoid { src, dst } => ops.function(FN_SIGMOID, self.reg(*src), self.reg(*dst), size(*dst)),
             Op::RmsNorm { src, weight, block, dst, .. } => {
                 let count = program.buffers[*dst] / block;
                 let w = self.small[&format!("{weight}.weight")];
@@ -305,8 +364,8 @@ impl Layout {
                 let heads = program.buffers[*query] / block;
                 let d = *block as u32;
                 for h in 0..heads as u32 {
-                    ops.copy_part(self.reg(*src), h * 2 * d, t[0], h * d, d);
-                    ops.copy_part(self.reg(*src), h * 2 * d + d, t[1], h * d, d);
+                    ops.copy_part(self.reg(*src), (h * 2 * d).into(), t[0], (h * d).into(), d.into());
+                    ops.copy_part(self.reg(*src), (h * 2 * d + d).into(), t[1], (h * d).into(), d.into());
                 }
                 ops.gather(&[(t[0], (heads * block) as u32)], self.reg(*query));
                 ops.gather(&[(t[1], (heads * block) as u32)], self.reg(*gate));
@@ -315,43 +374,48 @@ impl Layout {
                 let reg = self.reg(*buf);
                 let total = program.buffers[*buf] as u32;
                 let (d, h, rope) = (*block as u32, self.rope_half as u32, self.rope);
-                ops.dots(reg, rope, t[0], total, 2, |at, term| {
-                    let head = at / d * d;
-                    let j = at - head;
-                    match (j < h, j < 2 * h, term) {
-                        (true, _, 0) => Some(((reg, at), (rope, j))),
-                        (true, _, _) => Some(((reg, head + h + j), (rope, h + j))),
-                        (_, true, 0) => Some(((reg, at), (rope, j - h))),
-                        (_, true, _) => Some(((reg, head + j - h), (rope, 2 * h + j - h))),
-                        (_, _, 0) => Some(((reg, at), (rope, 3 * h))),
-                        _ => None,
-                    }
+                ops.each((total / d).into(), |ops, head| {
+                    let base = head * d;
+                    ops.each(h.into(), |ops, j| {
+                        let at = base + j;
+                        ops.sum_products(at, &[((reg, at), (rope, j)), ((reg, at + h.into()), (rope, j + h.into()))]);
+                    });
+                    ops.each(h.into(), |ops, j| {
+                        let at = base + j + h.into();
+                        ops.sum_products(at, &[((reg, at), (rope, j)), ((reg, base + j), (rope, j + (2 * h).into()))]);
+                    });
+                    ops.each((d - 2 * h).into(), |ops, j| {
+                        let at = base + j + (2 * h).into();
+                        ops.sum_products(at, &[((reg, at), (rope, (3 * h).into()))]);
+                    });
                 });
-                ops.copy_part(t[0], 0, reg, 0, total);
+                ops.narrow_sums(reg, rope, t[0], total.into());
+                ops.copy_part(t[0], zero, reg, zero, total.into());
             }
             Op::KvAppend { slot, key, value } => {
                 let width = program.buffers[*key] as u32;
-                let at = position as u32 * width;
-                ops.align_to(self.reg(*key), 0, STATE_EXPONENT, self.keys[*slot], at, width);
-                ops.align_to(self.reg(*value), 0, STATE_EXPONENT, self.values[*slot], at, width);
+                let at = position * width;
+                ops.align_to(self.reg(*key), zero, STATE_EXPONENT, self.keys[*slot], at, width.into());
+                ops.align_to(self.reg(*value), zero, STATE_EXPONENT, self.values[*slot], at, width.into());
             }
             Op::AttnSum { slot, query, head_dim, heads, kv_heads, dst } => {
                 let group = heads / kv_heads;
-                let tokens = position as u32 + 1;
+                let tokens = position + 1.into();
                 let width = (program.kv_slots[*slot].heads * head_dim) as u32;
                 let d = *head_dim as u32;
+                let (keys, values) = (self.keys[*slot], self.values[*slot]);
                 let regs = AttentionRegs { scores: t[10], top: t[11], shifted: t[12], weights: t[13], total: t[14], inverse: t[15], probabilities: t[16] };
                 let mut parts = Vec::new();
                 for h in 0..*heads {
                     let kv_head = (h / group) as u32;
                     let (qh, kt, vt) = (t[20], t[21], t[22]);
-                    ops.copy_part(self.reg(*query), h as u32 * d, qh, 0, d);
-                    ops.normalize(qh, d);
-                    for token_index in 0..tokens {
-                        let from = token_index * width + kv_head * d;
-                        ops.copy_part(self.keys[*slot], from, kt, token_index * d, d);
-                        ops.copy_part(self.values[*slot], from, vt, token_index * d, d);
-                    }
+                    ops.copy_part(self.reg(*query), (h as u32 * d).into(), qh, zero, d.into());
+                    ops.normalize(qh, d.into());
+                    ops.each(tokens, |ops, token_index| {
+                        let from = token_index * width + (kv_head * d).into();
+                        ops.copy_part(keys, from, kt, token_index * d, d.into());
+                        ops.copy_part(values, from, vt, token_index * d, d.into());
+                    });
                     ops.normalize(kt, tokens * d);
                     ops.normalize(vt, tokens * d);
                     ops.attention(qh, kt, vt, self.ones, self.parts[h], d, tokens, Some(self.inverse_root[head_dim]), regs);
@@ -365,13 +429,13 @@ impl Layout {
                 let taps = self.small[&format!("{weight}.weight")];
                 let reg = self.conv[*slot];
                 let (dim32, kernel32) = (dim as u32, kernel as u32);
-                ops.align_to(self.reg(*src), 0, STATE_EXPONENT, reg, history * dim32, dim32);
-                ops.dots(taps, reg, self.reg(*dst), dim32, kernel32, |c, k| Some(((taps, c * kernel32 + k), (reg, k * dim32 + c))));
-                for k in 0..history {
-                    for c in 0..dim32 {
-                        ops.move_element((reg, (k + 1) * dim32 + c), (reg, k * dim32 + c));
-                    }
-                }
+                ops.align_to(self.reg(*src), zero, STATE_EXPONENT, reg, (history * dim32).into(), dim32.into());
+                ops.dots(taps, reg, self.reg(*dst), dim32.into(), kernel32.into(), |c, k| ((taps, c * kernel32 + k), (reg, k * dim32 + c)));
+                ops.each(history.into(), |ops, k| {
+                    ops.each(dim32.into(), |ops, c| {
+                        ops.move_element((reg, (k + 1.into()) * dim32 + c), (reg, k * dim32 + c));
+                    });
+                });
             }
             Op::DeltaStep { slot, mixed, a, b, a_log, dt_bias, key_dim, key_heads, value_dim, value_heads, dst } => {
                 let ratio = value_heads / key_heads;
@@ -388,31 +452,31 @@ impl Layout {
                     let (qh, kh, vh, beta, decay) = (t[20], t[21], t[22], t[23], t[24]);
                     let (work, inv) = (t[25], t[26]);
 
-                    ops.copy_part(mixed, key_head * kd, work, 0, kd);
-                    ops.normalize(work, kd);
+                    ops.copy_part(mixed, (key_head * kd).into(), work, (0).into(), (kd).into());
+                    ops.normalize(work, (kd).into());
                     ops.l2_normalize(work, t[27], kd, (inv, t[28]), Some(self.epsilon));
-                    ops.scale(root, t[27], qh, kd);
-                    ops.copy_part(mixed, key_len + key_head * kd, work, 0, kd);
-                    ops.normalize(work, kd);
+                    ops.scale(root, t[27], qh, (kd).into());
+                    ops.copy_part(mixed, (key_len + key_head * kd).into(), work, (0).into(), (kd).into());
+                    ops.normalize(work, (kd).into());
                     ops.l2_normalize(work, kh, kd, (inv, t[28]), Some(self.epsilon));
-                    ops.copy_part(mixed, 2 * key_len + h32 * vd, vh, 0, vd);
-                    ops.normalize(vh, vd);
+                    ops.copy_part(mixed, (2 * key_len + h32 * vd).into(), vh, (0).into(), (vd).into());
+                    ops.normalize(vh, (vd).into());
 
-                    ops.copy_part(b_reg, h32, work, 0, 1);
-                    ops.normalize(work, 1);
-                    ops.function(FN_SIGMOID, work, beta, 1);
+                    ops.copy_part(b_reg, (h32).into(), work, (0).into(), (1).into());
+                    ops.normalize(work, (1).into());
+                    ops.function(FN_SIGMOID, work, beta, (1).into());
 
-                    ops.copy_part(a_reg, h32, t[29], 0, 1);
-                    ops.normalize(t[29], 1);
-                    ops.copy_part(bias, h32, t[30], 0, 1);
-                    ops.normalize(t[30], 1);
-                    ops.add(t[29], t[30], work, 1);
-                    ops.function(FN_SOFTPLUS, work, t[31], 1);
-                    ops.copy_part(scale_a, h32, t[32], 0, 1);
-                    ops.normalize(t[32], 1);
-                    ops.multiply(t[31], t[32], t[33], 1);
-                    ops.multiply(t[33], self.minus_one, work, 1);
-                    ops.function(FN_EXP, work, decay, 1);
+                    ops.copy_part(a_reg, (h32).into(), t[29], (0).into(), (1).into());
+                    ops.normalize(t[29], (1).into());
+                    ops.copy_part(bias, (h32).into(), t[30], (0).into(), (1).into());
+                    ops.normalize(t[30], (1).into());
+                    ops.add(t[29], t[30], work, (1).into());
+                    ops.function(FN_SOFTPLUS, work, t[31], (1).into());
+                    ops.copy_part(scale_a, (h32).into(), t[32], (0).into(), (1).into());
+                    ops.normalize(t[32], (1).into());
+                    ops.multiply(t[31], t[32], t[33], (1).into());
+                    ops.multiply(t[33], self.minus_one, work, (1).into());
+                    ops.function(FN_EXP, work, decay, (1).into());
 
                     let regs = DeltaRegs { state: self.delta[*slot][h], key: kh, query: qh, value: vh, beta, decay, memory: t[10], error: t[11], delta: t[12], update: t[13], next: t[14], out: self.delta_parts[h] };
                     ops.delta_step(regs, kd, vd);
@@ -430,20 +494,20 @@ impl Layout {
                 for b in 0..count {
                     let b32 = b as u32;
                     if by_head {
-                        ops.copy_part(self.delta_parts[b], 0, t[40], 0, d);
+                        ops.copy_part(self.delta_parts[b], (0).into(), t[40], (0).into(), (d).into());
                     } else {
-                        ops.copy_part(src, b32 * d, t[40], 0, d);
+                        ops.copy_part(src, (b32 * d).into(), t[40], (0).into(), (d).into());
                     }
-                    ops.normalize(t[40], d);
+                    ops.normalize(t[40], (d).into());
                     ops.rms_normalize(t[40], t[41], d, (t[42], t[43]), self.inverse_len.get(block).copied(), Some(self.epsilon));
-                    ops.multiply(t[41], w, t[44], d);
-                    ops.copy_part(z, b32 * d, t[45], 0, d);
-                    ops.normalize(t[45], d);
+                    ops.multiply(t[41], w, t[44], (d).into());
+                    ops.copy_part(z, (b32 * d).into(), t[45], (0).into(), (d).into());
+                    ops.normalize(t[45], (d).into());
                     // SiLU's small values would be lost next to its peak, so z and its
                     // sigmoid are applied one after the other.
-                    ops.function(FN_SIGMOID, t[45], t[46], d);
-                    ops.multiply(t[44], t[45], t[38], d);
-                    ops.multiply(t[38], t[46], self.parts[b], d);
+                    ops.function(FN_SIGMOID, t[45], t[46], (d).into());
+                    ops.multiply(t[44], t[45], t[38], (d).into());
+                    ops.multiply(t[38], t[46], self.parts[b], (d).into());
                     parts.push((self.parts[b], d));
                 }
                 ops.gather(&parts, self.reg(*dst));
@@ -465,35 +529,37 @@ impl Layout {
     #[allow(clippy::too_many_arguments)]
     fn lower_moe<O: BlockOps>(&self, ops: &mut O, prefix: &str, x: u32, dst: u32, hidden: u32, experts: u32, top_k: u32, intermediate: u32, shared: u32) {
         let t = &self.temporaries;
+        let zero: O::N = 0.into();
+        let (experts_n, hidden_n): (O::N, O::N) = (experts.into(), hidden.into());
         let matrix = |name: &str| format!("{prefix}.{name}");
         let reg_of = |name: &str| self.weights[&matrix(name)];
         let (raw, top, shifted, chances, total, inverse, work, mark, remaining, chosen, selected, scores) = (t[50], t[51], t[52], t[53], t[54], t[55], t[56], t[57], t[58], t[59], t[60], t[61]);
 
         ops.matvec(&matrix("gate"), reg_of("gate"), 0, x, raw, experts, hidden);
-        ops.maximum(raw, experts, top);
-        ops.sub_scalar(raw, top, shifted, experts);
-        ops.function(FN_EXP, shifted, chances, experts);
+        ops.maximum(raw, experts_n, top);
+        ops.sub_scalar(raw, top, shifted, experts_n);
+        ops.function(FN_EXP, shifted, chances, experts_n);
 
         // Repeatedly take the largest probability and blank it out.
-        ops.copy_part(chances, 0, work, 0, experts);
+        ops.copy_part(chances, zero, work, zero, experts_n);
         for pass in 0..top_k {
-            ops.maximum(work, experts, top);
-            ops.mark_equal(work, top, mark, experts);
+            ops.maximum(work, experts_n, top);
+            ops.mark_equal(work, top, mark, experts_n);
             if pass == 0 {
-                ops.copy_part(mark, 0, chosen, 0, experts);
+                ops.copy_part(mark, zero, chosen, zero, experts_n);
             } else {
-                ops.add(chosen, mark, t[62], experts);
-                ops.copy_part(t[62], 0, chosen, 0, experts);
+                ops.add(chosen, mark, t[62], experts_n);
+                ops.copy_part(t[62], zero, chosen, zero, experts_n);
             }
-            ops.add_sub(true, (self.ones, 0), (mark, 0), 1, remaining, experts);
-            ops.multiply(work, remaining, t[62], experts);
-            ops.copy_part(t[62], 0, work, 0, experts);
+            ops.add_sub(true, (self.ones, zero), (mark, zero), 1, remaining, experts_n);
+            ops.multiply(work, remaining, t[62], experts_n);
+            ops.copy_part(t[62], zero, work, zero, experts_n);
         }
-        ops.multiply(chances, chosen, selected, experts);
+        ops.multiply(chances, chosen, selected, experts_n);
         let ones = self.ones;
-        ops.dots(selected, ones, total, 1, experts, |_, e| Some(((selected, e), (ones, e))));
+        ops.dots(selected, ones, total, 1.into(), experts_n, |_, e| ((selected, e), (ones, e)));
         ops.reciprocal(total, inverse);
-        ops.scale(inverse, selected, scores, experts);
+        ops.scale(inverse, selected, scores, experts_n);
 
         // Every expert's output goes on one exponent, ready to be weighted.
         let outputs = t[48];
@@ -505,22 +571,22 @@ impl Layout {
             }
             ops.matvec(&matrix("switch_mlp.gate_proj"), reg_of("switch_mlp.gate_proj"), e * intermediate, x, gate, intermediate, hidden);
             ops.matvec(&matrix("switch_mlp.up_proj"), reg_of("switch_mlp.up_proj"), e * intermediate, x, up, intermediate, hidden);
-            self.silu(ops, gate, t[38], intermediate);
-            ops.multiply(t[38], up, product, intermediate);
+            self.silu(ops, gate, t[38], intermediate.into());
+            ops.multiply(t[38], up, product, intermediate.into());
             ops.matvec(&matrix("switch_mlp.down_proj"), reg_of("switch_mlp.down_proj"), e * hidden, product, down, hidden, intermediate);
-            ops.align_to(down, 0, EXPERT_EXPONENT, outputs, e * hidden, hidden);
+            ops.align_to(down, zero, EXPERT_EXPONENT, outputs, (e * hidden).into(), hidden_n);
         }
         let mixed = t[47];
-        ops.dots(scores, outputs, mixed, hidden, experts, |j, e| Some(((scores, e), (outputs, e * hidden + j))));
+        ops.dots(scores, outputs, mixed, hidden_n, experts_n, |j, e| ((scores, e), (outputs, e * hidden + j)));
 
         ops.matvec(&matrix("shared_expert.gate_proj"), reg_of("shared_expert.gate_proj"), 0, x, gate, shared, hidden);
         ops.matvec(&matrix("shared_expert.up_proj"), reg_of("shared_expert.up_proj"), 0, x, up, shared, hidden);
-        self.silu(ops, gate, t[38], shared);
-        ops.multiply(t[38], up, product, shared);
+        self.silu(ops, gate, t[38], shared.into());
+        ops.multiply(t[38], up, product, shared.into());
         ops.matvec(&matrix("shared_expert.down_proj"), reg_of("shared_expert.down_proj"), 0, product, down, hidden, shared);
         ops.matvec(&matrix("shared_expert_gate"), reg_of("shared_expert_gate"), 0, x, t[49], 1, hidden);
-        ops.function(FN_SIGMOID, t[49], t[63], 1);
-        ops.scale(t[63], down, t[62], hidden);
-        ops.add(mixed, t[62], dst, hidden);
+        ops.function(FN_SIGMOID, t[49], t[63], 1.into());
+        ops.scale(t[63], down, t[62], hidden_n);
+        ops.add(mixed, t[62], dst, hidden_n);
     }
 }

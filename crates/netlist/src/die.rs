@@ -2,10 +2,12 @@
 //! network, a vector lane, a function table, a vector register file and a
 //! microcoded sequencer. It executes programs built by `DieProgram`.
 
+use crate::block::{Alu, Expr, Step, Var};
 use crate::cell::{CellConfig, Gen};
+use crate::rv32::Logic;
 use crate::{Bit, Builder, Design};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const WIDE_EXTRA: u32 = 16;
 
@@ -69,6 +71,18 @@ pub struct ControlWord {
     pub chain_shift: bool,
     pub halt: bool,
     pub repeat: u32,
+    /// Index registers added to each operand's literal; register 0 is always zero.
+    pub offset_a: u32,
+    pub offset_b: u32,
+    pub offset_dst: u32,
+    /// `index[x_dst] = index[x_src] + literal_b`.
+    pub x_write: bool,
+    pub x_dst: u32,
+    pub x_src: u32,
+    /// Jump to `target` unless the value just written equals `index[x_limit]`.
+    pub branch: bool,
+    pub x_limit: u32,
+    pub target: u32,
 }
 
 const REPEAT_BITS: u32 = 12;
@@ -128,11 +142,26 @@ fn field_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("chain_shift", 1),
         ("halt", 1),
         ("repeat", REPEAT_BITS),
+        ("offset_a", x_bits(c)),
+        ("offset_b", x_bits(c)),
+        ("offset_dst", x_bits(c)),
+        ("x_write", 1),
+        ("x_dst", x_bits(c)),
+        ("x_src", x_bits(c)),
+        ("branch", 1),
+        ("x_limit", x_bits(c)),
+        ("target", c.microcode_bits),
     ]
 }
 
+/// log2 of the index registers, which never outnumber the elements they address.
+pub fn x_bits(c: &DieConfig) -> u32 {
+    c.index_bits.min(5)
+}
+
 impl ControlWord {
-    pub fn encode(&self, c: &DieConfig) -> u128 {
+    /// The word as 32-bit pieces, least significant first.
+    pub fn encode_words(&self, c: &DieConfig) -> Vec<u32> {
         let values = [
             self.reg_a as u128,
             self.reg_b as u128,
@@ -168,18 +197,37 @@ impl ControlWord {
             self.chain_shift as u128,
             self.halt as u128,
             self.repeat as u128,
+            self.offset_a as u128,
+            self.offset_b as u128,
+            self.offset_dst as u128,
+            self.x_write as u128,
+            self.x_dst as u128,
+            self.x_src as u128,
+            self.branch as u128,
+            self.x_limit as u128,
+            self.target as u128,
         ];
-        let mut word = 0u128;
-        let mut offset = 0;
+        let mut words = vec![0u32; word_bits(c).div_ceil(32) as usize];
+        let mut offset = 0usize;
         for ((_, width), value) in field_layout(c).iter().zip(values) {
-            word |= value << offset;
-            offset += width;
+            for bit in 0..*width as usize {
+                if value >> bit & 1 == 1 {
+                    words[(offset + bit) / 32] |= 1 << ((offset + bit) % 32);
+                }
+            }
+            offset += *width as usize;
         }
-        word
+        words
+    }
+
+    /// The word as one number, for the small dies whose words fit in 128 bits.
+    pub fn encode(&self, c: &DieConfig) -> u128 {
+        assert!(word_bits(c) <= 128, "la palabra no cabe en 128 bits");
+        self.encode_words(c).iter().rev().fold(0, |word, piece| word << 32 | *piece as u128)
     }
 }
 
-fn word_bits(c: &DieConfig) -> u32 {
+pub fn word_bits(c: &DieConfig) -> u32 {
     field_layout(c).iter().map(|(_, w)| w).sum()
 }
 
@@ -347,6 +395,10 @@ impl Gen {
 
         let mut b = Builder::new("llm2chip_die", "Die", "Secuenciador, banco de vectores, unidad vectorial, tabla de funciones, red de activaciones y celdas.");
         let start = b.input("start", 1)[0];
+        let entry = b.input("entry", c.microcode_bits);
+        let param_write = b.input("param_write", 1)[0];
+        let param_index = b.input("param_index", x_bits(c));
+        let param_data = b.input("param_data", c.index_bits);
         let load_code = b.input("load_code", 1)[0];
         let code_addr = b.input("code_addr", c.microcode_bits);
         let code_data = b.input("code_data", word);
@@ -369,7 +421,10 @@ impl Gen {
         let pc = b.wire("pc", c.microcode_bits);
         let pc_next = b.wire("pc_next", c.microcode_bits);
         let code = b.wire("code", word);
-        b.ram2p("microcode", c.microcode_bits, word, &[("raddr", pc_next.clone()), ("waddr", code_addr), ("we", vec![load_code]), ("wdata", code_data), ("rdata", code.clone())]);
+        // Words wider than one memory macro are split across several side by side.
+        for (part, (stored, written)) in code.chunks(64).zip(code_data.chunks(64)).enumerate() {
+            b.ram2p(&format!("microcode_{part}"), c.microcode_bits, stored.len() as u32, &[("raddr", pc_next.clone()), ("waddr", code_addr.clone()), ("we", vec![load_code]), ("wdata", written.to_vec()), ("rdata", stored.to_vec())]);
+        }
 
         let mut fields: BTreeMap<&str, Vec<Bit>> = BTreeMap::new();
         let mut offset = 0usize;
@@ -423,9 +478,6 @@ impl Gen {
         let pc_sum = b.wire("pc_sum", c.microcode_bits);
         let pc_carry = b.wire("pc_carry", 1);
         b.inst("pc_adder", &pc_adder, &[("a", pc.clone()), ("b", vec![Bit::Zero; c.microcode_bits as usize]), ("cin", vec![word_done]), ("sum", pc_sum.clone()), ("cout", pc_carry)]);
-        for i in 0..c.microcode_bits as usize {
-            b.and_to(started, pc_sum[i], pc_next[i]);
-        }
         let pc_reg = self.register(c.microcode_bits);
         b.inst("pc_reg", &pc_reg, &[("d", pc_next.clone()), ("q", pc.clone())]);
 
@@ -445,6 +497,46 @@ impl Gen {
         let chain_load = ctl("chain_load", &mut b, &fields);
         let chain_shift = ctl("chain_shift", &mut b, &fields);
 
+        // Loops and everything that depends on the token or the position live here.
+        b.group("Registros de índice");
+        let x_write = ctl("x_write", &mut b, &fields);
+        let branch = ctl("branch", &mut b, &fields);
+        let x_adder = self.ripple_adder(c.index_bits);
+        let (offset_a, offset_b, offset_dst);
+        {
+            let width = c.index_bits as usize;
+            let mut l = Logic { b: &mut b, next: 0 };
+            let stored: Vec<Vec<Bit>> = (0..1usize << x_bits(c)).map(|i| if i == 0 { vec![Bit::Zero; width] } else { l.fresh_bus(width) }).collect();
+            offset_a = l.select(&fields["offset_a"], &stored);
+            offset_b = l.select(&fields["offset_b"], &stored);
+            offset_dst = l.select(&fields["offset_dst"], &stored);
+            let source = l.select(&fields["x_src"], &stored);
+            let limit = l.select(&fields["x_limit"], &stored);
+            let sum = l.fresh_bus(width);
+            let carry = l.fresh();
+            l.b.inst("x_step", &x_adder, &[("a", source), ("b", fields["literal_b"].clone()), ("cin", vec![Bit::Zero]), ("sum", sum.clone()), ("cout", vec![carry])]);
+
+            let target_register = l.mux_bus(param_write, &fields["x_dst"], &param_index);
+            let data = l.mux_bus(param_write, &sum, &param_data);
+            let any_write = l.or(param_write, x_write);
+            for (i, q) in stored.iter().enumerate().skip(1) {
+                let selected = l.equals(&target_register, i as u32);
+                let write = l.and(selected, any_write);
+                let d = l.mux_bus(write, q, &data);
+                l.connect_flops(&d, q);
+            }
+
+            let differs: Vec<Bit> = sum.iter().zip(&limit).map(|(a, b)| l.xor(*a, *b)).collect();
+            let not_finished = l.any(&differs);
+            let branch_now = l.and(branch, word_done);
+            let taken = l.and(branch_now, not_finished);
+            let followed = l.mux_bus(taken, &pc_sum, &fields["target"]);
+            let chosen = l.mux_bus(start, &followed, &entry);
+            for (from, to) in chosen.iter().zip(&pc_next) {
+                l.b.or_to(*from, Bit::Zero, *to);
+            }
+        }
+
         // --- Vector registers ---
         b.group("Banco de vectores");
         let read_index = counter(self, &mut b, "read_index", c.index_bits, read_reset, read_step);
@@ -458,9 +550,18 @@ impl Gen {
             b.inst(&format!("{name}_select"), &mux_index, &[("s", vec![use_literal]), ("a", counter.to_vec()), ("b", literal.to_vec()), ("y", y.clone())]);
             y
         };
-        let index_a = pick(&mut b, "index_a", &read_index, &fields["literal_a"]);
-        let index_b = pick(&mut b, "index_b", &read_index, &fields["literal_b"]);
-        let index_w = pick(&mut b, "index_w", &write_index, &fields["literal_dst"]);
+        let plain_a = pick(&mut b, "plain_a", &read_index, &fields["literal_a"]);
+        let plain_b = pick(&mut b, "plain_b", &read_index, &fields["literal_b"]);
+        let plain_w = pick(&mut b, "plain_w", &write_index, &fields["literal_dst"]);
+        let offset = |b: &mut Builder, name: &str, plain: &[Bit], by: &[Bit]| -> Vec<Bit> {
+            let sum = b.wire(name, c.index_bits);
+            let carry = b.wire(&format!("{name}_carry"), 1);
+            b.inst(&format!("{name}_offset"), &x_adder, &[("a", plain.to_vec()), ("b", by.to_vec()), ("cin", vec![Bit::Zero]), ("sum", sum.clone()), ("cout", carry)]);
+            sum
+        };
+        let index_a = offset(&mut b, "index_a", &plain_a, &offset_a);
+        let index_b = offset(&mut b, "index_b", &plain_b, &offset_b);
+        let index_w = offset(&mut b, "index_w", &plain_w, &offset_dst);
         let addr_a = join(&fields["reg_a"], &index_a);
         let addr_b = join(&fields["reg_b"], &index_b);
         let addr_w = join(&fields["reg_dst"], &index_w);
@@ -915,15 +1016,63 @@ pub fn die_design(config: DieConfig) -> Design {
 pub struct DieProgram {
     config: DieConfig,
     cycles: Vec<ControlWord>,
+    /// Cycles that a jump or a start can land on, which therefore cannot be merged away.
+    labels: BTreeSet<usize>,
+    entries: Vec<usize>,
+    /// Index register holding each run-time quantity.
+    parameters: Vec<Expr>,
+    scoped: HashMap<Expr, u32>,
+    active: Vec<Var>,
+    in_use: BTreeSet<u32>,
+}
+
+/// One index register the CPU sets before starting the die.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Parameter {
+    pub register: u32,
+    pub token: u32,
+    pub position: u32,
+    pub constant: u32,
+}
+
+impl Parameter {
+    pub fn value(&self, token: u32, position: u32) -> u32 {
+        self.token.wrapping_mul(token).wrapping_add(self.position.wrapping_mul(position)).wrapping_add(self.constant)
+    }
+}
+
+/// Microcode loaded once, with the entry points and parameters that drive it.
+#[derive(Clone, Debug, Serialize)]
+pub struct Microprogram {
+    pub words: Vec<ControlWord>,
+    pub entries: Vec<u32>,
+    pub parameters: Vec<Parameter>,
 }
 
 const LANE_LATENCY: usize = 2;
+
+fn visit_indices(steps: &[Step], f: &mut impl FnMut(Expr)) {
+    for step in steps {
+        match step {
+            Step::One(alu) => {
+                f(alu.a.1);
+                f(alu.b.1);
+                f(alu.dst.1);
+            }
+            Step::Repeat { body, .. } => visit_indices(body, f),
+        }
+    }
+}
+
+fn only_parameters(e: &Expr) -> bool {
+    e.variables().all(|(v, _)| matches!(v, Var::Token | Var::Position))
+}
 
 impl DieProgram {
     pub fn new(config: DieConfig) -> Self {
         // The microcode read port takes one cycle to deliver the first word.
         let cycles = vec![ControlWord::default()];
-        Self { config, cycles }
+        Self { config, cycles, labels: BTreeSet::from([0]), entries: vec![0], parameters: Vec::new(), scoped: HashMap::new(), active: Vec::new(), in_use: BTreeSet::new() }
     }
 
     fn slot(&mut self, at: usize) -> &mut ControlWord {
@@ -937,8 +1086,147 @@ impl DieProgram {
         self.cycles.len()
     }
 
+    /// Ends the current routine and starts another that the CPU can enter separately.
+    pub fn next_entry(&mut self) {
+        let halt_at = self.end();
+        self.slot(halt_at).halt = true;
+        let start = self.end();
+        self.slot(start);
+        self.labels.insert(start);
+        self.entries.push(start);
+    }
+
+    fn parameter(&mut self, value: Expr) -> u32 {
+        let found = self.parameters.iter().position(|p| *p == value).unwrap_or_else(|| {
+            self.parameters.push(value);
+            self.parameters.len() - 1
+        });
+        let register = found as u32 + 1;
+        assert!(!self.in_use.contains(&register), "faltan registros de índice");
+        register
+    }
+
+    fn allocate(&mut self) -> u32 {
+        let register = ((self.parameters.len() as u32 + 1)..1 << x_bits(&self.config)).rev().find(|r| !self.in_use.contains(r)).expect("faltan registros de índice");
+        self.in_use.insert(register);
+        register
+    }
+
+    fn release(&mut self, register: u32) {
+        self.in_use.remove(&register);
+    }
+
+    fn set_index(&mut self, dst: u32, src: u32, value: u32) {
+        let at = self.end();
+        let mask = (1u64 << self.config.index_bits) - 1;
+        let w = self.slot(at);
+        w.x_write = true;
+        w.x_dst = dst;
+        w.x_src = src;
+        w.literal_b = (value as u64 & mask) as u32;
+    }
+
+    /// Splits an index into its literal part and the register holding the rest.
+    fn resolve(&mut self, index: Expr) -> (u32, u32) {
+        let variable = index.without_constant();
+        let register = if variable.is_constant() {
+            0
+        } else if only_parameters(&variable) {
+            self.parameter(variable)
+        } else {
+            *self.scoped.get(&variable).expect("índice sin registro asignado")
+        };
+        (index.constant(), register)
+    }
+
+    fn compile_loop(&mut self, variable: Var, count: Expr, body: &[Step]) {
+        assert!(only_parameters(&count), "el número de vueltas solo puede depender de los parámetros");
+        let counter = self.allocate();
+        let limit = self.allocate();
+        self.set_index(counter, 0, 0);
+        if count.is_constant() {
+            self.set_index(limit, 0, count.constant());
+        } else {
+            let source = self.parameter(count);
+            self.set_index(limit, source, 0);
+        }
+
+        let mut keys = BTreeSet::new();
+        let active = self.active.clone();
+        visit_indices(body, &mut |index| {
+            let key = index.restricted(|v| v == variable || active.contains(&v) || matches!(v, Var::Token | Var::Position));
+            if key.coefficient(variable) != 0 {
+                keys.insert(ExprKey(key));
+            }
+        });
+
+        // Each expression that moves with this loop gets a register stepped once per turn.
+        let mut stepped = Vec::new();
+        for ExprKey(key) in keys {
+            let stride = key.coefficient(variable);
+            if key == Expr::var(variable) {
+                self.scoped.insert(key, counter);
+                continue;
+            }
+            let base = key.restricted(|v| v != variable);
+            let source = self.resolve(base).1;
+            let register = self.allocate();
+            self.set_index(register, source, 0);
+            self.scoped.insert(key, register);
+            stepped.push((key, register, stride));
+        }
+
+        let start = self.end();
+        self.labels.insert(start);
+        self.active.push(variable);
+        self.assemble(body);
+        self.active.pop();
+
+        for (_, register, stride) in &stepped {
+            self.set_index(*register, *register, *stride);
+        }
+        let last = self.end() - 1;
+        let w = self.cycles[last];
+        let can_merge = last >= start && !w.x_write && !w.branch && w.literal_b == 0;
+        let at = if can_merge { last } else { self.end() };
+        let w = self.slot(at);
+        w.x_write = true;
+        w.x_dst = counter;
+        w.x_src = counter;
+        w.literal_b = 1;
+        w.branch = true;
+        w.x_limit = limit;
+        w.target = start as u32;
+
+        for (key, register, _) in stepped {
+            self.scoped.remove(&key);
+            self.release(register);
+        }
+        self.scoped.remove(&Expr::var(variable));
+        self.release(limit);
+        self.release(counter);
+    }
+
+    /// Lays out steps and loops, turning every variable index into an index register.
+    pub fn assemble(&mut self, steps: &[Step]) {
+        for step in steps {
+            match step {
+                Step::One(symbolic) => {
+                    let (a, offset_a) = self.resolve(symbolic.a.1);
+                    let (b, offset_b) = self.resolve(symbolic.b.1);
+                    let (dst, offset_dst) = self.resolve(symbolic.dst.1);
+                    let mut bound = symbolic.map_indices(|_| 0);
+                    (bound.a.1, bound.b.1, bound.dst.1) = (a, b, dst);
+                    (bound.offset_a, bound.offset_b, bound.offset_dst) = (offset_a, offset_b, offset_dst);
+                    self.alu(&bound);
+                }
+                Step::Repeat { variable, count, body } => self.compile_loop(*variable, *count, body),
+            }
+        }
+    }
+
     /// One single-element operation. Nothing overlaps, so each takes a few cycles.
-    pub fn alu(&mut self, step: &crate::block::Alu) {
+    pub fn alu(&mut self, step: &Alu) {
         let t0 = self.end();
         let extra = usize::from(step.op == OP_FUNCTION);
         {
@@ -946,8 +1234,10 @@ impl DieProgram {
             w.use_literal = true;
             w.reg_a = step.a.0;
             w.literal_a = step.a.1;
+            w.offset_a = step.offset_a;
             w.reg_b = step.b.0;
             w.literal_b = step.b.1;
+            w.offset_b = step.offset_b;
             w.magnitude_clear = step.magnitude_clear;
             w.accumulator_clear = step.accumulator_clear;
             w.wide_clear = step.wide_clear;
@@ -957,8 +1247,10 @@ impl DieProgram {
             w.use_literal = true;
             w.reg_a = step.a.0;
             w.literal_a = step.a.1;
+            w.offset_a = step.offset_a;
             w.reg_b = step.b.0;
             w.literal_b = step.literal.unwrap_or(step.b.1);
+            w.offset_b = step.offset_b;
             w.op = step.op;
             w.shift = step.shift;
             w.function = step.function;
@@ -968,6 +1260,7 @@ impl DieProgram {
             w.wide_write = step.wide_write;
             if step.wide_write {
                 w.literal_dst = step.dst.1;
+                w.offset_dst = step.offset_dst;
             }
         }
         if extra == 1 {
@@ -975,6 +1268,7 @@ impl DieProgram {
             w.use_literal = true;
             w.reg_a = step.a.0;
             w.literal_a = step.a.1;
+            w.offset_a = step.offset_a;
             w.op = step.op;
             w.function = step.function;
         }
@@ -983,6 +1277,7 @@ impl DieProgram {
         w.use_literal = true;
         w.reg_dst = step.dst.0;
         w.literal_dst = step.dst.1;
+        w.offset_dst = step.offset_dst;
         w.write_en = step.write;
         w.load_shift_a = step.load_shift_a;
         w.load_shift_b = step.load_shift_b;
@@ -1083,22 +1378,66 @@ impl DieProgram {
         self.slot(clock + rows + 1);
     }
 
-    /// Compressed microcode, ending in a halt word.
-    pub fn finish(mut self) -> Vec<ControlWord> {
+    fn compress(&mut self) -> (Vec<ControlWord>, HashMap<usize, u32>) {
         let halt_at = self.end();
         self.slot(halt_at).halt = true;
         let mut words: Vec<ControlWord> = Vec::new();
-        for word in self.cycles {
-            if let Some(last) = words.last_mut() {
-                let mut candidate = word;
-                candidate.repeat = last.repeat;
-                if candidate.encode(&self.config) == last.encode(&self.config) && last.repeat < (1 << REPEAT_BITS) - 1 && !word.halt {
-                    last.repeat += 1;
-                    continue;
+        let mut address = HashMap::new();
+        for (cycle, word) in self.cycles.iter().enumerate() {
+            if !self.labels.contains(&cycle) {
+                if let Some(last) = words.last_mut() {
+                    let mut candidate = *word;
+                    candidate.repeat = last.repeat;
+                    let effect = word.halt || word.x_write || word.branch;
+                    if !effect && candidate.encode_words(&self.config) == last.encode_words(&self.config) && last.repeat < (1 << REPEAT_BITS) - 1 {
+                        last.repeat += 1;
+                        continue;
+                    }
                 }
             }
-            words.push(word);
+            address.insert(cycle, words.len() as u32);
+            words.push(*word);
         }
-        words
+        for word in &mut words {
+            if word.branch {
+                word.target = address[&(word.target as usize)];
+            }
+        }
+        (words, address)
+    }
+
+    /// Compressed microcode, ending in a halt word.
+    pub fn finish(mut self) -> Vec<ControlWord> {
+        self.compress().0
+    }
+
+    /// The finished program, with what the CPU needs to run each routine.
+    pub fn finish_program(mut self) -> Microprogram {
+        let (words, address) = self.compress();
+        let entries = self.entries.iter().map(|cycle| address[cycle]).collect();
+        let parameters = self
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(i, value)| Parameter { register: i as u32 + 1, token: value.coefficient(Var::Token), position: value.coefficient(Var::Position), constant: value.constant() })
+            .collect();
+        Microprogram { words, entries, parameters }
+    }
+}
+
+/// Lets expressions be collected in a stable order.
+#[derive(PartialEq, Eq)]
+struct ExprKey(Expr);
+
+impl Ord for ExprKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let terms = |e: &Expr| e.variables().collect::<Vec<_>>();
+        terms(&self.0).cmp(&terms(&other.0)).then(self.0.constant().cmp(&other.0.constant()))
+    }
+}
+
+impl PartialOrd for ExprKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }

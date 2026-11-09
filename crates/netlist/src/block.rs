@@ -8,7 +8,6 @@ use crate::DieConfig;
 use std::collections::HashMap;
 
 pub type Place = (u32, u32);
-pub type Pair = (Place, Place);
 
 pub fn exponent_register(c: &DieConfig) -> u32 {
     (1 << c.reg_bits) - 1
@@ -114,29 +113,148 @@ pub struct DeltaRegs {
     pub out: u32,
 }
 
+/// A quantity the fixed microprogram only knows while it runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Var {
+    Token,
+    Position,
+    Loop(u32),
+}
+
+const EXPR_TERMS: usize = 4;
+
+/// `constant + Σ coefficient · variable`. Everything wraps, like the address registers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Expr {
+    constant: u32,
+    terms: [Option<(Var, u32)>; EXPR_TERMS],
+}
+
+impl Expr {
+    pub fn var(variable: Var) -> Self {
+        let mut terms = [None; EXPR_TERMS];
+        terms[0] = Some((variable, 1));
+        Self { constant: 0, terms }
+    }
+
+    pub fn constant(&self) -> u32 {
+        self.constant
+    }
+
+    pub fn variables(&self) -> impl Iterator<Item = (Var, u32)> + '_ {
+        self.terms.iter().flatten().copied()
+    }
+
+    pub fn is_constant(&self) -> bool {
+        self.terms[0].is_none()
+    }
+
+    pub fn without_constant(mut self) -> Self {
+        self.constant = 0;
+        self
+    }
+
+    pub fn coefficient(&self, variable: Var) -> u32 {
+        self.variables().find(|(v, _)| *v == variable).map_or(0, |(_, c)| c)
+    }
+
+    /// The same expression keeping only the variables `keep` accepts, and no constant.
+    pub fn restricted(&self, keep: impl Fn(Var) -> bool) -> Self {
+        self.variables().filter(|(v, _)| keep(*v)).fold(Self::default(), |sum, (v, c)| sum + Self::var(v) * c)
+    }
+
+    pub fn eval(&self, value: impl Fn(Var) -> u32) -> u32 {
+        self.variables().fold(self.constant, |sum, (v, c)| sum.wrapping_add(c.wrapping_mul(value(v))))
+    }
+}
+
+impl From<u32> for Expr {
+    fn from(constant: u32) -> Self {
+        Self { constant, terms: [None; EXPR_TERMS] }
+    }
+}
+
+impl std::ops::Add for Expr {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        let mut merged: Vec<(Var, u32)> = self.variables().collect();
+        for (variable, coefficient) in other.variables() {
+            match merged.iter_mut().find(|(v, _)| *v == variable) {
+                Some((_, c)) => *c = c.wrapping_add(coefficient),
+                None => merged.push((variable, coefficient)),
+            }
+        }
+        merged.retain(|(_, c)| *c != 0);
+        merged.sort();
+        assert!(merged.len() <= EXPR_TERMS, "índice demasiado complejo para el secuenciador");
+        let mut terms = [None; EXPR_TERMS];
+        for (slot, term) in terms.iter_mut().zip(merged) {
+            *slot = Some(term);
+        }
+        Self { constant: self.constant.wrapping_add(other.constant), terms }
+    }
+}
+
+impl std::ops::Mul<u32> for Expr {
+    type Output = Self;
+
+    fn mul(self, factor: u32) -> Self {
+        if factor == 0 {
+            return Self::default();
+        }
+        let mut result = self;
+        result.constant = result.constant.wrapping_mul(factor);
+        for (_, c) in result.terms.iter_mut().flatten() {
+            *c = c.wrapping_mul(factor);
+        }
+        result
+    }
+}
+
+/// What a length or index can be: a plain integer when executing, an `Expr` when compiling.
+pub trait Number: Copy + From<u32> + std::ops::Add<Output = Self> + std::ops::Mul<u32, Output = Self> {}
+
+impl Number for u32 {}
+impl Number for Expr {}
+
+pub type At<N> = (u32, N);
+pub type Pair<N = u32> = (At<N>, At<N>);
+
 /// The vector arithmetic of the die. Implementations must agree bit for bit.
-pub trait BlockOps {
+pub trait BlockOps: Sized {
+    type N: Number;
+
+    /// Runs `body` for every value from 0 to `count`, which is never zero unless constant.
+    fn each(&mut self, count: Self::N, body: impl FnMut(&mut Self, Self::N));
     fn load_vector(&mut self, reg: u32, values: &[f64]);
     fn load_mantissas(&mut self, reg: u32, mantissas: &[i64], exponent: i64);
-    fn normalize(&mut self, reg: u32, len: u32);
-    fn add_sub(&mut self, subtract: bool, a: Place, b: Place, b_stride: u32, dst: u32, len: u32);
-    fn multiply(&mut self, a: u32, b: u32, dst: u32, len: u32);
-    fn scale(&mut self, s_reg: u32, a: u32, dst: u32, len: u32);
+    /// `dst` becomes row `row` of a table. A compiled program reads it from `table`,
+    /// and an implementation that runs directly may use `values` instead.
+    fn load_row(&mut self, table: u32, row: Self::N, width: u32, dst: u32, values: impl Fn(u32) -> Vec<f64>);
+    fn normalize(&mut self, reg: u32, len: Self::N);
+    fn add_sub(&mut self, subtract: bool, a: At<Self::N>, b: At<Self::N>, b_stride: u32, dst: u32, len: Self::N);
+    fn multiply(&mut self, a: u32, b: u32, dst: u32, len: Self::N);
+    fn scale(&mut self, s_reg: u32, a: u32, dst: u32, len: Self::N);
     /// `dst[set] = Σ a[·] · b[·]` for every set of index pairs.
-    fn dots<F>(&mut self, a: u32, b: u32, dst: u32, sets: u32, terms: u32, indices: F)
+    fn dots<F>(&mut self, a: u32, b: u32, dst: u32, sets: Self::N, terms: Self::N, indices: F)
     where
-        F: Fn(u32, u32) -> Option<(Place, Place)>;
-    fn function(&mut self, function: u32, src: u32, dst: u32, len: u32);
+        F: Fn(Self::N, Self::N) -> Pair<Self::N>;
+    /// One sum of products, kept at full precision until `narrow_sums`.
+    fn sum_products(&mut self, set: Self::N, pairs: &[Pair<Self::N>]);
+    /// Turns the first `sets` full-precision sums into `dst`, sharing one exponent.
+    fn narrow_sums(&mut self, a: u32, b: u32, dst: u32, sets: Self::N);
+    fn function(&mut self, function: u32, src: u32, dst: u32, len: Self::N);
     fn reciprocal(&mut self, src: u32, dst: u32);
     fn inverse_sqrt(&mut self, src: u32, dst: u32);
-    fn copy_part(&mut self, src: u32, from: u32, dst: u32, to: u32, len: u32);
+    fn copy_part(&mut self, src: u32, from: Self::N, dst: u32, to: Self::N, len: Self::N);
     fn gather(&mut self, parts: &[(u32, u32)], dst: u32);
-    fn align_to(&mut self, src: u32, from: u32, exponent: i64, dst: u32, to: u32, len: u32);
-    fn move_element(&mut self, from: Place, to: Place);
+    fn align_to(&mut self, src: u32, from: Self::N, exponent: i64, dst: u32, to: Self::N, len: Self::N);
+    fn move_element(&mut self, from: At<Self::N>, to: At<Self::N>);
     /// `dst[0]` becomes the largest of `src[..len]`, sharing `src`'s exponent.
-    fn maximum(&mut self, src: u32, len: u32, dst: u32);
+    fn maximum(&mut self, src: u32, len: Self::N, dst: u32);
     /// `dst[i]` becomes 1 at the first element equal to `b[0]`, and 0 everywhere else.
-    fn mark_equal(&mut self, a: u32, b: u32, dst: u32, len: u32);
+    fn mark_equal(&mut self, a: u32, b: u32, dst: u32, len: Self::N);
     fn set_exponent(&mut self, reg: u32, exponent: i64);
     fn subtract_exponent(&mut self, reg: u32, amount: i64);
     /// `rows` rows of the matrix from `first`. It is held in register `matrix`, but
@@ -144,31 +262,31 @@ pub trait BlockOps {
     #[allow(clippy::too_many_arguments)]
     fn matvec(&mut self, name: &str, matrix: u32, first: u32, src: u32, dst: u32, rows: u32, cols: u32);
     /// Copies one row of an embedding-like matrix into `dst`.
-    fn copy_row(&mut self, name: &str, matrix: u32, row: u32, cols: u32, dst: u32);
+    fn copy_row(&mut self, name: &str, matrix: u32, row: Self::N, cols: u32, dst: u32);
     /// True only when an implementation can prove `reg[index]` is zero and may skip work.
     fn known_zero(&self, _reg: u32, _index: u32) -> bool {
         false
     }
 
-    fn add(&mut self, a: u32, b: u32, dst: u32, len: u32) {
-        self.add_sub(false, (a, 0), (b, 0), 1, dst, len);
+    fn add(&mut self, a: u32, b: u32, dst: u32, len: Self::N) {
+        self.add_sub(false, (a, 0.into()), (b, 0.into()), 1, dst, len);
     }
 
-    fn sub_scalar(&mut self, a: u32, b: u32, dst: u32, len: u32) {
-        self.add_sub(true, (a, 0), (b, 0), 0, dst, len);
+    fn sub_scalar(&mut self, a: u32, b: u32, dst: u32, len: Self::N) {
+        self.add_sub(true, (a, 0.into()), (b, 0.into()), 0, dst, len);
     }
 
-    fn dot(&mut self, a: u32, b: u32, dst: u32, len: u32) {
-        self.dots(a, b, dst, 1, len, |_, i| Some(((a, i), (b, i))));
+    fn dot(&mut self, a: u32, b: u32, dst: u32, len: Self::N) {
+        self.dots(a, b, dst, 1.into(), len, |_, i| ((a, i), (b, i)));
     }
 
     /// `inverse_len` holds `1 / len` when `len` is not a power of two; otherwise a shift does it.
     /// `epsilon`, when given, keeps an almost silent vector from being blown up.
     fn rms_normalize(&mut self, x: u32, dst: u32, len: u32, temporary: (u32, u32), inverse_len: Option<u32>, epsilon: Option<u32>) {
-        self.dot(x, x, temporary.0, len);
+        self.dot(x, x, temporary.0, len.into());
         let (mean, spare) = match inverse_len {
             Some(factor) => {
-                self.scale(factor, temporary.0, temporary.1, 1);
+                self.scale(factor, temporary.0, temporary.1, 1.into());
                 (temporary.1, temporary.0)
             }
             None => {
@@ -180,7 +298,7 @@ pub trait BlockOps {
     }
 
     fn l2_normalize(&mut self, x: u32, dst: u32, len: u32, temporary: (u32, u32), epsilon: Option<u32>) {
-        self.dot(x, x, temporary.0, len);
+        self.dot(x, x, temporary.0, len.into());
         self.invert_root_and_scale(x, dst, len, temporary, epsilon);
     }
 
@@ -188,59 +306,63 @@ pub trait BlockOps {
     fn invert_root_and_scale(&mut self, x: u32, dst: u32, len: u32, registers: (u32, u32), epsilon: Option<u32>) {
         let (value, spare) = match epsilon {
             Some(e) => {
-                self.add(registers.0, e, registers.1, 1);
+                self.add(registers.0, e, registers.1, 1.into());
                 (registers.1, registers.0)
             }
             None => registers,
         };
         self.inverse_sqrt(value, spare);
-        self.scale(spare, x, dst, len);
+        self.scale(spare, x, dst, len.into());
     }
 
     /// Softmax attention: `query` against `tokens` keys, then the weighted sum of values.
     #[allow(clippy::too_many_arguments)]
-    fn attention(&mut self, query: u32, keys: u32, values: u32, ones: u32, dst: u32, width: u32, tokens: u32, score_scale: Option<u32>, regs: AttentionRegs) {
-        self.dots(query, keys, regs.scores, tokens, width, |t, j| Some(((query, j), (keys, t * width + j))));
+    fn attention(&mut self, query: u32, keys: u32, values: u32, ones: u32, dst: u32, width: u32, tokens: Self::N, score_scale: Option<u32>, regs: AttentionRegs) {
+        self.dots(query, keys, regs.scores, tokens, width.into(), |t, j| ((query, j), (keys, t * width + j)));
         if let Some(scale) = score_scale {
             self.scale(scale, regs.scores, regs.top, tokens);
-            self.copy_part(regs.top, 0, regs.scores, 0, tokens);
+            self.copy_part(regs.top, 0.into(), regs.scores, 0.into(), tokens);
         }
         self.maximum(regs.scores, tokens, regs.top);
         self.sub_scalar(regs.scores, regs.top, regs.shifted, tokens);
         self.function(FN_EXP, regs.shifted, regs.weights, tokens);
-        self.dots(regs.weights, ones, regs.total, 1, tokens, |_, t| Some(((regs.weights, t), (ones, t))));
+        self.dots(regs.weights, ones, regs.total, 1.into(), tokens, |_, t| ((regs.weights, t), (ones, t)));
         self.reciprocal(regs.total, regs.inverse);
         self.scale(regs.inverse, regs.weights, regs.probabilities, tokens);
-        self.dots(regs.probabilities, values, dst, width, tokens, |j, t| Some(((regs.probabilities, t), (values, t * width + j))));
+        self.dots(regs.probabilities, values, dst, width.into(), tokens, |j, t| ((regs.probabilities, t), (values, t * width + j)));
     }
 
     /// One Gated DeltaNet head: the delta rule on a `key × value` state matrix.
     fn delta_step(&mut self, r: DeltaRegs, key: u32, value: u32) {
         let cells = key * value;
-        self.scale(r.decay, r.state, r.state, cells);
-        self.dots(r.state, r.key, r.memory, value, key, |j, i| Some(((r.state, i * value + j), (r.key, i))));
-        self.add_sub(true, (r.value, 0), (r.memory, 0), 1, r.error, value);
-        self.scale(r.beta, r.error, r.delta, value);
+        self.scale(r.decay, r.state, r.state, cells.into());
+        self.dots(r.state, r.key, r.memory, value.into(), key.into(), |j, i| ((r.state, i * value + j), (r.key, i)));
+        self.add_sub(true, (r.value, 0.into()), (r.memory, 0.into()), 1, r.error, value.into());
+        self.scale(r.beta, r.error, r.delta, value.into());
         // The output reads the old state and the update apart, before rounding merges them:
         // the update's contribution is often a tiny difference that rounding would erase.
-        self.dots(r.state, r.query, r.next, value, key, |j, i| Some(((r.state, i * value + j), (r.query, i))));
-        self.dot(r.key, r.query, r.memory, key);
-        self.scale(r.memory, r.delta, r.update, value);
-        self.add(r.next, r.update, r.out, value);
+        self.dots(r.state, r.query, r.next, value.into(), key.into(), |j, i| ((r.state, i * value + j), (r.query, i)));
+        self.dot(r.key, r.query, r.memory, key.into());
+        self.scale(r.memory, r.delta, r.update, value.into());
+        self.add(r.next, r.update, r.out, value.into());
         self.outer_product(r.key, r.delta, r.update, key, value);
-        self.add(r.state, r.update, r.next, cells);
-        self.copy_part(r.next, 0, r.state, 0, cells);
+        self.add(r.state, r.update, r.next, cells.into());
+        self.copy_part(r.next, 0.into(), r.state, 0.into(), cells.into());
     }
 
     fn outer_product(&mut self, a: u32, b: u32, dst: u32, rows: u32, cols: u32);
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Alu {
+pub struct Alu<N = u32> {
     pub op: u32,
-    pub a: Place,
-    pub b: Place,
-    pub dst: Place,
+    pub a: At<N>,
+    pub b: At<N>,
+    pub dst: At<N>,
+    /// Index registers added to each operand's literal; 0 is always zero.
+    pub offset_a: u32,
+    pub offset_b: u32,
+    pub offset_dst: u32,
     pub shift: u32,
     pub function: u32,
     pub literal: Option<u32>,
@@ -259,13 +381,16 @@ pub struct Alu {
     pub wide_clear: bool,
 }
 
-impl Alu {
-    pub fn new(op: u32) -> Self {
+impl<N: Default> Alu<N> {
+    fn with_op(op: u32) -> Self {
         Alu {
             op,
-            a: (0, 0),
-            b: (0, 0),
-            dst: (0, 0),
+            a: (0, N::default()),
+            b: (0, N::default()),
+            dst: (0, N::default()),
+            offset_a: 0,
+            offset_b: 0,
+            offset_dst: 0,
             shift: 0,
             function: 0,
             literal: None,
@@ -286,38 +411,124 @@ impl Alu {
     }
 }
 
-/// A program of single-element steps plus the register contents it starts from.
+impl Alu<u32> {
+    pub fn new(op: u32) -> Self {
+        Self::with_op(op)
+    }
+}
+
+impl Alu<Expr> {
+    /// The same step with its indices replaced by what `index` makes of them.
+    pub fn map_indices(&self, mut index: impl FnMut(Expr) -> u32) -> Alu<u32> {
+        let (a, b, dst) = (index(self.a.1), index(self.b.1), index(self.dst.1));
+        Alu {
+            op: self.op,
+            a: (self.a.0, a),
+            b: (self.b.0, b),
+            dst: (self.dst.0, dst),
+            offset_a: self.offset_a,
+            offset_b: self.offset_b,
+            offset_dst: self.offset_dst,
+            shift: self.shift,
+            function: self.function,
+            literal: self.literal,
+            write: self.write,
+            load_shift_a: self.load_shift_a,
+            load_shift_b: self.load_shift_b,
+            load_shift_left: self.load_shift_left,
+            load_wide_shift: self.load_wide_shift,
+            magnitude_scan: self.magnitude_scan,
+            magnitude_clear: self.magnitude_clear,
+            accumulate: self.accumulate,
+            accumulator_clear: self.accumulator_clear,
+            link_send: self.link_send,
+            wide_write: self.wide_write,
+            wide_scan: self.wide_scan,
+            wide_clear: self.wide_clear,
+        }
+    }
+}
+
+impl From<Alu<u32>> for Alu<Expr> {
+    fn from(s: Alu<u32>) -> Self {
+        let mut out = Alu::<Expr>::with_op(s.op);
+        out.a = (s.a.0, s.a.1.into());
+        out.b = (s.b.0, s.b.1.into());
+        out.dst = (s.dst.0, s.dst.1.into());
+        out.shift = s.shift;
+        out.function = s.function;
+        out.literal = s.literal;
+        out.write = s.write;
+        out.load_shift_a = s.load_shift_a;
+        out.load_shift_b = s.load_shift_b;
+        out.load_shift_left = s.load_shift_left;
+        out.load_wide_shift = s.load_wide_shift;
+        out.magnitude_scan = s.magnitude_scan;
+        out.magnitude_clear = s.magnitude_clear;
+        out.accumulate = s.accumulate;
+        out.accumulator_clear = s.accumulator_clear;
+        out.link_send = s.link_send;
+        out.wide_write = s.wide_write;
+        out.wide_scan = s.wide_scan;
+        out.wide_clear = s.wide_clear;
+        out
+    }
+}
+
+/// A microprogram before it is laid out: single-element steps and counted loops.
+#[derive(Clone, Debug)]
+pub enum Step {
+    One(Alu<Expr>),
+    Repeat { variable: Var, count: Expr, body: Vec<Step> },
+}
+
+impl From<Alu<u32>> for Step {
+    fn from(s: Alu<u32>) -> Self {
+        Step::One(s.into())
+    }
+}
+
+fn alu(op: u32) -> Alu<Expr> {
+    Alu::with_op(op)
+}
+
+/// A program of steps plus the register contents it starts from.
 pub struct Assembly {
-    pub steps: Vec<Alu>,
+    pub steps: Vec<Step>,
     pub initial: HashMap<Place, i64>,
     bits: u32,
     index_bits: u32,
     exponents: u32,
     scratch: u32,
+    loops: u32,
 }
 
 impl Assembly {
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c) }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0 }
     }
 
-    pub fn exponent(&self, reg: u32) -> Place {
-        (self.exponents, reg)
+    pub fn exponent(&self, reg: u32) -> At<Expr> {
+        (self.exponents, reg.into())
+    }
+
+    fn push(&mut self, step: Alu<Expr>) {
+        self.steps.push(Step::One(step));
     }
 
     /// Scratch element for values that have to be built up across several steps.
-    fn sc(&self, index: u32) -> Place {
-        (self.scratch, index)
+    fn sc(&self, index: u32) -> At<Expr> {
+        (self.scratch, index.into())
     }
 
     /// Writes a small constant, composing it when it does not fit one literal.
-    fn immediate(&mut self, value: i64, dst: Place) {
+    fn immediate(&mut self, value: i64, dst: At<Expr>) {
         let limit = (1i64 << (self.index_bits - 1)) - 1;
         if value.abs() <= limit {
-            let mut s = Alu::new(OP_IMMEDIATE);
+            let mut s = alu(OP_IMMEDIATE);
             s.literal = Some(value as u32 & ((1 << self.index_bits) - 1));
             s.dst = dst;
-            self.steps.push(s);
+            self.push(s);
         } else {
             let part = value / 2;
             self.immediate(part, self.sc(16));
@@ -326,19 +537,19 @@ impl Assembly {
         }
     }
 
-    fn binary(&mut self, op: u32, a: Place, b: Place, dst: Place) {
-        let mut s = Alu::new(op);
+    fn binary(&mut self, op: u32, a: At<Expr>, b: At<Expr>, dst: At<Expr>) {
+        let mut s = alu(op);
         s.a = a;
         s.b = b;
         s.dst = dst;
-        self.steps.push(s);
+        self.push(s);
     }
 
-    fn load_shifts(&mut self, a: Option<Place>, b: Option<Place>, left: Option<Place>) {
+    fn load_shifts(&mut self, a: Option<At<Expr>>, b: Option<At<Expr>>, left: Option<At<Expr>>) {
         // Sources are read through the A shifter, so A has to be loaded last.
         let zero = self.sc(15);
         for (place, which) in [(left, 2), (b, 1), (a, 0)] {
-            let mut s = Alu::new(OP_MOV);
+            let mut s = alu(OP_MOV);
             s.a = place.unwrap_or(zero);
             match which {
                 0 => s.load_shift_a = true,
@@ -346,7 +557,7 @@ impl Assembly {
                 _ => s.load_shift_left = true,
             }
             s.write = false;
-            self.steps.push(s);
+            self.push(s);
         }
     }
 
@@ -361,120 +572,107 @@ impl Assembly {
         self.binary(OP_ADD, self.sc(6), self.sc(7), self.exponent(dst));
     }
 
-    fn accumulate_set(&mut self, pairs: impl Iterator<Item = Pair>, wide_index: u32) {
-        let mut clear = Alu::new(OP_MOV);
+    fn clear_accumulator(&mut self) {
+        let mut clear = alu(OP_MOV);
         clear.write = false;
         clear.accumulator_clear = true;
-        self.steps.push(clear);
-        for (a, b) in pairs {
-            let mut s = Alu::new(OP_MOV);
-            s.a = a;
-            s.b = b;
-            s.write = false;
-            s.accumulate = true;
-            self.steps.push(s);
-        }
-        let mut write = Alu::new(OP_MOV);
+        self.push(clear);
+    }
+
+    fn accumulate(&mut self, a: At<Expr>, b: At<Expr>) {
+        let mut s = alu(OP_MOV);
+        s.a = a;
+        s.b = b;
+        s.write = false;
+        s.accumulate = true;
+        self.push(s);
+    }
+
+    fn store_accumulator(&mut self, wide_index: Expr) {
+        let mut write = alu(OP_MOV);
         write.write = false;
         write.wide_write = true;
         write.dst = (0, wide_index);
-        self.steps.push(write);
+        self.push(write);
     }
 
-    /// Narrows the wide sums to mantissas, shifting only as much as the largest needs.
-    fn narrow_wide(&mut self, a: u32, b: u32, dst: u32, sets: u32) {
-        let mut clear = Alu::new(OP_MOV);
-        clear.write = false;
-        clear.wide_clear = true;
-        self.steps.push(clear);
-        for set in 0..sets {
-            let mut s = Alu::new(OP_MOV);
-            s.a = (0, set);
-            s.write = false;
-            s.wide_scan = true;
-            self.steps.push(s);
-        }
-        let mut count = Alu::new(OP_WIDE_LZC);
-        count.dst = self.sc(0);
-        self.steps.push(count);
-        self.immediate(accumulator_bits(self.bits) as i64 - self.bits as i64, self.sc(1));
-        self.binary(OP_SUB, self.sc(1), self.sc(0), self.sc(2));
-        self.immediate(0, self.sc(3));
-        self.binary(OP_MAX, self.sc(2), self.sc(3), self.sc(4));
-        let mut load = Alu::new(OP_MOV);
-        load.a = self.sc(4);
-        load.write = false;
-        load.load_wide_shift = true;
-        self.steps.push(load);
-        for set in 0..sets {
-            let mut s = Alu::new(OP_WIDE_OUT);
-            s.a = (0, set);
-            s.dst = (dst, set);
-            self.steps.push(s);
-        }
-        self.binary(OP_ADD, self.exponent(a), self.exponent(b), self.sc(5));
-        self.binary(OP_ADD, self.sc(5), self.sc(4), self.sc(6));
-        self.immediate(1 - self.bits as i64, self.sc(7));
-        self.binary(OP_ADD, self.sc(6), self.sc(7), self.exponent(dst));
-        self.normalize(dst, sets);
-    }
-
-    fn table_input(&mut self, function: u32, source: Place, dst: Place) {
-        let mut s = Alu::new(OP_FUNCTION);
+    fn table_input(&mut self, function: u32, source: At<Expr>, dst: At<Expr>) {
+        let mut s = alu(OP_FUNCTION);
         s.a = source;
         s.function = function;
         s.dst = dst;
-        self.steps.push(s);
+        self.push(s);
+    }
+
+    fn scan_and_shift(&mut self, reg: u32, len: Expr) {
+        let mut first = alu(OP_MOV);
+        first.a = (reg, 0.into());
+        first.write = false;
+        first.magnitude_clear = true;
+        self.push(first);
+        self.each(len, |s, i| {
+            let mut scan = alu(OP_MOV);
+            scan.a = (reg, i);
+            scan.magnitude_scan = true;
+            scan.write = false;
+            s.push(scan);
+        });
     }
 }
 
 impl BlockOps for Assembly {
+    type N = Expr;
+
+    fn each(&mut self, count: Expr, mut body: impl FnMut(&mut Self, Expr)) {
+        if count.is_constant() {
+            match count.constant() {
+                0 => return,
+                1 => return body(self, 0.into()),
+                _ => {}
+            }
+        }
+        let variable = Var::Loop(self.loops);
+        self.loops += 1;
+        let outer = std::mem::take(&mut self.steps);
+        body(self, Expr::var(variable));
+        let inner = std::mem::replace(&mut self.steps, outer);
+        self.steps.push(Step::Repeat { variable, count, body: inner });
+    }
+
     fn load_vector(&mut self, reg: u32, values: &[f64]) {
         let (mantissas, exponent) = encode_vector(values, self.bits);
-        for (i, m) in mantissas.iter().enumerate() {
-            self.initial.insert((reg, i as u32), *m);
-        }
-        let place = self.exponent(reg);
-        self.initial.insert(place, exponent);
+        self.load_mantissas(reg, &mantissas, exponent);
     }
 
     fn load_mantissas(&mut self, reg: u32, mantissas: &[i64], exponent: i64) {
         for (i, m) in mantissas.iter().enumerate() {
             self.initial.insert((reg, i as u32), *m);
         }
-        let place = self.exponent(reg);
-        self.initial.insert(place, exponent);
+        self.initial.insert((self.exponents, reg), exponent);
     }
 
-    fn normalize(&mut self, reg: u32, len: u32) {
+    fn load_row(&mut self, table: u32, row: Expr, width: u32, dst: u32, _values: impl Fn(u32) -> Vec<f64>) {
+        self.copy_part(table, row * width, dst, 0.into(), width.into());
+    }
+
+    fn normalize(&mut self, reg: u32, len: Expr) {
         self.clear_shifts();
-        let mut first = Alu::new(OP_MOV);
-        first.a = (reg, 0);
-        first.write = false;
-        first.magnitude_clear = true;
-        self.steps.push(first);
-        for i in 0..len {
-            let mut s = Alu::new(OP_MOV);
-            s.a = (reg, i);
-            s.magnitude_scan = true;
-            s.write = false;
-            self.steps.push(s);
-        }
-        let mut count = Alu::new(OP_LZC);
+        self.scan_and_shift(reg, len);
+        let mut count = alu(OP_LZC);
         count.dst = self.sc(0);
-        self.steps.push(count);
+        self.push(count);
         self.load_shifts(None, None, Some(self.sc(0)));
-        for i in 0..len {
-            let mut s = Alu::new(OP_SHIFT_LEFT);
-            s.a = (reg, i);
-            s.dst = (reg, i);
-            self.steps.push(s);
-        }
+        self.each(len, |s, i| {
+            let mut shift = alu(OP_SHIFT_LEFT);
+            shift.a = (reg, i);
+            shift.dst = (reg, i);
+            s.push(shift);
+        });
         self.binary(OP_SUB, self.exponent(reg), self.sc(0), self.exponent(reg));
         self.clear_shifts();
     }
 
-    fn add_sub(&mut self, subtract: bool, a: Place, b: Place, b_stride: u32, dst: u32, len: u32) {
+    fn add_sub(&mut self, subtract: bool, a: At<Expr>, b: At<Expr>, b_stride: u32, dst: u32, len: Expr) {
         self.clear_shifts();
         let (ea, eb) = (self.exponent(a.0), self.exponent(b.0));
         self.binary(OP_MAX, ea, eb, self.sc(1));
@@ -484,111 +682,158 @@ impl BlockOps for Assembly {
         self.binary(OP_SUB, self.sc(3), eb, self.sc(5));
         self.load_shifts(Some(self.sc(4)), Some(self.sc(5)), None);
         let op = if subtract { OP_SUB } else { OP_ADD };
-        for i in 0..len {
-            self.binary(op, (a.0, a.1 + i), (b.0, b.1 + i * b_stride), (dst, i));
-        }
+        self.each(len, |s, i| s.binary(op, (a.0, a.1 + i), (b.0, b.1 + i * b_stride), (dst, i)));
         self.clear_shifts();
         self.binary(OP_MOV, self.sc(3), self.sc(15), self.exponent(dst));
         self.normalize(dst, len);
     }
 
-    fn multiply(&mut self, a: u32, b: u32, dst: u32, len: u32) {
-        for i in 0..len {
-            let mut s = Alu::new(OP_MUL);
-            s.a = (a, i);
-            s.b = (b, i);
-            s.dst = (dst, i);
-            s.shift = self.bits - 1;
-            self.steps.push(s);
-        }
+    fn multiply(&mut self, a: u32, b: u32, dst: u32, len: Expr) {
+        let shift = self.bits - 1;
+        self.each(len, |s, i| {
+            let mut product = alu(OP_MUL);
+            product.a = (a, i);
+            product.b = (b, i);
+            product.dst = (dst, i);
+            product.shift = shift;
+            s.push(product);
+        });
         self.product_exponent(a, b, dst, 0);
         self.normalize(dst, len);
     }
 
-    fn scale(&mut self, s_reg: u32, a: u32, dst: u32, len: u32) {
-        for i in 0..len {
-            let mut s = Alu::new(OP_MUL);
-            s.a = (s_reg, 0);
-            s.b = (a, i);
-            s.dst = (dst, i);
-            s.shift = self.bits - 1;
-            self.steps.push(s);
-        }
+    fn scale(&mut self, s_reg: u32, a: u32, dst: u32, len: Expr) {
+        let shift = self.bits - 1;
+        self.each(len, |s, i| {
+            let mut product = alu(OP_MUL);
+            product.a = (s_reg, 0.into());
+            product.b = (a, i);
+            product.dst = (dst, i);
+            product.shift = shift;
+            s.push(product);
+        });
         self.product_exponent(s_reg, a, dst, 0);
         self.normalize(dst, len);
     }
 
     fn outer_product(&mut self, a: u32, b: u32, dst: u32, rows: u32, cols: u32) {
-        for i in 0..rows {
-            for j in 0..cols {
-                let mut s = Alu::new(OP_MUL);
-                s.a = (a, i);
-                s.b = (b, j);
-                s.dst = (dst, i * cols + j);
-                s.shift = self.bits - 1;
-                self.steps.push(s);
-            }
-        }
+        let shift = self.bits - 1;
+        self.each(rows.into(), |s, i| {
+            s.each(cols.into(), |s, j| {
+                let mut product = alu(OP_MUL);
+                product.a = (a, i);
+                product.b = (b, j);
+                product.dst = (dst, i * cols + j);
+                product.shift = shift;
+                s.push(product);
+            });
+        });
         self.product_exponent(a, b, dst, 0);
-        self.normalize(dst, rows * cols);
+        self.normalize(dst, (rows * cols).into());
     }
 
-    fn dots<F>(&mut self, a: u32, b: u32, dst: u32, sets: u32, terms: u32, indices: F)
+    fn dots<F>(&mut self, a: u32, b: u32, dst: u32, sets: Expr, terms: Expr, indices: F)
     where
-        F: Fn(u32, u32) -> Option<(Place, Place)>,
+        F: Fn(Expr, Expr) -> Pair<Expr>,
     {
-        for set in 0..sets {
-            let pairs: Vec<Pair> = (0..terms).filter_map(|term| indices(set, term)).collect();
-            self.accumulate_set(pairs.into_iter(), set);
-        }
-        self.narrow_wide(a, b, dst, sets);
+        self.each(sets, |s, set| {
+            s.clear_accumulator();
+            s.each(terms, |s, term| {
+                let (x, y) = indices(set, term);
+                s.accumulate(x, y);
+            });
+            s.store_accumulator(set);
+        });
+        self.narrow_sums(a, b, dst, sets);
     }
 
-    fn function(&mut self, function: u32, src: u32, dst: u32, len: u32) {
-        let scratch = self.scratch;
-        self.align_to(src, 0, TABLE_INPUT_EXPONENT, scratch, 32, len);
-        for i in 0..len {
-            self.table_input(function, (scratch, 32 + i), (dst, i));
+    fn sum_products(&mut self, set: Expr, pairs: &[Pair<Expr>]) {
+        self.clear_accumulator();
+        for (x, y) in pairs {
+            self.accumulate(*x, *y);
         }
+        self.store_accumulator(set);
+    }
+
+    /// Narrows the wide sums to mantissas, shifting only as much as the largest needs.
+    fn narrow_sums(&mut self, a: u32, b: u32, dst: u32, sets: Expr) {
+        let mut clear = alu(OP_MOV);
+        clear.write = false;
+        clear.wide_clear = true;
+        self.push(clear);
+        self.each(sets, |s, set| {
+            let mut scan = alu(OP_MOV);
+            scan.a = (0, set);
+            scan.write = false;
+            scan.wide_scan = true;
+            s.push(scan);
+        });
+        let mut count = alu(OP_WIDE_LZC);
+        count.dst = self.sc(0);
+        self.push(count);
+        self.immediate(accumulator_bits(self.bits) as i64 - self.bits as i64, self.sc(1));
+        self.binary(OP_SUB, self.sc(1), self.sc(0), self.sc(2));
+        self.immediate(0, self.sc(3));
+        self.binary(OP_MAX, self.sc(2), self.sc(3), self.sc(4));
+        let mut load = alu(OP_MOV);
+        load.a = self.sc(4);
+        load.write = false;
+        load.load_wide_shift = true;
+        self.push(load);
+        self.each(sets, |s, set| {
+            let mut out = alu(OP_WIDE_OUT);
+            out.a = (0, set);
+            out.dst = (dst, set);
+            s.push(out);
+        });
+        self.binary(OP_ADD, self.exponent(a), self.exponent(b), self.sc(5));
+        self.binary(OP_ADD, self.sc(5), self.sc(4), self.sc(6));
+        self.immediate(1 - self.bits as i64, self.sc(7));
+        self.binary(OP_ADD, self.sc(6), self.sc(7), self.exponent(dst));
+        self.normalize(dst, sets);
+    }
+
+    fn function(&mut self, function: u32, src: u32, dst: u32, len: Expr) {
+        let scratch = self.scratch;
+        self.align_to(src, 0.into(), TABLE_INPUT_EXPONENT, scratch, 32.into(), len);
+        self.each(len, |s, i| s.table_input(function, (scratch, i + 32.into()), (dst, i)));
         let exponent = if function == FN_SOFTPLUS { SOFTPLUS_OUTPUT_EXPONENT } else { UNIT_OUTPUT_EXPONENT };
         self.immediate(exponent, self.exponent(dst));
         self.normalize(dst, len);
     }
 
     fn reciprocal(&mut self, src: u32, dst: u32) {
-        self.table_input(FN_RECIPROCAL, (src, 0), (dst, 0));
+        self.table_input(FN_RECIPROCAL, (src, 0.into()), (dst, 0.into()));
         self.immediate(RECIPROCAL_OUTPUT_EXPONENT, self.sc(1));
         self.binary(OP_SUB, self.sc(1), self.exponent(src), self.exponent(dst));
-        self.normalize(dst, 1);
+        self.normalize(dst, 1.into());
     }
 
     fn inverse_sqrt(&mut self, src: u32, dst: u32) {
         let e = self.exponent(src);
         self.clear_shifts();
-        let mut parity = Alu::new(OP_PARITY);
+        let mut parity = alu(OP_PARITY);
         parity.a = e;
         parity.dst = self.sc(1);
-        self.steps.push(parity);
+        self.push(parity);
         self.load_shifts(Some(self.sc(1)), None, None);
-        self.binary(OP_MOV, (src, 0), self.sc(15), self.sc(2));
+        self.binary(OP_MOV, (src, 0.into()), self.sc(15), self.sc(2));
         self.clear_shifts();
         self.binary(OP_ADD, e, self.sc(1), self.sc(3));
-        self.table_input(FN_INV_SQRT, self.sc(2), (dst, 0));
+        self.table_input(FN_INV_SQRT, self.sc(2), (dst, 0.into()));
         self.immediate(1, self.sc(4));
         self.load_shifts(Some(self.sc(4)), None, None);
         self.binary(OP_MOV, self.sc(3), self.sc(15), self.sc(5));
         self.clear_shifts();
         self.immediate(RECIPROCAL_OUTPUT_EXPONENT, self.sc(6));
         self.binary(OP_SUB, self.sc(6), self.sc(5), self.exponent(dst));
-        self.normalize(dst, 1);
+        self.normalize(dst, 1.into());
     }
 
-    fn copy_part(&mut self, src: u32, from: u32, dst: u32, to: u32, len: u32) {
+    fn copy_part(&mut self, src: u32, from: Expr, dst: u32, to: Expr, len: Expr) {
         self.clear_shifts();
         let zero = self.sc(15);
-        for i in 0..len {
-            self.binary(OP_MOV, (src, from + i), zero, (dst, to + i));
-        }
+        self.each(len, |s, i| s.binary(OP_MOV, (src, from + i), zero, (dst, to + i)));
         self.binary(OP_MOV, self.exponent(src), zero, self.exponent(dst));
     }
 
@@ -604,17 +849,16 @@ impl BlockOps for Assembly {
         for (reg, len) in parts {
             self.binary(OP_SUB, largest, self.exponent(*reg), shift);
             self.load_shifts(Some(shift), None, None);
-            for i in 0..*len {
-                self.binary(OP_MOV, (*reg, i), zero, (dst, offset + i));
-            }
+            let at: Expr = offset.into();
+            self.each((*len).into(), |s, i| s.binary(OP_MOV, (*reg, i), zero, (dst, at + i)));
             self.clear_shifts();
             offset += len;
         }
         self.binary(OP_MOV, largest, zero, self.exponent(dst));
-        self.normalize(dst, offset);
+        self.normalize(dst, offset.into());
     }
 
-    fn align_to(&mut self, src: u32, from: u32, exponent: i64, dst: u32, to: u32, len: u32) {
+    fn align_to(&mut self, src: u32, from: Expr, exponent: i64, dst: u32, to: Expr, len: Expr) {
         let e = self.exponent(src);
         self.immediate(exponent, self.sc(8));
         self.binary(OP_SUB, e, self.sc(8), self.sc(9));
@@ -623,41 +867,39 @@ impl BlockOps for Assembly {
         self.binary(OP_SUB, self.sc(8), e, self.sc(12));
         self.binary(OP_MAX, self.sc(12), self.sc(10), self.sc(13));
         self.load_shifts(Some(self.sc(13)), None, Some(self.sc(11)));
-        for i in 0..len {
-            let mut right = Alu::new(OP_MOV);
+        self.each(len, |s, i| {
+            let mut right = alu(OP_MOV);
             right.a = (src, from + i);
             right.dst = (dst, to + i);
-            self.steps.push(right);
-            let mut left = Alu::new(OP_SHIFT_LEFT);
+            s.push(right);
+            let mut left = alu(OP_SHIFT_LEFT);
             left.a = (dst, to + i);
             left.dst = (dst, to + i);
-            self.steps.push(left);
-        }
+            s.push(left);
+        });
         self.clear_shifts();
     }
 
-    fn move_element(&mut self, from: Place, to: Place) {
+    fn move_element(&mut self, from: At<Expr>, to: At<Expr>) {
         self.binary(OP_MOV, from, self.sc(15), to);
     }
 
-    fn maximum(&mut self, src: u32, len: u32, dst: u32) {
+    fn maximum(&mut self, src: u32, len: Expr, dst: u32) {
         self.clear_shifts();
-        self.binary(OP_MOV, (src, 0), self.sc(15), (dst, 0));
-        for t in 1..len {
-            self.binary(OP_MAX, (dst, 0), (src, t), (dst, 0));
-        }
+        let first: At<Expr> = (dst, 0.into());
+        self.binary(OP_MOV, (src, 0.into()), self.sc(15), first);
+        // Starting from the first element again keeps the count from ever being zero.
+        self.each(len, |s, t| s.binary(OP_MAX, first, (src, t), first));
         self.binary(OP_MOV, self.exponent(src), self.sc(15), self.exponent(dst));
     }
 
-    fn mark_equal(&mut self, a: u32, b: u32, dst: u32, len: u32) {
+    fn mark_equal(&mut self, a: u32, b: u32, dst: u32, len: Expr) {
         self.clear_shifts();
-        let mut clear = Alu::new(OP_MOV);
+        let mut clear = alu(OP_MOV);
         clear.magnitude_clear = true;
         clear.write = false;
-        self.steps.push(clear);
-        for i in 0..len {
-            self.binary(OP_EQUAL, (a, i), (b, 0), (dst, i));
-        }
+        self.push(clear);
+        self.each(len, |s, i| s.binary(OP_EQUAL, (a, i), (b, 0.into()), (dst, i)));
         self.immediate(0, self.exponent(dst));
     }
 
@@ -671,11 +913,11 @@ impl BlockOps for Assembly {
     }
 
     fn matvec(&mut self, _name: &str, matrix: u32, first: u32, src: u32, dst: u32, rows: u32, cols: u32) {
-        self.dots(matrix, src, dst, rows, cols, |r, j| Some(((matrix, (first + r) * cols + j), (src, j))));
+        self.dots(matrix, src, dst, rows.into(), cols.into(), |r, j| ((matrix, (r + first.into()) * cols + j), (src, j)));
     }
 
-    fn copy_row(&mut self, _name: &str, matrix: u32, row: u32, cols: u32, dst: u32) {
-        self.copy_part(matrix, row * cols, dst, 0, cols);
+    fn copy_row(&mut self, _name: &str, matrix: u32, row: Expr, cols: u32, dst: u32) {
+        self.copy_part(matrix, row * cols, dst, 0.into(), cols.into());
     }
 }
 
@@ -737,9 +979,35 @@ impl Behavior {
         self.get(place)
     }
 
-    pub fn run(&mut self, steps: &[Alu]) {
-        for s in steps {
-            self.step(s);
+    pub fn run(&mut self, steps: &[Step]) {
+        self.run_with(steps, 0, 0);
+    }
+
+    /// Runs a program for one token at one position of the context.
+    pub fn run_with(&mut self, steps: &[Step], token: u32, position: u32) {
+        let mut loops = HashMap::new();
+        self.walk(steps, token, position, &mut loops);
+    }
+
+    fn walk(&mut self, steps: &[Step], token: u32, position: u32, loops: &mut HashMap<Var, u32>) {
+        for step in steps {
+            let value = |loops: &HashMap<Var, u32>, e: Expr| e.eval(|v| match v {
+                Var::Token => token,
+                Var::Position => position,
+                loop_variable => loops[&loop_variable],
+            });
+            match step {
+                Step::One(alu) => {
+                    let bound = alu.map_indices(|e| value(loops, e));
+                    self.step(&bound);
+                }
+                Step::Repeat { variable, count, body } => {
+                    for i in 0..value(loops, *count) {
+                        loops.insert(*variable, i);
+                        self.walk(body, token, position, loops);
+                    }
+                }
+            }
         }
     }
 

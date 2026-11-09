@@ -29,6 +29,7 @@ pub struct BlockVm {
     function_bits: u32,
     weights: Option<Arc<Weights>>,
     matrix_exponents: RefCell<HashMap<String, i64>>,
+    wide: Vec<i64>,
 }
 
 impl BlockVm {
@@ -41,6 +42,7 @@ impl BlockVm {
             function_bits: config.function_bits,
             weights,
             matrix_exponents: RefCell::new(HashMap::new()),
+            wide: Vec::new(),
         }
     }
 
@@ -153,6 +155,31 @@ impl BlockVm {
 }
 
 impl BlockOps for BlockVm {
+    type N = u32;
+
+    fn each(&mut self, count: u32, mut body: impl FnMut(&mut Self, u32)) {
+        for i in 0..count {
+            body(self, i);
+        }
+    }
+
+    fn load_row(&mut self, _table: u32, row: u32, _width: u32, dst: u32, values: impl Fn(u32) -> Vec<f64>) {
+        self.load_vector(dst, &values(row));
+    }
+
+    fn sum_products(&mut self, set: u32, pairs: &[(Place, Place)]) {
+        let total = pairs.iter().fold(0i64, |total, (x, y)| self.wrap_wide(total + self.get(x.0, x.1) * self.get(y.0, y.1)));
+        if self.wide.len() <= set as usize {
+            self.wide.resize(set as usize + 1, 0);
+        }
+        self.wide[set as usize] = total;
+    }
+
+    fn narrow_sums(&mut self, a: u32, b: u32, dst: u32, sets: u32) {
+        let sums = self.wide[..sets as usize].to_vec();
+        self.narrow(&sums, self.exp(a), self.exp(b), dst);
+    }
+
     fn load_vector(&mut self, reg: u32, values: &[f64]) {
         let (mantissas, exponent) = netlist::block::encode_vector(values, self.bits);
         self.load_mantissas(reg, &mantissas, exponent);
@@ -227,15 +254,14 @@ impl BlockOps for BlockVm {
 
     fn dots<F>(&mut self, a: u32, b: u32, dst: u32, sets: u32, terms: u32, indices: F)
     where
-        F: Fn(u32, u32) -> Option<(Place, Place)>,
+        F: Fn(u32, u32) -> (Place, Place),
     {
         let sums: Vec<i64> = (0..sets)
             .map(|set| {
                 let mut total = 0i64;
                 for term in 0..terms {
-                    if let Some((x, y)) = indices(set, term) {
-                        total = self.wrap_wide(total + self.get(x.0, x.1) * self.get(y.0, y.1));
-                    }
+                    let (x, y) = indices(set, term);
+                    total = self.wrap_wide(total + self.get(x.0, x.1) * self.get(y.0, y.1));
                 }
                 total
             })
