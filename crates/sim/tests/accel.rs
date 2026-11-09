@@ -70,9 +70,13 @@ fn compare(gap: usize) {
     let gpu = Weights::open(&dir).unwrap().with_gpu();
     let Some(name) = gpu.accelerator_name() else {
         // Every Mac has Metal, so a missing GPU there means the shaders failed to compile.
-        assert!(!cfg!(target_os = "macos"), "Metal no se ha podido iniciar");
-        eprintln!("sin GPU: prueba omitida");
-        return;
+        #[cfg(target_os = "macos")]
+        panic!("Metal no se ha podido iniciar");
+        #[cfg(not(target_os = "macos"))]
+        {
+            eprintln!("sin GPU: prueba omitida");
+            return;
+        }
     };
     eprintln!("GPU: {name}, desplazamiento {gap}");
     let mut noise = Noise(99);
