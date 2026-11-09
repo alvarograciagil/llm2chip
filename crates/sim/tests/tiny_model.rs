@@ -132,11 +132,15 @@ fn make_checkpoint(dir: &Path) {
     w.write(&dir.join("model.safetensors"));
 }
 
+fn mask(c: &DieConfig) -> u64 {
+    (1u64 << c.cell.activation_bits) - 1
+}
+
 fn load_assembly(sim: &mut Simulator, c: &DieConfig, initial: &std::collections::HashMap<(u32, u32), i64>) {
     sim.set("load_vec", 1).unwrap();
     for ((reg, index), value) in initial {
         sim.set("vec_addr", ((*reg as u64) << c.index_bits) | *index as u64).unwrap();
-        sim.set("vec_data", *value as u64 & 0xFFFF).unwrap();
+        sim.set("vec_data", *value as u64 & mask(c)).unwrap();
         sim.tick();
     }
     sim.set("load_vec", 0).unwrap();
@@ -204,7 +208,7 @@ fn gates_after(program: &compiler::Program, dir: &Path, c: DieConfig, tokens: &[
     sim.set("load_fn", 1).unwrap();
     for (address, value) in tables(&c).iter().enumerate() {
         sim.set("fn_addr", address as u64).unwrap();
-        sim.set("cell_data", *value as u64 & 0xFFFF).unwrap();
+        sim.set("cell_data", *value as u64 & mask(&c)).unwrap();
         sim.tick();
     }
     sim.set("load_fn", 0).unwrap();
@@ -216,7 +220,7 @@ fn gates_after(program: &compiler::Program, dir: &Path, c: DieConfig, tokens: &[
 }
 
 fn assert_vm_matches_gates(program: &compiler::Program, config: &str, dir: &Path, c: DieConfig, tokens: &[u32], sim: &mut Simulator, layout: &Layout) {
-    let mut vm = ExactEngine::new(compile_qwen3_5(config).unwrap(), Weights::open(dir).unwrap()).unwrap();
+    let mut vm = ExactEngine::new(compile_qwen3_5(config).unwrap(), Weights::open(dir).unwrap(), c.cell.activation_bits).unwrap();
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }
@@ -277,7 +281,7 @@ fn draft_head_runs_on_the_gates() {
     let error: f32 = got.iter().zip(&expected).map(|(a, b)| (a - b).abs()).sum::<f32>() / 8.0;
     assert!(error < 0.1 * spread.max(0.2), "error medio {error}, magnitud {spread}");
 
-    let mut vm = ExactEngine::new(compile_qwen3_5(&config).unwrap(), Weights::open(&dir).unwrap()).unwrap();
+    let mut vm = ExactEngine::new(compile_qwen3_5(&config).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }
@@ -286,6 +290,24 @@ fn draft_head_runs_on_the_gates() {
     for index in 0..8 {
         let (mantissa, _) = read_block_value(&mut sim, c, layout.register_of(draft.logits), index);
         assert_eq!(mantissa, vm.mantissa(vm.register_of(draft.logits), index), "elemento {index}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn other_mantissa_widths_match_the_gates_bit_for_bit() {
+    let dir = std::env::temp_dir().join(format!("llm2chip-widths-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+    let tokens = [3u32, 7, 1];
+    for bits in [12u32, 18, 20] {
+        let mut base = die_config();
+        base.cell.activation_bits = bits;
+        base.cell.accumulator_bits = 2 * bits;
+        base.function_bits = 12.min(bits);
+        let (mut sim, layout) = gates_after(&program, &dir, base, &tokens);
+        assert_vm_matches_gates(&program, CONFIG, &dir, base, &tokens, &mut sim, &layout);
     }
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -356,7 +378,7 @@ fn tiny_model_runs_whole_on_the_gates() {
     sim.set("load_fn", 1).unwrap();
     for (address, value) in tables(&c).iter().enumerate() {
         sim.set("fn_addr", address as u64).unwrap();
-        sim.set("cell_data", *value as u64 & 0xFFFF).unwrap();
+        sim.set("cell_data", *value as u64 & mask(&c)).unwrap();
         sim.tick();
     }
     sim.set("load_fn", 0).unwrap();
@@ -402,7 +424,7 @@ fn tiny_model_runs_whole_on_the_gates() {
     assert!(error < 0.08 * spread.max(0.2), "error medio {error}, magnitud {spread}");
 
     // The fast machine must reach the same bits as the gates, in every buffer.
-    let mut vm = ExactEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap()).unwrap();
+    let mut vm = ExactEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }

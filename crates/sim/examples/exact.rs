@@ -23,7 +23,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ids = tokenizer.encode(text, false).map_err(|e| e.to_string())?.get_ids().to_vec();
 
     let mut float = Engine::new(compile_qwen3_5(&config)?, Weights::open(dir)?, Numeric::Float)?;
-    let mut exact = ExactEngine::new(compile_qwen3_5(&config)?, Weights::open(dir)?)?;
+    let bits: u32 = std::env::var("BITS").map_or(16, |v| v.parse().unwrap());
+    let mut exact = ExactEngine::new(compile_qwen3_5(&config)?, Weights::open(dir)?, bits)?;
     let mut sequence = ids.clone();
     let (mut matches, mut compared) = (0, 0);
     let (mut float_time, mut exact_time) = (0.0, 0.0);

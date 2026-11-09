@@ -9,10 +9,10 @@ use netlist::{CellConfig, DieConfig};
 use std::sync::Arc;
 
 /// Large register space and 12-bit tables: real models are not limited by a test die.
-fn exact_config() -> DieConfig {
+fn exact_config(bits: u32) -> DieConfig {
     DieConfig {
         cells: 1,
-        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array },
+        cell: CellConfig { weight_bits: 8, activation_bits: bits, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array },
         scale_bits: 16,
         reg_bits: 24,
         index_bits: 24,
@@ -34,8 +34,12 @@ pub struct ExactEngine {
 }
 
 impl ExactEngine {
-    pub fn new(program: Program, weights: Weights) -> Result<Self, String> {
-        let config = exact_config();
+    /// `bits` is the mantissa width of the die's vectors.
+    pub fn new(program: Program, weights: Weights, bits: u32) -> Result<Self, String> {
+        if !(8..=24).contains(&bits) {
+            return Err("los vectores admiten de 8 a 24 bits".into());
+        }
+        let config = exact_config(bits);
         let weights = Arc::new(weights);
         let layout = Layout::new(&program, &weights, config, false)?;
         let vm = BlockVm::new(&config, layout.registers_used() as usize + 8, Some(weights));

@@ -108,7 +108,7 @@ impl Layout {
                         let exponent = matrix.exponent(cols);
                         let mut flat = Vec::with_capacity(rows * cols);
                         for r in 0..rows {
-                            flat.extend(matrix.fixed_row(r, cols, exponent)?);
+                            flat.extend(matrix.fixed_row(r, cols, exponent, config.cell.activation_bits)?);
                         }
                         setup.load_mantissas(reg, &flat, exponent);
                     }

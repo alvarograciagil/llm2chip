@@ -214,9 +214,11 @@ fn half_at(bytes: &[u8], index: usize) -> f32 {
     f16::from_le_bytes([bytes[2 * index], bytes[2 * index + 1]]).to_f32()
 }
 
-const MANTISSA_FRACTION: i32 = 15;
 const AFFINE_EXTRA: i32 = 4;
-const MANTISSA_LIMIT: i64 = 32767;
+
+fn mantissa_limit(bits: u32) -> i64 {
+    (1i64 << (bits - 1)) - 1
+}
 
 fn exponent_of(largest: f32) -> i64 {
     if largest > 0.0 {
@@ -402,47 +404,51 @@ impl Matrix<'_> {
     }
 
     /// One row as the 16-bit mantissas the hardware stores.
-    pub fn fixed_row(&self, index: usize, cols: usize, exponent: i64) -> Result<Vec<i64>, String> {
+    pub fn fixed_row(&self, index: usize, cols: usize, exponent: i64, bits: u32) -> Result<Vec<i64>, String> {
+        let limit = mantissa_limit(bits);
+        let fraction = bits as i32 - 1;
         if self.requant(cols).is_some() {
-            let scale = 2f64.powi(MANTISSA_FRACTION - exponent as i32);
-            return Ok(self.row(index, cols)?.iter().map(|v| ((*v as f64 * scale).round() as i64).clamp(-MANTISSA_LIMIT, MANTISSA_LIMIT)).collect());
+            let scale = 2f64.powi(fraction - exponent as i32);
+            return Ok(self.row(index, cols)?.iter().map(|v| ((*v as f64 * scale).round() as i64).clamp(-limit, limit)).collect());
         }
         match &self.source {
             Source::Packed { words_per_row, groups, words, scales, biases } => {
                 let group_size = cols / groups;
                 let bits = words_per_row * 32 / cols;
                 let row = &words[index * words_per_row * 4..(index + 1) * words_per_row * 4];
-                let factor = fixed_factor(exponent);
+                let factor = fixed_factor(exponent, fraction);
                 let mut out = Vec::with_capacity(cols);
                 for g in 0..*groups {
                     let (scale, bias) = affine_integers(half_at(scales, index * groups + g), half_at(biases, index * groups + g), factor);
                     for j in 0..group_size {
                         let at = g * group_size + j;
                         let q = if bits == 8 { row[at] } else { (row[at / 2] >> (4 * (at & 1))) & 0xF };
-                        out.push(affine_weight(q, scale, bias));
+                        out.push(affine_weight(q, scale, bias, limit));
                     }
                 }
                 Ok(out)
             }
             Source::Plain { .. } => {
-                let scale = 2f64.powi(MANTISSA_FRACTION - exponent as i32);
-                Ok(self.row(index, cols)?.iter().map(|v| ((*v as f64 * scale).round() as i64).clamp(-MANTISSA_LIMIT, MANTISSA_LIMIT)).collect())
+                let scale = 2f64.powi(fraction - exponent as i32);
+                Ok(self.row(index, cols)?.iter().map(|v| ((*v as f64 * scale).round() as i64).clamp(-limit, limit)).collect())
             }
         }
     }
 
     /// Full-precision `Σ w · x` for each row, using the mantissas of `fixed_row`.
-    pub fn exact_sums(&self, first: usize, rows: usize, x: &[i32], exponent: i64) -> Vec<i64> {
+    pub fn exact_sums(&self, first: usize, rows: usize, x: &[i32], exponent: i64, bits: u32) -> Vec<i64> {
+        let limit = mantissa_limit(bits);
+        let fraction = bits as i32 - 1;
         let cols = x.len();
         let mut sums = vec![0i64; rows];
         if let Some((format, reference)) = self.requant(cols) {
-            let scale = 2f64.powi(MANTISSA_FRACTION - exponent as i32);
+            let scale = 2f64.powi(fraction - exponent as i32);
             sums.par_iter_mut().with_min_len(8).enumerate().for_each_init(
                 || vec![0f32; cols],
                 |row, (index, out)| {
                     self.decode_into(first + index, row);
                     quantize(&format, &reference, row);
-                    *out = row.iter().zip(x).map(|(w, v)| ((*w as f64 * scale).round() as i64).clamp(-MANTISSA_LIMIT, MANTISSA_LIMIT) * *v as i64).sum();
+                    *out = row.iter().zip(x).map(|(w, v)| ((*w as f64 * scale).round() as i64).clamp(-limit, limit) * *v as i64).sum();
                 },
             );
             return sums;
@@ -452,7 +458,7 @@ impl Matrix<'_> {
                 let group_size = cols / groups;
                 let bits = words_per_row * 32 / cols;
                 let stride = words_per_row * 4;
-                let factor = fixed_factor(exponent);
+                let factor = fixed_factor(exponent, fraction);
                 sums.par_iter_mut().with_min_len(16).enumerate().for_each(|(index, out)| {
                     let r = first + index;
                     let row = &words[r * stride..(r + 1) * stride];
@@ -468,13 +474,13 @@ impl Matrix<'_> {
                             code.copy_from_slice(&row[g * group_size..(g + 1) * group_size]);
                         }
                         let (scale, bias) = affine_integers(half_at(scales, r * groups + g), half_at(biases, r * groups + g), factor);
-                        total += dot_affine(&code, xs, scale, bias);
+                        total += dot_affine(&code, xs, scale, bias, limit);
                     }
                     *out = total;
                 });
             }
             Source::Plain { format, bytes, factor, .. } => {
-                let scale = 2f64.powi(MANTISSA_FRACTION - exponent as i32);
+                let scale = 2f64.powi(fraction - exponent as i32);
                 let size = format.size();
                 sums.par_iter_mut().with_min_len(16).enumerate().for_each(|(index, out)| {
                     let r = first + index;
@@ -482,7 +488,7 @@ impl Matrix<'_> {
                     *out = row
                         .chunks_exact(size)
                         .zip(x)
-                        .map(|(e, v)| ((format.decode(e, *factor) as f64 * scale).round() as i64).clamp(-MANTISSA_LIMIT, MANTISSA_LIMIT) * *v as i64)
+                        .map(|(e, v)| ((format.decode(e, *factor) as f64 * scale).round() as i64).clamp(-limit, limit) * *v as i64)
                         .sum();
                 });
             }
@@ -491,30 +497,29 @@ impl Matrix<'_> {
     }
 }
 
-fn fixed_factor(exponent: i64) -> f64 {
-    2f64.powi(MANTISSA_FRACTION + AFFINE_EXTRA - exponent as i32)
+fn fixed_factor(exponent: i64, fraction: i32) -> f64 {
+    2f64.powi(fraction + AFFINE_EXTRA - exponent as i32)
 }
 
 #[inline]
-fn affine_integers(scale: f32, bias: f32, factor: f64) -> (i32, i32) {
-    ((scale as f64 * factor).round() as i32, (bias as f64 * factor).round() as i32)
+fn affine_integers(scale: f32, bias: f32, factor: f64) -> (i64, i64) {
+    ((scale as f64 * factor).round() as i64, (bias as f64 * factor).round() as i64)
 }
 
 #[inline]
-fn affine_weight(q: u8, scale: i32, bias: i32) -> i64 {
-    ((q as i64 * scale as i64 + bias as i64) >> AFFINE_EXTRA).clamp(-MANTISSA_LIMIT, MANTISSA_LIMIT)
+fn affine_weight(q: u8, scale: i64, bias: i64, limit: i64) -> i64 {
+    ((q as i64 * scale + bias) >> AFFINE_EXTRA).clamp(-limit, limit)
 }
 
 /// `Σ ((q·scale + bias) >> 4) · x`, written so the compiler can vectorise it.
 #[inline]
-fn dot_affine(codes: &[u8], x: &[i32], scale: i32, bias: i32) -> i64 {
-    let limit = MANTISSA_LIMIT as i32;
+fn dot_affine(codes: &[u8], x: &[i32], scale: i64, bias: i64, limit: i64) -> i64 {
     let mut total = 0i64;
     for (cs, xs) in codes.chunks(8).zip(x.chunks(8)) {
         let mut sum = [0i64; 8];
         for i in 0..cs.len() {
-            let weight = ((cs[i] as i32 * scale + bias) >> AFFINE_EXTRA).clamp(-limit, limit);
-            sum[i] = weight as i64 * xs[i] as i64;
+            let weight = ((cs[i] as i64 * scale + bias) >> AFFINE_EXTRA).clamp(-limit, limit);
+            sum[i] = weight * xs[i] as i64;
         }
         total += sum.iter().sum::<i64>();
     }

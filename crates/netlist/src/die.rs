@@ -358,7 +358,7 @@ impl Gen {
         let load_cell = b.input("load_cell", c.cells);
         let load_scale = b.input("load_scale", 1)[0];
         let cell_addr = b.input("cell_addr", cfg.addr_bits);
-        let cell_data = b.input("cell_data", c.scale_bits.max(cfg.weight_bits));
+        let cell_data = b.input("cell_data", c.scale_bits.max(cfg.weight_bits).max(a));
         let halted = b.output("halted", 1)[0];
         let vec_out = b.output("vec_out", a);
         let link_in = b.input("link_in", a);
@@ -705,7 +705,7 @@ impl Gen {
                 ("load_en", vec![load_cell[i]]),
                 ("load_scale", vec![load_scale]),
                 ("load_addr", cell_addr.clone()),
-                ("load_data", cell_data.clone()),
+                ("load_data", cell_data[..c.scale_bits.max(cfg.weight_bits) as usize].to_vec()),
                 ("run", vec![cell_run]),
                 ("x", x_bus.clone()),
                 ("total", total.clone()),

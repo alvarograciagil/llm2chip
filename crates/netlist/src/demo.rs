@@ -137,7 +137,8 @@ pub fn read_register(sim: &mut Simulator, config: DieConfig, register: u64, inde
     sim.set("vec_addr", (register << config.index_bits) | index).expect("puerto del die");
     sim.tick();
     let value = sim.get("vec_out").expect("puerto del die");
-    ((value << 48) as i64) >> 48
+    let unused = 64 - config.cell.activation_bits;
+    ((value << unused) as i64) >> unused
 }
 
 /// One of the block floating point programs, ready to run on the die.
@@ -247,5 +248,5 @@ pub fn block_host_steps(c: DieConfig, assembly: &Assembly) -> Vec<TestStep> {
 pub fn read_block_value(sim: &mut Simulator, c: DieConfig, reg: u32, index: u32) -> (i64, f64) {
     let mantissa = read_register(sim, c, reg as u64, index as u64);
     let exponent = read_register(sim, c, exponent_register(&c) as u64, reg as u64);
-    (mantissa, mantissa as f64 / 32768.0 * 2f64.powi(exponent as i32))
+    (mantissa, mantissa as f64 / 2f64.powi(c.cell.activation_bits as i32 - 1) * 2f64.powi(exponent as i32))
 }

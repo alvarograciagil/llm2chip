@@ -28,10 +28,11 @@ pub const TABLE_INPUT_EXPONENT: i64 = 3;
 pub const SOFTPLUS_OUTPUT_EXPONENT: i64 = 4;
 pub const UNIT_OUTPUT_EXPONENT: i64 = 0;
 pub const RECIPROCAL_OUTPUT_EXPONENT: i64 = 1;
-/// The accumulator's width; products are `2·16` bits, leaving 16 guard bits.
-pub const ACCUMULATOR_BITS: u32 = 48;
-/// Output mantissas keep this many magnitude bits.
-const MANTISSA_MAGNITUDE_BITS: i64 = 15;
+/// The accumulator's width: a full product plus 16 guard bits.
+pub const fn accumulator_bits(bits: u32) -> u32 {
+    2 * bits + 16
+}
+
 
 /// Rounds to nearest while narrowing; the largest positive value does not wrap.
 pub fn round_right(value: i128, shift: u32, bits: u32) -> i64 {
@@ -396,7 +397,7 @@ impl Assembly {
         let mut count = Alu::new(OP_WIDE_LZC);
         count.dst = self.sc(0);
         self.steps.push(count);
-        self.immediate(ACCUMULATOR_BITS as i64 - 1 - MANTISSA_MAGNITUDE_BITS, self.sc(1));
+        self.immediate(accumulator_bits(self.bits) as i64 - self.bits as i64, self.sc(1));
         self.binary(OP_SUB, self.sc(1), self.sc(0), self.sc(2));
         self.immediate(0, self.sc(3));
         self.binary(OP_MAX, self.sc(2), self.sc(3), self.sc(4));
@@ -413,7 +414,7 @@ impl Assembly {
         }
         self.binary(OP_ADD, self.exponent(a), self.exponent(b), self.sc(5));
         self.binary(OP_ADD, self.sc(5), self.sc(4), self.sc(6));
-        self.immediate(-MANTISSA_MAGNITUDE_BITS, self.sc(7));
+        self.immediate(1 - self.bits as i64, self.sc(7));
         self.binary(OP_ADD, self.sc(6), self.sc(7), self.exponent(dst));
         self.normalize(dst, sets);
     }
@@ -777,7 +778,7 @@ impl Behavior {
                 (width - (64 - (self.magnitude & ((1 << width) - 1)).leading_zeros())) as i64
             }
             OP_WIDE_LZC => {
-                let width = ACCUMULATOR_BITS - 1;
+                let width = accumulator_bits(bits) - 1;
                 (width - (64 - (self.wide_magnitude & ((1 << width) - 1)).leading_zeros())) as i64
             }
             OP_WIDE_OUT => round_right(wide_value as i128, self.wide_shift.min(63), bits),
@@ -807,13 +808,13 @@ impl Behavior {
             self.magnitude |= if sign == 1 { !(a as u64) & mask } else { a as u64 & mask };
         }
         if s.wide_scan {
-            let top = ACCUMULATOR_BITS - 1;
+            let top = accumulator_bits(bits) - 1;
             let sign = (wide_value >> top) & 1;
             let mask = (1u64 << top) - 1;
             self.wide_magnitude |= if sign == 1 { !(wide_value as u64) & mask } else { wide_value as u64 & mask };
         }
         if s.accumulate {
-            self.accumulator = wrap(self.accumulator + a as i128 * b as i128, ACCUMULATOR_BITS) as i128;
+            self.accumulator = wrap(self.accumulator + a as i128 * b as i128, accumulator_bits(bits)) as i128;
         }
         if s.wide_write {
             self.wide.insert(s.dst.1, self.accumulator as i64);

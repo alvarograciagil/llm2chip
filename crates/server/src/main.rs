@@ -125,7 +125,7 @@ fn load_model(request: LoadRequest) -> Result<Loaded, String> {
     };
     let weights = Weights::open(dir)?.with_format(format);
     let engine: Box<dyn Runner> = if exact {
-        Box::new(ExactEngine::new(compile_qwen3_5(&config)?, weights)?)
+        Box::new(ExactEngine::new(compile_qwen3_5(&config)?, weights, numeric.map_or(16, |n| n.activation_bits.clamp(8, 24)))?)
     } else {
         Box::new(Engine::new(compile_qwen3_5(&config)?, weights, mode)?)
     };

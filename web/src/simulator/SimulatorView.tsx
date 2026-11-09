@@ -200,6 +200,14 @@ export function SimulatorPanel() {
           options={[["float", "Coma flotante"], ["fixed", "Exponente por vector"], ["exact", "Enteros exactos"]]}
           onChange={(numeric) => set({ numeric })}
         />
+        {state.numeric === "exact" && (
+          <div className="fixed-grid">
+            <label>
+              Bits de vector
+              <input type="text" inputMode="numeric" value={state.activationBits} onChange={(e) => set({ activationBits: Number(e.target.value) || 0 })} />
+            </label>
+          </div>
+        )}
         {state.numeric === "fixed" && (
           <div className="fixed-grid">
             {([

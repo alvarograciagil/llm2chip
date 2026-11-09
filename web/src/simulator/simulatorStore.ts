@@ -109,7 +109,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
     set({ loading: true, error: null });
     const body = {
       path,
-      numeric: numeric === "fixed" ? { activation_bits: activationBits, state_bits: stateBits, table_bits: tableBits } : null,
+      numeric: numeric !== "float" ? { activation_bits: activationBits, state_bits: stateBits, table_bits: tableBits } : null,
       exact: numeric === "exact",
       format: useDesignFormat ? designFormat : null,
     };

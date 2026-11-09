@@ -12,7 +12,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = std::fs::read_to_string(dir.join("config.json"))?;
     let program = compile_qwen3_5(&config)?;
     let mut float = Engine::new(compile_qwen3_5(&config)?, Weights::open(dir)?, Numeric::Float)?;
-    let mut exact = ExactEngine::new(compile_qwen3_5(&config)?, Weights::open(dir)?)?;
+    let bits: u32 = std::env::var("BITS").map_or(16, |v| v.parse().unwrap());
+    let mut exact = ExactEngine::new(compile_qwen3_5(&config)?, Weights::open(dir)?, bits)?;
     for position in 0..tokens {
         let token = [760u32, 6511, 314, 9338, 369, 11751, 13, 1000][position % 8];
         float.step(token, true)?;
