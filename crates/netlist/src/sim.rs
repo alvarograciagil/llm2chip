@@ -336,6 +336,11 @@ impl Simulator {
         worst
     }
 
+    /// A port of any width, in 32-bit words starting from the least significant.
+    pub fn get_words(&self, port: &str) -> Option<Vec<u32>> {
+        self.ports.get(port).map(|bits| bits.chunks(32).map(|chunk| read(&self.values, chunk) as u32).collect())
+    }
+
     pub fn get_wide(&self, port: &str) -> Option<u128> {
         self.ports.get(port).map(|bits| read(&self.values, bits))
     }

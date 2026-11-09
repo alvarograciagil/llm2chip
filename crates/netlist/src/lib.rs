@@ -3,6 +3,7 @@
 
 pub mod block;
 pub mod format;
+pub mod image;
 pub mod multiplier;
 mod cell;
 pub mod demo;

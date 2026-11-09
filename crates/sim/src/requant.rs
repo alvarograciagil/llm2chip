@@ -26,8 +26,11 @@ pub fn train_table(mut sample: Vec<f32>, entries: usize) -> Vec<f32> {
     if sample.is_empty() {
         return vec![0.0; entries];
     }
-    let mut table: Vec<f32> = (0..entries).map(|i| sample[((i * 2 + 1) * sample.len() / (2 * entries)).min(sample.len() - 1)]).collect();
-    for _ in 0..4 {
+    // Spread evenly over the range: starting from quantiles leaves the rare large weights,
+    // which matter most, without an entry of their own.
+    let (low, high) = (sample[0] as f64, sample[sample.len() - 1] as f64);
+    let mut table: Vec<f32> = (0..entries).map(|i| (low + (high - low) * i as f64 / (entries - 1).max(1) as f64) as f32).collect();
+    for _ in 0..8 {
         let mut sums = vec![(0f64, 0u32); entries];
         for v in &sample {
             let slot = nearest(&table, *v);

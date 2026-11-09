@@ -1,12 +1,13 @@
 //! Real firmware, compiled for the chip's CPU, on the gates and on the instruction simulator.
 
 use netlist::rv32::Rv32Iss;
-use netlist::soc::{soc_design, FirmwareImage, SocBus, SocConfig};
+use netlist::image::{build_image, Segment, Target};
+use netlist::soc::{soc_design, FirmwareImage, LoadWrite, SocBus, SocConfig};
 use netlist::Simulator;
 use std::path::Path;
 use std::process::Command;
 
-const CONFIG: SocConfig = SocConfig { program_bits: 12, data_bits: 12, fifo_bits: 6 };
+const CONFIG: SocConfig = SocConfig { program_bits: 12, data_bits: 13, fifo_bits: 6 };
 
 fn build_firmware() -> Option<FirmwareImage> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../firmware");
@@ -19,56 +20,110 @@ fn build_firmware() -> Option<FirmwareImage> {
     Some(FirmwareImage::from_elf(&elf).unwrap())
 }
 
-fn run_gates(image: &FirmwareImage, input: &[u8], limit: u64) -> (Vec<u8>, u64) {
+struct GateRun {
+    output: Vec<u8>,
+    writes: Vec<LoadWrite>,
+    cycles: u64,
+}
+
+/// Runs from power-up, answering the image port the cycle after each request.
+fn run_gates(image: &[u32], input: &[u8], limit: u64) -> GateRun {
     let mut sim = Simulator::new(&soc_design(CONFIG)).unwrap();
-    for (i, word) in image.program.iter().enumerate() {
-        sim.poke_memory("/program", i, *word as u128).unwrap();
-    }
-    for (i, word) in image.data.iter().enumerate() {
-        for byte in 0..4 {
-            sim.poke_memory(&format!("/data_{byte}"), i, (word >> (8 * byte) & 0xFF) as u128).unwrap();
-        }
-    }
     sim.set("reset", 1).unwrap();
-    sim.tick();
-    sim.set("reset", 0).unwrap();
     sim.set("cpu_hold", 1).unwrap();
     sim.tick();
+    sim.set("reset", 0).unwrap();
+    let mut pending = None;
+    let serve = |sim: &mut Simulator, pending: &mut Option<u32>| {
+        sim.set("image_resp_valid", pending.is_some() as u64).unwrap();
+        sim.set("image_resp_data", pending.unwrap_or(0) as u64).unwrap();
+        sim.settle();
+        *pending = (sim.get("image_req_valid").unwrap() == 1).then(|| image[sim.get("image_req_addr").unwrap() as usize]);
+    };
     for byte in input {
         sim.set("host_rx_valid", 1).unwrap();
         sim.set("host_rx_data", *byte as u64).unwrap();
+        serve(&mut sim, &mut pending);
         sim.tick();
     }
     sim.set("host_rx_valid", 0).unwrap();
-    sim.tick();
+    let mut boot = 0;
+    loop {
+        serve(&mut sim, &mut pending);
+        if sim.get("booting").unwrap() == 0 {
+            break;
+        }
+        sim.tick();
+        boot += 1;
+        assert!(boot < 1_000_000, "el arranque no termina");
+    }
     sim.set("cpu_hold", 0).unwrap();
     sim.set("host_tx_ready", 1).unwrap();
-    let mut output = Vec::new();
+
+    let mut run = GateRun { output: Vec::new(), writes: Vec::new(), cycles: 0 };
     for cycle in 0..limit {
-        sim.settle();
+        serve(&mut sim, &mut pending);
         if sim.get("host_tx_valid").unwrap() == 1 {
-            output.push(sim.get("host_tx_data").unwrap() as u8);
+            run.output.push(sim.get("host_tx_data").unwrap() as u8);
+        }
+        if sim.get("load_valid").unwrap() == 1 {
+            let words = sim.get_words("load_data").unwrap();
+            run.writes.push(LoadWrite { target: sim.get("load_target").unwrap() as u32, unit: sim.get("load_unit").unwrap() as u32, address: sim.get("load_addr").unwrap() as u32, words });
         }
         if sim.get("halted").unwrap() == 1 {
-            return (output, cycle + 1);
+            run.cycles = cycle + 1;
+            return run;
         }
         sim.tick();
     }
     panic!("el firmware no terminó en {limit} ciclos");
 }
 
-#[test]
-fn firmware_runs_identically_on_gates_and_instruction_simulator() {
-    let Some(image) = build_firmware() else { return };
-    let input = b"hola, chip\0";
-    let mut bus = SocBus::new(CONFIG, &image.program, &image.data, input);
+fn run_iss(image: &[u32], input: &[u8]) -> (SocBus, u64) {
+    let mut bus = SocBus::booted(CONFIG, image, input).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
-        assert!(cpu.cycle < 2_000_000, "el firmware no termina");
+        assert!(cpu.cycle < 5_000_000, "el firmware no termina");
     }
-    assert_eq!(bus.tx, b"HOLA, CHIP");
-    let (output, cycles) = run_gates(&image, input, cpu.cycle + 64);
-    assert_eq!(output, bus.tx);
-    eprintln!("{cycles} ciclos en puertas y {} en el simulador de instrucciones", cpu.cycle);
+    (bus, cpu.cycle)
+}
+
+fn segments() -> Vec<Segment> {
+    vec![
+        Segment { target: Target::Vector, unit: 0, address: 16, beats: 1, words: vec![0x11, 0x22, 0x33] },
+        Segment { target: Target::Microcode, unit: 0, address: 0, beats: 3, words: (0..12).map(|i| 0xA000_0000 | i).collect() },
+        Segment { target: Target::CellWeight, unit: 7, address: 4, beats: 1, words: (0..9).map(|i| i * i).collect() },
+    ]
+}
+
+fn compare(image: &[u32], expected_output: &[u8]) {
+    let input = b"hola, chip\0";
+    let (bus, cycles) = run_iss(image, input);
+    assert_eq!(bus.tx, expected_output, "{}", String::from_utf8_lossy(&bus.tx));
+    let run = run_gates(image, input, cycles + 64);
+    assert_eq!(run.output, bus.tx, "salida de las puertas");
+    assert_eq!(run.writes.len(), bus.writes.len());
+    for (gate, model) in run.writes.iter().zip(&bus.writes) {
+        assert_eq!((gate.target, gate.unit, gate.address), (model.target, model.unit, model.address));
+        assert_eq!(gate.words[..model.words.len()], model.words[..]);
+    }
+    assert_eq!(run.cycles, cycles, "ciclos");
+    eprintln!("{cycles} ciclos en puertas y en el simulador de instrucciones");
+}
+
+#[test]
+fn the_chip_boots_from_its_image_and_loads_every_segment() {
+    let Some(firmware) = build_firmware() else { return };
+    let image = build_image(&firmware.program, &firmware.data, &segments()).unwrap();
+    compare(&image, b"...HOLA, CHIP");
+}
+
+#[test]
+fn a_corrupted_segment_is_reported() {
+    let Some(firmware) = build_firmware() else { return };
+    let mut image = build_image(&firmware.program, &firmware.data, &segments()).unwrap();
+    let last = image.len() - 1;
+    image[last] ^= 0x10;
+    compare(&image, b"..EHOLA, CHIP");
 }

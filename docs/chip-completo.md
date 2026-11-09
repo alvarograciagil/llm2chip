@@ -25,11 +25,11 @@ El chip recibe bytes de texto y devuelve bytes de texto. El tokenizado, la infer
 | Registros vectoriales y microsecuenciador | Control de cada etapa | En puertas |
 | Enlace entre dies | Paso de activaciones | En puertas |
 | SRAM KV y estado DeltaNet | Memoria del modelo | Modelo funcional y área |
-| Bus interno del sistema | Une CPU, memorias y periféricos | Falta |
-| Puerto de host y FIFO | Entrada y salida de bytes | Falta |
-| CPU de control RV32IMC | Firmware | Solo área |
-| ROM de arranque, SRAM de instrucciones y datos | Firmware y vocabulario | Falta |
-| Controlador de carga y DMA | Imagen hacia celdas, tablas y microcódigo | Falta |
+| Bus interno del sistema | Une CPU, memorias y periféricos | En puertas |
+| Puerto de host y FIFO | Entrada y salida de bytes | En puertas |
+| CPU de control RV32IM | Firmware | En puertas e ISS, ciclo a ciclo |
+| SRAM de instrucciones y datos | Firmware y vocabulario | En puertas |
+| Controlador de carga y DMA | Imagen hacia celdas, tablas y microcódigo, con arranque propio y CRC | En puertas e ISS; salidas sin conectar al die |
 | Red de escritura de pesos | Lleva cada palabra a su celda | Solo puertos de carga directos |
 | ECC, CRC, BIST y reparación | Fiabilidad y celdas defectuosas | Solo área |
 | Unidad de muestreo y RNG | Top-k y temperatura sobre los logits | Falta |
@@ -89,10 +89,14 @@ Hoy los pesos se escriben directamente en la memoria simulada. El cambio central
 
 **Inyección de fallos.** La simulación podrá invertir bits y marcar celdas defectuosas, para comprobar que ECC, CRC y reparación actúan como deben.
 
+## Decisión pendiente: microprograma por token
+
+Hoy el programa de cada token lo genera el host, porque depende del token, de su posición y del tamaño de la caché KV. Un chip real no puede depender de eso. La propuesta es un microprograma fijo, cargado una sola vez desde la imagen, con registros de parámetros (token, posición, longitud de la caché) y bucles en el secuenciador. Hasta tenerlo no se puede conectar el firmware al die para generar texto en puertas.
+
 ## Fases
 
 1. Bus del sistema, mapa de memoria y puerto de host.
-2. Núcleo RV32IMC en puertas e ISS, verificados entre sí.
+2. Núcleo RV32IM en puertas e ISS, verificados entre sí.
 3. Firmware en Rust `no_std`: arranque, tokenizador, bucle principal.
 4. Imagen del chip y controlador de carga, con los tres niveles.
 5. Unidad de muestreo y RNG.

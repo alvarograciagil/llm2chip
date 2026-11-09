@@ -531,6 +531,8 @@ pub fn core_design() -> Design {
 
 /// What the CPU reads and writes, in words.
 pub trait Rv32Bus {
+    /// Called before each data access with the cycle it happens in.
+    fn at_cycle(&mut self, _cycle: u64) {}
     fn fetch(&mut self, address: u32) -> u32;
     fn read(&mut self, address: u32) -> u32;
     /// `strobe` has one bit per byte of `data`.
@@ -617,6 +619,7 @@ impl Rv32Iss {
             }
             LOAD => {
                 let address = rs1.wrapping_add(imm_i);
+                bus.at_cycle(self.cycle + EXECUTE_CYCLE);
                 let moved = bus.read(address & !3) >> (8 * (address & 3));
                 write = Some(match funct3 {
                     0 => moved as u8 as i8 as i32 as u32,
@@ -629,6 +632,7 @@ impl Rv32Iss {
             }
             STORE => {
                 let address = rs1.wrapping_add(imm_s);
+                bus.at_cycle(self.cycle + EXECUTE_CYCLE);
                 let offset = address & 3;
                 let (data, strobe) = match funct3 & 3 {
                     0 => ((rs2 & 0xFF) * 0x0101_0101, 1u8 << offset),
