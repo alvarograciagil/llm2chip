@@ -2,7 +2,7 @@
 //! a fixed microprogram, the die and the sampling unit.
 
 use compiler::compile_qwen3_5;
-use netlist::chip::{chip_design, chip_info, ChipConfig, ChipModel, GenerationSetup};
+use netlist::chip::{chip_design, chip_info, ChipConfig, ChipModel, GenerationSetup, DEBUG_CPU_PC, DEBUG_CYCLES, DEBUG_DIE_BUSY, DEBUG_SAMPLER_BUSY};
 use netlist::image::{build_image, Segment, Target};
 use netlist::rv32::Rv32Iss;
 use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
@@ -37,6 +37,9 @@ fn run_gates(design: &netlist::Design, image: &[u32], input: &[u8], limit: u64) 
     sim.set("cpu_hold", 1).unwrap();
     sim.tick();
     sim.set("reset", 0).unwrap();
+    for _ in 0..=netlist::chip::RESET_STRETCH {
+        sim.tick();
+    }
     let mut pending = None;
     let serve = |sim: &mut Simulator, pending: &mut Option<u32>| {
         sim.set("image_resp_valid", pending.is_some() as u64).unwrap();
@@ -116,10 +119,19 @@ fn text_goes_through_the_whole_chip_in_gates() {
 
     let design = chip_design(config);
     let start = std::time::Instant::now();
-    let (output, cycles, sim) = run_gates(&design, &image, input, cpu.cycle + 4096);
+    let (output, cycles, mut sim) = run_gates(&design, &image, input, cpu.cycle + 4096);
     eprintln!("puertas: {cycles} ciclos en {:.1} s, salida {:?}", start.elapsed().as_secs_f64(), String::from_utf8_lossy(&output));
     assert_eq!(String::from_utf8_lossy(&output), String::from_utf8_lossy(&expected));
     assert_eq!(cycles, cpu.cycle, "ciclos");
+    let debug = |sim: &mut Simulator, what: u64| {
+        sim.set("debug_select", what).unwrap();
+        sim.settle();
+        sim.get("debug_value").unwrap()
+    };
+    assert_eq!(debug(&mut sim, DEBUG_CYCLES), sim.cycle() - 1, "contador de ciclos");
+    assert_eq!(debug(&mut sim, DEBUG_DIE_BUSY), bus.peripheral.die_busy, "ciclos del die");
+    assert!(debug(&mut sim, DEBUG_SAMPLER_BUSY) > 0);
+    assert!(debug(&mut sim, DEBUG_CPU_PC) > 0);
     for (address, code) in sample.iter().enumerate() {
         assert_eq!(sim.peek_memory("/die/cell0/compute/weight_sram", address), Some(*code as u128), "peso {address}");
     }

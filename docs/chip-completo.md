@@ -35,8 +35,8 @@ El chip recibe bytes de texto y devuelve bytes de texto. El tokenizado, la infer
 | Unidad de muestreo y RNG | Top-k y temperatura sobre los logits, con filtro de varios carriles | En puertas y modelo, conectada al die |
 | Tokenizador en firmware | BPE con sus tablas en memoria de datos; no aplica NFC | En ISS con Qwen real y en puertas con tablas diminutas |
 | Planificador de tokens y MTP | Decide qué ejecuta cada die, y deshace | En software |
-| Reloj, reset y gestión de energía | Secuencia de reset, puertas de reloj | Falta |
-| Depuración y contadores | JTAG, trazas, rendimiento | Falta |
+| Reloj, reset y gestión de energía | Secuencia de reset, puertas de reloj | Reset en puertas; el reloj y la energía solo se estiman, porque el simulador tiene un único reloj |
+| Depuración y contadores | Contadores y puerto de lectura; falta JTAG estándar | En puertas |
 
 Muestrear en la CPU no sirve en los diseños rápidos. Leer 250.000 logits cuesta unos 250 µs a 1 GHz, y a 15.000 tok/s un token dura 66 µs. Por eso el muestreo tiene unidad propia y la CPU solo recibe el resultado.
 

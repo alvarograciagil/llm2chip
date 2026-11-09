@@ -320,6 +320,7 @@ impl Gen {
 
     /// Weight memory organised in words of several weights plus their check bits.
     /// Whole words arrive already encoded, so the encoder can be shared by many cells.
+    #[allow(clippy::too_many_arguments)]
     fn protected_memory(&mut self, b: &mut Builder, c: &CellConfig, address: Vec<Bit>, load_en: Bit, load_addr: Vec<Bit>, load_data: Vec<Bit>, weight: Vec<Bit>) {
         let lane_bits = c.ecc_lanes().trailing_zeros() as usize;
         let w = c.weight_bits as usize;

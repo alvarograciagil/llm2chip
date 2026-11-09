@@ -423,6 +423,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     let peripheral_address = b.output("peripheral_address", PERIPHERAL_BITS);
     let peripheral_wdata = b.output("peripheral_wdata", 32);
     let peripheral_rdata = b.input("peripheral_rdata", 32);
+    let debug_pc = b.output("debug_pc", 32);
 
     let loader_busy = b.wire("loader_busy", 1)[0];
     let loader_crc = b.wire("loader_crc", 32);
@@ -477,6 +478,9 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         let loader_write = l.and(is_loader, any_write);
         l.b.or_to(loader_write, Bit::Zero, loader_reg_write);
 
+        for (from, to) in imem_addr.iter().zip(&debug_pc) {
+            l.b.or_to(*from, Bit::Zero, *to);
+        }
         let is_peripheral = l.equals(&top, PERIPHERAL_BASE >> 28);
         let write_peripheral = l.and(is_peripheral, any_write);
         let read_peripheral = l.and(is_peripheral, dmem_re);

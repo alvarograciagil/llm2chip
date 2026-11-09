@@ -26,6 +26,14 @@ pub const REG_SAMPLE_START: u32 = 42;
 pub const REG_SAMPLE_DONE: u32 = 43;
 pub const REG_SAMPLE_TOKEN: u32 = 44;
 
+/// What the debug port shows for each value of `debug_select`.
+pub const DEBUG_CYCLES: u64 = 0;
+pub const DEBUG_DIE_BUSY: u64 = 1;
+pub const DEBUG_SAMPLER_BUSY: u64 = 2;
+pub const DEBUG_CPU_PC: u64 = 3;
+/// Cycles the chip keeps itself in reset after the external signal is released.
+pub const RESET_STRETCH: u64 = 15;
+
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct ChipConfig {
     pub soc: SocConfig,
@@ -59,6 +67,8 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     let booting = b.output("booting", 1);
     let image_req_valid = b.output("image_req_valid", 1);
     let image_req_addr = b.output("image_req_addr", 32);
+    let debug_select = b.input("debug_select", 2);
+    let debug_value = b.output("debug_value", 32);
 
     let load_valid = b.wire("load_valid", 1)[0];
     let load_target = b.wire("load_target", 3);
@@ -70,9 +80,12 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     let bus_address = b.wire("bus_address", PERIPHERAL_BITS);
     let bus_wdata = b.wire("bus_wdata", 32);
     let bus_rdata = b.wire("bus_rdata", 32);
+    let internal_reset = b.wire("internal_reset", 1)[0];
+    let cpu_pc = b.wire("cpu_pc", 32);
     b.group("Sistema de control");
     b.inst("control", &control, &[
-        ("reset", vec![reset]),
+        ("reset", vec![internal_reset]),
+        ("debug_pc", cpu_pc.clone()),
         ("cpu_hold", vec![cpu_hold]),
         ("host_rx_valid", host_rx_valid),
         ("host_rx_data", host_rx_data),
@@ -102,10 +115,33 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     let vector_out = b.wire("vector_out", activation as u32);
     let sampler_done = b.wire("sampler_done", 1);
     let sampler_token = b.wire("sampler_token", c.sampler.index_bits);
+    let external_reset = reset;
+    let reset = internal_reset;
     let mut die_pins: Vec<(&str, Vec<Bit>)> = vec![("halted", die_halted.clone()), ("vec_out", vector_out.clone())];
     let mut sampler_pins: Vec<(&str, Vec<Bit>)> = vec![("done", sampler_done.clone()), ("token", sampler_token.clone())];
     {
         let mut l = Logic { b: &mut b, next: 0 };
+        l.b.group("Reset");
+        // The chip leaves reset only after a fixed delay, so that every part starts together.
+        let stretch = l.fresh_bus(4);
+        let released = l.fresh();
+        let release_now = l.all(&stretch);
+        let counting = l.not(released);
+        let mut carry = counting;
+        let next_stretch: Vec<Bit> = stretch.iter().map(|bit| { let out = l.xor(*bit, carry); carry = l.and(*bit, carry); out }).collect();
+        let cleared_stretch = constant(0, 4);
+        let held_stretch = l.mux_bus(external_reset, &next_stretch, &cleared_stretch);
+        l.connect_flops(&held_stretch, &stretch);
+        let next_released = {
+            let stays = l.or(released, release_now);
+            let free = l.not(external_reset);
+            l.and(stays, free)
+        };
+        l.connect_flops(&[next_released], &[released]);
+        let holding = l.not(released);
+        let in_reset = l.or(external_reset, holding);
+        l.b.or_to(in_reset, Bit::Zero, internal_reset);
+
         l.b.group("Registros del die");
         let hit = |l: &mut Logic, register: u32| -> Bit {
             let selected = l.equals(&bus_address, register);
@@ -234,6 +270,29 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
             ("table_data", load_data[..16].to_vec()),
         ]);
 
+        l.b.group("Contadores y depuración");
+        let not_halted = l.not(die_halted[0]);
+        let idle_flag = l.or(parked, entry_write);
+        let not_idle = l.not(idle_flag);
+        let die_busy = l.and(not_halted, not_idle);
+        let counters: Vec<Vec<Bit>> = [Bit::One, die_busy, streaming]
+            .into_iter()
+            .map(|event| {
+                let q = l.fresh_bus(32);
+                let mut carry = event;
+                let stepped: Vec<Bit> = q.iter().map(|bit| { let out = l.xor(*bit, carry); carry = l.and(*bit, carry); out }).collect();
+                let cleared = constant(0, 32);
+                let next = l.mux_bus(external_reset, &stepped, &cleared);
+                l.connect_flops(&next, &q);
+                q
+            })
+            .collect();
+        let leaves: Vec<Vec<Bit>> = counters.into_iter().chain([cpu_pc.clone()]).collect();
+        let shown = l.select(&debug_select, &leaves);
+        for (from, to) in shown.iter().zip(&debug_value) {
+            l.b.or_to(*from, Bit::Zero, *to);
+        }
+
         l.b.group("Lectura de registros");
         let selected = l.fresh_bus(PERIPHERAL_BITS as usize);
         let held = l.mux_bus(bus_read, &selected, &bus_address);
@@ -278,6 +337,8 @@ pub struct ChipModel<E> {
     pub engine: E,
     pub code: Microprogram,
     pub sampler: SamplerModel,
+    /// Cycles the die has been busy, as the chip's own counter would read.
+    pub die_busy: u64,
     parameters: [u32; 32],
     vector_address: u32,
     sample_base: u32,
@@ -292,7 +353,7 @@ pub struct ChipModel<E> {
 
 impl<E: DieEngine> ChipModel<E> {
     pub fn new(engine: E, code: Microprogram, sampler: SamplerModel) -> Self {
-        Self { engine, code, sampler, parameters: [0; 32], vector_address: 0, sample_base: 0, sample_count: 0, inverse: 0, limit: 0, greedy: false, die_free_at: 0, sampler_done_at: None, sampler_token: 0 }
+        Self { engine, code, sampler, die_busy: 0, parameters: [0; 32], vector_address: 0, sample_base: 0, sample_count: 0, inverse: 0, limit: 0, greedy: false, die_free_at: 0, sampler_done_at: None, sampler_token: 0 }
     }
 
     /// Recovers the token and position from the parameter registers.
@@ -325,7 +386,9 @@ impl<E: DieEngine> Peripheral for ChipModel<E> {
                 let routine = self.code.entries.iter().position(|e| *e == value).expect("rutina desconocida");
                 let (token, position) = self.token_and_position();
                 self.engine.run(routine, token, position);
-                self.die_free_at = cycle + self.engine.cycles(routine, token, position);
+                let cycles = self.engine.cycles(routine, token, position);
+                self.die_busy += cycles;
+                self.die_free_at = cycle + cycles;
             }
             REG_VECTOR_ADDRESS => self.vector_address = value,
             REG_SAMPLE_BASE => self.sample_base = value,

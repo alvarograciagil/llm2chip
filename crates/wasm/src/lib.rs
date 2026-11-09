@@ -306,6 +306,9 @@ impl DieSimulation {
             sim.set("reset", 0).map_err(|e| JsError::new(&e.0))?;
             // An empty prompt: the firmware loads everything and stops.
             let mut boot = BootDemo::new(config).map_err(|e| JsError::new(&e))?;
+            for _ in 0..=netlist::chip::RESET_STRETCH {
+                sim.tick();
+            }
             sim.set("host_rx_valid", 1).map_err(|e| JsError::new(&e.0))?;
             sim.set("host_rx_data", 0).map_err(|e| JsError::new(&e.0))?;
             boot.serve(&mut sim)?;
