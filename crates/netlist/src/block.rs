@@ -277,6 +277,10 @@ pub trait BlockOps: Sized {
     fn sum_products(&mut self, set: Self::N, pairs: &[Pair<Self::N>]);
     /// Turns the first `sets` full-precision sums into `dst`, sharing one exponent.
     fn narrow_sums(&mut self, a: u32, b: u32, dst: u32, sets: Self::N);
+    /// `dst[j] = Σ weights[t] · matrix[t · width + j]`, for hardware that can add whole rows.
+    fn row_combination(&mut self, weights: u32, matrix: u32, dst: u32, width: u32, count: Self::N) {
+        self.dots(weights, matrix, dst, width.into(), count, |j, t| ((weights, t), (matrix, t * width + j)));
+    }
     fn function(&mut self, function: u32, src: u32, dst: u32, len: Self::N);
     fn reciprocal(&mut self, src: u32, dst: u32);
     fn inverse_sqrt(&mut self, src: u32, dst: u32);
@@ -374,19 +378,19 @@ pub trait BlockOps: Sized {
         self.dots(regs.weights, ones, regs.total, 1.into(), tokens, |_, t| ((regs.weights, t), (ones, t)));
         self.reciprocal(regs.total, regs.inverse);
         self.scale(regs.inverse, regs.weights, regs.probabilities, tokens);
-        self.dots(regs.probabilities, values, dst, width.into(), tokens, |j, t| ((regs.probabilities, t), (values, t * width + j)));
+        self.row_combination(regs.probabilities, values, dst, width, tokens);
     }
 
     /// One Gated DeltaNet head: the delta rule on a `key × value` state matrix.
     fn delta_step(&mut self, r: DeltaRegs, key: u32, value: u32) {
         let cells = key * value;
         self.scale(r.decay, r.state, r.state, cells.into());
-        self.dots(r.state, r.key, r.memory, value.into(), key.into(), |j, i| ((r.state, i * value + j), (r.key, i)));
+        self.row_combination(r.key, r.state, r.memory, value, key.into());
         self.add_sub(true, (r.value, 0.into()), (r.memory, 0.into()), 1, r.error, value.into());
         self.scale(r.beta, r.error, r.delta, value.into());
         // The output reads the old state and the update apart, before rounding merges them:
         // the update's contribution is often a tiny difference that rounding would erase.
-        self.dots(r.state, r.query, r.next, value.into(), key.into(), |j, i| ((r.state, i * value + j), (r.query, i)));
+        self.row_combination(r.query, r.state, r.next, value, key.into());
         self.dot(r.key, r.query, r.memory, key.into());
         self.scale(r.memory, r.delta, r.update, value.into());
         self.add(r.next, r.update, r.out, value.into());
@@ -554,6 +558,8 @@ pub enum Step {
     Repeat { variable: Var, count: Expr, body: Vec<Step> },
     /// A single-operation loop that issues one element, or block, per cycle.
     Stream { variable: Var, count: u32, body: Alu<Expr> },
+    /// `wide[j] += weights · matrix[start + j]` for every `j` of a row, or from zero if `fresh`.
+    Combine { weights: At<Expr>, matrix: u32, start: Expr, width: u32, fresh: bool, window: Expr, window_a: bool, window_b: bool },
     /// Moves every cell to where a matrix starts.
     CellSeek { weights: Expr, factors: Expr },
     /// Clears the row totals and restarts the input vector.
@@ -601,13 +607,14 @@ pub struct Assembly {
     lane_bits: u32,
     cells: u32,
     streams: bool,
+    combines: bool,
     /// Matrices the cells hold. Any other is computed from the vector registers.
     pub in_cells: HashMap<String, CellMatrix>,
 }
 
 impl Assembly {
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -833,6 +840,11 @@ fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32)
                     *body = marked;
                 }
             }
+            Step::Combine { weights, matrix, window, window_a, window_b, .. } => {
+                *window = step;
+                *window_a = windowed.contains(&weights.0);
+                *window_b = windowed.contains(matrix);
+            }
             Step::CellGroup { src, .. } => assert!(!windowed.contains(src), "las celdas leen de registros fijos"),
             Step::CellSeek { .. } | Step::CellPass | Step::CellDrain { .. } => {}
         }
@@ -1006,6 +1018,18 @@ impl BlockOps for Assembly {
     }
 
     /// Narrows the wide sums to mantissas, shifting only as much as the largest needs.
+    fn row_combination(&mut self, weights: u32, matrix: u32, dst: u32, width: u32, count: Expr) {
+        if !self.combines || width < MIN_STREAM {
+            return self.dots(weights, matrix, dst, width.into(), count, |j, t| ((weights, t), (matrix, t * width + j)));
+        }
+        // A zero weight clears every sum, whatever the matrix holds.
+        let zero = self.sc(10);
+        self.immediate(0, zero);
+        self.steps.push(Step::Combine { weights: zero, matrix, start: 0.into(), width, fresh: true, window: 0.into(), window_a: false, window_b: false });
+        self.each(count, |s, t| s.steps.push(Step::Combine { weights: (weights, t), matrix, start: t * width, width, fresh: false, window: 0.into(), window_a: false, window_b: false }));
+        self.narrow_sums(weights, matrix, dst, width.into());
+    }
+
     fn narrow_sums(&mut self, a: u32, b: u32, dst: u32, sets: Expr) {
         let mut clear = alu(OP_MOV);
         clear.write = false;
@@ -1310,7 +1334,7 @@ impl Behavior {
                         self.walk(&[Step::One(*body)], token, position, loops);
                     }
                 }
-                Step::CellSeek { .. } | Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } => panic!("este modelo no guarda los pesos de las celdas"),
+                Step::Combine { .. } | Step::CellSeek { .. } | Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } => panic!("este modelo no guarda los pesos de las celdas"),
             }
         }
     }

@@ -66,6 +66,11 @@ impl DieFeatures {
         self.widths[FIXED_A_FIELD] > 0
     }
 
+    /// Whether the die can add whole rows into the wide memory.
+    pub fn combines(&self) -> bool {
+        self.widths[WIDE_ACCUMULATE_FIELD] > 0
+    }
+
     pub fn without_register_windows() -> Self {
         let mut features = Self::default();
         features.widths[WINDOW_X_FIELD..].fill(0);
@@ -178,13 +183,18 @@ pub struct ControlWord {
     /// While the index counters stream, an operand that stays at its literal position.
     pub fixed_a: bool,
     pub fixed_b: bool,
+    /// Each wide-memory element adds a product, at the read and the write of a stream.
+    pub wide_accumulate: bool,
+    /// The sum starts from zero instead of what the wide memory holds.
+    pub wide_fresh: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 55;
+pub const FIELD_COUNT: usize = 57;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
+const WIDE_ACCUMULATE_FIELD: usize = 55;
 
 pub const OP_ADD: u32 = 0;
 pub const OP_MUL: u32 = 1;
@@ -267,6 +277,8 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("wide_from_chain", 1),
         ("fixed_a", 1),
         ("fixed_b", 1),
+        ("wide_accumulate", 1),
+        ("wide_fresh", 1),
     ]
 }
 
@@ -333,6 +345,8 @@ impl ControlWord {
             self.wide_from_chain as u128,
             self.fixed_a as u128,
             self.fixed_b as u128,
+            self.wide_accumulate as u128,
+            self.wide_fresh as u128,
         ]
     }
 
@@ -537,6 +551,24 @@ impl Gen {
         self.add(b.finish())
     }
 
+    /// What the wide memory holds plus a product, registered for its write.
+    fn wide_sum(&mut self, b: &mut Builder, (name, adder, register): (&str, &str, &str), held: &[Bit], product: &[Bit], fresh: Bit, bits: u32) -> Vec<Bit> {
+        let keep = b.wire(&format!("{name}_keep"), 1)[0];
+        b.not_to(fresh, keep);
+        let start = b.wire(&format!("{name}_start"), bits);
+        for (from, to) in held.iter().zip(&start) {
+            b.and_to(keep, *from, *to);
+        }
+        let sign = *product.last().expect("producto vacío");
+        let extended: Vec<Bit> = (0..bits as usize).map(|i| product.get(i).copied().unwrap_or(sign)).collect();
+        let sum = b.wire(&format!("{name}_d"), bits);
+        let carry = b.wire(&format!("{name}_carry"), 1);
+        b.inst(name, adder, &[("a", start), ("b", extended), ("cin", vec![Bit::Zero]), ("sum", sum.clone()), ("cout", carry)]);
+        let q = b.wire(&format!("{name}_q"), bits);
+        b.inst(&format!("{name}_reg"), register, &[("d", sum), ("q", q.clone())]);
+        q
+    }
+
     pub(crate) fn die(&mut self, c: &DieConfig) -> String {
         let cfg = c.cell;
         let (a, wide) = (cfg.activation_bits, c.wide_bits());
@@ -726,7 +758,8 @@ impl Gen {
         let lane_shift = c.features.lane_bits as usize;
         let read_index = index_counter(self, &mut b, ("read_index", 46_000), c.index_bits, (read_reset, read_step), fields["vector"][0], lane_shift);
         let chain_write = b.wire("chain_write", 1)[0];
-        b.and_to(wide_write, wide_from_chain, chain_write);
+        let counted_write = bus_or(&mut b, wide_from_chain, fields["wide_accumulate"][0], "counted_wide_write");
+        b.and_to(wide_write, counted_write, chain_write);
         let write_step = bus_or(&mut b, write_en, chain_write, "write_step");
         let write_index = index_counter(self, &mut b, ("write_index", 47_000), c.index_bits, (write_reset, write_step), fields["vector"][0], lane_shift);
         let join = |reg: &[Bit], index: &[Bit]| -> Vec<Bit> { index.iter().chain(reg).copied().collect() };
@@ -944,8 +977,53 @@ impl Gen {
         let chain_sign = *chain_shifted.last().expect("cadena vacía");
         let chain_wide: Vec<Bit> = (0..accumulator_bits as usize).map(|i| chain_shifted.get(i).copied().unwrap_or(chain_sign)).collect();
         let wide_data = b.wire("wide_data", accumulator_bits);
-        b.inst("wide_data_select", &acc_mux, &[("s", vec![wide_from_chain]), ("a", accumulator.clone()), ("b", chain_wide), ("y", wide_data.clone())]);
-        b.ram2p("wide_memory", c.index_bits, accumulator_bits, &[("raddr", index_a.clone()), ("waddr", index_w.clone()), ("we", vec![wide_write]), ("wdata", wide_data), ("rdata", wide_read.clone())]);
+        let from_outside = b.wire("wide_outside", accumulator_bits);
+        b.inst("wide_data_select", &acc_mux, &[("s", vec![wide_from_chain]), ("a", accumulator.clone()), ("b", chain_wide), ("y", from_outside.clone())]);
+        let combines = c.features.combines();
+        let lane_sums: Vec<Vec<Bit>> = (0..lanes).map(|lane| b.wire(&format!("wide_sum{lane}"), accumulator_bits)).collect();
+        if combines {
+            b.inst("wide_sum_select", &acc_mux, &[("s", vec![fields["wide_accumulate"][0]]), ("a", from_outside), ("b", lane_sums[0].clone()), ("y", wide_data.clone())]);
+        } else {
+            for (from, to) in from_outside.iter().zip(&wide_data) {
+                b.or_to(*from, Bit::Zero, *to);
+            }
+        }
+        // A combination walks the wide memory with the counter, whatever operand A reads.
+        let wide_raddr = if combines {
+            let y = b.wire("wide_raddr", c.index_bits);
+            b.inst("wide_raddr_select", &mux_index, &[("s", vec![fields["wide_accumulate"][0]]), ("a", index_a.clone()), ("b", plain_b.clone()), ("y", y.clone())]);
+            y
+        } else {
+            index_a.clone()
+        };
+        let mut wide_banks = Vec::with_capacity(lanes);
+        {
+            let mut l = Logic { b: &mut b, next: 48_000 };
+            let together = l.and(wide_write, vector_flag);
+            for (lane, sum) in lane_sums.iter().enumerate() {
+                let here = l.equals(&index_w[..lane_bits], lane as u32);
+                let alone = l.and(wide_write, here);
+                let write = l.or(alone, together);
+                let data = if lane == 0 { wide_data.clone() } else { l.mux_bus(together, &wide_data, sum) };
+                let name = if lanes == 1 { "wide_memory".to_string() } else { format!("wide_memory{lane}") };
+                let read = l.b.wire(&format!("{name}_data"), accumulator_bits);
+                l.b.ram2p(&name, c.index_bits - lane_bits as u32, accumulator_bits, &[("raddr", wide_raddr[lane_bits..].to_vec()), ("waddr", index_w[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data), ("rdata", read.clone())]);
+                wide_banks.push(read);
+            }
+            let bank = l.fresh_bus(lane_bits);
+            l.connect_flops(&wide_raddr[..lane_bits], &bank);
+            let chosen = l.select(&bank, &wide_banks);
+            for (from, to) in chosen.iter().zip(&wide_read) {
+                l.b.or_to(*from, Bit::Zero, *to);
+            }
+        }
+        let wide_fresh = fields["wide_fresh"][0];
+        if combines {
+            let sum = self.wide_sum(&mut b, ("wide_sum_adder", &acc_adder, &acc_reg), &wide_read, &product, wide_fresh, accumulator_bits);
+            for (from, to) in sum.iter().zip(&lane_sums[0]) {
+                b.or_to(*from, Bit::Zero, *to);
+            }
+        }
         let wide_top = accumulator_bits as usize - 1;
         let wide_magnitude = b.wire("wide_magnitude", accumulator_bits - 1);
         let keep_wide = b.wire("wide_keep", 1)[0];
@@ -1076,6 +1154,13 @@ impl Gen {
             for (op, leaf) in [(OP_MUL, shifted), (OP_FUNCTION, table), (OP_SUB, sum), (OP_MOV, lane_a), (OP_SHIFT_LEFT, saturated)] {
                 if c.features.uses(op) {
                     leaves[op as usize] = leaf;
+                }
+            }
+            if combines {
+                let (adder_name, sum) = (name("wide_sum"), &lane_sums[lane]);
+                let total = self.wide_sum(&mut b, (&adder_name, &acc_adder, &acc_reg), &wide_banks[lane], &product, wide_fresh, accumulator_bits);
+                for (from, to) in total.iter().zip(sum) {
+                    b.or_to(*from, Bit::Zero, *to);
                 }
             }
             let chosen = mux_tree(&mut b, &mux_a, &name("op"), leaves, &op);
@@ -1465,6 +1550,11 @@ fn visit_indices(steps: &[Step], f: &mut impl FnMut(Expr)) {
                 f(alu.window);
             }
             Step::Repeat { body, .. } => visit_indices(body, f),
+            Step::Combine { weights, start, window, .. } => {
+                f(weights.1);
+                f(*start);
+                f(*window);
+            }
             Step::Stream { body, .. } => {
                 f(body.a.1);
                 f(body.b.1);
@@ -1641,6 +1731,7 @@ impl DieProgram {
                 }
                 Step::Repeat { variable, count, body } => self.compile_loop(*variable, *count, body),
                 Step::Stream { variable, count, body } => self.stream(*variable, *count, body),
+                Step::Combine { .. } => self.combine(step),
                 Step::CellSeek { weights, factors } => self.cell_seek(*weights, *factors),
                 Step::CellPass => self.cell_pass(),
                 Step::CellGroup { src, length } => self.cell_group(*src, *length),
@@ -1692,9 +1783,19 @@ impl DieProgram {
             }
             w
         };
-        let start = self.end();
-        let w = self.slot(start);
-        (w.read_reset, w.write_reset) = (true, true);
+        self.emit_stream(n, written, true, word);
+        for temporary in temporaries {
+            self.release(temporary);
+        }
+    }
+
+    /// Lays out the words of a stream of `n` elements whose results land `written` later.
+    fn emit_stream(&mut self, n: usize, written: usize, reset: bool, word: impl Fn(usize) -> ControlWord) {
+        if reset {
+            let start = self.end();
+            let w = self.slot(start);
+            (w.read_reset, w.write_reset) = (true, true);
+        }
         let (from, until) = if n > written { (written, n) } else { (n + written, n + written) };
         for k in 0..from.min(n + written) {
             let at = self.end();
@@ -1711,6 +1812,40 @@ impl DieProgram {
         for k in until.max(from.min(n + written))..n + written {
             let at = self.end();
             *self.slot(at) = word(k);
+        }
+    }
+
+    /// Adds a whole row, times one weight, to the sums in the wide memory.
+    fn combine(&mut self, step: &Step) {
+        let Step::Combine { weights, matrix, start, width, fresh, window, window_a, window_b } = *step else {
+            unreachable!("solo se llama con una combinación");
+        };
+        let mut temporaries = Vec::new();
+        let (literal_a, offset_a) = self.resolve(weights.1);
+        let offset_b = self.moving_offset(start, &mut temporaries);
+        let window_x = if window_a || window_b { self.resolve(window).1 } else { 0 };
+        let lane_bits = self.config.features.lane_bits;
+        let lanes = 1u32 << lane_bits;
+        let (blocks, rest) = if width.is_multiple_of(lanes) && start.is_multiple_of(lanes) { (width / lanes, 0) } else { (0, width) };
+        let word = |k: usize, n: usize, vector: bool| {
+            let mut w = ControlWord { vector, window_x, wide_accumulate: true, ..Default::default() };
+            if k < n {
+                w.read_step = true;
+                (w.reg_a, w.literal_a, w.offset_a, w.window_a, w.fixed_a) = (weights.0, literal_a, offset_a, window_a, true);
+                (w.reg_b, w.offset_b, w.window_b) = (matrix, offset_b, window_b);
+            }
+            if (1..n + 1).contains(&k) {
+                (w.broadcast_a, w.wide_fresh) = (vector, fresh);
+            }
+            w.wide_write = (2..n + 2).contains(&k);
+            w
+        };
+        let reset = rest == 0;
+        if blocks > 0 {
+            self.emit_stream(blocks as usize, 2, reset, |k| word(k, blocks as usize, true));
+        }
+        if rest > 0 {
+            self.emit_stream(rest as usize, 2, !reset, |k| word(k, rest as usize, false));
         }
         for temporary in temporaries {
             self.release(temporary);
