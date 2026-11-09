@@ -4,6 +4,8 @@ import { IconButton } from "../components/controls";
 import { AREA_VIEW_THRESHOLD, layoutAreas, layoutModule, type Edge, type Layout, type Node, type Pin } from "./layout";
 import { currentModule, useCellSim } from "./simStore";
 
+const MIN_FIT = 0.7;
+
 interface Camera {
   x: number;
   y: number;
@@ -27,6 +29,46 @@ function showValue(bits: string): string {
   if (bits.length <= 1) return bits;
   return `${BigInt.asIntN(bits.length, BigInt(`0b${bits}`))}`;
 }
+
+/** At most six characters, so a value never runs into the labels beside it. */
+function compactValue(bits: string): string {
+  const full = showValue(bits);
+  if (full.length <= 6) return full;
+  const value = Number(full);
+  const [limit, suffix] = Math.abs(value) >= 1e12 ? [1e12, "T"] : Math.abs(value) >= 1e9 ? [1e9, "G"] : Math.abs(value) >= 1e6 ? [1e6, "M"] : [1e3, "k"];
+  return `${(value / limit).toFixed(Math.abs(value / limit) >= 100 ? 0 : 1).replace(".", ",")}${suffix}`;
+}
+
+const PIN_HELP: Record<string, string> = {
+  clear: "pone a cero el estado",
+  clear_total: "borra la suma acumulada",
+  clear_group: "borra la suma del grupo",
+  load_en: "escribe un peso en memoria",
+  load_addr: "dirección del peso que se escribe",
+  load_data: "valor del peso que se escribe",
+  load_scale: "escribe la escala o el sesgo del grupo",
+  run: "avanza el cálculo un ciclo",
+  x: "activación de entrada",
+  total: "suma acumulada de la fila",
+  weight: "peso leído de memoria",
+  product: "peso por activación",
+  valid: "el dato de este ciclo es válido",
+  value: "valor que se suma",
+  addr: "dirección de memoria",
+  we: "activa la escritura",
+  wdata: "dato que se escribe",
+  rdata: "dato leído",
+  raddr: "dirección de lectura",
+  waddr: "dirección de escritura",
+  d: "dato que se guarda",
+  q: "dato guardado",
+  advance: "avanza el contador",
+  address: "dirección actual",
+  s: "elige la entrada",
+  a: "entrada a",
+  b: "entrada b",
+  y: "salida",
+};
 
 function GateSymbol({ node, selected }: { node: Node; selected: boolean }) {
   const { w, h } = node;
@@ -66,13 +108,14 @@ function BoxSymbol({ node, selected, value }: { node: Node; selected: boolean; v
       )}
       {node.pins.map((p) => (
         <g key={p.name}>
+          <title>{`${p.name}${PIN_HELP[p.name] ? `: ${PIN_HELP[p.name]}` : ""} (${p.width} ${p.width === 1 ? "bit" : "bits"}) = ${showValue(value(p))}`}</title>
           <circle className="pin" cx={p.x} cy={p.y} r={2.5} />
           <text className="pin-name" x={p.side === "left" ? 8 : node.w - 8} y={p.y + 3.5} textAnchor={p.side === "left" ? "start" : "end"}>
             {p.name}
           </text>
           {p.width > 1 && (
             <text className="pin-value" x={node.w / 2} y={p.y + 3.5} textAnchor="middle">
-              {showValue(value(p))}
+              {compactValue(value(p))}
             </text>
           )}
         </g>
@@ -100,17 +143,17 @@ function PortSymbol({ node, value }: { node: Node; value: string }) {
         {node.title}
       </text>
       <text className="port-value" x={node.kind === "input" ? node.w - 10 : 10} y={node.h / 2 + 4} textAnchor={node.kind === "input" ? "end" : "start"}>
-        {showValue(value)}
+        {compactValue(value)}
       </text>
     </g>
   );
 }
 
-function EdgePath({ edge, value, onHover }: { edge: Edge; value: string; onHover: (e: Edge | null) => void }) {
+function EdgePath({ edge, value, state, onHover }: { edge: Edge; value: string; state: "" | "hot" | "dim"; onHover: (e: Edge | null) => void }) {
   const d = edge.points.map(([x, y], i) => `${i ? "L" : "M"}${x} ${y}`).join(" ");
   const active = value.includes("1");
   return (
-    <g onPointerEnter={() => onHover(edge)} onPointerLeave={() => onHover(null)}>
+    <g className={state} onPointerEnter={() => onHover(edge)} onPointerLeave={() => onHover(null)}>
       <path className="wire-hit" d={d} />
       <path className={`wire ${active ? "on" : ""} ${value.length > 1 ? "bus" : ""}`} d={d} />
     </g>
@@ -123,6 +166,13 @@ function Diagram({ module, layout, snapshot }: { module: NetlistModule; layout: 
   const enter = useCellSim((s) => s.enter);
   const setArea = useCellSim((s) => s.setArea);
   const [hovered, setHovered] = useState<Edge | null>(null);
+
+  // Hovering a wire or selecting a block lights its nets and fades the rest.
+  const focus = useMemo(() => {
+    if (hovered) return new Set([hovered.driver]);
+    if (!selected) return null;
+    return new Set(layout.edges.filter((e) => e.from.node === selected || e.to.node === selected).map((e) => e.driver));
+  }, [hovered, selected, layout]);
 
   const pinValue = (node: Node, pin: Pin) => {
     if (node.kind !== "instance") {
@@ -140,7 +190,10 @@ function Diagram({ module, layout, snapshot }: { module: NetlistModule; layout: 
         </g>
       ))}
       {layout.edges.map((edge) => (
-        <EdgePath key={edge.id} edge={edge} value={busValue(module, snapshot, edge.bits)} onHover={setHovered} />
+        <EdgePath key={edge.id} edge={edge} value={busValue(module, snapshot, edge.bits)} state={!focus ? "" : focus.has(edge.driver) ? "hot" : "dim"} onHover={setHovered} />
+      ))}
+      {layout.junctions.map(([x, y]) => (
+        <circle key={`${x},${y}`} className="junction" cx={x} cy={y} r={2.6} />
       ))}
       {layout.nodes.map((node) => (
         <g
@@ -171,7 +224,7 @@ function Diagram({ module, layout, snapshot }: { module: NetlistModule; layout: 
       {hovered && (
         <g className="wire-label" transform={`translate(${hovered.points[1][0] + 6} ${hovered.points[1][1] - 8})`}>
           <text>
-            {hovered.net} = {showValue(busValue(module, snapshot, hovered.bits))}
+            {hovered.net}{hovered.bits.length > 1 ? ` [${hovered.bits.length}]` : ""} = {showValue(busValue(module, snapshot, hovered.bits))}
           </text>
         </g>
       )}
@@ -188,9 +241,16 @@ export function SchematicView() {
   const module = currentModule(design, path);
   const area = useCellSim((s) => s.area);
   const overview = !!module && !area && module.instances.length > AREA_VIEW_THRESHOLD;
-  const layout = useMemo(() => {
-    if (!module || !design) return null;
-    return overview ? layoutAreas(module, design) : layoutModule(module, design, area);
+  const [layout, setLayout] = useState<Layout | null>(null);
+  useEffect(() => {
+    if (!module || !design) return;
+    let current = true;
+    void (overview ? layoutAreas(module, design) : layoutModule(module, design, area)).then((next) => {
+      if (current) setLayout(next);
+    });
+    return () => {
+      current = false;
+    };
   }, [module, design, area, overview]);
 
   const host = useRef<HTMLDivElement>(null);
@@ -207,9 +267,11 @@ export function SchematicView() {
     const el = host.current;
     if (!el || !layout) return;
     const { width, height } = el.getBoundingClientRect();
-    const k = Math.min(1.4, (width - 80) / layout.width, (height - 130) / layout.height);
+    // Never shrink so far that the labels stop being readable: the rest is reached by panning.
+    const k = Math.max(Math.min(MIN_FIT, 1.4), Math.min(1.4, (width - 80) / layout.width, (height - 130) / layout.height));
     if (!(k > 0)) return;
-    camera.current = { k, x: (width - layout.width * k) / 2, y: 62 + (height - 110 - layout.height * k) / 2 };
+    const overflow = layout.width * k > width - 48;
+    camera.current = { k, x: overflow ? 24 : (width - layout.width * k) / 2, y: Math.max(62, 62 + (height - 110 - layout.height * k) / 2) };
     apply();
   }, [layout, apply]);
 
@@ -335,7 +397,11 @@ export function SchematicView() {
             <i className="wire-key" aria-hidden="true" />
             A cero
           </span>
-          <span className="legend-hint">Doble clic para entrar · Esc para subir</span>
+          <span>
+            <i className="wire-key thick" aria-hidden="true" />
+            Bus
+          </span>
+          <span className="legend-hint">Pasa por un cable para seguirlo · Doble clic para entrar · Esc para subir</span>
         </div>
         <div className="zoom">
           <IconButton label="Alejar" onClick={() => zoom(0.7, ...center())}>

@@ -1212,6 +1212,23 @@ input[type="range"]::-webkit-slider-thumb {
   stroke: var(--accent);
 }
 
+.dim .wire {
+  opacity: 0.16;
+}
+
+.hot .wire {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+}
+
+.hot .wire.bus {
+  stroke-width: 3.5;
+}
+
+.junction {
+  fill: var(--label-3);
+}
+
 .wire-hit {
   fill: none;
   stroke: transparent;
@@ -1241,6 +1258,11 @@ input[type="range"]::-webkit-slider-thumb {
 
 .wire-key.on {
   background: var(--accent);
+}
+
+.wire-key.thick {
+  height: 4px;
+  border-radius: 1px;
 }
 
 .legend-hint {
