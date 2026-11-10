@@ -250,7 +250,7 @@ pub struct DieSimulation {
 
 enum Demo {
     Mlp(demo::Example),
-    Block(demo::BlockDemo),
+    Block(Box<demo::BlockDemo>),
     Boot(BootDemo),
 }
 
@@ -348,7 +348,7 @@ impl DieSimulation {
                     }
                     sim.tick();
                 }
-                Demo::Block(built)
+                Demo::Block(Box::new(built))
             }
             other => return Err(JsError::new(&format!("demostración desconocida: {other}"))),
         };
