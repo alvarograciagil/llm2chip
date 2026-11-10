@@ -79,7 +79,7 @@ fn main() {
         return;
     }
     let weights = Weights::open(dir).unwrap();
-    let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 36, mac_stages: 1, adder_stages: 1, addr_bits: 24, coding: Default::default(), exponent_bits: 0, multiplier: MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false };
+    let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 36, mac_stages: 1, adder_stages: 1, addr_bits: 24, coding: Default::default(), exponent_bits: 0, multiplier: MultiplierKind::Booth, fixed_weights: false, ecc: false, skip_zeros: false };
     let features = DieFeatures::default().with_lane_bits(env("LANES", 7)).with_cluster_bits(env("UNITS", 7)).with_key_shift(CONTEXT.trailing_zeros());
     let die = DieConfig { cells: 1 << env("CELLS", 18), cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features };
     let layout = Layout::for_image(&program, &weights, die, CONTEXT as usize).unwrap();

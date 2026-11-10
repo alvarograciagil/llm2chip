@@ -545,15 +545,16 @@ fn max_scan_stages(lane_bits: u32) -> usize {
     lane_bits.saturating_sub(1) as usize / 3
 }
 
-/// Register stages in the network that finds the largest operand over the units: one
-/// after every two of its levels but the last, so no cycle holds more than two of them.
+/// Register stages in the network that finds the largest operand over the units: the last
+/// cycle has one of its levels, after the comparison it feeds, and the others two each.
 fn max_stages(cluster_bits: u32) -> usize {
-    cluster_bits.saturating_sub(1) as usize / 2
+    cluster_bits as usize / 2
 }
 
 fn writes_at_once(s: &Alu) -> bool {
-    // The largest over a group of units takes the network's stages.
-    if s.op == OP_MAX && s.reduce_group > 0 {
+    // The largest over a group of units takes the network's stages, and a product is
+    // rounded in the cycle after it is computed.
+    if (s.op == OP_MAX && s.reduce_group > 0) || s.op == OP_MUL {
         return false;
     }
     let late_shift = (s.load_shift_a || s.load_shift_b || s.load_shift_left || s.load_wide_shift) && !s.shift_now;
@@ -805,12 +806,9 @@ impl Gen {
             let sign = *v.last().expect("vector vacío");
             (0..wide as usize).map(|i| v.get(i).copied().unwrap_or(sign)).collect()
         };
-        let terms = b.wire("terms", wide);
-        let unused = b.wire("terms_carry", 1);
-        b.inst("terms_adder", wide_adder, &[("a", extend(&sum_scaled)), ("b", extend(&x_biased)), ("cin", vec![Bit::Zero]), ("sum", terms.clone()), ("cout", unused)]);
-        let next = b.wire("total_next", wide);
-        let unused = b.wire("total_carry", 1);
-        b.inst("total_adder", wide_adder, &[("a", p.total.clone()), ("b", terms), ("cin", vec![Bit::Zero]), ("sum", next.clone()), ("cout", unused)]);
+        // The total and both terms meet in a carry-save step with one fast adder.
+        let _ = wide_adder;
+        let next = Logic { b: &mut b, next: 59_500 }.sum_many(vec![p.total.clone(), extend(&sum_scaled), extend(&x_biased)]);
         let chosen = b.wire("total_chosen", wide);
         b.inst("total_select", mux_wide, &[("s", vec![update]), ("a", p.total.clone()), ("b", next), ("y", chosen.clone())]);
         let not_clear = b.wire("total_keep", 1)[0];
@@ -857,8 +855,9 @@ impl Gen {
         let next = l.adder(&before, &extended, Bit::Zero).0;
         l.connect_flops(&next, &sum);
         l.b.set_prefix("");
-        // The last cycle's sum, before it is registered, is the whole product.
-        next
+        // The cycle after the last, the register holds the whole product.
+        let _ = next;
+        sum
     }
 
     /// What the wide memory holds plus a product, or the total over the units, registered for its write.
@@ -1062,7 +1061,9 @@ impl Gen {
                 late.push(q);
                 bit = q;
             }
-            vec![("factor_first", vec![late[0]]), ("factor_done", vec![late[factor_steps - 1]])]
+            let q = b.wire("factor_late_done", 1)[0];
+            b.dff_to(late[factor_steps - 1], q);
+            vec![("factor_first", vec![late[0]]), ("factor_done", vec![q])]
         } else {
             Vec::new()
         };
@@ -1341,6 +1342,9 @@ impl Gen {
             b.inst("raddr_select", &mux_addr, &[("s", vec![host_reading]), ("a", addr_a), ("b", vec_addr.clone()), ("y", raddr_a.clone())]);
 
             let lane_products: Vec<Vec<Bit>> = (0..lanes).map(|lane| b.wire(&format!("lane_product{lane}"), 2 * a)).collect();
+            // Every lane's product is kept a cycle: products are rounded, and added up, in the
+            // cycle after the one they are computed in.
+            let held_products: Vec<Vec<Bit>> = (0..lanes).map(|lane| b.wire(&format!("lane_product_held{lane}"), 2 * a)).collect();
             // In a block of a variable-length scan, the last one may be only partly used.
             let scanned_lane: Vec<Bit> = {
                 let mut l = Logic { b: &mut b, next: 49_500 };
@@ -1462,6 +1466,7 @@ impl Gen {
             b.group("Unidad vectorial");
             let product = b.wire("product", 2 * a);
             b.inst("multiplier", &mult, &[("weight", read_a.clone()), ("x", read_b.clone()), ("product", product.clone())]);
+            Logic { b: &mut b, next: 59_300 }.connect_flops(&product, &held_products[0]);
             let op = fields["op"].clone();
             // The adder subtracts for OP_SUB, whose bit 2 is set.
             let subtract = op[2];
@@ -1472,7 +1477,7 @@ impl Gen {
             let sum = b.wire("sum", a);
             let unused = b.wire("sum_carry", 1);
             b.inst("adder", &add, &[("a", aligned_a.clone()), ("b", flipped), ("cin", vec![subtract]), ("sum", sum.clone()), ("cout", unused)]);
-            let shifted = self.rounded_right(&mut b, "product_shift", &product, &fields["shift"], a as usize);
+            let shifted = self.rounded_right(&mut b, "product_shift", &held_products[0], &fields["shift"], a as usize);
 
             b.group("Comparador");
             // A unit sitting out a loop offers the smallest value, so it never wins.
@@ -1608,8 +1613,7 @@ impl Gen {
                 let block = late(&mut l, &[vector_flag])[0];
                 let mut operands = vec![accumulator.clone()];
                 for lane in 0..lanes {
-                    let source = if lane == 0 { &product } else { &lane_products[lane] };
-                    let held = late(&mut l, source);
+                    let held = &held_products[lane];
                     let sign = held[2 * a as usize - 1];
                     let counted = if lane == 0 { Bit::One } else {
                         let taken = late(&mut l, &[scanned_lane[lane]])[0];
@@ -1841,6 +1845,7 @@ impl Gen {
                 let lane_b = self.rounded_right(&mut b, &name("align_b"), &operand_b, &shift_b, a as usize);
                 let product = lane_products[lane].clone();
                 b.inst(&name("multiplier"), &mult, &[("weight", operand_a.clone()), ("x", operand_b.clone()), ("product", product.clone())]);
+                Logic { b: &mut b, next: 59_400 }.connect_flops(&product, &held_products[lane]);
                 let flipped = b.wire(&name("flipped"), a);
                 for i in 0..a as usize {
                     b.xor_to(lane_b[i], subtract, flipped[i]);
@@ -1848,7 +1853,7 @@ impl Gen {
                 let sum = b.wire(&name("sum"), a);
                 let unused = b.wire(&name("carry"), 1);
                 b.inst(&name("adder"), &add, &[("a", lane_a.clone()), ("b", flipped), ("cin", vec![subtract]), ("sum", sum.clone()), ("cout", unused)]);
-                let shifted = self.rounded_right(&mut b, &name("product_shift"), &product, &fields["shift"], a as usize);
+                let shifted = self.rounded_right(&mut b, &name("product_shift"), &held_products[lane], &fields["shift"], a as usize);
                 let table = b.wire(&name("table"), a);
                 let mut index: Vec<Bit> = operand_a[(a - c.function_bits) as usize..].to_vec();
                 index.extend_from_slice(&fields["function"]);
@@ -1919,8 +1924,8 @@ impl Gen {
                         let larger = l.mux_bus(less, x, y);
                         l.mux_bus(*active, x, &larger)
                     }).collect();
-                    // A register after every two levels but the last, as `max_stages` counts.
-                    if level % 2 == 1 && level + 1 < on.len() {
+                    // Registers as `max_stages` counts them, the last before the last level.
+                    if (on.len() - 1 - level) % 2 == 1 {
                         largest = largest.iter().map(|value| {
                             let held = l.fresh_bus(value.len());
                             l.connect_flops(value, &held);
@@ -2656,7 +2661,8 @@ impl DieProgram {
         // A broadcast operand that moves one element for each block of the others.
         let lane_bits = self.config.features.lane_bits;
         let a_shift = if step.vector && lane_bits > 0 && step.a.1.coefficient(variable) == 1 { lane_bits } else { 0 };
-        let extra = usize::from(step.op == OP_FUNCTION);
+        // The function table reads a cycle later, and a product is rounded a cycle later.
+        let extra = usize::from(step.op == OP_FUNCTION || step.op == OP_MUL);
         let written = 2 + extra;
         let by_blocks = count.is_constant() && !in_elements;
         let n = if by_blocks { count.constant() as usize } else { usize::MAX / 2 };
@@ -2913,7 +2919,7 @@ impl DieProgram {
     fn factor_wait(&self) -> usize {
         match self.config.features.factor_steps {
             1 => 0,
-            steps => steps as usize,
+            steps => steps as usize + 1,
         }
     }
 
@@ -3042,7 +3048,7 @@ impl DieProgram {
         }
         let immediate = immediate_target(step.literal, self.config);
         let t0 = self.end();
-        let extra = if step.op == OP_FUNCTION {
+        let extra = if step.op == OP_FUNCTION || step.op == OP_MUL {
             1
         } else if step.op == OP_MAX && step.reduce_group > 0 {
             max_stages(self.config.features.cluster_bits)
@@ -3096,13 +3102,15 @@ impl DieProgram {
         }
         for more in 0..extra {
             let w = self.slot(t0 + 2 + more);
-            w.reduce_group = step.reduce_group;
+            (w.reduce_group, w.shift) = (step.reduce_group, step.shift);
             w.use_literal = true;
             w.reg_a = step.a.0;
             w.literal_a = step.a.1;
             w.offset_a = step.offset_a;
-            (w.window_x, w.window_a) = (step.window_x, step.window_a);
-            (w.vector, w.broadcast_a) = (step.vector, step.broadcast_a);
+            // B too, which a comparison at the end of the network still reads.
+            (w.reg_b, w.literal_b, w.offset_b) = (step.b.0, step.b.1, step.offset_b);
+            (w.window_x, w.window_a, w.window_b) = (step.window_x, step.window_a, step.window_b);
+            (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
             w.from_cluster = step.from_cluster;
             w.op = step.op;
             w.function = step.function;
@@ -3202,8 +3210,8 @@ impl DieProgram {
 
     /// `dst[i] = f(a[i], b[i])` for one of the lane's operations, over `len` values.
     fn lane_op(&mut self, op: u32, shift: u32, a: u32, b: u32, dst: u32, len: usize) {
-        // The function table adds one cycle of synchronous read.
-        let extra = usize::from(op == OP_FUNCTION);
+        // The function table adds one cycle of synchronous read, and a product one of rounding.
+        let extra = usize::from(op == OP_FUNCTION || op == OP_MUL);
         let start = self.end();
         self.slot(start).read_reset = true;
         self.slot(start).write_reset = true;
