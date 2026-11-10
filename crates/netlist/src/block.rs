@@ -695,6 +695,9 @@ pub struct Assembly {
     combines: bool,
     clusters: u32,
     key_shift: u32,
+    /// Which of the A, B and left shifters are known to hold zero.
+    shift_zero: [bool; 3],
+    zero_ready: bool,
     /// With keys kept in columns, how many tokens each column has room for.
     pub key_capacity: Option<u32>,
     /// Matrices the cells hold. Any other is computed from the vector registers.
@@ -703,7 +706,7 @@ pub struct Assembly {
 
 impl Assembly {
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, shift_zero: [false; 3], zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -812,23 +815,53 @@ impl Assembly {
     }
 
     fn load_shifts(&mut self, a: Option<At<Expr>>, b: Option<At<Expr>>, left: Option<At<Expr>>) {
-        // Sources are read through the A shifter, so A has to be loaded last.
-        let zero = self.sc(15);
-        for (place, which) in [(left, 2), (b, 1), (a, 0)] {
-            let mut s = alu(OP_MOV);
-            s.a = place.unwrap_or(zero);
-            match which {
-                0 => s.load_shift_a = true,
-                1 => s.load_shift_b = true,
-                _ => s.load_shift_left = true,
+        // A loaded value passes through the A shifter, so A must be zero while the others
+        // load. A register already known to be zero is not loaded again.
+        let wanted = [a, b, left];
+        let needed: Vec<bool> = (0..3).map(|i| wanted[i].is_some() || !self.shift_zero[i]).collect();
+        if !needed.iter().any(|n| *n) {
+            return;
+        }
+        let zero = self.zero_place();
+        if !self.shift_zero[0] && (needed[1] || needed[2] || wanted[0].is_some()) {
+            self.load_shift(0, zero);
+        }
+        for which in [2, 1, 0] {
+            if needed[which] && !(wanted[which].is_none() && self.shift_zero[which]) {
+                self.load_shift(which, wanted[which].unwrap_or(zero));
+                self.shift_zero[which] = wanted[which].is_none();
             }
-            s.write = false;
-            self.push(s);
         }
     }
 
+    fn load_shift(&mut self, which: usize, place: At<Expr>) {
+        let mut s = alu(OP_MOV);
+        s.a = place;
+        match which {
+            0 => s.load_shift_a = true,
+            1 => s.load_shift_b = true,
+            _ => s.load_shift_left = true,
+        }
+        s.write = false;
+        self.push(s);
+        self.shift_zero[which] = true;
+    }
+
+    /// An element holding zero, written the first time it is needed.
+    fn zero_place(&mut self) -> At<Expr> {
+        if !self.zero_ready {
+            self.immediate(0, self.sc(15));
+            self.zero_ready = true;
+        }
+        self.sc(15)
+    }
+
+    /// Loops repeat their body, so what it leaves in the shifters is not known before it.
+    fn forget_shifts(&mut self) {
+        self.shift_zero = [false; 3];
+    }
+
     fn clear_shifts(&mut self) {
-        self.immediate(0, self.sc(15));
         self.load_shifts(None, None, None);
     }
 
@@ -1008,10 +1041,13 @@ impl BlockOps for Assembly {
         }
         let variable = Var::Loop(self.loops);
         self.loops += 1;
+        self.zero_place();
+        self.forget_shifts();
         let outer = std::mem::take(&mut self.steps);
         body(self, Expr::var(variable));
         let inner = std::mem::replace(&mut self.steps, outer);
         self.steps.push(Step::Repeat { variable, count, body: inner });
+        self.forget_shifts();
     }
 
     fn load_vector(&mut self, reg: u32, values: &[f64]) {
@@ -1323,9 +1359,12 @@ impl BlockOps for Assembly {
         }
         let (first, second) = (Var::Loop(self.loops), Var::Loop(self.loops + 1));
         self.loops += 2;
+        self.zero_place();
+        self.forget_shifts();
         let before = std::mem::take(&mut self.steps);
         body(self, Expr::var(first), Expr::var(second));
         let inside = std::mem::replace(&mut self.steps, before);
+        self.forget_shifts();
         let total = outer * inner;
         for block in 0..total.div_ceil(self.clusters) {
             let assignments = (0..self.clusters.min(total - block * self.clusters)).map(|unit| {
