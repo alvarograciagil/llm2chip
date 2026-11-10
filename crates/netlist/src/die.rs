@@ -538,7 +538,24 @@ fn bits_for(value: u32) -> u32 {
 
 /// Steps whose result can be written as it is computed: nothing reads it through the
 /// result register afterwards, and no other unit has to see it on the way.
+/// Register stages in the tree that finds the largest element across the lanes: one after
+/// every three of its levels but the last, so the largest of a block reaches `best` that
+/// many cycles later.
+fn max_scan_stages(lane_bits: u32) -> usize {
+    lane_bits.saturating_sub(1) as usize / 3
+}
+
+/// Register stages in the network that finds the largest operand over the units: one
+/// after every two of its levels but the last, so no cycle holds more than two of them.
+fn max_stages(cluster_bits: u32) -> usize {
+    cluster_bits.saturating_sub(1) as usize / 2
+}
+
 fn writes_at_once(s: &Alu) -> bool {
+    // The largest over a group of units takes the network's stages.
+    if s.op == OP_MAX && s.reduce_group > 0 {
+        return false;
+    }
     let late_shift = (s.load_shift_a || s.load_shift_b || s.load_shift_left || s.load_wide_shift) && !s.shift_now;
     let later = late_shift || s.link_send || s.wide_write;
     !later && !matches!(s.op, OP_FUNCTION | OP_LINK | OP_CELLS)
@@ -1462,7 +1479,10 @@ impl Gen {
             let max_a = if shares_max {
                 let smallest: Vec<Bit> = (0..a as usize).map(|i| if i + 1 == a as usize { Bit::One } else { Bit::Zero }).collect();
                 b.inst("max_offer", &mux_a, &[("s", vec![enabled]), ("a", smallest), ("b", aligned_a.clone()), ("y", unit_max[cluster].clone())]);
-                group_max[cluster].clone()
+                // Over a group the network gives it, some cycles later; alone, A itself.
+                let mut l = Logic { b: &mut b, next: 59_100 };
+                let grouped = l.any(&fields["reduce_group"]);
+                l.mux_bus(grouped, &aligned_a, &group_max[cluster])
             } else {
                 aligned_a.clone()
             };
@@ -1495,21 +1515,16 @@ impl Gen {
                 if i == top {
                     b.xor_to(Bit::Zero, Bit::Zero, differs);
                 } else {
-                    // A scan over a block looks at every lane; the others count only then.
-                    let mut any = b.wire(&format!("mag_lane0_{i}"), 1)[0];
-                    b.xor_to(read_a[i], read_a[top], any);
+                    // A scan over a block looks at every lane, in a tree; the others count only then.
+                    let mut l = Logic { b: &mut b, next: 59_200 };
+                    let mut bits = vec![l.xor(read_a[i], read_a[top])];
                     for (lane, bank) in banks_a.iter().enumerate().skip(1) {
-                        let here = b.wire(&format!("mag_lane{lane}_{i}"), 1)[0];
-                        b.xor_to(bank[i], bank[top], here);
-                        let counted = b.wire(&format!("mag_counted{lane}_{i}"), 1)[0];
-                        let live = b.wire(&format!("mag_live{lane}_{i}"), 1)[0];
-                        b.and_to(block_scan, scanned_lane[lane], live);
-                        b.and_to(live, here, counted);
-                        let merged = b.wire(&format!("mag_any{lane}_{i}"), 1)[0];
-                        b.or_to(any, counted, merged);
-                        any = merged;
+                        let here = l.xor(bank[i], bank[top]);
+                        let live = l.and(block_scan, scanned_lane[lane]);
+                        bits.push(l.and(live, here));
                     }
-                    b.or_to(any, Bit::Zero, differs);
+                    let any = l.any(&bits);
+                    l.b.or_to(any, Bit::Zero, differs);
                 }
                 let seen = b.wire(&format!("mag_seen{i}"), 1)[0];
                 b.and_to(scan, differs, seen);
@@ -1545,12 +1560,26 @@ impl Gen {
                     let taken = l.and(block, scanned_lane[lane]);
                     level.push(l.mux_bus(taken, &read_a, bank));
                 }
+                let mut depth = 0;
+                let mut scanning = scan_best;
                 while level.len() > 1 {
                     level = level.chunks(2).map(|pair| if pair.len() == 2 { larger(&mut l, &pair[0], &pair[1]) } else { pair[0].clone() }).collect();
+                    depth += 1;
+                    // A register after every three levels but the last, as `max_scan_stages` counts.
+                    if depth % 3 == 0 && level.len() > 1 {
+                        level = level.iter().map(|value| {
+                            let held = l.fresh_bus(value.len());
+                            l.connect_flops(value, &held);
+                            held
+                        }).collect();
+                        let late = l.fresh();
+                        l.connect_flops(&[scanning], &[late]);
+                        scanning = late;
+                    }
                 }
                 let largest = level.pop().expect("al menos un carril");
                 let updated = larger(&mut l, &best, &largest);
-                let kept = l.mux_bus(scan_best, &best, &updated);
+                let kept = l.mux_bus(scanning, &best, &updated);
                 let lowest: Vec<Bit> = (0..a as usize).map(|i| if i == top { Bit::One } else { Bit::Zero }).collect();
                 let next = l.mux_bus(clear_best, &kept, &lowest);
                 l.connect_flops(&next, &best);
@@ -1561,37 +1590,37 @@ impl Gen {
 
             b.group("Acumulador vectorial");
             let accumulator_bits = 2 * a + 16;
-            let acc_adder = self.ripple_adder(accumulator_bits);
             let acc_reg = self.register(accumulator_bits);
             let acc_mux = self.mux_bus(accumulator_bits);
             let accumulate = ctl("accumulate", &mut b, &fields);
             let accumulator_clear = ctl("accumulator_clear", &mut b, &fields);
             let accumulator = b.wire("accumulator", accumulator_bits);
-            let product_sign = product[2 * a as usize - 1];
-            let plain_input: Vec<Bit> = (0..accumulator_bits as usize).map(|i| product.get(i).copied().unwrap_or(product_sign)).collect();
-            // A block adds up the product of every lane at once.
-            let extended: Vec<Bit> = if lanes == 1 {
-                plain_input
-            } else {
+            // The products are kept a cycle; then every lane's, and the sum so far, meet in
+            // a carry-save tree with one fast adder at the end.
+            let (acc_sum, accumulating) = {
                 let mut l = Logic { b: &mut b, next: 54_000 };
-                let widen = |l: &mut Logic, lane: usize| -> Vec<Bit> {
-                    let source = if lane == 0 { &product } else { &lane_products[lane] };
-                    let sign = source[2 * a as usize - 1];
-                    (0..accumulator_bits as usize).map(|i| {
-                        let bit = source.get(i).copied().unwrap_or(sign);
-                        if lane == 0 { bit } else { l.and(bit, scanned_lane[lane]) }
-                    }).collect()
+                let late = |l: &mut Logic, bits: &[Bit]| -> Vec<Bit> {
+                    let held = l.fresh_bus(bits.len());
+                    l.connect_flops(bits, &held);
+                    held
                 };
-                // The lanes' products meet in a carry-save tree with one fast adder at the end.
-                let terms: Vec<Vec<Bit>> = (0..lanes).map(|lane| widen(&mut l, lane)).collect();
-                let block = l.sum_many(terms);
-                l.mux_bus(vector_flag, &plain_input, &block)
+                let accumulating = late(&mut l, &[accumulate])[0];
+                let block = late(&mut l, &[vector_flag])[0];
+                let mut operands = vec![accumulator.clone()];
+                for lane in 0..lanes {
+                    let source = if lane == 0 { &product } else { &lane_products[lane] };
+                    let held = late(&mut l, source);
+                    let sign = held[2 * a as usize - 1];
+                    let counted = if lane == 0 { Bit::One } else {
+                        let taken = late(&mut l, &[scanned_lane[lane]])[0];
+                        l.and(block, taken)
+                    };
+                    operands.push((0..accumulator_bits as usize).map(|i| l.and(held.get(i).copied().unwrap_or(sign), counted)).collect());
+                }
+                (l.sum_many(operands), accumulating)
             };
-            let acc_sum = b.wire("acc_sum", accumulator_bits);
-            let unused = b.wire("acc_carry", 1);
-            b.inst("acc_adder", &acc_adder, &[("a", accumulator.clone()), ("b", extended), ("cin", vec![Bit::Zero]), ("sum", acc_sum.clone()), ("cout", unused)]);
             let acc_next = b.wire("acc_next", accumulator_bits);
-            b.inst("acc_select", &acc_mux, &[("s", vec![accumulate]), ("a", accumulator.clone()), ("b", acc_sum), ("y", acc_next.clone())]);
+            b.inst("acc_select", &acc_mux, &[("s", vec![accumulating]), ("a", accumulator.clone()), ("b", acc_sum), ("y", acc_next.clone())]);
             let keep_acc = b.wire("acc_keep", 1)[0];
             b.not_to(accumulator_clear, keep_acc);
             let acc_d = b.wire("acc_d", accumulator_bits);
@@ -1688,17 +1717,17 @@ impl Gen {
             let wide_magnitude_d = b.wire("wide_magnitude_d", accumulator_bits - 1);
             for i in 0..wide_top {
                 let differs = {
+                    // Every lane at once, in a tree.
                     let mut l = Logic { b: &mut b, next: 53_000 + i * 2048 };
-                    let mut any = l.xor(wide_read[i], wide_read[wide_top]);
+                    let mut bits = vec![l.xor(wide_read[i], wide_read[wide_top])];
                     for (lane, bank) in wide_banks.iter().enumerate().skip(1) {
                         let (value, sign) = (bank[fraction + i], bank[fraction + wide_top]);
                         let here = l.xor(value, sign);
                         let block = l.and(wide_scan, vector_flag);
                         let live = l.and(block, scanned_lane[lane]);
-                        let counted = l.and(live, here);
-                        any = l.or(any, counted);
+                        bits.push(l.and(live, here));
                     }
-                    any
+                    l.any(&bits)
                 };
                 let seen = b.wire(&format!("wide_seen{i}"), 1)[0];
                 b.and_to(wide_scan, differs, seen);
@@ -1890,6 +1919,14 @@ impl Gen {
                         let larger = l.mux_bus(less, x, y);
                         l.mux_bus(*active, x, &larger)
                     }).collect();
+                    // A register after every two levels but the last, as `max_stages` counts.
+                    if level % 2 == 1 && level + 1 < on.len() {
+                        largest = largest.iter().map(|value| {
+                            let held = l.fresh_bus(value.len());
+                            l.connect_flops(value, &held);
+                            held
+                        }).collect();
+                    }
                 }
                 for (value, output) in largest.iter().zip(&group_max) {
                     for (from, to) in value.iter().zip(output) {
@@ -2288,6 +2325,12 @@ pub struct DieProgram {
     /// The last two-cycle step and the cycle it computes in, which the next step's read
     /// may share when it does not depend on it.
     last_short: Option<(usize, Alu)>,
+    /// The first cycle a step may read the largest element found so far in: the tree
+    /// across the lanes delivers each block's a few cycles after it computes.
+    max_ready: usize,
+    /// The first cycle a step may read the accumulator in: products reach it a cycle
+    /// after they are computed.
+    acc_ready: usize,
 }
 
 /// One index register the CPU sets before starting the die.
@@ -2404,7 +2447,7 @@ impl DieProgram {
     pub fn new(config: DieConfig) -> Self {
         // The microcode read port takes one cycle to deliver the first word.
         let cycles = vec![ControlWord::default()];
-        Self { config, cycles, labels: BTreeSet::from([0]), entries: vec![0], parameters: Vec::new(), scoped: HashMap::new(), active: Vec::new(), in_use: BTreeSet::new(), cells_settle: 0, drain_pending: 0, last_short: None }
+        Self { config, cycles, labels: BTreeSet::from([0]), entries: vec![0], parameters: Vec::new(), scoped: HashMap::new(), active: Vec::new(), in_use: BTreeSet::new(), cells_settle: 0, drain_pending: 0, last_short: None, max_ready: 0, acc_ready: 0 }
     }
 
     fn slot(&mut self, at: usize) -> &mut ControlWord {
@@ -2639,6 +2682,13 @@ impl DieProgram {
         } else {
             let leading = if step.write { written } else { 1 };
             self.emit_variable_stream(count, leading, &mut temporaries, word);
+        }
+        // The last block computes no later than the cycle after the stream's words.
+        if step.max_scan {
+            self.max_ready = self.end() + max_scan_stages(self.config.features.lane_bits) + 1;
+        }
+        if step.accumulate {
+            self.acc_ready = self.end() + 2;
         }
         for temporary in temporaries {
             self.release(temporary);
@@ -2986,12 +3036,19 @@ impl DieProgram {
 
     /// One single-element operation. Nothing overlaps, so each takes a few cycles.
     pub fn alu(&mut self, step: &Alu) {
+        self.wait_for_max(step);
         if self.config.features.streams() && writes_at_once(step) {
             return self.short_alu(step);
         }
         let immediate = immediate_target(step.literal, self.config);
         let t0 = self.end();
-        let extra = usize::from(step.op == OP_FUNCTION);
+        let extra = if step.op == OP_FUNCTION {
+            1
+        } else if step.op == OP_MAX && step.reduce_group > 0 {
+            max_stages(self.config.features.cluster_bits)
+        } else {
+            0
+        };
         {
             let w = self.slot(t0);
             w.use_literal = true;
@@ -3037,8 +3094,9 @@ impl DieProgram {
                 w.offset_dst = step.offset_dst;
             }
         }
-        if extra == 1 {
-            let w = self.slot(t0 + 2);
+        for more in 0..extra {
+            let w = self.slot(t0 + 2 + more);
+            w.reduce_group = step.reduce_group;
             w.use_literal = true;
             w.reg_a = step.a.0;
             w.literal_a = step.a.1;
@@ -3106,6 +3164,34 @@ impl DieProgram {
         (w.reg_dst, w.literal_dst, w.offset_dst, w.write_now) = (step.dst.0, step.dst.1, step.offset_dst, step.write);
         (w.load_shift_a, w.load_shift_b, w.load_shift_left, w.shift_now) = (step.load_shift_a, step.load_shift_b, step.load_shift_left, step.shift_now);
         w.load_wide_shift = step.load_wide_shift;
+    }
+
+    /// A step that takes the largest element found so far reads it once the tree across
+    /// the lanes has delivered the last block's; one that adds to it is remembered.
+    fn wait_for_max(&mut self, step: &Alu) {
+        if step.max_out {
+            // The step computes no earlier than the end, even sharing a cycle to read.
+            while self.end() < self.max_ready {
+                let at = self.end();
+                self.slot(at);
+                self.last_short = None;
+            }
+        }
+        if step.max_scan {
+            // Computing at most two words after the end, as a step of three cycles does.
+            self.max_ready = self.end() + 2 + max_scan_stages(self.config.features.lane_bits) + 1;
+        }
+        // The accumulator is read to store it or to shift it out.
+        if step.wide_write || step.op == OP_ACCUMULATOR {
+            while self.end() < self.acc_ready {
+                let at = self.end();
+                self.slot(at);
+                self.last_short = None;
+            }
+        }
+        if step.accumulate {
+            self.acc_ready = self.end() + 3;
+        }
     }
 
     /// Leaves the die idle for `cycles`, for example while a link settles.
