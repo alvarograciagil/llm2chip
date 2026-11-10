@@ -41,7 +41,7 @@ pub fn die_config() -> DieConfig {
 #[allow(dead_code)]
 pub fn cell_die_config() -> DieConfig {
     let base = die_config();
-    DieConfig { cell: CellConfig { accumulator_bits: 40, addr_bits: 12, ..base.cell }, scale_bits: 21, index_bits: 12, ..base }
+    DieConfig { cell: CellConfig { accumulator_bits: 40, addr_bits: 12, ..base.cell }, scale_bits: 21, index_bits: 12, features: base.features.with_key_shift(4), ..base }
 }
 
 pub struct Rng(pub u64);

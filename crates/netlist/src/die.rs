@@ -43,17 +43,25 @@ pub struct DieFeatures {
     pub lane_bits: u32,
     /// log2 of the vector units that run the same words on different data.
     pub cluster_bits: u32,
+    /// log2 of the tokens each column of the key store holds; zero when keys are not in columns.
+    pub key_shift: u32,
 }
 
 impl Default for DieFeatures {
     fn default() -> Self {
-        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0 }
+        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0 }
     }
 }
 
 impl DieFeatures {
     pub fn is_general(&self) -> bool {
         self.ops == u32::MAX
+    }
+
+    /// The same die with room for `1 << key_shift` tokens in each column of keys.
+    pub fn with_key_shift(mut self, key_shift: u32) -> Self {
+        self.key_shift = key_shift;
+        self
     }
 
     /// The same die with several vector units.
@@ -88,7 +96,7 @@ impl DieFeatures {
     /// Exactly what this microprogram needs.
     pub fn of(code: &Microprogram) -> Self {
         // Additions are also how the comparator and the sequencer's own results are made.
-        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0 };
+        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0 };
         let mut highest_x = 0;
         for word in &code.words {
             features.ops |= 1 << word.op;
@@ -108,7 +116,7 @@ impl DieFeatures {
     pub fn union(self, other: Self) -> Self {
         let mut widths = self.widths;
         widths.iter_mut().zip(other.widths).for_each(|(a, b)| *a = (*a).max(b));
-        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits) }
+        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift) }
     }
 
     fn uses(&self, op: u32) -> bool {
@@ -208,10 +216,12 @@ pub struct ControlWord {
     pub max_scan: bool,
     pub max_clear: bool,
     pub max_out: bool,
+    /// Each write goes a whole column further on, to store one token's key.
+    pub write_spread: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 65;
+pub const FIELD_COUNT: usize = 66;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
@@ -309,6 +319,7 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("max_scan", 1),
         ("max_clear", 1),
         ("max_out", 1),
+        ("write_spread", 1),
     ]
 }
 
@@ -385,6 +396,7 @@ impl ControlWord {
             self.max_scan as u128,
             self.max_clear as u128,
             self.max_out as u128,
+            self.write_spread as u128,
         ]
     }
 
@@ -893,6 +905,15 @@ impl Gen {
             let plain_a = pick(&mut b, "plain_a", fields["fixed_a"][0], &read_index, &fields["literal_a"]);
             let plain_b = pick(&mut b, "plain_b", fields["fixed_b"][0], &read_index, &fields["literal_b"]);
             let plain_w = pick(&mut b, "plain_w", Bit::Zero, &write_index, &fields["literal_dst"]);
+            let plain_w = if c.features.key_shift > 0 {
+                let shift = c.features.key_shift as usize;
+                let spread: Vec<Bit> = (0..c.index_bits as usize).map(|i| if i < shift { Bit::Zero } else { write_index[i - shift] }).collect();
+                let y = b.wire("plain_w_spread", c.index_bits);
+                b.inst("plain_w_spread_select", &mux_index, &[("s", vec![fields["write_spread"][0]]), ("a", plain_w), ("b", spread), ("y", y.clone())]);
+                y
+            } else {
+                plain_w
+            };
             let offset = |b: &mut Builder, name: &str, plain: &[Bit], by: &[Bit]| -> Vec<Bit> {
                 let sum = b.wire(name, c.index_bits);
                 let carry = b.wire(&format!("{name}_carry"), 1);
@@ -2044,7 +2065,7 @@ impl DieProgram {
                 (w.broadcast_a, w.broadcast_b) = (step.broadcast_a, step.broadcast_b);
             }
             if (written..n + written).contains(&k) {
-                (w.reg_dst, w.offset_dst, w.window_dst, w.write_en) = (step.dst.0, offset_dst, step.window_dst, step.write);
+                (w.reg_dst, w.offset_dst, w.window_dst, w.write_en, w.write_spread) = (step.dst.0, offset_dst, step.window_dst, step.write, step.write_spread);
             }
             w
         };

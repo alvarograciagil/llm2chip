@@ -404,7 +404,15 @@ impl Layout {
         if next >= (1 << config.reg_bits) - 2 {
             return Err(format!("faltan registros: se necesitan {next}"));
         }
-        let key_capacity = chip_tokens.filter(|_| cells && config.features.combines()).map(|tokens| (tokens as u32).next_multiple_of(1 << config.features.lane_bits));
+        let key_capacity = chip_tokens.filter(|_| cells && config.features.combines()).map(|tokens| match config.features.key_shift {
+            0 => (tokens as u32).next_multiple_of(1 << config.features.lane_bits),
+            shift => 1 << shift,
+        });
+        if let (Some(tokens), Some(capacity)) = (chip_tokens, key_capacity) {
+            if tokens as u32 > capacity {
+                return Err(format!("cada columna de claves tiene sitio para {capacity} tokens y el contexto es de {tokens}"));
+            }
+        }
         let (in_cells, cell_weights, cell_factors) = place_in_cells(&cell_plan, config.cells as usize, 1 << config.features.cluster_bits);
         let reach = 1u64 << config.index_bits.min(config.cell.addr_bits);
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
@@ -514,15 +522,20 @@ impl Layout {
         asm
     }
 
+    /// The microcode of one operation on its own, to see what it costs.
+    pub fn op_microprogram(&self, program: &Program, inst: &Inst) -> Result<Microprogram, String> {
+        let mut asm = self.assembly();
+        self.run_list(&mut asm, program, std::slice::from_ref(inst), Expr::var(Var::Token), Expr::var(Var::Position), true)?;
+        let mut code = DieProgram::new(self.config);
+        code.assemble(&asm.steps);
+        Ok(code.finish_program())
+    }
+
     /// The cycles each operation of a token takes on this die, in program order.
     pub fn cycles_by_op(&self, program: &Program, token: u32, position: u32) -> Result<Vec<(String, u64)>, String> {
         let mut list = Vec::new();
         for inst in &program.ops {
-            let mut asm = self.assembly();
-            self.run_list(&mut asm, program, std::slice::from_ref(inst), Expr::var(Var::Token), Expr::var(Var::Position), true)?;
-            let mut code = DieProgram::new(self.config);
-            code.assemble(&asm.steps);
-            let code = code.finish_program();
+            let code = self.op_microprogram(program, inst)?;
             let name = format!("{:?}", inst.op);
             list.push((name.split([' ', '{', '(']).next().unwrap_or("").to_string(), code.cycles(&self.config, 0, token, position)));
         }
@@ -669,7 +682,8 @@ impl Layout {
         let t = &self.temporaries;
         let d = block as u32;
         let first = self.parts[0];
-        ops.each((count as u32).into(), |ops, b| {
+        // Each block is normalised on its own, so several vector units can share them.
+        ops.each_head(count as u32, 1, |ops, b, _| {
             ops.with_window(b, &[first], |ops, offset| {
                 let part = first + offset;
                 ops.copy_part(src, b * d, t[40], 0.into(), d.into());
@@ -682,7 +696,7 @@ impl Layout {
             });
         });
         let parts: Vec<(u32, u32)> = (0..count).map(|b| (self.parts[b], d)).collect();
-        ops.gather(&parts, dst);
+        ops.gather_heads(&parts, dst);
     }
 
     fn silu<O: BlockOps>(&self, ops: &mut O, src: u32, dst: u32, len: O::N) {

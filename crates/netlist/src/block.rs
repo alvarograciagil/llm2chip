@@ -489,6 +489,8 @@ pub struct Alu<N = u32> {
     pub max_clear: bool,
     /// The result is that largest mantissa.
     pub max_out: bool,
+    /// The destination index counts in whole columns of the key store.
+    pub write_spread: bool,
     pub magnitude_clear: bool,
     pub accumulate: bool,
     pub accumulator_clear: bool,
@@ -529,6 +531,7 @@ impl<N: Default> Alu<N> {
             max_scan: false,
             max_clear: false,
             max_out: false,
+            write_spread: false,
             magnitude_clear: false,
             accumulate: false,
             accumulator_clear: false,
@@ -580,6 +583,7 @@ impl Alu<Expr> {
             max_scan: self.max_scan,
             max_clear: self.max_clear,
             max_out: self.max_out,
+            write_spread: self.write_spread,
             magnitude_clear: self.magnitude_clear,
             accumulate: self.accumulate,
             accumulator_clear: self.accumulator_clear,
@@ -606,7 +610,7 @@ impl From<Alu<u32>> for Alu<Expr> {
         out.load_shift_left = s.load_shift_left;
         out.load_wide_shift = s.load_wide_shift;
         out.magnitude_scan = s.magnitude_scan;
-        (out.max_scan, out.max_clear, out.max_out) = (s.max_scan, s.max_clear, s.max_out);
+        (out.max_scan, out.max_clear, out.max_out, out.write_spread) = (s.max_scan, s.max_clear, s.max_out, s.write_spread);
         out.magnitude_clear = s.magnitude_clear;
         out.accumulate = s.accumulate;
         out.accumulator_clear = s.accumulator_clear;
@@ -690,6 +694,7 @@ pub struct Assembly {
     streams: bool,
     combines: bool,
     clusters: u32,
+    key_shift: u32,
     /// With keys kept in columns, how many tokens each column has room for.
     pub key_capacity: Option<u32>,
     /// Matrices the cells hold. Any other is computed from the vector registers.
@@ -698,7 +703,7 @@ pub struct Assembly {
 
 impl Assembly {
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1394,6 +1399,18 @@ impl BlockOps for Assembly {
         let Some(capacity) = self.key_capacity else {
             return self.align_to(src, 0.into(), exponent, keys, slot * width, width.into());
         };
+        // With a die that counts in whole columns, the key goes out one element per cycle
+        // from an aligned copy.
+        if self.key_shift > 0 {
+            let start: Expr = 32u32.max(1 << self.lane_bits).into();
+            let scratch = self.scratch;
+            self.align_to(src, 0.into(), exponent, scratch, start, width.into());
+            let variable = Var::Loop(self.loops);
+            self.loops += 1;
+            let mut step = alu(OP_MOV);
+            (step.a, step.dst, step.write_spread) = ((scratch, start + Expr::var(variable)), (keys, slot), true);
+            return self.steps.push(Step::Stream { variable, count: width.into(), in_elements: false, body: step });
+        }
         // The tokens of one column sit in consecutive places, one for each lane.
         self.load_alignment(src, exponent);
         self.each(width.into(), |s, j| {
