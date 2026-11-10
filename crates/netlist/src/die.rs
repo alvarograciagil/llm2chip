@@ -258,10 +258,15 @@ pub struct ControlWord {
     /// The wide sums add onto their own last total instead of what the memory holds, so
     /// a stream of rows piles up in one block.
     pub wide_chain: bool,
+    /// Non-zero: the cells' groups are parts of quantisation groups of `1 << quant_bits`
+    /// columns, and a unit's cells move on to the next scale and bias only where one ends.
+    pub quant_bits: u32,
+    /// The group ending now is a unit's last of the pass: its cells move on regardless.
+    pub slice_end: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 76;
+pub const FIELD_COUNT: usize = 78;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
@@ -375,6 +380,8 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("cell_end", 1),
         ("a_shift", bits_for(c.features.lane_bits)),
         ("wide_chain", 1),
+        ("quant_bits", 3),
+        ("slice_end", 1),
     ]
 }
 
@@ -462,6 +469,8 @@ impl ControlWord {
             self.cell_end as u128,
             self.a_shift as u128,
             self.wide_chain as u128,
+            self.quant_bits as u128,
+            self.slice_end as u128,
         ]
     }
 
@@ -610,6 +619,7 @@ impl Gen {
         let clear = b.input("clear", 1)[0];
         let clear_group = b.input("clear_group", 1)[0];
         let flush = b.input("flush", 1)[0];
+        let advance = b.input("advance", 1)[0];
         let seek_weights = b.input("seek_weights", 1);
         let seek_factors = b.input("seek_factors", 1)[0];
         let seek_addr = b.input("seek_addr", cfg.addr_bits);
@@ -673,7 +683,7 @@ impl Gen {
             b.and_to(load_en, load_scale, write_scale);
             FactorLoad { write_scale, load_data, load_addr }
         });
-        self.finish_scaled_cell(b, c, &scale_mul, &wide_adder, &reg_wide, &mux_wide, SumParts { group_sum, x_sum, load: factor_load, clear, flush, total, clear_group, seek_factors, seek_addr })
+        self.finish_scaled_cell(b, c, &scale_mul, &wide_adder, &reg_wide, &mux_wide, SumParts { group_sum, x_sum, load: factor_load, clear, flush, advance, total, clear_group, seek_factors, seek_addr })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -685,7 +695,7 @@ impl Gen {
         b.group("Escala y sesgo");
         let group = b.wire("group_index", cfg.addr_bits);
         let module_counter = self.seek_counter(cfg.addr_bits);
-        b.inst("group_index_counter", &module_counter, &[("clear", vec![p.clear]), ("advance", vec![p.flush]), ("seek", vec![p.seek_factors]), ("target", p.seek_addr.clone()), ("address", group.clone())]);
+        b.inst("group_index_counter", &module_counter, &[("clear", vec![p.clear]), ("advance", vec![p.advance]), ("seek", vec![p.seek_factors]), ("target", p.seek_addr.clone()), ("address", group.clone())]);
         let read_addr = b.wire("factors_raddr", cfg.addr_bits);
         for i in 0..cfg.addr_bits as usize {
             b.xor_to(group[i], Bit::Zero, read_addr[i]);
@@ -910,7 +920,7 @@ impl Gen {
         // An activation read with `cell_feed` reaches the cells `x_delay` cycles later, and
         // the last of a group is in their totals `latency` cycles after that: delay lines
         // run and flush them, so the next group's reads follow with no pause.
-        let (cell_run, cell_flush) = {
+        let (cell_run, cell_flush, cell_end_now, cell_flush_now) = {
             let delay = |b: &mut Builder, name: &str, from: Bit, cycles: usize| -> Bit {
                 let mut bit = from;
                 for stage in 0..cycles {
@@ -927,7 +937,7 @@ impl Gen {
             let flush_late = delay(&mut b, "cell_end", end, x_delay + cfg.latency() as usize);
             let run = ctl("cell_run", &mut b, &fields);
             let flush = ctl("cell_flush", &mut b, &fields);
-            (bus_or(&mut b, run, run_late, "cell_run_any"), bus_or(&mut b, flush, flush_late, "cell_flush_any"))
+            (bus_or(&mut b, run, run_late, "cell_run_any"), bus_or(&mut b, flush, flush_late, "cell_flush_any"), end, flush)
         };
         let chain_load = ctl("chain_load", &mut b, &fields);
         let chain_shift = ctl("chain_shift", &mut b, &fields);
@@ -972,6 +982,10 @@ impl Gen {
         let group_accumulator: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_group_accumulator"), 2 * a + 16)).collect();
         let unit_magnitude: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_magnitude"), a - 1)).collect();
         let group_magnitude: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_group_magnitude"), a - 1)).collect();
+        // The largest operand A over a group, for a maximum that every unit of it agrees on.
+        let shares_max = clusters > 1 && c.features.uses(OP_MAX);
+        let unit_max: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_max"), a)).collect();
+        let group_max: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_group_max"), a)).collect();
         let reduced: Vec<Vec<Vec<Bit>>> = (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("unit{k}_reduced{lane}"), wide_bits)).collect()).collect();
         // What bit `j` of a unit's number adds to an index written with `x_scaled`.
         let bit_strides: Vec<Vec<Bit>> = {
@@ -1316,20 +1330,28 @@ impl Gen {
             let shifted = self.rounded_right(&mut b, "product_shift", &product, &fields["shift"], a as usize);
 
             b.group("Comparador");
+            // A unit sitting out a loop offers the smallest value, so it never wins.
+            let max_a = if shares_max {
+                let smallest: Vec<Bit> = (0..a as usize).map(|i| if i + 1 == a as usize { Bit::One } else { Bit::Zero }).collect();
+                b.inst("max_offer", &mux_a, &[("s", vec![enabled]), ("a", smallest), ("b", aligned_a.clone()), ("y", unit_max[cluster].clone())]);
+                group_max[cluster].clone()
+            } else {
+                aligned_a.clone()
+            };
             let inverted = b.wire("cmp_inverted", a);
             for i in 0..a as usize {
                 b.not_to(aligned_b[i], inverted[i]);
             }
             let difference = b.wire("difference", a);
             let unused = b.wire("cmp_carry", 1);
-            b.inst("comparator", &add, &[("a", aligned_a.clone()), ("b", inverted), ("cin", vec![Bit::One]), ("sum", difference.clone()), ("cout", unused)]);
+            b.inst("comparator", &add, &[("a", max_a.clone()), ("b", inverted), ("cin", vec![Bit::One]), ("sum", difference.clone()), ("cout", unused)]);
             let top = a as usize - 1;
             let signs_differ = b.wire("signs_differ", 1)[0];
-            b.xor_to(aligned_a[top], aligned_b[top], signs_differ);
+            b.xor_to(max_a[top], aligned_b[top], signs_differ);
             let a_is_less = b.wire("a_is_less", 1)[0];
-            b.mux_to(signs_differ, difference[top], aligned_a[top], a_is_less);
+            b.mux_to(signs_differ, difference[top], max_a[top], a_is_less);
             let maximum = b.wire("maximum", a);
-            b.inst("max_select", &mux_a, &[("s", vec![a_is_less]), ("a", aligned_a.clone()), ("b", aligned_b), ("y", maximum.clone())]);
+            b.inst("max_select", &mux_a, &[("s", vec![a_is_less]), ("a", max_a), ("b", aligned_b), ("y", maximum.clone())]);
 
             b.group("Detector de magnitud");
             let scan = ctl("magnitude_scan", &mut b, &fields);
@@ -1727,6 +1749,26 @@ impl Gen {
                     l.b.or_to(*from, Bit::Zero, *to);
                 }
             }
+            if shares_max {
+                let top = a as usize - 1;
+                let mut largest: Vec<Vec<Bit>> = unit_max.clone();
+                for (level, active) in on.iter().enumerate() {
+                    largest = (0..clusters).map(|k| {
+                        let (x, y) = (&largest[k], &largest[k ^ (1 << level)]);
+                        let inverted: Vec<Bit> = y.iter().map(|bit| l.not(*bit)).collect();
+                        let difference = l.adder(x, &inverted, Bit::One).0;
+                        let signs_differ = l.xor(x[top], y[top]);
+                        let less = l.mux(signs_differ, difference[top], x[top]);
+                        let larger = l.mux_bus(less, x, y);
+                        l.mux_bus(*active, x, &larger)
+                    }).collect();
+                }
+                for (value, output) in largest.iter().zip(&group_max) {
+                    for (from, to) in value.iter().zip(output) {
+                        l.b.or_to(*from, Bit::Zero, *to);
+                    }
+                }
+            }
             let mut wide_seen: Vec<Vec<Bit>> = unit_wide_magnitude.clone();
             let mut sums: Vec<Vec<Bit>> = unit_accumulator.clone();
             for (level, active) in on.iter().enumerate() {
@@ -1833,13 +1875,34 @@ impl Gen {
                 x_bus = q;
             }
             let cell_seek_addr: Vec<Bit> = (0..cfg.addr_bits as usize).map(|i| index_a.get(i).copied().unwrap_or(Bit::Zero)).collect();
+            // A group of the cells that ends a quantisation group, which this unit's column
+            // shows, or ends the unit's share of the pass, moves its cells' factors on.
+            let advance = {
+                let mut l = Logic { b: &mut b, next: 58_000 + unit * 64 };
+                let quant = &fields["quant_bits"];
+                let mut done = Bit::One;
+                for (i, bit) in index_a.iter().enumerate().take((1 << quant.len()) - 1) {
+                    let within = at_least(&mut l, quant, i as u32 + 1);
+                    let outside = l.not(within);
+                    let ok = l.or(*bit, outside);
+                    done = l.and(done, ok);
+                }
+                let ends = l.or(done, fields["slice_end"][0]);
+                let mut late = l.and(cell_end_now, ends);
+                for _ in 0..1 + c.broadcast_stages as usize + cfg.latency() as usize {
+                    let q = l.fresh();
+                    l.connect_flops(&[late], &[q]);
+                    late = q;
+                }
+                l.or(late, cell_flush_now)
+            };
             let mut chain_in = vec![vec![Bit::Zero; wide as usize]; lanes];
             for row in (0..per_unit).rev() {
                 let i = unit * per_unit + row;
                 let lane = row % lanes;
                 b.group("Celdas");
                 let total = b.wire(&format!("cell{i}_total"), wide);
-                let mut cell_pins = vec![("clear", vec![cell_clear]), ("clear_group", vec![cell_clear_group]), ("flush", vec![cell_flush]), ("run", vec![cell_run]), ("x", x_bus.clone()), ("total", total.clone()), ("seek_weights", vec![cell_seek_weights]), ("seek_factors", vec![cell_seek_factors]), ("seek_addr", cell_seek_addr.clone())];
+                let mut cell_pins = vec![("clear", vec![cell_clear]), ("clear_group", vec![cell_clear_group]), ("flush", vec![cell_flush]), ("advance", vec![advance]), ("run", vec![cell_run]), ("x", x_bus.clone()), ("total", total.clone()), ("seek_weights", vec![cell_seek_weights]), ("seek_factors", vec![cell_seek_factors]), ("seek_addr", cell_seek_addr.clone())];
                 if let Some((load_cell, load_scale, cell_addr)) = &cell_ports {
                     cell_pins.extend([("load_en", vec![load_cell[i]]), ("load_scale", vec![*load_scale]), ("load_addr", cell_addr.clone()), ("load_data", cell_data[..c.scale_bits.max(cfg.weight_bits) as usize].to_vec())]);
                 }
@@ -1878,6 +1941,8 @@ struct SumParts {
     load: Option<FactorLoad>,
     clear: Bit,
     flush: Bit,
+    /// Moves on to the next scale and bias: with each flush, unless a group is in parts.
+    advance: Bit,
     total: Vec<Bit>,
     clear_group: Bit,
     seek_factors: Bit,
@@ -2382,7 +2447,7 @@ impl DieProgram {
                 Step::Clustered { vars, assignments, body } => self.clustered(vars, assignments, body),
                 Step::CellSeek { weights, factors } => self.cell_seek(*weights, *factors),
                 Step::CellPass => self.cell_pass(),
-                Step::CellGroup { src, length, start } => self.cell_group(*src, *length, *start),
+                Step::CellGroup { src, length, start, quant_bits, last } => self.cell_group(*src, *length, *start, (*quant_bits, *last)),
                 Step::WideReduce { rows, group } => self.wide_reduce(*rows, *group),
                 Step::CellDrain { rows } => self.cell_drain(*rows),
             }
@@ -2696,7 +2761,7 @@ impl DieProgram {
     }
 
     /// Streams the next `length` activations through the cells, then applies their factors.
-    fn cell_group(&mut self, src: u32, length: u32, first: Expr) {
+    fn cell_group(&mut self, src: u32, length: u32, first: Expr, (quant_bits, last): (u32, bool)) {
         let offset = self.resolve(first).1;
         let c = self.config;
         if c.features.feeds_cells() && length >= 2 {
@@ -2706,6 +2771,9 @@ impl DieProgram {
                 let w = self.slot(start + i);
                 (w.read_step, w.reg_a, w.offset_a, w.cell_feed) = (true, src, offset, true);
                 w.cell_end = i + 1 == length as usize;
+                if w.cell_end {
+                    (w.quant_bits, w.slice_end) = (quant_bits, last && quant_bits > 0);
+                }
                 self.drain_into(start + i);
             }
             self.cells_settle = start + length as usize - 1 + self.feed_latency();

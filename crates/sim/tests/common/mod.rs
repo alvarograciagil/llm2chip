@@ -55,6 +55,11 @@ impl Rng {
     }
 }
 
+thread_local! {
+    /// Columns that share a scale and a bias in the matrices this thread writes.
+    pub static GROUP: std::cell::Cell<usize> = const { std::cell::Cell::new(2) };
+}
+
 #[derive(Default)]
 pub struct Writer {
     header: BTreeMap<String, serde_json::Value>,
@@ -75,15 +80,15 @@ impl Writer {
 
     /// One matrix in MLX's affine format: 4-bit codes in groups of two columns.
     pub fn matrix(&mut self, name: &str, rows: usize, cols: usize, rng: &mut Rng) {
-        const GROUP: usize = 2;
-        let groups = cols / GROUP;
+        let group = GROUP.with(|g| g.get());
+        let groups = cols / group;
         let mut codes = Vec::with_capacity(rows * cols);
         let (mut scales, mut biases) = (Vec::new(), Vec::new());
         for _ in 0..rows {
             for _ in 0..groups {
                 scales.extend(half::f16::from_f32(0.02 + 0.03 * rng.unit().abs()).to_le_bytes());
                 biases.extend(half::f16::from_f32(-0.2 * rng.unit().abs() - 0.05).to_le_bytes());
-                for _ in 0..GROUP {
+                for _ in 0..group {
                     codes.push(((rng.unit() + 1.0) * 7.5) as u8 & 0xF);
                 }
             }

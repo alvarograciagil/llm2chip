@@ -403,6 +403,13 @@ pub trait BlockOps: Sized {
         self.gather(parts, dst);
     }
 
+    /// At the end of a head, inside `each_head`: a die whose units can agree on the
+    /// largest exponent brings the head to it there, all heads at once, so that
+    /// `gather_heads` only has to copy. Elsewhere `gather_heads` does it, to the same bits.
+    fn align_heads(&mut self, reg: u32, len: u32) {
+        let _ = (reg, len);
+    }
+
     /// `dst[c] = Σ taps[k · width + c] · history[k · width + c]` over `kernel` rows.
     fn depthwise(&mut self, taps: u32, history: u32, dst: u32, width: u32, kernel: u32) {
         self.dots(taps, history, dst, width.into(), kernel.into(), |c, k| ((taps, k * width + c), (history, k * width + c)));
@@ -685,7 +692,9 @@ pub enum Step {
     /// Clears the row totals and restarts the input vector.
     CellPass,
     /// One group of columns through the cells.
-    CellGroup { src: u32, length: u32, start: Expr },
+    /// With `quant_bits`, the group is part of a quantisation group of that many bits of
+    /// columns; `last` marks a unit's last group of the pass.
+    CellGroup { src: u32, length: u32, start: Expr, quant_bits: u32, last: bool },
     /// The totals of all the vector units are added together in their wide memories.
     WideReduce { rows: Expr, group: u32 },
     /// The totals of the first `rows` cells go to the wide memory.
@@ -737,6 +746,9 @@ pub struct CellMatrix {
     pub factors: u32,
     pub group: u32,
     pub groups: u32,
+    /// Non-zero when each group is part of a quantisation group of `1 << quant_bits`
+    /// columns, so the columns divide evenly among the units.
+    pub quant_bits: u32,
 }
 
 impl From<Alu<u32>> for Step {
@@ -781,6 +793,11 @@ pub struct Assembly {
     /// A stream of blocks can take one element of a scalar operand for each block, and pile
     /// rows of one block up in the wide memory.
     rows_stream: bool,
+    /// Every head of the `each_head` being built has a unit of its own at once.
+    heads_at_once: bool,
+    /// Sets of heads brought to one exponent where they were made, which the next as many
+    /// `gather_heads` only copy: see `align_heads`.
+    heads_aligned: u32,
     zero_ready: bool,
     /// With keys kept in columns, how many tokens each column has room for.
     pub key_capacity: Option<u32>,
@@ -894,7 +911,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_stride: 1, shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_stride: 1, shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -929,12 +946,14 @@ impl Assembly {
     fn cell_round(&mut self, src: u32, place: CellMatrix, rows: u32, column: Expr) {
         self.steps.push(Step::CellPass);
         let groups = place.groups.div_ceil(self.clusters);
+        let group = |last: bool| Step::CellGroup { src, length: place.group, start: column, quant_bits: place.quant_bits, last };
         if groups <= 16 {
-            for _ in 0..groups {
-                self.steps.push(Step::CellGroup { src, length: place.group, start: column });
+            for g in 0..groups {
+                self.steps.push(group(g + 1 == groups));
             }
         } else {
-            self.each(groups.into(), |s, _| s.steps.push(Step::CellGroup { src, length: place.group, start: column }));
+            self.each((groups - 1).into(), |s, _| s.steps.push(group(false)));
+            self.steps.push(group(true));
         }
         self.steps.push(Step::CellDrain { rows });
     }
@@ -1682,7 +1701,9 @@ impl BlockOps for Assembly {
         let before = std::mem::take(&mut self.steps);
         self.split = Some((Expr::var(part), parts));
         self.in_units = true;
+        self.heads_at_once = heads * parts <= self.clusters;
         body(self, Expr::var(first), Expr::var(second));
+        self.heads_at_once = false;
         self.in_units = false;
         self.split = None;
         let inside = std::mem::replace(&mut self.steps, before);
@@ -1710,7 +1731,9 @@ impl BlockOps for Assembly {
         self.forget_shifts();
         let before = std::mem::take(&mut self.steps);
         self.in_units = true;
+        self.heads_at_once = outer * inner <= self.clusters;
         body(self, Expr::var(first), Expr::var(second));
+        self.heads_at_once = false;
         self.in_units = false;
         let inside = std::mem::replace(&mut self.steps, before);
         self.forget_shifts();
@@ -1724,6 +1747,29 @@ impl BlockOps for Assembly {
         }
     }
 
+    fn align_heads(&mut self, reg: u32, len: u32) {
+        if !(self.in_units && self.heads_at_once) {
+            return;
+        }
+        self.clear_shifts();
+        let (largest, shift) = (self.sc(1), self.sc(2));
+        let exponent = self.exponent(reg);
+        // Each unit offers its exponent and all of them get the largest.
+        let mut most = alu(OP_MAX);
+        (most.a, most.b, most.dst, most.reduce_group) = (exponent, exponent, largest, self.clusters.trailing_zeros());
+        self.push(most);
+        self.binary(OP_SUB, largest, exponent, shift);
+        self.load_shifts(Some(shift), None, None);
+        self.elements(len.into(), &[0.into()], true, |s, i, vector| {
+            let mut step = alu(OP_MOV);
+            (step.a, step.dst, step.vector) = ((reg, i), (reg, i), vector);
+            s.push(step);
+        });
+        self.clear_shifts();
+        self.binary(OP_MOV, largest, largest, exponent);
+        self.heads_aligned += 1;
+    }
+
     fn gather_heads(&mut self, parts: &[(u32, u32)], dst: u32) {
         if self.clusters <= 1 {
             return self.gather(parts, dst);
@@ -1734,6 +1780,25 @@ impl BlockOps for Assembly {
         let stride = self.head_stride;
         let unit_of = |part: usize, units: u32| part as u32 * stride % units + 1;
         let units = self.clusters;
+        if self.heads_aligned > 0 {
+            self.heads_aligned -= 1;
+            // Every part already sits at the one exponent: copy them, and that exponent.
+            let mut read = alu(OP_MOV);
+            (read.a, read.b, read.dst, read.from_cluster) = (self.exponent(parts[0].0), zero, self.exponent(dst), unit_of(0, units));
+            self.push(read);
+            let mut offset = 0;
+            for (part, (reg, len)) in parts.iter().enumerate() {
+                let at: Expr = offset.into();
+                self.elements((*len).into(), &[at], true, |s, i, vector| {
+                    let mut step = alu(OP_MOV);
+                    (step.a, step.b, step.dst, step.from_cluster) = ((*reg, i), zero, (dst, at + i), unit_of(part, units));
+                    (step.vector, step.broadcast_b) = (vector, vector);
+                    s.push(step);
+                });
+                offset += len;
+            }
+            return;
+        }
         for (part, (reg, _)) in parts.iter().enumerate() {
             let mut read = alu(OP_MOV);
             (read.a, read.b, read.dst, read.from_cluster) = (self.exponent(*reg), zero, exponent, unit_of(part, units));

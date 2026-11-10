@@ -420,6 +420,33 @@ fn the_cells_reach_the_same_bits_as_the_exact_machine() {
 
 #[test]
 #[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
+fn quantisation_groups_cut_among_the_units_keep_the_bits() {
+    // Groups of four columns over four units: each unit takes two columns of a group, and
+    // its cells move on to the next scale and bias only where the whole group ends.
+    GROUP.with(|g| g.set(4));
+    let dir = std::env::temp_dir().join(format!("llm2chip-cut-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+    let tokens = [3u32, 5, 1];
+    let mut vm = ExactEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
+    for (position, token) in tokens.iter().enumerate() {
+        vm.step(*token, position + 1 == tokens.len()).unwrap();
+    }
+    let c = DieConfig { cells: 16, features: cell_die_config().features.with_lane_bits(2).with_cluster_bits(2), ..cell_die_config() };
+    let mut run = gates_in_cells(&program, &dir, c, &tokens);
+    for (buffer, length) in program.buffers.iter().enumerate() {
+        let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
+        for index in 0..*length as u32 {
+            let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
+            assert_eq!(mantissa, vm.mantissa(fast, index), "búfer {buffer}, elemento {index}");
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
 fn parallel_lanes_compute_the_same_bits_in_fewer_cycles() {
     let dir = std::env::temp_dir().join(format!("llm2chip-lanes-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

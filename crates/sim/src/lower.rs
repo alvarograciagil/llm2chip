@@ -142,8 +142,12 @@ struct CellEntry {
     rows: usize,
     cols: usize,
     block: usize,
+    /// Columns fed to the cells between two flushes, and how many such groups there are.
     group: usize,
     groups: usize,
+    /// Columns that share one scale and bias: `group` itself, or a multiple of it when
+    /// the quantisation groups are cut so that the units share the columns evenly.
+    quant: usize,
     exponent: i64,
     /// Its rows follow those of the entry before, in the same passes of the cells.
     chained: bool,
@@ -169,6 +173,27 @@ fn cell_runs(plan: &[CellEntry], lanes: u32) -> Vec<(&[CellEntry], Vec<usize>, u
     runs
 }
 
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+impl CellEntry {
+    /// The quantisation groups that unit `unit` has a part of, in its share of the columns.
+    fn quant_groups_of(&self, unit: usize, units: usize) -> Range<usize> {
+        let share = self.groups.div_ceil(units) * self.group;
+        let first = unit * share;
+        first / self.quant..(first + share).div_ceil(self.quant)
+    }
+
+    /// Scales and biases each cell keeps for one pass: as many as the unit with most.
+    fn factors_per_pass(&self, units: usize) -> usize {
+        if self.quant == self.group {
+            return self.groups.div_ceil(units);
+        }
+        (0..units).map(|unit| self.quant_groups_of(unit, units).len()).max().unwrap_or(0)
+    }
+}
+
 /// The address of each matrix in the cells, and how deep their two memories must be.
 fn place_in_cells(plan: &[CellEntry], cells: usize, units: usize, lanes: u32) -> (HashMap<String, CellMatrix>, u64, u64) {
     let per_unit = (cells / units).max(1);
@@ -176,14 +201,15 @@ fn place_in_cells(plan: &[CellEntry], cells: usize, units: usize, lanes: u32) ->
     let mut places = HashMap::new();
     for (parts, _, block) in cell_runs(plan, lanes) {
         let e = &parts[0];
+        let quant_bits = if e.quant == e.group { 0 } else { e.quant.trailing_zeros() };
         for part in parts {
-            places.insert(part.name.clone(), CellMatrix { weights: weights as u32, factors: factors as u32, group: e.group as u32, groups: e.groups as u32 });
+            places.insert(part.name.clone(), CellMatrix { weights: weights as u32, factors: factors as u32, group: e.group as u32, groups: e.groups as u32, quant_bits });
         }
         let blocks = if parts.len() == 1 { e.rows / e.block } else { 1 };
         let rounds = (blocks * block.div_ceil(per_unit)) as u64;
         let groups = e.groups.div_ceil(units) as u64;
         weights += rounds * groups * e.group as u64;
-        factors += rounds * groups;
+        factors += rounds * e.factors_per_pass(units) as u64;
     }
     (places, weights, factors)
 }
@@ -239,6 +265,9 @@ pub struct Layout {
     rope: [u32; 2],
     rope_table: [u32; 2],
     rope_half: usize,
+    /// With every rotation on heads of one size, the cosines and sines of each element
+    /// of a head, built once a token: `(block, [(cos, sin)] for each table)`.
+    rope_factors: Option<(u32, [(u32, u32); 2])>,
     inverse_root: HashMap<usize, u32>,
     inverse_len: HashMap<usize, u32>,
     setup: Assembly,
@@ -333,12 +362,19 @@ impl Layout {
                     // A matrix with no groups of its own is split so every unit gets a part.
                     let units = 1usize << config.features.cluster_bits;
                     let (group, groups) = if groups == 1 && units > 1 && cols.is_multiple_of(units) { (cols / units, units) } else { (group, groups) };
+                    let block = rows_per_use(program, &inst.op, &name, rows);
+                    // Quantisation groups that do not divide among the units are cut into
+                    // parts that do: each unit's cells then feed the same number of columns,
+                    // and move on to the next scale and bias where a whole group ends.
+                    let share = cols / units;
+                    let part = gcd(group, share);
+                    let cut = config.features.feeds_cells() && units > 1 && block == rows && !groups.is_multiple_of(units) && cols.is_multiple_of(units) && group.is_power_of_two() && group <= 128 && (2..group).contains(&part);
+                    let (group, groups, quant) = if cut { (part, cols / part, group) } else { (group, groups, group) };
                     let exponent = matrix.exponent(cols);
                     setup.load_mantissas(reg, &[], exponent);
-                    let block = rows_per_use(program, &inst.op, &name, rows);
                     let chained = match (previous, &inst.op, cell_plan.last()) {
                         (Some(Op::Matvec { matrix: before, src: from, .. }), Op::Matvec { src, dst, .. }, Some(last)) => {
-                            last.name == *before && from == src && dst != src && uses[before] == 1 && uses[&name] == 1 && block == rows && last.block == last.rows && (last.cols, last.group, last.groups) == (cols, group, groups)
+                            last.name == *before && from == src && dst != src && uses[before] == 1 && uses[&name] == 1 && block == rows && last.block == last.rows && (last.cols, last.group, last.groups, last.quant) == (cols, group, groups, quant)
                         }
                         _ => false,
                     };
@@ -350,7 +386,7 @@ impl Layout {
                         chains.insert(name.clone(), vec![(name.clone(), *dst)]);
                         leader_of.insert(name.clone(), name.clone());
                     }
-                    cell_plan.push(CellEntry { block, name, rows, cols, group, groups, exponent, chained });
+                    cell_plan.push(CellEntry { block, name, rows, cols, group, groups, quant, exponent, chained });
                 }
             }
             previous = Some(&inst.op);
@@ -446,6 +482,8 @@ impl Layout {
             })
             .unwrap_or(0);
         let rope_table = [alloc(1), alloc(1)];
+        let mut rope_blocks = all_ops(program).filter_map(|i| if let Op::Rope { block, .. } = i.op { Some(block as u32) } else { None });
+        let rope_factors = rope_blocks.next().filter(|first| rope_blocks.all(|b| b == *first)).map(|block| (block, [(alloc(1), alloc(1)), (alloc(1), alloc(1))]));
         if let (Some(tokens), true) = (chip_tokens, rope_half > 0) {
             let tables = [(program.rope_theta, program.rope_scaling), (program.local_rope_theta.unwrap_or(program.rope_theta), None)];
             for (index, (theta, scaling)) in tables.iter().enumerate().take(1 + program.local_rope_theta.is_some() as usize) {
@@ -489,7 +527,7 @@ impl Layout {
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
         }
-        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, rope, rope_table, rope_half, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers })
+        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -652,6 +690,10 @@ impl Layout {
             let groups = e.groups.div_ceil(units);
             let first = unit * groups;
             let blocks = if parts.len() == 1 { e.rows / e.block } else { 1 };
+            // The scales and biases this unit's cells take in each pass, and those its
+            // memory holds for the unit with most, which are left empty here.
+            let quant_groups = if e.quant == e.group { first..first + groups } else { e.quant_groups_of(unit, units) };
+            let spare = e.factors_per_pass(units) - quant_groups.len();
             for b in 0..blocks {
                 for round in 0..block.div_ceil(per_unit) {
                     let row = round * per_unit + place;
@@ -661,9 +703,10 @@ impl Layout {
                         Some((p, start)) => {
                             let matrix = weights.matrix(&p.name)?;
                             let (w, f) = matrix.cell_row(b * p.block + row - start, p.cols, p.exponent, self.config.cell.activation_bits)?;
-                            let shared = |g: usize| if f.len() == p.groups { f.get(g).copied() } else { (g < p.groups).then(|| f[0]) };
+                            let count = p.cols.div_ceil(p.quant);
+                            let shared = |q: usize| if f.len() == count { f.get(q).copied() } else { (q < count).then(|| f[0]) };
+                            factors.extend(quant_groups.clone().map(|q| shared(q).unwrap_or((0, 0))));
                             for g in first..first + groups {
-                                factors.push(shared(g).unwrap_or((0, 0)));
                                 for j in 0..p.group {
                                     codes.push(w.get(g * p.group + j).copied().unwrap_or(0));
                                 }
@@ -671,11 +714,12 @@ impl Layout {
                         }
                         None => {
                             codes.extend(std::iter::repeat_n(0, groups * e.group));
-                            factors.extend(std::iter::repeat_n((0, 0), groups));
+                            factors.extend(std::iter::repeat_n((0, 0), quant_groups.len()));
                         }
                     }
                 }
             }
+            factors.extend(std::iter::repeat_n((0, 0), spare * blocks * block.div_ceil(per_unit)));
         }
         Ok((codes, factors))
     }
@@ -752,6 +796,25 @@ impl Layout {
         if let Some(local) = program.local_rope_theta {
             ops.load_row(self.rope_table[1], position, 3 * half as u32 + 1, self.rope[1], |row| rope_row(local, None, half, row));
         }
+        // Every rotation of the token uses the same factors, so they are laid out once.
+        if let Some((block, factors)) = self.rope_factors {
+            for (table, (cos, sin)) in factors.iter().enumerate().take(1 + program.local_rope_theta.is_some() as usize) {
+                self.rope_factors_into(ops, self.rope[table], block, (*cos, *sin));
+            }
+        }
+    }
+
+    /// `cos` and `sin` for each element of a head of `d`: the rotated pairs take their
+    /// angle's, and the elements past the rotated part are kept as they are.
+    fn rope_factors_into<O: BlockOps>(&self, ops: &mut O, rope: u32, d: u32, (cos, sin): (u32, u32)) {
+        let zero: O::N = 0.into();
+        let h = self.rope_half as u32;
+        let rotary = 2 * h;
+        ops.copy_part(rope, zero, cos, zero, h.into());
+        ops.copy_part(rope, zero, cos, h.into(), h.into());
+        ops.copy_part(rope, h.into(), sin, zero, h.into());
+        ops.copy_part(rope, rotary.into(), sin, h.into(), h.into());
+        ops.each((d - rotary).into(), |ops, j| ops.move_element((rope, (3 * h).into()), (cos, j + rotary.into())));
     }
 
     fn reg(&self, buf: usize) -> u32 {
@@ -790,6 +853,7 @@ impl Layout {
                     Some(w) => ops.multiply(t[41], w, part, d.into()),
                     None => ops.copy_part(t[41], 0.into(), part, 0.into(), d.into()),
                 }
+                ops.align_heads(part, d);
             });
         });
         let parts: Vec<(u32, u32)> = (0..count).map(|b| (self.parts[b], d)).collect();
@@ -905,25 +969,43 @@ impl Layout {
             Op::SplitQueryGate { src, query, gate, block } => {
                 let heads = program.buffers[*query] / block;
                 let d = *block as u32;
-                ops.each((heads as u32).into(), |ops, h| {
-                    ops.copy_part(self.reg(*src), h * (2 * d), t[0], h * d, d.into());
-                    ops.copy_part(self.reg(*src), h * (2 * d) + d.into(), t[1], h * d, d.into());
-                });
-                ops.gather(&[(t[0], (heads * block) as u32)], self.reg(*query));
-                ops.gather(&[(t[1], (heads * block) as u32)], self.reg(*gate));
+                let src = self.reg(*src);
+                if 2 * heads <= PARTS {
+                    // Each unit takes the two halves of its own head.
+                    let (first_query, first_gate) = (self.parts[0], self.parts[heads]);
+                    ops.each_head(heads as u32, 1, |ops, h, _| {
+                        ops.with_window(h, &[first_query, first_gate], |ops, offset| {
+                            ops.copy_part(src, h * (2 * d), first_query + offset, 0.into(), d.into());
+                            ops.copy_part(src, h * (2 * d) + d.into(), first_gate + offset, 0.into(), d.into());
+                            ops.align_heads(first_query + offset, d);
+                            ops.align_heads(first_gate + offset, d);
+                        });
+                    });
+                    ops.gather_heads(&(0..heads).map(|h| (self.parts[h], d)).collect::<Vec<_>>(), self.reg(*query));
+                    ops.gather_heads(&(0..heads).map(|h| (self.parts[heads + h], d)).collect::<Vec<_>>(), self.reg(*gate));
+                } else {
+                    ops.each((heads as u32).into(), |ops, h| {
+                        ops.copy_part(src, h * (2 * d), t[0], h * d, d.into());
+                        ops.copy_part(src, h * (2 * d) + d.into(), t[1], h * d, d.into());
+                    });
+                    ops.gather(&[(t[0], (heads * block) as u32)], self.reg(*query));
+                    ops.gather(&[(t[1], (heads * block) as u32)], self.reg(*gate));
+                }
             }
             Op::Rope { buf, block, table, .. } => {
                 let reg = self.reg(*buf);
                 let total = program.buffers[*buf] as u32;
                 let (d, h, rope) = (*block as u32, self.rope_half as u32, self.rope[*table]);
                 // One table of factors for each element, so each head is one pair of sweeps.
-                let (cos, sin, first) = (t[50], t[51], self.parts[0]);
+                let first = self.parts[0];
                 let rotary = 2 * h;
-                ops.copy_part(rope, zero, cos, zero, h.into());
-                ops.copy_part(rope, zero, cos, h.into(), h.into());
-                ops.copy_part(rope, h.into(), sin, zero, h.into());
-                ops.copy_part(rope, rotary.into(), sin, h.into(), h.into());
-                ops.each((d - rotary).into(), |ops, j| ops.move_element((rope, (3 * h).into()), (cos, j + rotary.into())));
+                let (cos, sin) = match self.rope_factors {
+                    Some((block, factors)) if block == d => factors[*table],
+                    _ => {
+                        self.rope_factors_into(ops, rope, d, (t[50], t[51]));
+                        (t[50], t[51])
+                    }
+                };
                 let heads = total / d;
                 ops.each_head(heads, 1, |ops, head, _| {
                     ops.with_window(head, &[first], |ops, offset| {
@@ -932,6 +1014,7 @@ impl Layout {
                         ops.copy_part(x, h.into(), swapped, zero, h.into());
                         ops.copy_part(x, zero, swapped, h.into(), h.into());
                         ops.rotate(x, swapped, (cos, sin), first + offset, d, rotary);
+                        ops.align_heads(first + offset, d);
                     });
                 });
                 let parts: Vec<(u32, u32)> = (0..heads as usize).map(|part| (self.parts[part], d)).collect();
@@ -986,6 +1069,7 @@ impl Layout {
                             ops.normalize(qh, d.into());
                             let store = KeyStore { keys, values, stride: width, offset: kv_head * d };
                             ops.attention(qh, store, self.ones, first + offset, d, tokens, Some(self.inverse_root[scale_dim]), regs);
+                            ops.align_heads(first + offset, d);
                         });
                     }
                 });
@@ -1050,6 +1134,7 @@ impl Layout {
 
                             let regs = DeltaRegs { state: first_state + offset, key: kh, query: qh, value: vh, beta, decay, memory: t[10], error: t[11], delta: t[12], update: t[13], next: t[14], out: first_out + offset, key_rows: t[56], query_rows: t[57] };
                             ops.delta_step(regs, kd, vd);
+                            ops.align_heads(first_out + offset, vd);
                         });
                     }
                 });
@@ -1082,6 +1167,7 @@ impl Layout {
                         ops.function(FN_SIGMOID, t[45], t[46], d.into());
                         ops.multiply(t[44], t[45], t[38], d.into());
                         ops.multiply(t[38], t[46], first_part + offset, d.into());
+                        ops.align_heads(first_part + offset, d);
                     });
                 });
                 let parts: Vec<(u32, u32)> = (0..count).map(|b| (self.parts[b], d)).collect();
