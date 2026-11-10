@@ -303,6 +303,16 @@ export function SimulatorPanel() {
           Temperatura (0 elige siempre el más probable)
           <input type="text" inputMode="decimal" value={state.temperature} onChange={(e) => set({ temperature: Number(e.target.value.replace(",", ".")) || 0 })} />
         </label>
+        <label className="check" title="Con la plantilla de chat del modelo, abre su bloque de razonamiento antes de la respuesta. Sin él, el bloque llega cerrado y el modelo contesta directamente. Es texto del prompt: no cambia el chip.">
+          <input type="checkbox" checked={state.thinking} onChange={(e) => set({ thinking: e.target.checked })} />
+          Razonar antes de responder
+        </label>
+        {state.thinking && (
+          <label title="Cuántos tokens puede razonar el modelo antes de que el firmware del chip cierre el razonamiento por él y pase a la respuesta. Vacío lo deja sin límite; 0 equivale a no razonar.">
+            Presupuesto de razonamiento (tokens, vacío sin límite)
+            <input type="text" inputMode="numeric" value={state.thinkBudget} placeholder="Sin límite" onChange={(e) => set({ thinkBudget: e.target.value.replace(/[^0-9]/g, "") })} />
+          </label>
+        )}
         <label>
           Medir cabeza MTP (profundidad, 0 para desactivar)
           <input type="text" inputMode="numeric" value={state.mtpDepth} onChange={(e) => set({ mtpDepth: Math.min(3, Number(e.target.value) || 0) })} />

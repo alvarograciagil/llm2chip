@@ -14,6 +14,48 @@ pub struct PromptStyle {
     /// Qwen3.5 is framed here, with its reasoning block closed or left open.
     chatml_thinking: bool,
     pub stop: Vec<u32>,
+    /// The tokens that open and close the model's reasoning, if its tokenizer has them.
+    pub think: Option<(u32, u32)>,
+}
+
+/// Follows a model's reasoning and closes it once it has taken `budget` tokens, as the
+/// chip's firmware does.
+pub struct ReasoningBudget {
+    think: Option<(u32, u32)>,
+    budget: u32,
+    inside: bool,
+    spent: u32,
+}
+
+impl ReasoningBudget {
+    pub fn new(think: Option<(u32, u32)>, budget: Option<u32>) -> Self {
+        Self { think, budget: budget.unwrap_or(u32::MAX), inside: false, spent: 0 }
+    }
+
+    pub fn see(&mut self, token: u32) {
+        let Some((open, close)) = self.think else { return };
+        if token == open {
+            (self.inside, self.spent) = (true, 0);
+        } else if token == close {
+            self.inside = false;
+        } else if self.inside {
+            self.spent += 1;
+        }
+    }
+
+    /// The token generation goes on with in place of the one sampled.
+    pub fn steer(&mut self, sampled: u32) -> u32 {
+        let token = match self.think {
+            Some((_, close)) if self.inside && sampled != close && self.spent >= self.budget => close,
+            _ => sampled,
+        };
+        self.see(token);
+        token
+    }
+}
+
+fn think_tokens(tokenizer: &Tokenizer) -> Option<(u32, u32)> {
+    Some((tokenizer.token_to_id("<think>")?, tokenizer.token_to_id("</think>")?))
 }
 
 fn read_json(path: &Path) -> Value {
@@ -35,7 +77,7 @@ fn ids_of(value: &Value) -> Vec<u32> {
 impl PromptStyle {
     pub fn read(dir: &Path, family: &str, tokenizer: &Tokenizer) -> Self {
         if family == "qwen3_5" {
-            return Self { template: None, bos: String::new(), eos: String::new(), chatml_thinking: true, stop: QWEN_STOP.to_vec() };
+            return Self { template: None, bos: String::new(), eos: String::new(), chatml_thinking: true, stop: QWEN_STOP.to_vec(), think: think_tokens(tokenizer) };
         }
         let settings = read_json(&dir.join("tokenizer_config.json"));
         let template = std::fs::read_to_string(dir.join("chat_template.jinja")).ok().or_else(|| settings["chat_template"].as_str().map(String::from));
@@ -48,7 +90,7 @@ impl PromptStyle {
         if stop.is_empty() {
             stop.extend(tokenizer.token_to_id(&eos));
         }
-        Self { template, bos, eos, chatml_thinking: false, stop }
+        Self { template, bos, eos, chatml_thinking: false, stop, think: think_tokens(tokenizer) }
     }
 
     /// The text to tokenize, and whether the tokenizer must add its special tokens.
@@ -80,7 +122,7 @@ mod tests {
     use super::*;
 
     fn style(template: Option<&str>, stop: Vec<u32>) -> PromptStyle {
-        PromptStyle { template: template.map(String::from), bos: "<s>".into(), eos: "</s>".into(), chatml_thinking: false, stop }
+        PromptStyle { template: template.map(String::from), bos: "<s>".into(), eos: "</s>".into(), chatml_thinking: false, stop, think: None }
     }
 
     #[test]

@@ -601,7 +601,7 @@ fn the_firmware_scores_the_draft_head_like_the_software() {
     let die = DieConfig { reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, ..die_config() };
     let _ = cell;
     let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }] };
-    let setup = GenerationSetup { max_new: count as u32 + 1, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: depth as u32, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS };
+    let setup = GenerationSetup { max_new: count as u32 + 1, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: depth as u32, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: None, think_budget: u32::MAX };
     let info = chip_info(&die, &code, 1, 8, &setup);
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
     let input: Vec<u8> = prompt.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect();
@@ -620,6 +620,73 @@ fn the_firmware_scores_the_draft_head_like_the_software() {
     assert_eq!(bus.peripheral.draft_tries[..depth], tries[..depth], "intentos");
     assert_eq!(bus.peripheral.draft_hits[..depth], hits[..depth], "aciertos");
     assert!(tries[0] > 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_firmware_closes_the_reasoning_when_its_budget_runs_out() {
+    use netlist::chip::{chip_info, ChipModel, GenerationSetup};
+    use netlist::image::build_image;
+    use netlist::rv32::Rv32Iss;
+    use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
+    use netlist::soc::{FirmwareImage, SocBus, SocConfig};
+    use netlist::Parameter;
+    use sim::chip::{RunnerEngine, FLOW_DRAFT_REGISTER, FLOW_INDEX_BITS, FLOW_REGISTER_BITS};
+
+    let dir = std::env::temp_dir().join(format!("llm2chip-think-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let engine = || Engine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
+    let best = |v: &[f32]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
+    // The prompt ends opening the reasoning, as a chat template does.
+    let (prompt, count, budget) = ([3u32, 5, 6], 6usize, 2u32);
+    let generate = |close: u32, budget: u32| -> Vec<u32> {
+        let mut software = engine();
+        let mut next = 0;
+        for (i, id) in prompt.iter().enumerate() {
+            let (logits, _) = software.step(*id, i + 1 == prompt.len()).unwrap();
+            next = logits.map_or(next, best);
+        }
+        let (mut output, mut spent, mut inside) = (Vec::new(), 0, true);
+        for _ in 0..count {
+            if inside && next != close && spent >= budget {
+                next = close;
+            }
+            if next == close {
+                inside = false;
+            } else if inside {
+                spent += 1;
+            }
+            output.push(next);
+            next = best(software.step(next, true).unwrap().0.unwrap());
+        }
+        output
+    };
+    // A closing token the model would not choose by itself in the first steps.
+    let free = generate(u32::MAX, u32::MAX);
+    let close = (0..8).find(|t| !free[..=budget as usize].contains(t) && *t != 6).unwrap();
+    let expected = generate(close, budget);
+    assert_eq!(expected[budget as usize], close, "{expected:?}");
+
+    let firmware = FirmwareImage::from_elf(include_bytes!("../../../firmware/prebuilt/firmware.elf")).unwrap();
+    let die = DieConfig { reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, ..die_config() };
+    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }] };
+    let setup = GenerationSetup { max_new: count as u32, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: Some((6, close)), think_budget: budget };
+    let info = chip_info(&die, &code, 1, 8, &setup);
+    let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
+    let input: Vec<u8> = prompt.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect();
+    let mut chip_engine = engine();
+    let runner = RunnerEngine::new(&mut chip_engine, 16, 0);
+    let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
+    let mut bus = SocBus::booted_with(SocConfig { program_bits: 14, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
+    let mut cpu = Rv32Iss::default();
+    while !cpu.halted {
+        cpu.step(&mut bus);
+        assert!(cpu.cycle < 200_000_000, "el firmware no termina");
+    }
+    assert!(bus.peripheral.engine.error.is_none(), "{:?}", bus.peripheral.engine.error);
+    let tokens: Vec<u32> = bus.tx.as_chunks::<4>().0.iter().map(|t| u32::from_le_bytes(*t)).collect();
+    assert_eq!(tokens, expected, "el chip debe cerrar el razonamiento tras {budget} tokens");
     std::fs::remove_dir_all(dir).unwrap();
 }
 

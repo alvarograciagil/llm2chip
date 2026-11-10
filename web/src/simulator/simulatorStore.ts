@@ -40,6 +40,10 @@ interface SimulatorState {
   useDesignFormat: boolean;
   designFormat: WeightFormat | null;
   mtpDepth: number;
+  /** The model reasons before answering, if its template allows it. */
+  thinking: boolean;
+  /** Most reasoning tokens before the chip closes the reasoning itself; empty is unbounded. */
+  thinkBudget: string;
   firmware: boolean;
   samplerUnit: boolean;
   firmwareTokenizer: boolean;
@@ -89,6 +93,8 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   useDesignFormat: false,
   designFormat: null,
   mtpDepth: 0,
+  thinking: false,
+  thinkBudget: "",
   firmware: false,
   samplerUnit: false,
   firmwareTokenizer: false,
@@ -148,7 +154,8 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   },
 
   generate() {
-    const { prompt, maxTokens, temperature, topK, mtpDepth, firmware, samplerUnit, firmwareTokenizer } = get();
+    const { prompt, maxTokens, temperature, topK, mtpDepth, thinking, thinkBudget, firmware, samplerUnit, firmwareTokenizer } = get();
+    const budget = thinkBudget.trim() === "" ? null : Math.max(0, Math.floor(Number(thinkBudget) || 0));
     const metric = (id: string) => useDesign.getState().report?.metrics.find((m) => m.id === id)?.value ?? 0;
     const rate = metric("tok_s");
     const fidelity = { firmware, sampler_unit: samplerUnit || firmware, cycles_per_token: rate > 0 ? (metric("freq_ghz") * 1e9) / rate : 0, sampler_lanes: useDesign.getState().params.sampler_lanes, tokenizer: firmware && firmwareTokenizer, context_tokens: useDesign.getState().params.context_tokens };
@@ -157,7 +164,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${location.host}/api/generate`);
     socket = ws;
-    ws.onopen = () => ws.send(JSON.stringify({ prompt, max_tokens: maxTokens, temperature, top_k: topK, mtp_depth: mtpDepth, fidelity }));
+    ws.onopen = () => ws.send(JSON.stringify({ prompt, max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, mtp_depth: mtpDepth, fidelity }));
     ws.onerror = () => set({ error: "Se perdió la conexión con el motor.", running: false });
     ws.onclose = () => set({ running: false });
     ws.onmessage = (event) => {

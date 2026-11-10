@@ -178,7 +178,7 @@ fn setup(name: &str, firmware: &FirmwareImage) -> Setup {
     let die = DieConfig { microcode_bits: 15, ..cell_die_config() };
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let tables = tiny_tokenizer();
-    let generation = GenerationSetup { max_new: 1, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0 };
+    let generation = GenerationSetup { max_new: 1, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     let plans: Vec<_> = [1, 2].iter().map(|chips| plan_parts(&program, &dir, die, CHIP_TOKENS, &generation, *chips).unwrap()).collect();
     let image = build_plan_image(&firmware.program, &firmware.data, &tables.to_words(), &plans).unwrap();
     Setup { design: chip_design(config), image, dir, config, die }

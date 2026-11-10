@@ -57,7 +57,10 @@ const INFO_STOP_TABLE: usize = 14;
 const INFO_DRAFT_DEPTH: usize = 15;
 const INFO_DRAFT_LOGITS: usize = 16;
 const INFO_ENTRIES: usize = 17;
-const INFO_PARAMETERS: usize = 18;
+const INFO_THINK_OPEN: usize = 18;
+const INFO_THINK_CLOSE: usize = 19;
+const INFO_THINK_BUDGET: usize = 20;
+const INFO_PARAMETERS: usize = 21;
 
 /// The tokenizer's tables, which the image builder leaves after the segment table.
 const TOKENIZER: *const u32 = 0x1000_8000 as *const u32;
@@ -334,6 +337,33 @@ fn read_prompt(sink: &mut impl FnMut(u32)) {
     }
 }
 
+/// Follows the model's reasoning, between its opening and closing tokens, and closes it
+/// itself once it has taken as many tokens as the budget allows.
+#[derive(Default)]
+struct Reasoning {
+    inside: bool,
+    spent: u32,
+}
+
+impl Reasoning {
+    fn see(&mut self, token: u32) {
+        if token == info(INFO_THINK_OPEN) {
+            (self.inside, self.spent) = (true, 0);
+        } else if token == info(INFO_THINK_CLOSE) {
+            self.inside = false;
+        } else if self.inside {
+            self.spent += 1;
+        }
+    }
+
+    /// The token the chip goes on with in place of the one it sampled.
+    fn steer(&mut self, sampled: u32) -> u32 {
+        let token = if self.inside && sampled != info(INFO_THINK_CLOSE) && self.spent >= info(INFO_THINK_BUDGET) { info(INFO_THINK_CLOSE) } else { sampled };
+        self.see(token);
+        token
+    }
+}
+
 fn emit(token: u32, decoding: &mut Decoding) {
     if info(INFO_RAW_TOKENS) != 0 {
         for shift in 0..4 {
@@ -361,7 +391,9 @@ extern "C" fn main() {
     let (entry_token, entry_logits) = (ROUTINE_TOKEN, ROUTINE_LOGITS);
     let depth = (info(INFO_DRAFT_DEPTH) as usize).min(MAX_DRAFT_DEPTH);
     let (mut last, mut position, mut draft_position) = (0, 0, 0u32);
+    let mut reasoning = Reasoning::default();
     read_prompt(&mut |token| {
+        reasoning.see(token);
         // The draft head reads the state before each token, to predict the one after it.
         if depth > 0 && position > 0 {
             run_die(ROUTINE_FEED_FROM_MAIN, 0, 0);
@@ -382,7 +414,7 @@ extern "C" fn main() {
     let (mut waiting, mut produced, mut previous) = (0usize, 0u32, 0u32);
     for _ in 0..info(INFO_MAX_NEW) {
         run_die(entry_logits, last, position - 1);
-        last = sample();
+        last = reasoning.steer(sample());
         if stops.clone().any(|at| info(at) == last) {
             return;
         }

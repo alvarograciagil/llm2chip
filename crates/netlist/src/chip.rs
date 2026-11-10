@@ -550,7 +550,10 @@ pub const INFO_STOP_TABLE: usize = 14;
 pub const INFO_DRAFT_DEPTH: usize = 15;
 pub const INFO_DRAFT_LOGITS: usize = 16;
 pub const INFO_ENTRIES: usize = 17;
-pub const INFO_PARAMETERS: usize = 18;
+pub const INFO_THINK_OPEN: usize = 18;
+pub const INFO_THINK_CLOSE: usize = 19;
+pub const INFO_THINK_BUDGET: usize = 20;
+pub const INFO_PARAMETERS: usize = 21;
 pub const REG_DRAFT_RESULT: u32 = 48;
 pub const INFO_PARAMETER_SLOTS: usize = 16;
 
@@ -571,6 +574,11 @@ pub struct GenerationSetup {
     pub draft_depth: u32,
     /// Where the draft head leaves its logits.
     pub draft_logits: u32,
+    /// The tokens that open and close the model's reasoning, if it has them.
+    pub think: Option<(u32, u32)>,
+    /// The most tokens the model may reason before the chip closes the reasoning itself;
+    /// `u32::MAX` leaves it unbounded.
+    pub think_budget: u32,
 }
 
 /// The chip description the firmware reads from its data memory.
@@ -589,6 +597,9 @@ pub fn chip_info(c: &DieConfig, code: &Microprogram, logits_register: u32, vocab
     info[INFO_ACTIVATION_BITS] = c.cell.activation_bits;
     info[INFO_RAW_TOKENS] = setup.raw_tokens as u32;
     info[INFO_STOP_COUNT] = setup.stop.len() as u32;
+    // A model without reasoning tokens never opens it: no token is u32::MAX.
+    let (open, close) = setup.think.unwrap_or((u32::MAX, u32::MAX));
+    (info[INFO_THINK_OPEN], info[INFO_THINK_CLOSE], info[INFO_THINK_BUDGET]) = (open, close, setup.think_budget);
     assert!(code.parameters.len() <= INFO_PARAMETER_SLOTS, "demasiados parámetros");
     info[INFO_PARAMETER_COUNT] = code.parameters.len() as u32;
     for p in &code.parameters {

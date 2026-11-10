@@ -470,6 +470,9 @@ struct GenerateRequest {
     top_k: usize,
     #[serde(default)]
     thinking: bool,
+    /// The most tokens the model may reason before its reasoning is closed for it.
+    #[serde(default)]
+    think_budget: Option<u32>,
     /// Also runs the draft head and reports how often it guessed right.
     #[serde(default)]
     mtp_depth: usize,
@@ -626,6 +629,8 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
         stop: loaded.prompt.stop.clone(),
         draft_depth: request.mtp_depth.min(3) as u32,
         draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS,
+        think: loaded.prompt.think,
+        think_budget: request.think_budget.unwrap_or(u32::MAX),
     };
     let info = chip_info(&die, &code, FLOW_LOGITS_REGISTER, vocabulary as u32, &setup);
     let use_tables = request.fidelity.tokenizer;
@@ -721,7 +726,9 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     let use_unit = request.fidelity.sampler_unit;
     let mut seed = 0x9E3779B97F4A7C15u64 ^ std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
     let mut next = 0;
+    let mut reasoning = prompt::ReasoningBudget::new(loaded.prompt.think, request.think_budget);
     for (i, id) in ids.iter().enumerate() {
+        reasoning.see(*id);
         if cancelled.load(Relaxed) {
             return Ok(());
         }
@@ -730,7 +737,7 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
         let (logits, stats) = loaded.engine.step(*id, last || wants_mtp)?;
         if last {
             if let Some(l) = logits {
-                next = if use_unit { sample_on_unit(&mut unit, l, request.temperature, request.top_k) } else { sample(l, request.temperature, request.top_k, &mut seed) };
+                next = reasoning.steer(if use_unit { sample_on_unit(&mut unit, l, request.temperature, request.top_k) } else { sample(l, request.temperature, request.top_k, &mut seed) });
             }
         }
         if wants_mtp && loaded.engine.has_draft_head() {
@@ -760,7 +767,7 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
         let seconds = stats.seconds;
         let token = next;
         let logits = logits.ok_or("sin logits")?;
-        next = if use_unit { sample_on_unit(&mut unit, logits, request.temperature, request.top_k) } else { sample(logits, request.temperature, request.top_k, &mut seed) };
+        next = reasoning.steer(if use_unit { sample_on_unit(&mut unit, logits, request.temperature, request.top_k) } else { sample(logits, request.temperature, request.top_k, &mut seed) });
 
         if request.mtp_depth > 0 {
             // Score earlier guesses against what the main model actually produced.
