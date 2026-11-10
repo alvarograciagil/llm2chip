@@ -173,6 +173,41 @@ fn cell_runs(plan: &[CellEntry], lanes: u32) -> Vec<(&[CellEntry], Vec<usize>, u
     runs
 }
 
+/// The buffers an operation reads.
+fn buffers_read(op: &Op) -> Vec<usize> {
+    match op {
+        Op::EmbRead { .. } => vec![],
+        Op::Matvec { src, .. } | Op::Copy { src, .. } | Op::Silu { src, .. } | Op::Gelu { src, .. } | Op::Scale { src, .. } | Op::AddWeight { src, .. } | Op::RmsNorm { src, .. } | Op::SplitQueryGate { src, .. } | Op::SoftCap { src, .. } | Op::Sigmoid { src, .. } | Op::Dconv { src, .. } | Op::Slice { src, .. } | Op::SigmoidMoe { src, .. } | Op::Moe { src, .. } => vec![*src],
+        Op::Add { a, b, .. } | Op::MulElem { a, b, .. } | Op::Concat { a, b, .. } => vec![*a, *b],
+        Op::Rope { buf, .. } => vec![*buf],
+        Op::KvAppend { key, value, .. } => vec![*key, *value],
+        Op::AttnSum { query, .. } => vec![*query],
+        Op::DeltaStep { mixed, a, b, .. } => vec![*mixed, *a, *b],
+        Op::RmsGated { src, z, .. } => vec![*src, *z],
+        Op::Mla { query, latent, rope_key, .. } => vec![*query, *latent, *rope_key],
+    }
+}
+
+/// Buffers that can stay a slice per unit: each is made by a step that works in slices
+/// of its length, and read only by such steps, which take the same slices.
+fn spread_buffers(program: &Program) -> HashSet<usize> {
+    let ops: Vec<&Op> = all_ops(program).map(|i| &i.op).collect();
+    let in_slices = |op: &Op| matches!(op, Op::Silu { .. } | Op::MulElem { .. } | Op::Add { .. } | Op::Dconv { .. });
+    let mut kept: HashSet<usize> = [program.logits, program.final_hidden].into_iter().collect();
+    if let Some(draft) = &program.draft {
+        kept.extend([draft.hidden_in, draft.hidden_out]);
+    }
+    let made: HashMap<usize, &Op> = ops.iter().filter_map(|op| match op {
+        Op::Matvec { dst, .. } | Op::Silu { dst, .. } | Op::MulElem { dst, .. } | Op::Add { dst, .. } | Op::Dconv { dst, .. } => Some((*dst, *op)),
+        _ => None,
+    }).collect();
+    made.keys().copied().filter(|buffer| {
+        let length = program.buffers[*buffer];
+        let mut readers = ops.iter().filter(|op| buffers_read(op).contains(buffer)).peekable();
+        !kept.contains(buffer) && readers.peek().is_some() && readers.all(|op| in_slices(op) && buffers_read(op).iter().all(|b| program.buffers[*b] == length))
+    }).collect()
+}
+
 fn gcd(a: usize, b: usize) -> usize {
     if b == 0 { a } else { gcd(b, a % b) }
 }
@@ -262,6 +297,9 @@ pub struct Layout {
     /// Each head of a recurrent output keeps its own exponent until it is normalised.
     delta_parts: Vec<u32>,
     delta_outputs: HashSet<usize>,
+    /// Buffers that stay a slice per unit: made and read only by element-wise steps
+    /// that take the same slices.
+    spread: HashSet<usize>,
     rope: [u32; 2],
     rope_table: [u32; 2],
     rope_half: usize,
@@ -501,6 +539,7 @@ impl Layout {
         let parts: Vec<u32> = (0..PARTS).map(|_| alloc(1)).collect();
         let delta_parts: Vec<u32> = (0..PARTS).map(|_| alloc(1)).collect();
         let delta_outputs = all_ops(program).filter_map(|i| if let Op::DeltaStep { dst, .. } = i.op { Some(dst) } else { None }).collect();
+        let spread = spread_buffers(program);
         let next = next.get();
         if next >= (1 << config.reg_bits) - 2 {
             return Err(format!("faltan registros: se necesitan {next}"));
@@ -527,7 +566,7 @@ impl Layout {
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
         }
-        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers })
+        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -544,6 +583,11 @@ impl Layout {
 
     pub fn register_of(&self, buffer: usize) -> u32 {
         self.buffers[buffer]
+    }
+
+    /// Whether a die with several units leaves `buffer` a slice on each, never whole.
+    pub fn is_spread(&self, buffer: usize) -> bool {
+        self.spread.contains(&buffer)
     }
 
     /// The whole microprogram: loaded once, then entered with the token and position
@@ -888,6 +932,14 @@ impl Layout {
     }
 
     fn lower_op<O: BlockOps>(&self, ops: &mut O, program: &Program, op: &Op, token: O::N, position: O::N) -> Result<(), String> {
+        let made: Vec<usize> = match op {
+            Op::Matvec { matrix, dst, .. } => self.chains.get(matrix).map_or_else(|| vec![*dst], |parts| parts.iter().map(|(_, dst)| *dst).collect()),
+            Op::Silu { dst, .. } | Op::MulElem { dst, .. } | Op::Add { dst, .. } | Op::Dconv { dst, .. } => vec![*dst],
+            _ => Vec::new(),
+        };
+        for buffer in made.into_iter().filter(|b| self.spread.contains(b)) {
+            ops.leave_spread(self.reg(buffer));
+        }
         let t = &self.temporaries;
         let size = |buffer: usize| -> O::N { (program.buffers[buffer] as u32).into() };
         let zero: O::N = 0.into();

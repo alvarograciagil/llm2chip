@@ -5,7 +5,7 @@
 
 use crate::die::{OP_ADD, OP_EQUAL, OP_FUNCTION, OP_IMMEDIATE, OP_LINK, OP_LZC, OP_MAX, OP_MOV, OP_MUL, OP_PARITY, OP_SHIFT_LEFT, OP_SUB, OP_WIDE_LZC, OP_WIDE_OUT};
 use crate::DieConfig;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub type Place = (u32, u32);
 
@@ -403,6 +403,12 @@ pub trait BlockOps: Sized {
         self.gather(parts, dst);
     }
 
+    /// The next operation that writes `reg` a slice per unit may leave it that way: what
+    /// reads it next takes the same slices. Elsewhere the whole vector is there anyway.
+    fn leave_spread(&mut self, reg: u32) {
+        let _ = reg;
+    }
+
     /// At the end of a head, inside `each_head`: a die whose units can agree on the
     /// largest exponent brings the head to it there, all heads at once, so that
     /// `gather_heads` only has to copy. Elsewhere `gather_heads` does it, to the same bits.
@@ -798,6 +804,8 @@ pub struct Assembly {
     rows_stream: bool,
     /// Every head of the `each_head` being built has a unit of its own at once.
     heads_at_once: bool,
+    /// Registers the next slices among the units may leave where they were made.
+    spread: HashSet<u32>,
     /// Sets of heads brought to one exponent where they were made, which the next as many
     /// `gather_heads` only copy: see `align_heads`.
     heads_aligned: u32,
@@ -926,7 +934,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1685,6 +1693,9 @@ impl BlockOps for Assembly {
         // short it is.
         let (count, unit) = if lanes > 1 { (len / lanes, lanes) } else { (len, 1) };
         for output in outputs {
+            if self.spread.remove(output) {
+                continue;
+            }
             let variable = Var::Loop(self.loops);
             self.loops += 1;
             let mut step = alu(OP_MOV);
@@ -1763,6 +1774,10 @@ impl BlockOps for Assembly {
             self.steps.push(Step::Clustered { vars: vec![first, second], assignments: assignments.collect(), slots, body: inside.clone() });
         }
         self.head_units = (0..outer * inner).map(|h| (h / inner) * width + h % inner).collect();
+    }
+
+    fn leave_spread(&mut self, reg: u32) {
+        self.spread.insert(reg);
     }
 
     fn align_heads(&mut self, reg: u32, len: u32) {

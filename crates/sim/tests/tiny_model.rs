@@ -126,7 +126,7 @@ fn assert_vm_matches_gates(program: &compiler::Program, config: &str, dir: &Path
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }
-    for (buffer, length) in program.buffers.iter().enumerate() {
+    for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !layout.is_spread(*buffer)) {
         let gates = layout.register_of(buffer);
         let fast = vm.register_of(buffer);
         for index in 0..*length as u32 {
@@ -296,7 +296,7 @@ fn tiny_model_runs_whole_on_the_gates() {
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }
-    for (buffer, length) in program.buffers.iter().enumerate() {
+    for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !layout.is_spread(*buffer)) {
         let gates = layout.register_of(buffer);
         let fast = vm.register_of(buffer);
         for index in 0..*length as u32 {
@@ -403,7 +403,8 @@ fn the_cells_reach_the_same_bits_as_the_exact_machine() {
     for (cells, lane_bits, cluster_bits) in [(1u32, 0u32, 0u32), (2, 0, 0), (8, 0, 0), (8, 2, 0), (4, 0, 1), (8, 1, 2), (16, 2, 2), (16, 3, 1)] {
         let c = DieConfig { cells, features: cell_die_config().features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits), ..cell_die_config() };
         let mut run = gates_in_cells(&program, &dir, c, &tokens);
-        for (buffer, length) in program.buffers.iter().enumerate() {
+        // Some buffers stay a slice per unit: what reads them takes the same slices.
+        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer)) {
             let gates = run.layout.register_of(buffer);
             let fast = vm.register_of(buffer);
             for index in 0..*length as u32 {
@@ -435,7 +436,7 @@ fn quantisation_groups_cut_among_the_units_keep_the_bits() {
     }
     let c = DieConfig { cells: 16, features: cell_die_config().features.with_lane_bits(2).with_cluster_bits(2), ..cell_die_config() };
     let mut run = gates_in_cells(&program, &dir, c, &tokens);
-    for (buffer, length) in program.buffers.iter().enumerate() {
+    for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer)) {
         let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
         for index in 0..*length as u32 {
             let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
@@ -492,7 +493,8 @@ fn sliding_windows_and_biases_run_on_the_gates() {
         for (position, token) in tokens.iter().enumerate() {
             vm.step(*token, position + 1 == tokens.len()).unwrap();
         }
-        for (buffer, length) in program.buffers.iter().enumerate() {
+        // Some buffers stay a slice per unit: what reads them takes the same slices.
+        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer)) {
             let gates = run.layout.register_of(buffer);
             let fast = vm.register_of(buffer);
             for index in 0..*length as u32 {
@@ -654,7 +656,8 @@ fn heads_in_groups_of_three_run_on_units_a_power_of_two_apart() {
     for cluster_bits in [3, 4] {
         let c = DieConfig { cells: 4 << cluster_bits, features: cell_die_config().features.with_lane_bits(2).with_cluster_bits(cluster_bits), ..cell_die_config() };
         let mut run = gates_in_cells(&program, &dir, c, &tokens);
-        for (buffer, length) in program.buffers.iter().enumerate() {
+        // Some buffers stay a slice per unit: what reads them takes the same slices.
+        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer)) {
             let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
             for index in 0..*length as u32 {
                 let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
