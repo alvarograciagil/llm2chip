@@ -124,6 +124,10 @@ impl DieFeatures {
         for parameter in &code.parameters {
             highest_x = highest_x.max(parameter.register);
         }
+        // An immediate is signed: one more bit, so a positive one never reads as negative.
+        if features.uses(OP_IMMEDIATE) {
+            features.widths[TARGET_FIELD] += 1;
+        }
         features.x_registers = highest_x + 1;
         features
     }
@@ -270,6 +274,8 @@ pub const FIELD_COUNT: usize = 78;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
+/// The jump target, which an immediate step's compute cycle uses as its value instead.
+const TARGET_FIELD: usize = 42;
 const X_SPLIT_FIELD: usize = 70;
 const SHIFT_NOW_FIELD: usize = 71;
 const CELL_FEED_FIELD: usize = 72;
@@ -540,8 +546,8 @@ fn can_follow(previous: &Alu, next: &Alu, lanes: u32) -> bool {
         && previous.broadcast_b == next.broadcast_b
         && previous.from_cluster == next.from_cluster
         && (!windowed(previous) && !windowed(next) || previous.window_x == next.window_x)
-        // The compute cycle of an immediate or a literal step uses literal B as its value.
-        && (previous.literal.is_none() && previous.op != OP_IMMEDIATE || previous.literal.unwrap_or(previous.b.1) == next.b.1);
+        // Only an immediate carries a literal, and it carries it in the jump target.
+        && (previous.literal.is_none() || previous.op == OP_IMMEDIATE);
     let span = |vector: bool| if vector { lanes } else { 1 };
     let touches = |(reg, at): (u32, u32), offset: u32, window: bool, vector: bool| {
         let (written, from) = previous.dst;
@@ -580,6 +586,15 @@ fn bit_linear(literals: &[u32], mask: u64, bits: u32) -> Option<Vec<(u32, u64)>>
         let factor = strides[s as usize].wrapping_sub(below) & mask;
         (factor != 0).then_some((s, factor))
     }).collect())
+}
+
+/// An immediate, kept in `index_bits` like any index, as the jump target carries it: the
+/// same signed value in the target's own width.
+fn immediate_target(literal: Option<u32>, c: DieConfig) -> u32 {
+    let Some(value) = literal else { return 0 };
+    let shift = 32 - c.index_bits;
+    let signed = ((value << shift) as i32) >> shift;
+    signed as u32 & ((1u32 << c.microcode_bits) - 1)
 }
 
 /// Whether `bits` holds at least `value`.
@@ -1634,8 +1649,10 @@ impl Gen {
 
             // --- Result selection ---
             b.group("Selección de resultado");
-            let immediate_sign = *fields["literal_b"].last().expect("literal vacío");
-            let immediate: Vec<Bit> = (0..a as usize).map(|i| fields["literal_b"].get(i).copied().unwrap_or(immediate_sign)).collect();
+            // An immediate's value rides in the jump target, which no step that computes needs,
+            // so the next step's read can share its cycle.
+            let immediate_sign = *fields["target"].last().expect("destino vacío");
+            let immediate: Vec<Bit> = (0..a as usize).map(|i| fields["target"].get(i).copied().unwrap_or(immediate_sign)).collect();
             let mut parity = vec![Bit::Zero; a as usize];
             parity[0] = read_a[0];
             // All-ones-but-the-sign when the two aligned operands match, zero otherwise.
@@ -2430,7 +2447,7 @@ impl DieProgram {
         }
         let last = self.end() - 1;
         let w = self.cycles[last];
-        let can_merge = last >= start && !w.x_write && !w.branch && w.literal_b == 0;
+        let can_merge = last >= start && !w.x_write && !w.branch && w.literal_b == 0 && w.target == 0;
         let at = if can_merge { last } else { self.end() };
         let w = self.slot(at);
         w.x_write = true;
@@ -2881,6 +2898,7 @@ impl DieProgram {
         if self.config.features.streams() && writes_at_once(step) {
             return self.short_alu(step);
         }
+        let immediate = immediate_target(step.literal, self.config);
         let t0 = self.end();
         let extra = usize::from(step.op == OP_FUNCTION);
         {
@@ -2907,7 +2925,8 @@ impl DieProgram {
             w.literal_a = step.a.1;
             w.offset_a = step.offset_a;
             w.reg_b = step.b.0;
-            w.literal_b = step.literal.unwrap_or(step.b.1);
+            w.literal_b = step.b.1;
+            w.target = immediate;
             w.offset_b = step.offset_b;
             (w.window_x, w.window_a, w.window_b) = (step.window_x, step.window_a, step.window_b);
             (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
@@ -2959,6 +2978,7 @@ impl DieProgram {
     /// shares the previous step's compute cycle when nothing ties the two together.
     fn short_alu(&mut self, step: &Alu) {
         let lanes = 1u32 << self.config.features.lane_bits;
+        let immediate = immediate_target(step.literal, self.config);
         let t0 = match self.last_short {
             // A word that steps or jumps on the indices keeps its own literal B.
             Some((at, previous)) if at + 1 == self.end() && !self.labels.contains(&self.end()) && !self.cycles[at].x_write && can_follow(&previous, step, lanes) => at,
@@ -2983,7 +3003,7 @@ impl DieProgram {
         let w = self.slot(t0 + 1);
         w.use_literal = true;
         (w.reg_a, w.literal_a, w.offset_a) = (step.a.0, step.a.1, step.offset_a);
-        (w.reg_b, w.literal_b, w.offset_b) = (step.b.0, step.literal.unwrap_or(step.b.1), step.offset_b);
+        (w.reg_b, w.literal_b, w.offset_b, w.target) = (step.b.0, step.b.1, step.offset_b, immediate);
         (w.window_x, w.window_a, w.window_b, w.window_dst) = (step.window_x, step.window_a, step.window_b, step.window_dst);
         (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
         w.from_cluster = step.from_cluster;

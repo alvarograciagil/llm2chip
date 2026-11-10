@@ -804,6 +804,8 @@ pub struct Assembly {
     rows_stream: bool,
     /// Every head of the `each_head` being built has a unit of its own at once.
     heads_at_once: bool,
+    /// Bits of an immediate, which rides in the word's jump target.
+    immediate_bits: u32,
     /// Registers the next slices among the units may leave where they were made.
     spread: HashSet<u32>,
     /// Sets of heads brought to one exponent where they were made, which the next as many
@@ -934,7 +936,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -952,7 +954,8 @@ impl Assembly {
 
     /// Writes a small constant, composing it when it does not fit one literal.
     fn immediate(&mut self, value: i64, dst: At<Expr>) {
-        let limit = (1i64 << (self.index_bits - 1)) - 1;
+        let bits = self.immediate_bits;
+        let limit = (1i64 << (bits - 1)) - 1;
         if value.abs() <= limit {
             let mut s = alu(OP_IMMEDIATE);
             s.literal = Some(value as u32 & ((1 << self.index_bits) - 1));
