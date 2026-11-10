@@ -23,6 +23,9 @@ pub const EXECUTE_CYCLE: u64 = 2;
 pub const MULDIV_CYCLES: u64 = 33;
 
 /// Small combinational helpers over one module.
+/// Adders this wide or wider take their carries from a prefix tree.
+pub const PREFIX_FROM: usize = 8;
+
 pub(crate) struct Logic<'a> {
     pub b: &'a mut Builder,
     pub next: usize,
@@ -73,12 +76,24 @@ impl Logic<'_> {
         a.iter().zip(b).map(|(x, y)| self.mux(s, *x, *y)).collect()
     }
 
+    /// In a tree, so the depth grows with the logarithm of the bits.
     pub fn all(&mut self, bits: &[Bit]) -> Bit {
-        bits.iter().copied().reduce(|a, b| self.and(a, b)).unwrap_or(Bit::One)
+        self.tree(bits, Bit::One, Self::and)
     }
 
     pub fn any(&mut self, bits: &[Bit]) -> Bit {
-        bits.iter().copied().reduce(|a, b| self.or(a, b)).unwrap_or(Bit::Zero)
+        self.tree(bits, Bit::Zero, Self::or)
+    }
+
+    fn tree(&mut self, bits: &[Bit], empty: Bit, join: fn(&mut Self, Bit, Bit) -> Bit) -> Bit {
+        let mut level = bits.to_vec();
+        if level.is_empty() {
+            return empty;
+        }
+        while level.len() > 1 {
+            level = level.chunks(2).map(|pair| if let [x, y] = pair { join(self, *x, *y) } else { pair[0] }).collect();
+        }
+        level[0]
     }
 
     pub fn equals(&mut self, bits: &[Bit], value: u32) -> Bit {
@@ -113,7 +128,84 @@ impl Logic<'_> {
         current
     }
 
+    /// A Brent-Kung adder: the carries come from a tree of generate and propagate pairs,
+    /// about twice as deep as the bits' logarithm instead of as deep as the bits.
+    pub fn prefix_adder(&mut self, a: &[Bit], b: &[Bit], carry_in: Bit) -> (Vec<Bit>, Bit) {
+        let n = a.len().min(b.len());
+        let p: Vec<Bit> = (0..n).map(|i| self.xor(a[i], b[i])).collect();
+        let mut g: Vec<Bit> = (0..n).map(|i| self.and(a[i], b[i])).collect();
+        // The carry in folds into the first bit's generate.
+        let first = self.and(p[0], carry_in);
+        g[0] = self.or(g[0], first);
+        let mut pp = p.clone();
+        let combine = |l: &mut Self, g: &mut [Bit], pp: &mut [Bit], i: usize, j: usize| {
+            let t = l.and(pp[i], g[j]);
+            g[i] = l.or(g[i], t);
+            pp[i] = l.and(pp[i], pp[j]);
+        };
+        let mut d = 1;
+        while d < n {
+            let mut i = 2 * d - 1;
+            while i < n {
+                combine(self, &mut g, &mut pp, i, i - d);
+                i += 2 * d;
+            }
+            d *= 2;
+        }
+        d /= 2;
+        while d >= 1 {
+            let mut i = 3 * d - 1;
+            while i < n {
+                combine(self, &mut g, &mut pp, i, i - d);
+                i += 2 * d;
+            }
+            d /= 2;
+        }
+        let sum: Vec<Bit> = (0..n).map(|i| {
+            let carry = if i == 0 { carry_in } else { g[i - 1] };
+            self.xor(p[i], carry)
+        }).collect();
+        (sum, g[n - 1])
+    }
+
+    /// The sum of many operands of one width, modulo that width: full adders take three
+    /// at a time down to two without carrying along, and one fast adder finishes.
+    pub fn sum_many(&mut self, mut operands: Vec<Vec<Bit>>) -> Vec<Bit> {
+        let width = operands.first().map_or(0, Vec::len);
+        while operands.len() > 2 {
+            let mut next = Vec::with_capacity(operands.len() * 2 / 3 + 2);
+            for group in operands.chunks(3) {
+                if let [x, y, z] = group {
+                    let mut sum = Vec::with_capacity(width);
+                    let mut carry = vec![Bit::Zero];
+                    for i in 0..width {
+                        let p = self.xor(x[i], y[i]);
+                        sum.push(self.xor(p, z[i]));
+                        if i + 1 < width {
+                            let g = self.and(x[i], y[i]);
+                            let t = self.and(p, z[i]);
+                            carry.push(self.or(g, t));
+                        }
+                    }
+                    next.push(sum);
+                    next.push(carry);
+                } else {
+                    next.extend(group.iter().cloned());
+                }
+            }
+            operands = next;
+        }
+        match operands.as_slice() {
+            [x, y] => self.adder(x, y, Bit::Zero).0,
+            [x] => x.clone(),
+            _ => vec![Bit::Zero; width],
+        }
+    }
+
     pub fn adder(&mut self, a: &[Bit], b: &[Bit], carry_in: Bit) -> (Vec<Bit>, Bit) {
+        if a.len().min(b.len()) >= PREFIX_FROM {
+            return self.prefix_adder(a, b, carry_in);
+        }
         let mut carry = carry_in;
         let mut sum = Vec::with_capacity(a.len());
         for (a, b) in a.iter().zip(b) {

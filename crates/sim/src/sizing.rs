@@ -22,6 +22,8 @@ pub struct Candidate {
     pub lane_bits: u32,
     pub cell_bits: u32,
     pub cycles: u64,
+    /// The die's clock: the one asked for, or its fastest if that is lower.
+    pub clock_hz: f64,
     pub tokens_per_second: f64,
     /// Seconds to the first token after a prompt of `Target::prompt` tokens.
     pub prompt_seconds: f64,
@@ -41,7 +43,15 @@ pub struct Costs {
     pub level: f64,
     pub level_lane: f64,
     pub cell: f64,
+    /// The slowest path between registers, in full-adder delays: with one unit of four
+    /// lanes, and how much each doubling of the lanes and of the units adds.
+    pub path: f64,
+    pub path_lane_bit: f64,
+    pub path_unit_bit: f64,
 }
+
+/// Delays of an AND, OR, XOR, NOT and MUX in full-adder delays.
+const GATE_DELAYS: [f64; 5] = [0.25, 0.25, 0.5, 0.12, 0.4];
 
 impl Costs {
     /// Measured on dies of one, two and four units with four and eight lanes.
@@ -64,7 +74,23 @@ impl Costs {
         let ((f4, u4, l4), (f8, u8, l8)) = (at(2), at(3));
         let lane = (u8 - u4) / 4.0;
         let level_lane = (l8 - l4) / 4.0;
-        Costs { fixed: (f4 + f8) / 2.0, unit: u4 - 4.0 * lane, lane, level: l4 - 4.0 * level_lane, level_lane, cell }
+        // The clock: grows with the logarithm of the lanes and of the units, so three
+        // small dies give its line.
+        // The simulator holds every memory, so they are made small: only the index adders
+        // would be a little deeper with the real widths.
+        let path = |cluster_bits: u32, lane_bits: u32| {
+            let small = DieConfig { reg_bits: 8, index_bits: 12, microcode_bits: 12, cell: netlist::CellConfig { addr_bits: 8, ..base.cell }, ..base };
+            let c = DieConfig { cells: 1 << (cluster_bits + lane_bits), features: base.features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits), ..small };
+            netlist::Simulator::new(&die_design(c)).map_or(f64::INFINITY, |sim| sim.critical_path(GATE_DELAYS))
+        };
+        let (start, wider, more) = (path(0, 2), path(0, 4), path(2, 2));
+        Costs { fixed: (f4 + f8) / 2.0, unit: u4 - 4.0 * lane, lane, level: l4 - 4.0 * level_lane, level_lane, cell, path: start, path_lane_bit: (wider - start) / 2.0, path_unit_bit: (more - start) / 2.0 }
+    }
+
+    /// The fastest clock of a die, given the delay of a full adder in its process.
+    pub fn clock_hz(&self, cluster_bits: u32, lane_bits: u32, full_adder_ns: f64) -> f64 {
+        let path = self.path + self.path_lane_bit * (lane_bits as f64 - 2.0).max(0.0) + self.path_unit_bit * cluster_bits as f64;
+        1e9 / (path * full_adder_ns)
     }
 
     pub fn gates(&self, cluster_bits: u32, lane_bits: u32, cell_bits: u32) -> f64 {
@@ -81,7 +107,10 @@ pub struct Target {
     pub prompt_seconds: f64,
     pub prompt: u32,
     pub chips: Vec<u32>,
+    /// The highest clock wanted; each die runs at the lower of this and its own fastest.
     pub clock_hz: f64,
+    /// A full adder's delay in the process, which sets each die's fastest clock.
+    pub full_adder_ns: f64,
     pub context: u32,
     pub lane_bits: std::ops::RangeInclusive<u32>,
     pub cluster_bits: std::ops::RangeInclusive<u32>,
@@ -139,7 +168,8 @@ pub fn search(program: &Program, weights: &Weights, base: DieConfig, costs: &Cos
         let codes = chip_programs(program, weights, die, target.context, chips).ok()?;
         let timing = timing(&codes, die, target.context, target.prompt, 256);
         let cycles = timing.token_cycles;
-        Some(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, tokens_per_second: target.clock_hz / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / target.clock_hz, gates: chips as f64 * costs.gates(cluster_bits, lane_bits, cell_bits) })
+        let clock = target.clock_hz.min(costs.clock_hz(cluster_bits, lane_bits, target.full_adder_ns));
+        Some(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, clock_hz: clock, tokens_per_second: clock / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / clock, gates: chips as f64 * costs.gates(cluster_bits, lane_bits, cell_bits) })
     };
     let fits = |c: &Candidate| c.tokens_per_second >= target.tokens_per_second && c.prompt_seconds <= target.prompt_seconds;
     let shapes: Vec<(u32, u32, u32)> = target.chips.iter().flat_map(|&n| target.lane_bits.clone().flat_map(move |l| target.cluster_bits.clone().map(move |u| (n, u, l)))).collect();

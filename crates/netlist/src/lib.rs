@@ -169,6 +169,8 @@ pub(crate) struct Builder {
     counter: usize,
     group: String,
     prefix: String,
+    /// Names given so far: a name used again gets a number, so every net has its own.
+    names: std::collections::HashSet<String>,
 }
 
 impl Builder {
@@ -185,6 +187,7 @@ impl Builder {
             counter: 0,
             group: String::new(),
             prefix: String::new(),
+            names: std::collections::HashSet::new(),
         }
     }
 
@@ -199,7 +202,12 @@ impl Builder {
 
     pub fn wire(&mut self, name: &str, width: u32) -> Vec<Bit> {
         let id = self.module.nets.len();
-        self.module.nets.push(Net { name: format!("{}{name}", self.prefix), width });
+        let mut full = format!("{}{name}", self.prefix);
+        if !self.names.insert(full.clone()) {
+            full = format!("{full}_{id}");
+            self.names.insert(full.clone());
+        }
+        self.module.nets.push(Net { name: full, width });
         (0..width).map(|bit| Bit::Net(id, bit)).collect()
     }
 

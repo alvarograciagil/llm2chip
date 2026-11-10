@@ -127,12 +127,24 @@ impl Gen {
             return name;
         }
         let fa = self.full_adder();
-        let mut b = Builder::new(&name, &format!("Sumador de {width} bits"), "Cadena de sumadores completos: cada acarreo alimenta al siguiente bit.");
+        let wide = width as usize >= crate::rv32::PREFIX_FROM;
+        let how = if wide { "Los acarreos salen de un árbol de prefijos (Brent-Kung): tan profundo como dos veces el logaritmo de los bits." } else { "Cadena de sumadores completos: cada acarreo alimenta al siguiente bit." };
+        let mut b = Builder::new(&name, &format!("Sumador de {width} bits"), how);
         let a = b.input("a", width);
         let x = b.input("b", width);
         let cin = b.input("cin", 1)[0];
         let sum = b.output("sum", width);
         let cout = b.output("cout", 1)[0];
+        if wide {
+            b.group("Árbol de acarreos");
+            let mut l = crate::rv32::Logic { b: &mut b, next: 0 };
+            let (s, c) = l.prefix_adder(&a, &x, cin);
+            for (from, to) in s.iter().zip(&sum) {
+                l.b.or_to(*from, Bit::Zero, *to);
+            }
+            l.b.or_to(c, Bit::Zero, cout);
+            return self.add(b.finish());
+        }
         b.group("Cadena de acarreo");
         let carries = b.wire("carry", width.saturating_sub(1));
         let mut carry = cin;

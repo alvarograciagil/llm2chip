@@ -159,7 +159,8 @@ fn hierarchy_expands_into_real_gates() {
     assert_eq!(counts["sram"], 1);
     assert!(design.modules.contains_key("full_adder"));
     let sim = Simulator::new(&design).unwrap();
-    assert!(sim.snapshot("/multiplier/adder0/fa0").is_some(), "se puede entrar hasta el sumador completo");
+    // The rows are wide enough for prefix adders, so there is no full adder inside them.
+    assert!(sim.snapshot("/multiplier/adder0").is_some(), "se puede entrar hasta el sumador de cada fila");
 }
 
 #[test]

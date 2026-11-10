@@ -57,10 +57,14 @@ pub struct Simulator {
     ports: HashMap<String, Vec<usize>>,
     paths: HashMap<String, BTreeMap<String, Vec<usize>>>,
     cycle: u64,
+    /// Every signal's name, for `critical_trace`, when built with `with_names`.
+    names: Vec<String>,
 }
 
 struct Elaborator<'a> {
     design: &'a Design,
+    named: bool,
+    names: Vec<String>,
     next: usize,
     gates: Vec<Gate>,
     flops: Vec<(usize, usize)>,
@@ -84,6 +88,18 @@ impl Elaborator<'_> {
                 Some(bits) => bits.clone(),
                 None => (0..net.width).map(|_| self.fresh()).collect(),
             });
+        }
+        if self.named {
+            for (id, (net, bits)) in m.nets.iter().zip(&nets).enumerate() {
+                for (bit, index) in bits.iter().enumerate() {
+                    if self.names.len() <= *index {
+                        self.names.resize(*index + 1, String::new());
+                    }
+                    if self.names[*index].is_empty() {
+                        self.names[*index] = format!("{path}/{}#{id}[{bit}]", net.name);
+                    }
+                }
+            }
         }
         self.paths.insert(
             path.to_string(),
@@ -198,9 +214,20 @@ fn read(values: &[u8], bits: &[usize]) -> u128 {
 
 impl Simulator {
     pub fn new(design: &Design) -> Result<Self, SimError> {
+        Self::build(design, false)
+    }
+
+    /// Like `new`, keeping every signal's name for `critical_trace`.
+    pub fn with_names(design: &Design) -> Result<Self, SimError> {
+        Self::build(design, true)
+    }
+
+    fn build(design: &Design, named: bool) -> Result<Self, SimError> {
         let top = &design.modules[&design.top];
         let mut e = Elaborator {
             design,
+            named,
+            names: Vec::new(),
             next: 2,
             gates: Vec::new(),
             flops: Vec::new(),
@@ -226,6 +253,7 @@ impl Simulator {
             ports,
             paths: e.paths,
             cycle: 0,
+            names: e.names,
         };
         for port in top.ports.iter().filter(|p| p.dir == Dir::Input) {
             sim.set(&port.name, 0)?;
@@ -377,6 +405,37 @@ impl Simulator {
             worst = worst.max(arrival[g.y]);
         }
         worst
+    }
+
+    /// The nets along the slowest combinational path, from where it starts to where it
+    /// ends, each with its arrival time: to see which structure sets the clock.
+    pub fn critical_trace(&self, delays: [f64; 5]) -> Vec<(String, f64)> {
+        let mut arrival = vec![0f64; self.values.len()];
+        let mut from = vec![usize::MAX; self.values.len()];
+        let (mut worst, mut end) = (0f64, 0);
+        for g in &self.gates {
+            let inputs: &[usize] = match g.op {
+                Op::Not => &[g.a],
+                Op::Mux => &[g.a, g.b, g.c],
+                _ => &[g.a, g.b],
+            };
+            let delay = match g.op { Op::And => delays[0], Op::Or => delays[1], Op::Xor => delays[2], Op::Not => delays[3], Op::Mux => delays[4] };
+            let latest = *inputs.iter().max_by(|x, y| arrival[**x].total_cmp(&arrival[**y])).expect("puerta sin entradas");
+            arrival[g.y] = arrival[latest] + delay;
+            from[g.y] = latest;
+            if arrival[g.y] > worst {
+                (worst, end) = (arrival[g.y], g.y);
+            }
+        }
+        let mut trace = Vec::new();
+        let mut at = end;
+        while at != usize::MAX {
+            let name = self.names.get(at).filter(|n| !n.is_empty()).cloned().unwrap_or_else(|| format!("#{at}"));
+            trace.push((name, arrival[at]));
+            at = from[at];
+        }
+        trace.reverse();
+        trace
     }
 
     /// A port of any width, in 32-bit words starting from the least significant.

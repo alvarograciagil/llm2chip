@@ -886,7 +886,8 @@ impl Gen {
         let mux_wide = self.mux_bus(wide);
         let mux_a = self.mux_bus(a);
         let mux_addr = self.mux_bus(addr_bits);
-        let mult = self.multiplier(a, a, 1);
+        // Every lane multiplies with a tree, so the clock does not wait on a chain of adders.
+        let mult = self.tree_multiplier(crate::multiplier::MultiplierKind::Wallace, a, a, 1);
         let add = self.ripple_adder(a);
 
         let mut b = Builder::new("llm2chip_die", "Die", "Secuenciador, banco de vectores, unidad vectorial, tabla de funciones, red de activaciones y celdas.");
@@ -984,16 +985,12 @@ impl Gen {
             let literal: Vec<Bit> = (0..repeat_bits as usize).map(|i| fields["repeat"].get(i).copied().unwrap_or(Bit::Zero)).collect();
             l.mux_bus(from_register, &literal, &counted)
         };
-        let mut equal = Bit::One;
-        for i in 0..repeat_bits as usize {
-            let diff = b.wire(&format!("rep_diff{i}"), 1)[0];
-            b.xor_to(repeat[i], target[i], diff);
-            let same = b.wire(&format!("rep_same{i}"), 1)[0];
-            b.not_to(diff, same);
-            let next = b.wire(&format!("rep_eq{i}"), 1)[0];
-            b.and_to(equal, same, next);
-            equal = next;
-        }
+        let equal = {
+            let mut l = Logic { b: &mut b, next: 58_900 };
+            let differ: Vec<Bit> = (0..repeat_bits as usize).map(|i| l.xor(repeat[i], target[i])).collect();
+            let any = l.any(&differ);
+            l.not(any)
+        };
         b.and_to(equal, running, word_done);
 
         // The memory reads the next address, so its output always matches the PC.
@@ -1541,13 +1538,17 @@ impl Gen {
                     let less = l.mux(signs_differ, difference[top], x[top]);
                     l.mux_bus(less, x, y)
                 };
+                // The lanes meet in a tree; a lane left out offers lane 0's value again.
                 let block = l.and(vector_flag, scan_best);
-                let mut largest = read_a.clone();
+                let mut level: Vec<Vec<Bit>> = vec![read_a.clone()];
                 for (lane, bank) in banks_a.iter().enumerate().skip(1) {
                     let taken = l.and(block, scanned_lane[lane]);
-                    let candidate = l.mux_bus(taken, &largest, bank);
-                    largest = larger(&mut l, &largest, &candidate);
+                    level.push(l.mux_bus(taken, &read_a, bank));
                 }
+                while level.len() > 1 {
+                    level = level.chunks(2).map(|pair| if pair.len() == 2 { larger(&mut l, &pair[0], &pair[1]) } else { pair[0].clone() }).collect();
+                }
+                let largest = level.pop().expect("al menos un carril");
                 let updated = larger(&mut l, &best, &largest);
                 let kept = l.mux_bus(scan_best, &best, &updated);
                 let lowest: Vec<Bit> = (0..a as usize).map(|i| if i == top { Bit::One } else { Bit::Zero }).collect();
@@ -1581,10 +1582,9 @@ impl Gen {
                         if lane == 0 { bit } else { l.and(bit, scanned_lane[lane]) }
                     }).collect()
                 };
-                let block = (1..lanes).fold(widen(&mut l, 0), |sum, lane| {
-                    let term = widen(&mut l, lane);
-                    l.adder(&sum, &term, Bit::Zero).0
-                });
+                // The lanes' products meet in a carry-save tree with one fast adder at the end.
+                let terms: Vec<Vec<Bit>> = (0..lanes).map(|lane| widen(&mut l, lane)).collect();
+                let block = l.sum_many(terms);
                 l.mux_bus(vector_flag, &plain_input, &block)
             };
             let acc_sum = b.wire("acc_sum", accumulator_bits);
@@ -1739,12 +1739,7 @@ impl Gen {
             let mut parity = vec![Bit::Zero; a as usize];
             parity[0] = read_a[0];
             // All-ones-but-the-sign when the two aligned operands match, zero otherwise.
-            let mut any_difference = Bit::Zero;
-            for (i, bit) in difference.iter().enumerate() {
-                let next = b.wire(&format!("eq_any{i}"), 1)[0];
-                b.or_to(any_difference, *bit, next);
-                any_difference = next;
-            }
+            let any_difference = Logic { b: &mut b, next: 58_950 }.any(&difference);
             let same = b.wire("eq_same", 1)[0];
             b.not_to(any_difference, same);
             // Only the first match in a scan counts, so ties cannot select extra elements.
@@ -2110,13 +2105,13 @@ impl Gen {
         let mux = self.mux_bus(extended.len() as u32);
         let shifted = barrel_right(b, &mux, name, &extended, amount);
         let truncated = shifted[1..=width].to_vec();
-        let mut largest = b.wire(&format!("{name}_positive"), 1)[0];
-        b.not_to(truncated[width - 1], largest);
-        for (i, bit) in truncated.iter().take(width - 1).enumerate() {
-            let next = b.wire(&format!("{name}_full{i}"), 1)[0];
-            b.and_to(largest, *bit, next);
-            largest = next;
-        }
+        let largest = {
+            let mut l = Logic { b, next: 59_000 };
+            let positive = l.not(truncated[width - 1]);
+            let mut ones: Vec<Bit> = truncated[..width - 1].to_vec();
+            ones.push(positive);
+            l.all(&ones)
+        };
         let carry = and_not(b, shifted[0], largest, &format!("{name}_carry"));
         let adder = self.ripple_adder(width as u32);
         let rounded = b.wire(&format!("{name}_rounded"), width as u32);
