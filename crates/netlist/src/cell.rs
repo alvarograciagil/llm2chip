@@ -278,8 +278,10 @@ impl Gen {
     }
 
     /// `fast` swaps the ripple adder for a parallel-prefix one.
-    pub(crate) fn accumulator(&mut self, width: u32, fast: bool) -> String {
-        let name = format!("accumulator_{width}{}", if fast { "_fast" } else { "" });
+    /// With `restartable`, «restart» drops the total and starts again from this value, so
+    /// one sum ends and the next begins in the same cycle.
+    pub(crate) fn restartable_accumulator(&mut self, width: u32, fast: bool, restartable: bool) -> String {
+        let name = format!("accumulator_{width}{}{}", if fast { "_fast" } else { "" }, if restartable { "_restart" } else { "" });
         if self.modules.contains_key(&name) {
             return name;
         }
@@ -289,9 +291,22 @@ impl Gen {
         let mut b = Builder::new(&name, &format!("Acumulador de {width} bits"), "Suma cada producto válido al total. «clear» lo devuelve a cero.");
         let mut sum_ports: Vec<(&str, Vec<Bit>)> = Vec::new();
         let clear = b.input("clear", 1)[0];
+        let restart = restartable.then(|| b.input("restart", 1)[0]);
         let valid = b.input("valid", 1)[0];
         let value = b.input("value", width);
         let total = b.output("total", width);
+        let kept = match restart {
+            Some(restart) => {
+                let keep = b.wire("keep", 1)[0];
+                b.not_to(restart, keep);
+                let kept = b.wire("kept", width);
+                for i in 0..width as usize {
+                    b.and_to(keep, total[i], kept[i]);
+                }
+                kept
+            }
+            None => total.clone(),
+        };
         let not_clear = b.wire("not_clear", 1)[0];
         let sum = b.wire("sum", width);
         let unused = b.wire("carry_out", 1);
@@ -299,13 +314,13 @@ impl Gen {
         let next = b.wire("next", width);
 
         b.group("Suma");
-        sum_ports.extend([("a", total.clone()), ("b", value), ("sum", sum.clone())]);
+        sum_ports.extend([("a", kept.clone()), ("b", value), ("sum", sum.clone())]);
         if !fast {
             sum_ports.extend([("cin", vec![Bit::Zero]), ("cout", unused)]);
         }
         b.inst("adder", &adder, &sum_ports);
         b.group("Decisión");
-        b.inst("select", &mux, &[("s", vec![valid]), ("a", total.clone()), ("b", sum), ("y", chosen.clone())]);
+        b.inst("select", &mux, &[("s", vec![valid]), ("a", kept), ("b", sum), ("y", chosen.clone())]);
         b.not_to(clear, not_clear);
         for i in 0..width as usize {
             b.and_to(not_clear, chosen[i], next[i]);
@@ -483,7 +498,7 @@ impl Gen {
         };
         let uses_multiples = c.multiplier == MultiplierKind::Multiples;
         let acc_reg = self.register(acc);
-        let accumulator = self.accumulator(acc, c.multiplier != MultiplierKind::Array);
+        let accumulator = self.restartable_accumulator(acc, c.multiplier != MultiplierKind::Array, seekable);
 
         let mut b = Builder::new(
             "compute_cell",
@@ -492,6 +507,8 @@ impl Gen {
         );
         let clear = b.input("clear", 1)[0];
         let clear_total = b.input("clear_total", 1)[0];
+        // A cell that can seek also ends one group and starts the next in the same cycle.
+        let restart = seekable.then(|| b.input("restart", 1)[0]);
         let protected = c.has_ecc();
         let (load_addr_bits, load_data_bits) = if protected {
             let word = c.ecc_lanes() * w;
@@ -608,7 +625,11 @@ impl Gen {
         b.group("Acumulador");
         let clear_acc = b.wire("clear_acc", 1)[0];
         b.or_to(clear, clear_total, clear_acc);
-        b.inst("accumulator", &accumulator, &[("clear", vec![clear_acc]), ("valid", vec![valid]), ("value", value), ("total", total)]);
+        let mut pins = vec![("clear", vec![clear_acc]), ("valid", vec![valid]), ("value", value), ("total", total)];
+        if let Some(restart) = restart {
+            pins.push(("restart", vec![restart]));
+        }
+        b.inst("accumulator", &accumulator, &pins);
         self.add(b.finish())
     }
 }

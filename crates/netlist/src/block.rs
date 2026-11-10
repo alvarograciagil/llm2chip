@@ -690,7 +690,6 @@ const MIN_STREAM: u32 = 4;
 /// Fractional bits of the scale and bias the cells multiply by.
 pub const FACTOR_FRACTION: u32 = 4;
 
-/// Where the cells keep a matrix.
 /// One matrix of those `BlockOps::matvecs` applies together.
 #[derive(Clone, Debug)]
 pub struct MatvecPart {
@@ -713,6 +712,7 @@ pub fn chained_rows(rows: &[u32], lanes: u32) -> (Vec<u32>, u32) {
     (starts, end)
 }
 
+/// Where the cells keep a matrix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellMatrix {
     pub weights: u32,
@@ -886,7 +886,13 @@ impl Assembly {
     fn cell_round(&mut self, src: u32, place: CellMatrix, rows: u32, column: Expr) {
         self.steps.push(Step::CellPass);
         let groups = place.groups.div_ceil(self.clusters);
-        self.each(groups.into(), |s, _| s.steps.push(Step::CellGroup { src, length: place.group, start: column }));
+        if groups <= 16 {
+            for _ in 0..groups {
+                self.steps.push(Step::CellGroup { src, length: place.group, start: column });
+            }
+        } else {
+            self.each(groups.into(), |s, _| s.steps.push(Step::CellGroup { src, length: place.group, start: column }));
+        }
         self.steps.push(Step::CellDrain { rows });
     }
 
@@ -1888,7 +1894,17 @@ impl Assembly {
         let column = Var::Loop(self.loops);
         self.loops += 1;
         let before = std::mem::take(&mut self.steps);
-        self.each((rows / per_unit).into(), |s, _| s.cell_round(src, place, per_unit, Expr::var(column)));
+        // The first pass stands apart, so every turn of the loop drains the pass before it
+        // while it computes its own. Nothing may come between them, not even the zero a
+        // loop wants ready.
+        self.zero_place();
+        let full = rows / per_unit;
+        if full > 0 {
+            self.cell_round(src, place, per_unit, Expr::var(column));
+        }
+        if full > 1 {
+            self.each((full - 1).into(), |s, _| s.cell_round(src, place, per_unit, Expr::var(column)));
+        }
         if !rows.is_multiple_of(per_unit) {
             self.cell_round(src, place, rows % per_unit, Expr::var(column));
         }

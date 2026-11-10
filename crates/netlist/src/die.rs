@@ -87,6 +87,11 @@ impl DieFeatures {
         self.widths[SHIFT_NOW_FIELD] > 0
     }
 
+    /// Whether one group of the cells can follow another with no pause.
+    pub fn feeds_cells(&self) -> bool {
+        self.widths[CELL_FEED_FIELD] > 0
+    }
+
     /// Whether the die can add whole rows into the wide memory.
     pub fn combines(&self) -> bool {
         self.widths[WIDE_ACCUMULATE_FIELD] > 0
@@ -237,15 +242,20 @@ pub struct ControlWord {
     pub x_split: u32,
     /// The shifters load from the operands as they are read: A and left from A, B from B.
     pub shift_now: bool,
+    /// The activation read now goes to the cells when it reaches them.
+    pub cell_feed: bool,
+    /// It is the last of a group: the cells apply the group's factors once it is in.
+    pub cell_end: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 72;
+pub const FIELD_COUNT: usize = 74;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
 const X_SPLIT_FIELD: usize = 70;
 const SHIFT_NOW_FIELD: usize = 71;
+const CELL_FEED_FIELD: usize = 72;
 const WIDE_ACCUMULATE_FIELD: usize = 55;
 const MAX_SCAN_FIELD: usize = 62;
 
@@ -347,6 +357,8 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("gather_shift", bits_for(c.index_bits)),
         ("x_split", bits_for(c.features.cluster_bits + 1)),
         ("shift_now", 1),
+        ("cell_feed", 1),
+        ("cell_end", 1),
     ]
 }
 
@@ -430,6 +442,8 @@ impl ControlWord {
             self.gather_shift as u128,
             self.x_split as u128,
             self.shift_now as u128,
+            self.cell_feed as u128,
+            self.cell_end as u128,
         ]
     }
 
@@ -552,8 +566,9 @@ impl Gen {
 
         b.group("Celda de cálculo");
         let group_sum = b.wire("group_sum", acc);
-        let clear_total = bus_or(&mut b, flush, clear_group, "clear_group_sum");
-        let mut compute_pins = vec![("clear", vec![clear]), ("clear_total", vec![clear_total]), ("run", vec![run]), ("x", x.clone()), ("total", group_sum.clone()), ("seek", seek_weights), ("seek_addr", seek_addr.clone())];
+        // A flush takes the group's sum and starts the next group with whatever product
+        // arrives in that cycle, so groups can follow each other with no gap.
+        let mut compute_pins = vec![("clear", vec![clear]), ("clear_total", vec![clear_group]), ("restart", vec![flush]), ("run", vec![run]), ("x", x.clone()), ("total", group_sum.clone()), ("seek", seek_weights), ("seek_addr", seek_addr.clone())];
         if let Some((load_en, load_scale, load_addr, load_data)) = &load {
             let load_weight = and_not(&mut b, *load_en, *load_scale, "load_weight");
             compute_pins.extend([("load_en", vec![load_weight]), ("load_addr", load_addr.clone()), ("load_data", load_data[..cfg.weight_bits as usize].to_vec())]);
@@ -561,19 +576,36 @@ impl Gen {
         b.inst("compute", &compute, &compute_pins);
 
         b.group("Suma de activaciones");
-        let sign = *x.last().expect("activación vacía");
-        let x_wide: Vec<Bit> = (0..acc as usize).map(|i| x.get(i).copied().unwrap_or(sign)).collect();
+        // The activations are delayed to arrive with their products, so a flush splits
+        // both sums at the same place.
+        let reg_x = self.register(a);
+        let (mut x_late, mut run_late) = (x.clone(), run);
+        for stage in 0..cfg.latency() as usize - 1 {
+            let q = b.wire(&format!("x_late{stage}"), a);
+            b.inst(&format!("x_late_reg{stage}"), &reg_x, &[("d", x_late), ("q", q.clone())]);
+            x_late = q;
+            let r = b.wire(&format!("run_late{stage}"), 1)[0];
+            b.dff_to(run_late, r);
+            run_late = r;
+        }
+        let sign = *x_late.last().expect("activación vacía");
+        let x_wide: Vec<Bit> = (0..acc as usize).map(|i| x_late.get(i).copied().unwrap_or(sign)).collect();
         let x_sum = b.wire("x_sum", acc);
         let x_gated = b.wire("x_gated", acc);
-        let run_gate = run;
         for i in 0..acc as usize {
-            b.and_to(run_gate, x_wide[i], x_gated[i]);
+            b.and_to(run_late, x_wide[i], x_gated[i]);
+        }
+        let x_kept = b.wire("x_kept", acc);
+        let x_keep = b.wire("x_keep_on_flush", 1)[0];
+        b.not_to(flush, x_keep);
+        for i in 0..acc as usize {
+            b.and_to(x_keep, x_sum[i], x_kept[i]);
         }
         let x_next = b.wire("x_next", acc);
         let unused = b.wire("x_carry", 1);
-        b.inst("x_adder", &adder, &[("a", x_sum.clone()), ("b", x_gated), ("cin", vec![Bit::Zero]), ("sum", x_next.clone()), ("cout", unused)]);
+        b.inst("x_adder", &adder, &[("a", x_kept), ("b", x_gated), ("cin", vec![Bit::Zero]), ("sum", x_next.clone()), ("cout", unused)]);
         let keep = b.wire("x_keep", 1)[0];
-        let reset = bus_or(&mut b, clear, clear_total, "x_reset");
+        let reset = bus_or(&mut b, clear, clear_group, "x_reset");
         b.not_to(reset, keep);
         let x_d = b.wire("x_d", acc);
         for i in 0..acc as usize {
@@ -815,10 +847,30 @@ impl Gen {
         };
         let cell_seek_weights = ctl("cell_seek_weights", &mut b, &fields);
         let cell_seek_factors = ctl("cell_seek_factors", &mut b, &fields);
-        let cell_run = ctl("cell_run", &mut b, &fields);
         let cell_clear = ctl("cell_clear", &mut b, &fields);
         let cell_clear_group = ctl("cell_clear_group", &mut b, &fields);
-        let cell_flush = ctl("cell_flush", &mut b, &fields);
+        // An activation read with `cell_feed` reaches the cells `x_delay` cycles later, and
+        // the last of a group is in their totals `latency` cycles after that: delay lines
+        // run and flush them, so the next group's reads follow with no pause.
+        let (cell_run, cell_flush) = {
+            let delay = |b: &mut Builder, name: &str, from: Bit, cycles: usize| -> Bit {
+                let mut bit = from;
+                for stage in 0..cycles {
+                    let q = b.wire(&format!("{name}_late{stage}"), 1)[0];
+                    b.dff_to(bit, q);
+                    bit = q;
+                }
+                bit
+            };
+            let x_delay = 1 + c.broadcast_stages as usize;
+            let feed = ctl("cell_feed", &mut b, &fields);
+            let end = ctl("cell_end", &mut b, &fields);
+            let run_late = delay(&mut b, "cell_feed", feed, x_delay);
+            let flush_late = delay(&mut b, "cell_end", end, x_delay + cfg.latency() as usize);
+            let run = ctl("cell_run", &mut b, &fields);
+            let flush = ctl("cell_flush", &mut b, &fields);
+            (bus_or(&mut b, run, run_late, "cell_run_any"), bus_or(&mut b, flush, flush_late, "cell_flush_any"))
+        };
         let chain_load = ctl("chain_load", &mut b, &fields);
         let chain_shift = ctl("chain_shift", &mut b, &fields);
 
@@ -993,7 +1045,8 @@ impl Gen {
             let counted_write = bus_or(&mut b, wide_from_chain, fields["wide_accumulate"][0], "counted_wide_write");
             b.and_to(wide_write, counted_write, chain_write);
             let write_step = bus_or(&mut b, write_en, chain_write, "write_step");
-            let write_index = index_counter(self, &mut b, ("write_index", 47_000), c.index_bits, (write_reset, write_step), fields["vector"][0], lane_shift);
+            let block_write = bus_or(&mut b, fields["vector"][0], fields["wide_from_chain"][0], "block_write");
+            let write_index = index_counter(self, &mut b, ("write_index", 47_000), c.index_bits, (write_reset, write_step), block_write, lane_shift);
             let join = |reg: &[Bit], index: &[Bit]| -> Vec<Bit> { index.iter().chain(reg).copied().collect() };
             let use_literal = fields["use_literal"][0];
             let mux_index = self.mux_bus(c.index_bits);
@@ -1350,7 +1403,8 @@ impl Gen {
             let mut wide_banks = Vec::with_capacity(lanes);
             {
                 let mut l = Logic { b: &mut b, next: 48_000 };
-                let together = l.and(wide_write, vector_flag);
+                let by_block = l.or(vector_flag, wide_from_chain);
+                let together = l.and(wide_write, by_block);
                 for (lane, sum) in lane_sums.iter().enumerate() {
                     let here = l.equals(&index_w[..lane_bits], lane as u32);
                     let alone = l.and(wide_write, here);
@@ -1932,6 +1986,11 @@ pub struct DieProgram {
     scoped: HashMap<Expr, u32>,
     active: Vec<Var>,
     in_use: BTreeSet<u32>,
+    /// The first cycle after the last group fed to the cells has reached their totals.
+    cells_settle: usize,
+    /// Blocks of totals loaded into the result chains and not yet moved to the wide memory:
+    /// the next pass of the cells moves them while it computes.
+    drain_pending: u32,
 }
 
 /// One index register the CPU sets before starting the die.
@@ -2043,7 +2102,7 @@ impl DieProgram {
     pub fn new(config: DieConfig) -> Self {
         // The microcode read port takes one cycle to deliver the first word.
         let cycles = vec![ControlWord::default()];
-        Self { config, cycles, labels: BTreeSet::from([0]), entries: vec![0], parameters: Vec::new(), scoped: HashMap::new(), active: Vec::new(), in_use: BTreeSet::new() }
+        Self { config, cycles, labels: BTreeSet::from([0]), entries: vec![0], parameters: Vec::new(), scoped: HashMap::new(), active: Vec::new(), in_use: BTreeSet::new(), cells_settle: 0, drain_pending: 0 }
     }
 
     fn slot(&mut self, at: usize) -> &mut ControlWord {
@@ -2112,6 +2171,13 @@ impl DieProgram {
 
     fn compile_loop(&mut self, variable: Var, count: Expr, body: &[Step]) {
         assert!(only_parameters(&count), "el número de vueltas solo puede depender de los parámetros");
+        // A loop may take over a pending drain only if every turn leaves the same one behind.
+        let lanes = 1u32 << self.config.features.lane_bits;
+        let carries = matches!((body.first(), body.last()), (Some(Step::CellPass), Some(Step::CellDrain { rows })) if rows.div_ceil(lanes) == self.drain_pending);
+        if !carries {
+            self.finish_drain();
+        }
+        let pending = self.drain_pending;
         let counter = self.allocate();
         let limit = self.allocate();
         self.set_index(counter, 0, 0);
@@ -2152,6 +2218,9 @@ impl DieProgram {
         self.active.push(variable);
         self.assemble(body);
         self.active.pop();
+        // A group fed at the end of the last turn is still settling after the jump back.
+        let fed_inside = self.cells_settle > self.end();
+        assert_eq!(self.drain_pending, pending, "cada vuelta deja el mismo vaciado pendiente");
 
         for (_, register, stride) in &stepped {
             self.set_index(*register, *register, *stride);
@@ -2168,6 +2237,9 @@ impl DieProgram {
         w.branch = true;
         w.x_limit = limit;
         w.target = start as u32;
+        if fed_inside {
+            self.cells_settle = self.end() + self.feed_latency();
+        }
 
         for (key, register, _) in stepped {
             self.scoped.remove(&key);
@@ -2181,6 +2253,9 @@ impl DieProgram {
     /// Lays out steps and loops, turning every variable index into an index register.
     pub fn assemble(&mut self, steps: &[Step]) {
         for step in steps {
+            if !matches!(step, Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } | Step::Repeat { .. }) {
+                self.finish_drain();
+            }
             match step {
                 Step::One(symbolic) => {
                     let (a, offset_a) = self.resolve(symbolic.a.1);
@@ -2417,6 +2492,7 @@ impl DieProgram {
         }
         self.active.extend_from_slice(vars);
         self.assemble(body);
+        self.finish_drain();
         self.active.truncate(active.len());
         for (key, register) in registers {
             self.scoped.remove(&key);
@@ -2427,10 +2503,20 @@ impl DieProgram {
         (w.set_clusters, w.literal_b) = (true, units);
     }
 
+    /// Cycles from feeding the last activation of a group until the totals have it.
+    fn feed_latency(&self) -> usize {
+        1 + self.config.broadcast_stages as usize + self.config.cell.latency() as usize + 1
+    }
+
+    /// The first free cycle once the cells have taken everything fed to them.
+    fn after_cells(&self) -> usize {
+        self.end().max(self.cells_settle)
+    }
+
     /// Points every cell at the first weight and the first group of a matrix.
     fn cell_seek(&mut self, weights: Expr, factors: Expr) {
         let (literal, offset) = self.resolve(weights);
-        let t = self.end();
+        let t = self.after_cells();
         let w = self.slot(t);
         (w.use_literal, w.literal_a, w.offset_a, w.cell_seek_weights, w.write_reset) = (true, literal, offset, true, true);
         let (literal, offset) = self.resolve(factors);
@@ -2441,15 +2527,47 @@ impl DieProgram {
 
     /// Starts one round of the cells over the input vector.
     fn cell_pass(&mut self) {
-        let t = self.end();
+        let t = self.after_cells();
         let w = self.slot(t);
         (w.read_reset, w.cell_clear_group) = (true, true);
+        self.drain_into(t);
+    }
+
+    /// Moves one pending block of totals from the chains into the wide memory at `t`.
+    fn drain_into(&mut self, t: usize) {
+        if self.drain_pending > 0 {
+            let vector = self.config.features.lane_bits > 0;
+            let w = self.slot(t);
+            (w.wide_write, w.wide_from_chain, w.chain_shift) = (true, true, true);
+            w.vector |= vector && !w.read_step;
+            self.drain_pending -= 1;
+        }
+    }
+
+    /// Moves whatever the chains still hold.
+    fn finish_drain(&mut self) {
+        while self.drain_pending > 0 {
+            let t = self.end();
+            self.drain_into(t);
+        }
     }
 
     /// Streams the next `length` activations through the cells, then applies their factors.
     fn cell_group(&mut self, src: u32, length: u32, first: Expr) {
         let offset = self.resolve(first).1;
         let c = self.config;
+        if c.features.feeds_cells() && length >= 2 {
+            // The delay lines run and flush the cells, so the next group can start at once.
+            let start = self.end();
+            for i in 0..length as usize {
+                let w = self.slot(start + i);
+                (w.read_step, w.reg_a, w.offset_a, w.cell_feed) = (true, src, offset, true);
+                w.cell_end = i + 1 == length as usize;
+                self.drain_into(start + i);
+            }
+            self.cells_settle = start + length as usize - 1 + self.feed_latency();
+            return;
+        }
         let x_delay = 1 + c.broadcast_stages as usize;
         let start = self.end();
         for i in 0..length as usize {
@@ -2467,7 +2585,15 @@ impl DieProgram {
     fn cell_drain(&mut self, rows: u32) {
         let lane_bits = self.config.features.lane_bits;
         let lanes = 1u32 << lane_bits;
-        let t = self.end();
+        if self.config.features.feeds_cells() {
+            // Load the chains now; the next pass moves them while it computes.
+            self.finish_drain();
+            let t = self.after_cells();
+            self.slot(t).chain_load = true;
+            self.drain_pending = rows.div_ceil(lanes);
+            return;
+        }
+        let t = self.after_cells();
         self.slot(t).chain_load = true;
         for i in 0..rows.div_ceil(lanes) as usize {
             let w = self.slot(t + 1 + i);

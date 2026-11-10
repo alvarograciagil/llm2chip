@@ -21,7 +21,7 @@ fn env(name: &str, default: u32) -> u32 {
 }
 
 fn kind(w: &ControlWord) -> &'static str {
-    if w.cell_run || w.cell_flush || w.chain_shift || w.chain_load || w.cell_clear_group {
+    if w.cell_run || w.cell_flush || w.cell_feed || w.chain_shift || w.chain_load || w.cell_clear_group {
         "celdas"
     } else if w.x_write {
         "bucles"
