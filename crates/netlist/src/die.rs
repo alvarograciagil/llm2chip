@@ -82,6 +82,11 @@ impl DieFeatures {
         self.widths[FIXED_A_FIELD] > 0
     }
 
+    /// Whether the shifters can load straight from the read ports.
+    pub fn shifts_now(&self) -> bool {
+        self.widths[SHIFT_NOW_FIELD] > 0
+    }
+
     /// Whether the die can add whole rows into the wide memory.
     pub fn combines(&self) -> bool {
         self.widths[WIDE_ACCUMULATE_FIELD] > 0
@@ -227,13 +232,20 @@ pub struct ControlWord {
     /// Non-zero: operand A comes from unit `index >> gather_shift`, so one stream
     /// collects a vector whose slices each unit computed.
     pub gather_shift: u32,
+    /// With `x_scaled`, unit `k` adds `(k >> x_split) · literal_a` and
+    /// `(k mod 2^x_split) · literal_dst`: several units per head, each on its own part.
+    pub x_split: u32,
+    /// The shifters load from the operands as they are read: A and left from A, B from B.
+    pub shift_now: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 70;
+pub const FIELD_COUNT: usize = 72;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
+const X_SPLIT_FIELD: usize = 70;
+const SHIFT_NOW_FIELD: usize = 71;
 const WIDE_ACCUMULATE_FIELD: usize = 55;
 const MAX_SCAN_FIELD: usize = 62;
 
@@ -333,6 +345,8 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("write_now", 1),
         ("x_scaled", 1),
         ("gather_shift", bits_for(c.index_bits)),
+        ("x_split", bits_for(c.features.cluster_bits + 1)),
+        ("shift_now", 1),
     ]
 }
 
@@ -414,6 +428,8 @@ impl ControlWord {
             self.write_now as u128,
             self.x_scaled as u128,
             self.gather_shift as u128,
+            self.x_split as u128,
+            self.shift_now as u128,
         ]
     }
 
@@ -467,8 +483,9 @@ fn bits_for(value: u32) -> u32 {
 /// Steps whose result can be written as it is computed: nothing reads it through the
 /// result register afterwards, and no other unit has to see it on the way.
 fn writes_at_once(s: &Alu) -> bool {
-    let later = s.load_shift_a || s.load_shift_b || s.load_shift_left || s.load_wide_shift || s.link_send || s.wide_write;
-    !s.vector && !later && !matches!(s.op, OP_FUNCTION | OP_LINK | OP_CELLS) && !s.broadcast_a && !s.broadcast_b
+    let late_shift = (s.load_shift_a || s.load_shift_b || s.load_shift_left) && !s.shift_now;
+    let later = late_shift || s.load_wide_shift || s.link_send || s.wide_write;
+    !later && !matches!(s.op, OP_FUNCTION | OP_LINK | OP_CELLS)
 }
 
 /// Whether `bits` holds at least `value`.
@@ -846,6 +863,21 @@ impl Gen {
         let unit_magnitude: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_magnitude"), a - 1)).collect();
         let group_magnitude: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_group_magnitude"), a - 1)).collect();
         let reduced: Vec<Vec<Vec<Bit>>> = (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("unit{k}_reduced{lane}"), wide_bits)).collect()).collect();
+        // What bit `j` of a unit's number adds to an index written with `x_scaled`.
+        let bit_strides: Vec<Vec<Bit>> = {
+            b.set_prefix("xsplit_");
+            let width = c.index_bits as usize;
+            let mut l = Logic { b: &mut b, next: 0 };
+            let unit_bits = c.features.cluster_bits as usize;
+            let options = 1usize << fields["x_split"].len();
+            let strides = (0..unit_bits).map(|j| {
+                let shifted = |literal: &[Bit], by: usize| -> Vec<Bit> { (0..width).map(|i| if i < by { Bit::Zero } else { literal.get(i - by).copied().unwrap_or(Bit::Zero) }).collect() };
+                let leaves: Vec<Vec<Bit>> = (0..options).map(|split| if split <= j { shifted(&fields["literal_a"], j - split) } else if split <= unit_bits { shifted(&fields["literal_dst"], j) } else { vec![Bit::Zero; width] }).collect();
+                l.select(&fields["x_split"], &leaves)
+            }).collect();
+            b.set_prefix("");
+            strides
+        };
         let global_running = running;
         let mut first_unit = None;
         let mut unit_ports = Vec::with_capacity(clusters);
@@ -909,11 +941,10 @@ impl Gen {
                     fields["literal_b"].clone()
                 } else {
                     let scaled = l.and(fields["x_scaled"][0], Bit::One);
-                    let stride: Vec<Bit> = fields["literal_a"].iter().take(width).map(|bit| l.and(*bit, scaled)).collect();
                     let mut total: Vec<Bit> = fields["literal_b"].clone();
-                    for shift in 0..u32::BITS as usize - (cluster as u32).leading_zeros() as usize {
-                        if cluster >> shift & 1 == 1 {
-                            let moved: Vec<Bit> = (0..width).map(|i| if i < shift { Bit::Zero } else { stride.get(i - shift).copied().unwrap_or(Bit::Zero) }).collect();
+                    for (bit, stride) in bit_strides.iter().enumerate() {
+                        if cluster >> bit & 1 == 1 {
+                            let moved: Vec<Bit> = stride.iter().map(|s| l.and(*s, scaled)).collect();
                             total = l.adder(&total, &moved, Bit::Zero).0;
                         }
                     }
@@ -1043,17 +1074,24 @@ impl Gen {
             // whole block can be read and written at once and a single element still can.
             let vector_flag = fields["vector"][0];
             let lane_results: Vec<Vec<Bit>> = (0..lanes).map(|lane| if lane == 0 { write_data.clone() } else { b.wire(&format!("lane{lane}_result"), a) }).collect();
+            // What each lane computes this cycle, for a block written as it is computed.
+            let lane_direct: Vec<Vec<Bit>> = (0..lanes).map(|lane| if lane == 0 { direct_result.clone() } else { b.wire(&format!("lane{lane}_direct"), a) }).collect();
             let (mut banks_a, mut banks_b) = (Vec::with_capacity(lanes), Vec::with_capacity(lanes));
             {
                 let bank_bits = addr_bits - lane_bits as u32;
                 let mut l = Logic { b: &mut b, next: 40_000 };
-                let written_together = l.and(write_en, vector_flag);
-                for (lane, result) in lane_results.iter().enumerate() {
+                let written_together = l.and(any_write, vector_flag);
+                for (lane, (late, direct)) in lane_results.iter().zip(&lane_direct).enumerate() {
                     let here = l.equals(&waddr[..lane_bits], lane as u32);
                     let alone = l.and(we, here);
                     let masked = l.and(written_together, scanned_lane[lane]);
                     let write = l.or(alone, masked);
-                    let data = if lane == 0 { wdata.clone() } else { l.mux_bus(written_together, &wdata, result) };
+                    let data = if lane == 0 {
+                        wdata.clone()
+                    } else {
+                        let result = l.mux_bus(write_now, late, direct);
+                        l.mux_bus(written_together, &wdata, &result)
+                    };
                     let (name_a, name_b) = if lanes == 1 { ("vectors_a".to_string(), "vectors_b".to_string()) } else { (format!("vectors_a{lane}"), format!("vectors_b{lane}")) };
                     let (read_this_a, read_this_b) = (l.b.wire(&format!("{name_a}_data"), a), l.b.wire(&format!("{name_b}_data"), a));
                     l.b.ram2p(&name_a, bank_bits, a, &[("raddr", raddr_a[lane_bits..].to_vec()), ("waddr", waddr[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data.clone()), ("rdata", read_this_a.clone())]);
@@ -1104,10 +1142,16 @@ impl Gen {
                 b.inst(&format!("{name}_reg"), &shift_reg, &[("d", d), ("q", q.clone())]);
                 q
             };
-            let low: Vec<Bit> = write_data[..SHIFT_REG_BITS as usize].to_vec();
-            let shift_a = held_shift(&mut b, "shift_a", load_shift_a, &low);
-            let shift_b = held_shift(&mut b, "shift_b", load_shift_b, &low);
-            let shift_left = held_shift(&mut b, "shift_left", load_shift_left, &low);
+            // Loaded from the result as it is written, or straight from the operands read.
+            let (from_a, from_b) = {
+                let now = ctl("shift_now", &mut b, &fields);
+                let mut l = Logic { b: &mut b, next: 46_000 };
+                let low = &write_data[..SHIFT_REG_BITS as usize];
+                (l.mux_bus(now, low, &read_a[..SHIFT_REG_BITS as usize]), l.mux_bus(now, low, &read_b[..SHIFT_REG_BITS as usize]))
+            };
+            let shift_a = held_shift(&mut b, "shift_a", load_shift_a, &from_a);
+            let shift_b = held_shift(&mut b, "shift_b", load_shift_b, &from_b);
+            let shift_left = held_shift(&mut b, "shift_left", load_shift_left, &from_a);
             let aligned_a = self.rounded_right(&mut b, "align_a", &read_a, &shift_a, a as usize);
             let aligned_b = self.rounded_right(&mut b, "align_b", &read_b, &shift_b, a as usize);
 
@@ -1372,7 +1416,7 @@ impl Gen {
             }
             let seen_wide: Vec<Bit> = if clusters > 1 { group_wide_magnitude[cluster].clone() } else { wide_magnitude.clone() };
             let wide_leading = leading_zeros(&mut b, "wide_lzc", &seen_wide, a);
-            let wide_shift = held_shift(&mut b, "wide_shift", load_wide_shift, &low);
+            let wide_shift = held_shift(&mut b, "wide_shift", load_wide_shift, &write_data[..SHIFT_REG_BITS as usize]);
             let wide_shifted = self.rounded_right(&mut b, "wide_right", &wide_read, &wide_shift, a as usize);
 
             b.group("Desplazamiento a la izquierda");
@@ -1506,6 +1550,9 @@ impl Gen {
                     }
                 }
                 let chosen = mux_tree(&mut b, &mux_a, &name("op"), leaves, &op);
+                for (from, to) in chosen.iter().zip(&lane_direct[lane]) {
+                    b.or_to(*from, Bit::Zero, *to);
+                }
                 let held = b.wire(&name("held"), a);
                 b.inst(&name("hold"), &mux_a, &[("s", vec![link_stall]), ("a", chosen), ("b", lane_results[lane].clone()), ("y", held.clone())]);
                 b.inst(&name("result_reg"), &reg_a, &[("d", held), ("q", lane_results[lane].clone())]);
@@ -2339,13 +2386,25 @@ impl DieProgram {
             let source = self.resolve(key.restricted(|v| !vars.contains(&v))).1;
             let mask = (1u64 << self.config.index_bits) - 1;
             let literals: Vec<u32> = assignments.iter().map(|values| vars.iter().zip(values).map(|(v, value)| key.coefficient(*v).wrapping_mul(*value)).fold(0u32, u32::wrapping_add)).collect();
-            let step = literals.get(1).map_or(0, |second| second.wrapping_sub(literals[0])) as u64 & mask;
-            let even = literals.iter().enumerate().all(|(unit, literal)| (*literal as u64 & mask) == (literals[0] as u64).wrapping_add(unit as u64 * step) & mask);
-            if even {
-                // Evenly spaced across the units: a single word writes them all.
+            // Unit `k` gets `first + (k >> split) · outer + (k mod 2^split) · inner`.
+            let spaced = |split: u32| -> Option<(u64, u64)> {
+                let at = |unit: usize| literals.get(unit).map(|l| (*l as u64).wrapping_sub(literals[0] as u64) & mask);
+                let outer = at(1 << split).unwrap_or(0);
+                let inner = if split == 0 { 0 } else { at(1).unwrap_or(0) };
+                let fits = literals.iter().enumerate().all(|(unit, literal)| {
+                    let expected = (literals[0] as u64).wrapping_add((unit as u64 >> split).wrapping_mul(outer)).wrapping_add((unit as u64 & ((1 << split) - 1)).wrapping_mul(inner));
+                    (*literal as u64 & mask) == expected & mask
+                });
+                fits.then_some((outer, inner))
+            };
+            let splits = if self.config.features.widths[X_SPLIT_FIELD] == 0 { 0 } else { self.config.features.cluster_bits };
+            if let Some((split, (outer, inner))) = (0..=splits).find_map(|split| spaced(split).map(|strides| (split, strides))) {
+                // Evenly spaced across the units, or across heads and their parts: a
+                // single word writes them all.
                 self.set_index(register, source, literals[0]);
                 let last = self.end() - 1;
-                (self.cycles[last].x_scaled, self.cycles[last].literal_a) = (true, step as u32);
+                let w = &mut self.cycles[last];
+                (w.x_scaled, w.literal_a, w.x_split, w.literal_dst) = (true, outer as u32, split, inner as u32);
             } else {
                 for (unit, literal) in literals.iter().enumerate() {
                     self.set_index(register, source, *literal);
@@ -2522,6 +2581,7 @@ impl DieProgram {
             (w.reg_a, w.literal_a, w.offset_a) = (step.a.0, step.a.1, step.offset_a);
             (w.reg_b, w.literal_b, w.offset_b) = (step.b.0, step.b.1, step.offset_b);
             (w.window_x, w.window_a, w.window_b) = (step.window_x, step.window_a, step.window_b);
+            (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
             w.from_cluster = step.from_cluster;
             w.magnitude_clear = step.magnitude_clear;
             w.max_clear = step.max_clear;
@@ -2533,11 +2593,13 @@ impl DieProgram {
         (w.reg_a, w.literal_a, w.offset_a) = (step.a.0, step.a.1, step.offset_a);
         (w.reg_b, w.literal_b, w.offset_b) = (step.b.0, step.literal.unwrap_or(step.b.1), step.offset_b);
         (w.window_x, w.window_a, w.window_b, w.window_dst) = (step.window_x, step.window_a, step.window_b, step.window_dst);
+        (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
         w.from_cluster = step.from_cluster;
         (w.op, w.shift, w.function) = (step.op, step.shift, step.function);
         (w.magnitude_scan, w.reduce_group, w.max_scan, w.max_out) = (step.magnitude_scan, step.reduce_group, step.max_scan, step.max_out);
         (w.accumulate, w.wide_scan) = (step.accumulate, step.wide_scan);
         (w.reg_dst, w.literal_dst, w.offset_dst, w.write_now) = (step.dst.0, step.dst.1, step.offset_dst, step.write);
+        (w.load_shift_a, w.load_shift_b, w.load_shift_left, w.shift_now) = (step.load_shift_a, step.load_shift_b, step.load_shift_left, step.shift_now);
     }
 
     /// Leaves the die idle for `cycles`, for example while a link settles.

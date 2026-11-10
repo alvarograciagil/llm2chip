@@ -4,7 +4,7 @@
 use crate::weights::{CellRow, Weights};
 use compiler::{Inst, Op, Program, RopeScaling};
 use netlist::block::{FN_GELU, FN_GELU_TANH, FN_TANH};
-use netlist::block::{encode_vector, Assembly, AttentionRegs, BlockOps, CellMatrix, DeltaRegs, Expr, KeyStore, Var, FN_EXP, FN_SIGMOID, FN_SOFTPLUS};
+use netlist::block::{chained_rows, encode_vector, Assembly, AttentionRegs, BlockOps, CellMatrix, DeltaRegs, Expr, KeyStore, MatvecPart, Var, FN_EXP, FN_SIGMOID, FN_SOFTPLUS};
 use netlist::{DieConfig, DieProgram, Microprogram};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -63,6 +63,13 @@ fn matrices_of(program: &Program, op: &Op) -> Vec<(String, usize, usize)> {
 }
 
 /// How many rows of `name` one use takes, when it does not take them all.
+fn program_dst(op: &Op) -> usize {
+    match op {
+        Op::Matvec { dst, .. } => *dst,
+        _ => unreachable!("solo los productos se encadenan"),
+    }
+}
+
 fn rows_per_use(program: &Program, op: &Op, name: &str, rows: usize) -> usize {
     match op {
         Op::Moe { src, intermediate, .. } | Op::SigmoidMoe { src, intermediate, .. } if name.contains("switch_mlp.") => {
@@ -138,16 +145,42 @@ struct CellEntry {
     group: usize,
     groups: usize,
     exponent: i64,
+    /// Its rows follow those of the entry before, in the same passes of the cells.
+    chained: bool,
+}
+
+/// Entries that share passes of the cells, with where each one's rows start and how many
+/// rows a pass covers: a single matrix used a block at a time passes over each block.
+fn cell_runs(plan: &[CellEntry], lanes: u32) -> Vec<(&[CellEntry], Vec<usize>, usize)> {
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for end in 1..=plan.len() {
+        if end == plan.len() || !plan[end].chained {
+            let parts = &plan[start..end];
+            if let [single] = parts {
+                runs.push((parts, vec![0], single.block));
+            } else {
+                let (starts, total) = chained_rows(&parts.iter().map(|e| e.rows as u32).collect::<Vec<_>>(), lanes);
+                runs.push((parts, starts.into_iter().map(|s| s as usize).collect(), total as usize));
+            }
+            start = end;
+        }
+    }
+    runs
 }
 
 /// The address of each matrix in the cells, and how deep their two memories must be.
-fn place_in_cells(plan: &[CellEntry], cells: usize, units: usize) -> (HashMap<String, CellMatrix>, u64, u64) {
+fn place_in_cells(plan: &[CellEntry], cells: usize, units: usize, lanes: u32) -> (HashMap<String, CellMatrix>, u64, u64) {
     let per_unit = (cells / units).max(1);
     let (mut weights, mut factors) = (0u64, 0u64);
     let mut places = HashMap::new();
-    for e in plan {
-        places.insert(e.name.clone(), CellMatrix { weights: weights as u32, factors: factors as u32, group: e.group as u32, groups: e.groups as u32 });
-        let rounds = (e.rows / e.block * e.block.div_ceil(per_unit)) as u64;
+    for (parts, _, block) in cell_runs(plan, lanes) {
+        let e = &parts[0];
+        for part in parts {
+            places.insert(part.name.clone(), CellMatrix { weights: weights as u32, factors: factors as u32, group: e.group as u32, groups: e.groups as u32 });
+        }
+        let blocks = if parts.len() == 1 { e.rows / e.block } else { 1 };
+        let rounds = (blocks * block.div_ceil(per_unit)) as u64;
         let groups = e.groups.div_ceil(units) as u64;
         weights += rounds * groups * e.group as u64;
         factors += rounds * groups;
@@ -213,6 +246,10 @@ pub struct Layout {
     in_cells: HashMap<String, CellMatrix>,
     lookup_tables: HashSet<String>,
     key_capacity: Option<u32>,
+    /// Products of one vector run together in the cells: the first matrix of each chain
+    /// gives every matrix of it, with its output buffer; the others do nothing alone.
+    chains: HashMap<String, Vec<(String, usize)>>,
+    followers: HashSet<String>,
 }
 
 impl Layout {
@@ -240,6 +277,16 @@ impl Layout {
         let mut setup = Assembly::new(&config);
         let mut matrices: HashMap<String, u32> = HashMap::new();
         let mut cell_plan: Vec<CellEntry> = Vec::new();
+        // Consecutive products of the same vector run in one pass of the cells.
+        let mut chains: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+        let mut leader_of: HashMap<String, String> = HashMap::new();
+        let mut uses: HashMap<String, usize> = HashMap::new();
+        for inst in all_ops(program) {
+            for (name, ..) in matrices_of(program, &inst.op) {
+                *uses.entry(name).or_default() += 1;
+            }
+        }
+        let mut previous: Option<&Op> = None;
         let mut lookup_tables: HashSet<String> = HashSet::new();
         let mut in_registers: HashSet<String> = HashSet::new();
         let mut small: HashMap<String, u32> = HashMap::new();
@@ -288,9 +335,25 @@ impl Layout {
                     let (group, groups) = if groups == 1 && units > 1 && cols.is_multiple_of(units) { (cols / units, units) } else { (group, groups) };
                     let exponent = matrix.exponent(cols);
                     setup.load_mantissas(reg, &[], exponent);
-                    cell_plan.push(CellEntry { block: rows_per_use(program, &inst.op, &name, rows), name, rows, cols, group, groups, exponent });
+                    let block = rows_per_use(program, &inst.op, &name, rows);
+                    let chained = match (previous, &inst.op, cell_plan.last()) {
+                        (Some(Op::Matvec { matrix: before, src: from, .. }), Op::Matvec { src, dst, .. }, Some(last)) => {
+                            last.name == *before && from == src && dst != src && uses[before] == 1 && uses[&name] == 1 && block == rows && last.block == last.rows && (last.cols, last.group, last.groups) == (cols, group, groups)
+                        }
+                        _ => false,
+                    };
+                    if chained {
+                        let leader = leader_of.get(&cell_plan.last().expect("anterior").name).cloned().expect("cadena");
+                        chains.get_mut(&leader).expect("cadena").push((name.clone(), program_dst(&inst.op)));
+                        leader_of.insert(name.clone(), leader);
+                    } else if let Op::Matvec { dst, .. } = &inst.op {
+                        chains.insert(name.clone(), vec![(name.clone(), *dst)]);
+                        leader_of.insert(name.clone(), name.clone());
+                    }
+                    cell_plan.push(CellEntry { block, name, rows, cols, group, groups, exponent, chained });
                 }
             }
+            previous = Some(&inst.op);
             if let Op::RmsNorm { block, .. } | Op::RmsGated { block, .. } = &inst.op {
                 if !block.is_power_of_two() {
                     inverse_len.entry(*block).or_insert_with(|| {
@@ -413,12 +476,14 @@ impl Layout {
                 return Err(format!("cada columna de claves tiene sitio para {capacity} tokens y el contexto es de {tokens}"));
             }
         }
-        let (in_cells, cell_weights, cell_factors) = place_in_cells(&cell_plan, config.cells as usize, 1 << config.features.cluster_bits);
+        let (in_cells, cell_weights, cell_factors) = place_in_cells(&cell_plan, config.cells as usize, 1 << config.features.cluster_bits, 1 << config.features.lane_bits);
+        chains.retain(|_, parts| parts.len() > 1);
+        let followers: HashSet<String> = chains.values().flat_map(|parts| parts[1..].iter().map(|(name, _)| name.clone())).collect();
         let reach = 1u64 << config.index_bits.min(config.cell.addr_bits);
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
         }
-        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, rope, rope_table, rope_half, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity })
+        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, rope, rope_table, rope_half, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -523,9 +588,11 @@ impl Layout {
     }
 
     /// The microcode of one operation on its own, to see what it costs.
-    pub fn op_microprogram(&self, program: &Program, inst: &Inst) -> Result<Microprogram, String> {
+    /// One operation on its own; `first` also loads the token's rotary table, as the
+    /// first operation of every token does.
+    pub fn op_microprogram(&self, program: &Program, inst: &Inst, first: bool) -> Result<Microprogram, String> {
         let mut asm = self.assembly();
-        self.run_list(&mut asm, program, std::slice::from_ref(inst), Expr::var(Var::Token), Expr::var(Var::Position), true)?;
+        self.run_list(&mut asm, program, std::slice::from_ref(inst), Expr::var(Var::Token), Expr::var(Var::Position), first)?;
         let mut code = DieProgram::new(self.config);
         code.assemble(&asm.steps);
         Ok(code.finish_program())
@@ -534,8 +601,8 @@ impl Layout {
     /// The cycles each operation of a token takes on this die, in program order.
     pub fn cycles_by_op(&self, program: &Program, token: u32, position: u32) -> Result<Vec<(String, u64)>, String> {
         let mut list = Vec::new();
-        for inst in &program.ops {
-            let code = self.op_microprogram(program, inst)?;
+        for (i, inst) in program.ops.iter().enumerate() {
+            let code = self.op_microprogram(program, inst, i == 0)?;
             let name = format!("{:?}", inst.op);
             list.push((name.split([' ', '{', '(']).next().unwrap_or("").to_string(), code.cycles(&self.config, 0, token, position)));
         }
@@ -563,7 +630,7 @@ impl Layout {
     }
 
     pub fn cell_depths(&self) -> (u64, u64) {
-        let (_, weights, factors) = place_in_cells(&self.cell_plan, self.config.cells as usize, 1 << self.config.features.cluster_bits);
+        let (_, weights, factors) = place_in_cells(&self.cell_plan, self.config.cells as usize, 1 << self.config.features.cluster_bits, 1 << self.config.features.lane_bits);
         (weights, factors)
     }
 
@@ -574,25 +641,32 @@ impl Layout {
         let per_unit = (self.config.cells as usize / units).max(1);
         let (unit, place) = (cell as usize / per_unit, cell as usize % per_unit);
         let (mut codes, mut factors) = (Vec::new(), Vec::new());
-        for e in &self.cell_plan {
-            let matrix = weights.matrix(&e.name)?;
+        for (parts, starts, block) in cell_runs(&self.cell_plan, 1 << self.config.features.lane_bits) {
+            let e = &parts[0];
             let groups = e.groups.div_ceil(units);
             let first = unit * groups;
-            for block in 0..e.rows / e.block {
-                for round in 0..e.block.div_ceil(per_unit) {
+            let blocks = if parts.len() == 1 { e.rows / e.block } else { 1 };
+            for b in 0..blocks {
+                for round in 0..block.div_ceil(per_unit) {
                     let row = round * per_unit + place;
-                    if row < e.block {
-                        let (w, f) = matrix.cell_row(block * e.block + row, e.cols, e.exponent, self.config.cell.activation_bits)?;
-                        let shared = |g: usize| if f.len() == e.groups { f.get(g).copied() } else { (g < e.groups).then(|| f[0]) };
-                        for g in first..first + groups {
-                            factors.push(shared(g).unwrap_or((0, 0)));
-                            for j in 0..e.group {
-                                codes.push(w.get(g * e.group + j).copied().unwrap_or(0));
+                    // The matrix of the run that has this row, if any: runs pad between them.
+                    let owner = parts.iter().zip(&starts).find(|(p, start)| row >= **start && row < *start + if parts.len() == 1 { p.block } else { p.rows });
+                    match owner {
+                        Some((p, start)) => {
+                            let matrix = weights.matrix(&p.name)?;
+                            let (w, f) = matrix.cell_row(b * p.block + row - start, p.cols, p.exponent, self.config.cell.activation_bits)?;
+                            let shared = |g: usize| if f.len() == p.groups { f.get(g).copied() } else { (g < p.groups).then(|| f[0]) };
+                            for g in first..first + groups {
+                                factors.push(shared(g).unwrap_or((0, 0)));
+                                for j in 0..p.group {
+                                    codes.push(w.get(g * p.group + j).copied().unwrap_or(0));
+                                }
                             }
                         }
-                    } else {
-                        codes.extend(std::iter::repeat_n(0, groups * e.group));
-                        factors.extend(std::iter::repeat_n((0, 0), groups));
+                        None => {
+                            codes.extend(std::iter::repeat_n(0, groups * e.group));
+                            factors.extend(std::iter::repeat_n((0, 0), groups));
+                        }
                     }
                 }
             }
@@ -607,7 +681,7 @@ impl Layout {
         let dropped: HashSet<u32> = self.weights.iter().filter(|(name, _)| !used.contains(*name)).map(|(_, reg)| *reg).collect();
         self.setup.initial.retain(|(register, _), _| !dropped.contains(register));
         self.cell_plan.retain(|e| used.contains(&e.name));
-        self.in_cells = place_in_cells(&self.cell_plan, self.config.cells as usize, 1 << self.config.features.cluster_bits).0;
+        self.in_cells = place_in_cells(&self.cell_plan, self.config.cells as usize, 1 << self.config.features.cluster_bits, 1 << self.config.features.lane_bits).0;
     }
 
     /// Runs one routine of the microprogram directly, at software speed.
@@ -755,7 +829,12 @@ impl Layout {
             }
             Op::Matvec { matrix, src, dst } => {
                 let (rows, cols) = (program.buffers[*dst] as u32, program.buffers[*src] as u32);
-                ops.matvec(matrix, self.weights[matrix], 0.into(), self.reg(*src), self.reg(*dst), rows, cols);
+                if let Some(chain) = self.chains.get(matrix) {
+                    let parts: Vec<MatvecPart> = chain.iter().map(|(name, dst)| MatvecPart { name: name.clone(), matrix: self.weights[name], dst: self.reg(*dst), rows: program.buffers[*dst] as u32 }).collect();
+                    ops.matvecs(&parts, self.reg(*src), cols);
+                } else if !self.followers.contains(matrix) {
+                    ops.matvec(matrix, self.weights[matrix], 0.into(), self.reg(*src), self.reg(*dst), rows, cols);
+                }
             }
             Op::Copy { src, dst } => ops.copy_part(self.reg(*src), zero, self.reg(*dst), zero, size(*dst)),
             Op::Add { a, b, dst } => self.pairwise(ops, false, (self.reg(*a), self.reg(*b)), self.reg(*dst), program.buffers[*dst] as u32),

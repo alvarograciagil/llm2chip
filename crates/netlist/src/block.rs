@@ -313,6 +313,13 @@ pub trait BlockOps: Sized {
     /// `name` lets an implementation stream it from the checkpoint instead.
     #[allow(clippy::too_many_arguments)]
     fn matvec(&mut self, name: &str, matrix: u32, first: Self::N, src: u32, dst: u32, rows: u32, cols: u32);
+    /// Several whole matrices applied to the same `src`, each into its own `dst`. A die
+    /// with cells runs them in one pass when they lie one after another there.
+    fn matvecs(&mut self, parts: &[MatvecPart], src: u32, cols: u32) {
+        for part in parts {
+            self.matvec(&part.name, part.matrix, 0.into(), src, part.dst, part.rows, cols);
+        }
+    }
     /// Copies one row of an embedding-like matrix into `dst`.
     fn copy_row(&mut self, name: &str, matrix: u32, row: Self::N, cols: u32, dst: u32);
     /// True only when an implementation can prove `reg[index]` is zero and may skip work.
@@ -490,6 +497,8 @@ pub struct Alu<N = u32> {
     pub load_shift_a: bool,
     pub load_shift_b: bool,
     pub load_shift_left: bool,
+    /// The shifters load straight from the operands read: A and left from A, B from B.
+    pub shift_now: bool,
     pub load_wide_shift: bool,
     pub magnitude_scan: bool,
     /// A count of leading zeros looks at the magnitude of `1 << reduce_group` neighbouring units.
@@ -538,6 +547,7 @@ impl<N: Default> Alu<N> {
             load_shift_a: false,
             load_shift_b: false,
             load_shift_left: false,
+            shift_now: false,
             load_wide_shift: false,
             magnitude_scan: false,
             reduce_group: 0,
@@ -592,6 +602,7 @@ impl Alu<Expr> {
             load_shift_a: self.load_shift_a,
             load_shift_b: self.load_shift_b,
             load_shift_left: self.load_shift_left,
+            shift_now: self.shift_now,
             load_wide_shift: self.load_wide_shift,
             magnitude_scan: self.magnitude_scan,
             reduce_group: self.reduce_group,
@@ -624,6 +635,7 @@ impl From<Alu<u32>> for Alu<Expr> {
         out.load_shift_a = s.load_shift_a;
         out.load_shift_b = s.load_shift_b;
         out.load_shift_left = s.load_shift_left;
+        out.shift_now = s.shift_now;
         out.load_wide_shift = s.load_wide_shift;
         out.magnitude_scan = s.magnitude_scan;
         out.reduce_group = s.reduce_group;
@@ -679,6 +691,28 @@ const MIN_STREAM: u32 = 4;
 pub const FACTOR_FRACTION: u32 = 4;
 
 /// Where the cells keep a matrix.
+/// One matrix of those `BlockOps::matvecs` applies together.
+#[derive(Clone, Debug)]
+pub struct MatvecPart {
+    pub name: String,
+    pub matrix: u32,
+    pub dst: u32,
+    pub rows: u32,
+}
+
+/// Where each of several matrices starts when their rows follow one another in the cells,
+/// each on a block boundary, and how many rows they take together.
+pub fn chained_rows(rows: &[u32], lanes: u32) -> (Vec<u32>, u32) {
+    let mut starts = Vec::with_capacity(rows.len());
+    let mut end = 0u32;
+    for r in rows {
+        let start = end.next_multiple_of(lanes);
+        starts.push(start);
+        end = start + r;
+    }
+    (starts, end)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellMatrix {
     pub weights: u32,
@@ -722,6 +756,8 @@ pub struct Assembly {
     head_stride: u32,
     /// Which of the A, B and left shifters are known to hold zero.
     shift_zero: [bool; 3],
+    /// The die loads its shifters from the read ports, as described in `load_shifts_now`.
+    shifts_now: bool,
     zero_ready: bool,
     /// With keys kept in columns, how many tokens each column has room for.
     pub key_capacity: Option<u32>,
@@ -759,13 +795,18 @@ impl Assembly {
 
     /// Narrows `sets` wide sums from `from` into the same places of `dst`.
     fn narrow_part(&mut self, a: u32, b: u32, dst: u32, from: Expr, sets: Expr) {
+        self.narrow_part_at(a, b, dst, from, from, sets);
+    }
+
+    /// Like `narrow_part`, with the sums taken from `wide` on in the wide memory.
+    fn narrow_part_at(&mut self, a: u32, b: u32, dst: u32, wide: Expr, from: Expr, sets: Expr) {
         let mut clear = alu(OP_MOV);
         clear.write = false;
         clear.wide_clear = true;
         self.push(clear);
-        self.elements(sets, &[from], true, |s, set, vector| {
+        self.elements(sets, &[wide, from], true, |s, set, vector| {
             let mut scan = alu(OP_MOV);
-            scan.a = (0, from + set);
+            scan.a = (0, wide + set);
             scan.write = false;
             scan.wide_scan = true;
             scan.vector = vector;
@@ -784,9 +825,9 @@ impl Assembly {
         load.write = false;
         load.load_wide_shift = true;
         self.push(load);
-        self.elements(sets, &[from], true, |s, set, vector| {
+        self.elements(sets, &[wide, from], true, |s, set, vector| {
             let mut out = alu(OP_WIDE_OUT);
-            out.a = (0, from + set);
+            out.a = (0, wide + set);
             out.dst = (dst, from + set);
             out.vector = vector;
             s.push(out);
@@ -810,7 +851,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_stride: 1, shift_zero: [false; 3], zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_stride: 1, shift_zero: [false; 3], shifts_now: c.features.shifts_now(), zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -919,6 +960,9 @@ impl Assembly {
     }
 
     fn load_shifts(&mut self, a: Option<At<Expr>>, b: Option<At<Expr>>, left: Option<At<Expr>>) {
+        if self.shifts_now {
+            return self.load_shifts_now([a, b, left]);
+        }
         // A loaded value passes through the A shifter, so A must be zero while the others
         // load. A register already known to be zero is not loaded again.
         let wanted = [a, b, left];
@@ -933,6 +977,50 @@ impl Assembly {
         for which in [2, 1, 0] {
             if needed[which] && !(wanted[which].is_none() && self.shift_zero[which]) {
                 self.load_shift(which, wanted[which].unwrap_or(zero));
+                self.shift_zero[which] = wanted[which].is_none();
+            }
+        }
+    }
+
+    /// Loads straight from the read ports: B beside A or left in the same step, and
+    /// nothing has to be cleared first.
+    fn load_shifts_now(&mut self, wanted: [Option<At<Expr>>; 3]) {
+        let needed: Vec<bool> = (0..3).map(|i| wanted[i].is_some() || !self.shift_zero[i]).collect();
+        if !needed.iter().any(|n| *n) {
+            return;
+        }
+        let mut places = [None; 3];
+        for which in 0..3 {
+            if needed[which] {
+                places[which] = Some(wanted[which].unwrap_or_else(|| self.zero_place()));
+            }
+        }
+        // Port A carries A and left, together when they load the same element.
+        let mut port_a: Vec<(At<Expr>, bool, bool)> = Vec::new();
+        match (places[0], places[2]) {
+            (Some(x), Some(y)) if x == y => port_a.push((x, true, true)),
+            (x, y) => {
+                port_a.extend(x.map(|x| (x, true, false)));
+                port_a.extend(y.map(|y| (y, false, true)));
+            }
+        }
+        let mut port_b = places[1];
+        for (place, load_a, load_left) in port_a {
+            let mut s = alu(OP_MOV);
+            (s.a, s.load_shift_a, s.load_shift_left) = (place, load_a, load_left);
+            if let Some(b) = port_b.take() {
+                (s.b, s.load_shift_b) = (b, true);
+            }
+            (s.write, s.shift_now) = (false, true);
+            self.push(s);
+        }
+        if let Some(b) = port_b {
+            let mut s = alu(OP_MOV);
+            (s.b, s.load_shift_b, s.write, s.shift_now) = (b, true, false, true);
+            self.push(s);
+        }
+        for which in 0..3 {
+            if needed[which] {
                 self.shift_zero[which] = wanted[which].is_none();
             }
         }
@@ -1755,6 +1843,39 @@ impl BlockOps for Assembly {
         let Some(place) = self.in_cells.get(name).copied() else {
             return self.dots(matrix, src, dst, rows.into(), cols.into(), |r, j| ((matrix, (r + first) * cols + j), (src, j)));
         };
+        self.cell_matvec(place, first, src, rows);
+        // Every unit holds every total; each narrows a slice and one stream collects them.
+        self.in_slabs(rows, &[dst], |s, start, count| s.narrow_part(matrix, src, dst, start, count.into()));
+    }
+
+    fn matvecs(&mut self, parts: &[MatvecPart], src: u32, cols: u32) {
+        let place = self.in_cells.get(&parts[0].name).copied();
+        let (Some(place), true) = (place, parts.len() > 1) else {
+            for part in parts {
+                self.matvec(&part.name, part.matrix, 0.into(), src, part.dst, part.rows, cols);
+            }
+            return;
+        };
+        // One pass of the cells computes every matrix; each is then narrowed on its own,
+        // with its own exponent, exactly as if it had been applied alone.
+        let rows: Vec<u32> = parts.iter().map(|p| p.rows).collect();
+        let (starts, total) = chained_rows(&rows, 1 << self.lane_bits);
+        self.cell_matvec(place, 0.into(), src, total);
+        for (part, start) in parts.iter().zip(starts) {
+            let (matrix, dst) = (part.matrix, part.dst);
+            self.in_slabs(part.rows, &[dst], |s, from, count| s.narrow_part_at(matrix, src, dst, from + Expr::from(start), from, count.into()));
+        }
+    }
+
+    fn copy_row(&mut self, _name: &str, matrix: u32, row: Expr, cols: u32, dst: u32) {
+        self.copy_part(matrix, row * cols, dst, 0.into(), cols.into());
+    }
+}
+
+impl Assembly {
+    /// The cells' part of a matrix-vector product: `rows` sums from `first`, in the wide
+    /// memory of every unit.
+    fn cell_matvec(&mut self, place: CellMatrix, first: Expr, src: u32, rows: u32) {
         // A matrix used a block at a time keeps each block's rows from cell 0 on. Each
         // vector unit has its own cells, and takes its own slice of the columns.
         let units = self.clusters;
@@ -1776,12 +1897,6 @@ impl BlockOps for Assembly {
         if units > 1 {
             self.steps.push(Step::WideReduce { rows: rows.into(), group: self.clusters.trailing_zeros() });
         }
-        // Every unit holds every total; each narrows a slice and one stream collects them.
-        self.in_slabs(rows, &[dst], |s, start, count| s.narrow_part(matrix, src, dst, start, count.into()));
-    }
-
-    fn copy_row(&mut self, _name: &str, matrix: u32, row: Expr, cols: u32, dst: u32) {
-        self.copy_part(matrix, row * cols, dst, 0.into(), cols.into());
     }
 }
 
