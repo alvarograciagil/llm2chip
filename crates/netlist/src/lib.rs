@@ -148,6 +148,19 @@ impl Design {
         walk(self, &self.top, 1, &mut out);
         out
     }
+
+    /// Logic in NAND2 equivalents, memories left out: the usual weights of each gate.
+    pub fn gate_equivalents(&self) -> f64 {
+        let weight = |name: &str| match name {
+            "and" | "or" => 1.33,
+            "not" => 0.67,
+            "xor" => 2.0,
+            "mux" => 2.33,
+            "dff" => 4.5,
+            _ => 0.0,
+        };
+        self.flat_counts().iter().map(|(name, count)| weight(name) * *count as f64).sum()
+    }
 }
 
 /// Builds one module. Generators pass bit vectors around, least significant first.

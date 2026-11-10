@@ -411,7 +411,7 @@ impl Layout {
                     // and move on to the next scale and bias where a whole group ends.
                     let share = cols / units;
                     let part = gcd(group, share);
-                    let cut = config.features.feeds_cells() && units > 1 && block == rows && !groups.is_multiple_of(units) && cols.is_multiple_of(units) && group.is_power_of_two() && group <= 128 && (2..group).contains(&part);
+                    let cut = config.features.feeds_cells() && units > 1 && block == rows && !groups.is_multiple_of(units) && cols.is_multiple_of(units) && group.is_power_of_two() && group <= 128 && (2..group).contains(&part) && part >= config.features.factor_steps as usize;
                     let (group, groups, quant) = if cut { (part, cols / part, group) } else { (group, groups, group) };
                     let exponent = matrix.exponent(cols);
                     setup.load_mantissas(reg, &[], exponent);
@@ -563,6 +563,11 @@ impl Layout {
         let (units, lanes) = (1u32 << config.features.cluster_bits, 1u32 << config.features.lane_bits);
         if cells && config.cells / units < lanes {
             return Err(format!("cada unidad necesita al menos {lanes} celdas, una por carril, y tiene {}", config.cells / units));
+        }
+        // A cell applies one group's factors while it adds up the next, so no group is shorter.
+        let steps = config.features.factor_steps as usize;
+        if let Some(short) = cell_plan.iter().find(|e| e.group < steps) {
+            return Err(format!("{} tiene grupos de {} columnas y cada celda tarda {steps} ciclos en aplicar sus factores", short.name, short.group));
         }
         let (in_cells, cell_weights, cell_factors) = place_in_cells(&cell_plan, config.cells as usize, 1 << config.features.cluster_bits, 1 << config.features.lane_bits);
         chains.retain(|_, parts| parts.len() > 1);

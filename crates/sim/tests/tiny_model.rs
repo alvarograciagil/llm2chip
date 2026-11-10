@@ -434,13 +434,16 @@ fn quantisation_groups_cut_among_the_units_keep_the_bits() {
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }
-    let c = DieConfig { cells: 16, features: cell_die_config().features.with_lane_bits(2).with_cluster_bits(2), ..cell_die_config() };
-    let mut run = gates_in_cells(&program, &dir, c, &tokens);
-    for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer)) {
-        let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
-        for index in 0..*length as u32 {
-            let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
-            assert_eq!(mantissa, vm.mantissa(fast, index), "búfer {buffer}, elemento {index}");
+    // The factors applied at once, over two cycles in parts of groups, and over four.
+    for (lane_bits, cluster_bits, steps) in [(2, 2, 1), (2, 2, 2), (1, 0, 4)] {
+        let c = DieConfig { cells: 16, features: cell_die_config().features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits).with_factor_steps(steps), ..cell_die_config() };
+        let mut run = gates_in_cells(&program, &dir, c, &tokens);
+        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer)) {
+            let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
+            for index in 0..*length as u32 {
+                let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
+                assert_eq!(mantissa, vm.mantissa(fast, index), "{steps} ciclos por factor, búfer {buffer}, elemento {index}");
+            }
         }
     }
     std::fs::remove_dir_all(dir).unwrap();

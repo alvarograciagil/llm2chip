@@ -6,6 +6,7 @@ mod exact;
 mod exec;
 pub mod image;
 pub mod lower;
+pub mod sizing;
 pub mod tokenizer;
 mod requant;
 mod vm;

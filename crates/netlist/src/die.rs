@@ -45,17 +45,26 @@ pub struct DieFeatures {
     pub cluster_bits: u32,
     /// log2 of the tokens each column of the key store holds; zero when keys are not in columns.
     pub key_shift: u32,
+    /// Cycles a cell takes to apply a group's scale and bias, a few bits of each a cycle,
+    /// while it adds up the next group: one is a whole multiplier for each, all at once.
+    pub factor_steps: u32,
 }
 
 impl Default for DieFeatures {
     fn default() -> Self {
-        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0 }
+        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1 }
     }
 }
 
 impl DieFeatures {
     pub fn is_general(&self) -> bool {
         self.ops == u32::MAX
+    }
+
+    /// The same die with cells that take `steps` cycles to apply a group's factors.
+    pub fn with_factor_steps(mut self, steps: u32) -> Self {
+        self.factor_steps = steps.max(1);
+        self
     }
 
     /// The same die with room for `1 << key_shift` tokens in each column of keys.
@@ -112,7 +121,7 @@ impl DieFeatures {
     /// Exactly what this microprogram needs.
     pub fn of(code: &Microprogram) -> Self {
         // Additions are also how the comparator and the sequencer's own results are made.
-        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0 };
+        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1 };
         let mut highest_x = 0;
         for word in &code.words {
             features.ops |= 1 << word.op;
@@ -136,7 +145,7 @@ impl DieFeatures {
     pub fn union(self, other: Self) -> Self {
         let mut widths = self.widths;
         widths.iter_mut().zip(other.widths).for_each(|(a, b)| *a = (*a).max(b));
-        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift) }
+        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps) }
     }
 
     fn uses(&self, op: u32) -> bool {
@@ -654,6 +663,7 @@ impl Gen {
         let clear_group = b.input("clear_group", 1)[0];
         let flush = b.input("flush", 1)[0];
         let advance = b.input("advance", 1)[0];
+        let serial = (c.features.factor_steps > 1).then(|| (b.input("factor_first", 1)[0], b.input("factor_done", 1)[0]));
         let seek_weights = b.input("seek_weights", 1);
         let seek_factors = b.input("seek_factors", 1)[0];
         let seek_addr = b.input("seek_addr", cfg.addr_bits);
@@ -717,7 +727,7 @@ impl Gen {
             b.and_to(load_en, load_scale, write_scale);
             FactorLoad { write_scale, load_data, load_addr }
         });
-        self.finish_scaled_cell(b, c, &scale_mul, &wide_adder, &reg_wide, &mux_wide, SumParts { group_sum, x_sum, load: factor_load, clear, flush, advance, total, clear_group, seek_factors, seek_addr })
+        self.finish_scaled_cell(b, c, &scale_mul, &wide_adder, &reg_wide, &mux_wide, SumParts { group_sum, x_sum, load: factor_load, clear, flush, advance, serial, total, clear_group, seek_factors, seek_addr })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -753,10 +763,25 @@ impl Gen {
             }
         }
 
-        let sum_scaled = b.wire("sum_scaled", acc + s);
-        b.inst("scale_times_sum", scale_mul, &[("weight", scale), ("x", p.group_sum.clone()), ("product", sum_scaled.clone())]);
-        let x_biased = b.wire("x_biased", acc + s);
-        b.inst("bias_times_x", scale_mul, &[("weight", bias), ("x", p.x_sum.clone()), ("product", x_biased.clone())]);
+        let (sum_scaled, x_biased, update) = match p.serial {
+            None => {
+                let sum_scaled = b.wire("sum_scaled", acc + s);
+                b.inst("scale_times_sum", scale_mul, &[("weight", scale), ("x", p.group_sum.clone()), ("product", sum_scaled.clone())]);
+                let x_biased = b.wire("x_biased", acc + s);
+                b.inst("bias_times_x", scale_mul, &[("weight", bias), ("x", p.x_sum.clone()), ("product", x_biased.clone())]);
+                (sum_scaled, x_biased, p.flush)
+            }
+            Some((first, done)) => {
+                // The flush keeps the group's sums and factors; then each cycle takes the next
+                // few bits of each factor, highest first, while the cell adds up the next group.
+                let steps = c.features.factor_steps;
+                let chunk = s.div_ceil(steps);
+                let chunk_mul = self.multiplier(chunk + 1, acc, 1);
+                let sum_scaled = self.serial_product(&mut b, "scale", (&scale, &p.group_sum), (p.flush, first), (steps, chunk), &chunk_mul);
+                let x_biased = self.serial_product(&mut b, "bias", (&bias, &p.x_sum), (p.flush, first), (steps, chunk), &chunk_mul);
+                (sum_scaled, x_biased, done)
+            }
+        };
 
         b.group("Total de la fila");
         let extend = |v: &[Bit]| -> Vec<Bit> {
@@ -770,7 +795,7 @@ impl Gen {
         let unused = b.wire("total_carry", 1);
         b.inst("total_adder", wide_adder, &[("a", p.total.clone()), ("b", terms), ("cin", vec![Bit::Zero]), ("sum", next.clone()), ("cout", unused)]);
         let chosen = b.wire("total_chosen", wide);
-        b.inst("total_select", mux_wide, &[("s", vec![p.flush]), ("a", p.total.clone()), ("b", next), ("y", chosen.clone())]);
+        b.inst("total_select", mux_wide, &[("s", vec![update]), ("a", p.total.clone()), ("b", next), ("y", chosen.clone())]);
         let not_clear = b.wire("total_keep", 1)[0];
         let total_clear = bus_or(&mut b, p.clear, p.clear_group, "total_clear");
         b.not_to(total_clear, not_clear);
@@ -780,6 +805,43 @@ impl Gen {
         }
         b.inst("total_reg", reg_wide, &[("d", d), ("q", p.total)]);
         self.add(b.finish())
+    }
+
+    /// `factor · value`, a few bits of the factor a cycle from the top, its sign with the
+    /// first: kept at the flush, done `steps` cycles after it.
+    #[allow(clippy::too_many_arguments)]
+    fn serial_product(&mut self, b: &mut Builder, name: &str, (factor, value): (&[Bit], &[Bit]), (flush, first): (Bit, Bit), (steps, chunk): (u32, u32), chunk_mul: &str) -> Vec<Bit> {
+        let mut l = Logic { b, next: 0 };
+        l.b.set_prefix(&format!("{name}_"));
+        let (padded, width) = ((steps * chunk) as usize, value.len());
+        let top = *factor.last().expect("factor vacío");
+        let wide_factor: Vec<Bit> = (0..padded).map(|i| factor.get(i).copied().unwrap_or(top)).collect();
+        // The factor shifts up a chunk a cycle; the value holds still.
+        let held_factor = l.fresh_bus(padded);
+        let shifted: Vec<Bit> = (0..padded).map(|i| if i < chunk as usize { Bit::Zero } else { held_factor[i - chunk as usize] }).collect();
+        let next_factor = l.mux_bus(flush, &shifted, &wide_factor);
+        l.connect_flops(&next_factor, &held_factor);
+        let held_value = l.fresh_bus(width);
+        let kept = l.mux_bus(flush, &held_value, value);
+        l.connect_flops(&kept, &held_value);
+        // The highest chunk carries the sign; the others are positive.
+        let piece: Vec<Bit> = held_factor[padded - chunk as usize..].to_vec();
+        let sign = l.and(first, *piece.last().expect("trozo vacío"));
+        let signed_piece: Vec<Bit> = piece.iter().copied().chain(std::iter::once(sign)).collect();
+        let product = l.fresh_bus(chunk as usize + 1 + width);
+        l.b.inst("chunk_times_value", chunk_mul, &[("weight", signed_piece), ("x", held_value.clone()), ("product", product.clone())]);
+        let total_width = padded + width;
+        let sum = l.fresh_bus(total_width);
+        let up: Vec<Bit> = (0..total_width).map(|i| if i < chunk as usize { Bit::Zero } else { sum[i - chunk as usize] }).collect();
+        let restart = l.not(first);
+        let before: Vec<Bit> = up.iter().map(|bit| l.and(*bit, restart)).collect();
+        let product_sign = *product.last().expect("producto vacío");
+        let extended: Vec<Bit> = (0..total_width).map(|i| product.get(i).copied().unwrap_or(product_sign)).collect();
+        let next = l.adder(&before, &extended, Bit::Zero).0;
+        l.connect_flops(&next, &sum);
+        l.b.set_prefix("");
+        // The last cycle's sum, before it is registered, is the whole product.
+        next
     }
 
     /// What the wide memory holds plus a product, or the total over the units, registered for its write.
@@ -975,6 +1037,21 @@ impl Gen {
         };
         let chain_load = ctl("chain_load", &mut b, &fields);
         let chain_shift = ctl("chain_shift", &mut b, &fields);
+        // Cells that apply their factors over several cycles hear when each flush started.
+        let factor_steps = c.features.factor_steps as usize;
+        let factor_pins: Vec<(&str, Vec<Bit>)> = if factor_steps > 1 {
+            let mut bit = cell_flush;
+            let mut late = Vec::with_capacity(factor_steps);
+            for stage in 0..factor_steps {
+                let q = b.wire(&format!("factor_late{stage}"), 1)[0];
+                b.dff_to(bit, q);
+                late.push(q);
+                bit = q;
+            }
+            vec![("factor_first", vec![late[0]]), ("factor_done", vec![late[factor_steps - 1]])]
+        } else {
+            Vec::new()
+        };
 
         // Every vector unit runs the same words. Each has its own registers and index
         // registers, so inside a loop over heads each one works on a different head.
@@ -1959,6 +2036,7 @@ impl Gen {
                 b.group("Celdas");
                 let total = b.wire(&format!("cell{i}_total"), wide);
                 let mut cell_pins = vec![("clear", vec![cell_clear]), ("clear_group", vec![cell_clear_group]), ("flush", vec![cell_flush]), ("advance", vec![advance]), ("run", vec![cell_run]), ("x", x_bus.clone()), ("total", total.clone()), ("seek_weights", vec![cell_seek_weights]), ("seek_factors", vec![cell_seek_factors]), ("seek_addr", cell_seek_addr.clone())];
+                cell_pins.extend(factor_pins.iter().cloned());
                 if let Some((load_cell, load_scale, cell_addr)) = &cell_ports {
                     cell_pins.extend([("load_en", vec![load_cell[i]]), ("load_scale", vec![*load_scale]), ("load_addr", cell_addr.clone()), ("load_data", cell_data[..c.scale_bits.max(cfg.weight_bits) as usize].to_vec())]);
                 }
@@ -1999,6 +2077,9 @@ struct SumParts {
     flush: Bit,
     /// Moves on to the next scale and bias: with each flush, unless a group is in parts.
     advance: Bit,
+    /// With factors applied over several cycles: the first of them, and the last, when
+    /// the products are complete and go into the total.
+    serial: Option<(Bit, Bit)>,
     total: Vec<Bit>,
     clear_group: Bit,
     seek_factors: Bit,
@@ -2780,7 +2861,15 @@ impl DieProgram {
 
     /// Cycles from feeding the last activation of a group until the totals have it.
     fn feed_latency(&self) -> usize {
-        1 + self.config.broadcast_stages as usize + self.config.cell.latency() as usize + 1
+        1 + self.config.broadcast_stages as usize + self.config.cell.latency() as usize + 1 + self.factor_wait()
+    }
+
+    /// Cycles the last group's factors take after its flush, beyond a whole multiplier's.
+    fn factor_wait(&self) -> usize {
+        match self.config.features.factor_steps {
+            1 => 0,
+            steps => steps as usize,
+        }
     }
 
     /// The first free cycle once the cells have taken everything fed to them.
@@ -2858,7 +2947,8 @@ impl DieProgram {
         }
         let settled = start + length as usize + x_delay + c.cell.latency() as usize + 1;
         self.slot(settled).cell_flush = true;
-        self.slot(settled + 1);
+        let wait = self.factor_wait();
+        self.slot(settled + 1 + wait);
     }
 
     /// Moves the totals of the first `rows` cells into the wide memory, a block at a time.
