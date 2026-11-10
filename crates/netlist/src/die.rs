@@ -224,10 +224,13 @@ pub struct ControlWord {
     pub write_now: bool,
     /// Each unit also adds its own number times `literal_a` to an index it writes.
     pub x_scaled: bool,
+    /// Non-zero: operand A comes from unit `index >> gather_shift`, so one stream
+    /// collects a vector whose slices each unit computed.
+    pub gather_shift: u32,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 69;
+pub const FIELD_COUNT: usize = 70;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
@@ -329,6 +332,7 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("reduce_group", bits_for(c.features.cluster_bits + 1)),
         ("write_now", 1),
         ("x_scaled", 1),
+        ("gather_shift", bits_for(c.index_bits)),
     ]
 }
 
@@ -409,6 +413,7 @@ impl ControlWord {
             self.reduce_group as u128,
             self.write_now as u128,
             self.x_scaled as u128,
+            self.gather_shift as u128,
         ]
     }
 
@@ -806,9 +811,24 @@ impl Gen {
         let lane_bits = c.features.lane_bits as usize;
         let lanes = 1usize << lane_bits;
         let cluster_banks: Vec<Vec<Vec<Bit>>> = (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("cluster{k}_bank{lane}"), a)).collect()).collect();
+        let gather_index = b.wire("gather_index", c.index_bits);
         let (foreign, shared_banks): (Bit, Vec<Vec<Bit>>) = {
             let mut l = Logic { b: &mut b, next: 50_000 };
-            let picked: Vec<Bit> = (0..clusters as u32).map(|k| l.equals(&fields["from_cluster"], k + 1)).collect();
+            // In a gathering stream the block being read says which unit has it.
+            let gathering = l.any(&fields["gather_shift"]);
+            let mut owner = gather_index.clone();
+            for (level, select) in fields["gather_shift"].iter().enumerate() {
+                let step = 1usize << level;
+                let moved: Vec<Bit> = (0..owner.len()).map(|i| owner.get(i + step).copied().unwrap_or(Bit::Zero)).collect();
+                owner = l.mux_bus(*select, &owner, &moved);
+            }
+            let unit_bits = c.features.cluster_bits as usize;
+            let picked: Vec<Bit> = (0..clusters as u32).map(|k| {
+                let named = l.equals(&fields["from_cluster"], k + 1);
+                let owns = l.equals(&owner[..unit_bits.min(owner.len())], k);
+                let owns = l.and(owns, gathering);
+                l.or(named, owns)
+            }).collect();
             let foreign = l.any(&picked);
             let banks = (0..lanes).map(|lane| (0..a as usize).map(|bit| {
                 let terms: Vec<Bit> = picked.iter().zip(&cluster_banks).map(|(on, banks)| l.and(*on, banks[lane][bit])).collect();
@@ -929,6 +949,11 @@ impl Gen {
             // --- Vector registers ---
             b.group("Banco de vectores");
             let read_index = index_counter(self, &mut b, ("read_index", 46_000), c.index_bits, (read_reset, read_step), fields["vector"][0], lane_shift);
+            if cluster == 0 {
+                // The data arriving now was read with the index of the cycle before.
+                let mut l = Logic { b: &mut b, next: 56_000 };
+                l.connect_flops(&read_index, &gather_index);
+            }
             let chain_write = b.wire("chain_write", 1)[0];
             let counted_write = bus_or(&mut b, wide_from_chain, fields["wide_accumulate"][0], "counted_wide_write");
             b.and_to(wide_write, counted_write, chain_write);
@@ -1150,8 +1175,9 @@ impl Gen {
                 b.and_to(keep_magnitude, merged, magnitude_d[i]);
             }
             b.inst("magnitude_reg", &reg_a, &[("d", magnitude_d), ("q", magnitude.clone())]);
+            // A unit sitting out a loop does not count in its group.
             for (from, to) in magnitude[..top].iter().zip(&unit_magnitude[cluster]) {
-                b.or_to(*from, Bit::Zero, *to);
+                b.and_to(*from, enabled, *to);
             }
             let seen_magnitude: Vec<Bit> = if clusters > 1 { group_magnitude[cluster].clone() } else { magnitude[..top].to_vec() };
             let leading = leading_zeros(&mut b, "lzc", &seen_magnitude, a);
@@ -2133,7 +2159,7 @@ impl DieProgram {
         let n = if by_blocks { count.constant() as usize } else { usize::MAX / 2 };
 
         let word = |k: usize| {
-            let mut w = ControlWord { vector: step.vector, window_x, from_cluster: step.from_cluster, ..Default::default() };
+            let mut w = ControlWord { vector: step.vector, window_x, from_cluster: step.from_cluster, gather_shift: step.gather_shift, ..Default::default() };
             if k < n {
                 w.read_step = true;
                 (w.reg_a, w.literal_a, w.offset_a, w.window_a, w.fixed_a) = (step.a.0, literal_a, offset_a, step.window_a, fixed_a);

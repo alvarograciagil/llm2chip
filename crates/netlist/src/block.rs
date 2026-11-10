@@ -378,6 +378,14 @@ pub trait BlockOps: Sized {
         self.each_head(outer, inner, body);
     }
 
+    /// Runs `body` on slices of a vector of `len` elements, one per unit where the die has
+    /// several, and collects `outputs` whole in every unit afterwards. The body gets the
+    /// start of its slice and its length.
+    fn in_slabs(&mut self, len: u32, outputs: &[u32], mut body: impl FnMut(&mut Self, Self::N, u32)) {
+        let _ = outputs;
+        body(self, 0.into(), len);
+    }
+
     /// Like `gather`, for parts that `each_head` left on the units that made them.
     fn gather_heads(&mut self, parts: &[(u32, u32)], dst: u32) {
         self.gather(parts, dst);
@@ -488,6 +496,8 @@ pub struct Alu<N = u32> {
     pub max_out: bool,
     /// The destination index counts in whole columns of the key store.
     pub write_spread: bool,
+    /// Operand A comes from the unit that owns each slice of `1 << gather_shift` elements.
+    pub gather_shift: u32,
     pub magnitude_clear: bool,
     pub accumulate: bool,
     pub accumulator_clear: bool,
@@ -530,6 +540,7 @@ impl<N: Default> Alu<N> {
             max_clear: false,
             max_out: false,
             write_spread: false,
+            gather_shift: 0,
             magnitude_clear: false,
             accumulate: false,
             accumulator_clear: false,
@@ -583,6 +594,7 @@ impl Alu<Expr> {
             max_clear: self.max_clear,
             max_out: self.max_out,
             write_spread: self.write_spread,
+            gather_shift: self.gather_shift,
             magnitude_clear: self.magnitude_clear,
             accumulate: self.accumulate,
             accumulator_clear: self.accumulator_clear,
@@ -610,7 +622,7 @@ impl From<Alu<u32>> for Alu<Expr> {
         out.load_wide_shift = s.load_wide_shift;
         out.magnitude_scan = s.magnitude_scan;
         out.reduce_group = s.reduce_group;
-        (out.max_scan, out.max_clear, out.max_out, out.write_spread) = (s.max_scan, s.max_clear, s.max_out, s.write_spread);
+        (out.max_scan, out.max_clear, out.max_out, out.write_spread, out.gather_shift) = (s.max_scan, s.max_clear, s.max_out, s.write_spread, s.gather_shift);
         out.magnitude_clear = s.magnitude_clear;
         out.accumulate = s.accumulate;
         out.accumulator_clear = s.accumulator_clear;
@@ -697,6 +709,8 @@ pub struct Assembly {
     key_shift: u32,
     /// Inside a loop over heads split among units: this unit's part and how many there are.
     split: Option<(Expr, u32)>,
+    /// Inside slices of one vector: the units counted together when normalising.
+    slab_group: u32,
     /// How many neighbouring units the last loop over heads gave each head.
     head_stride: u32,
     /// Which of the A, B and left shifters are known to hold zero.
@@ -721,7 +735,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_stride: 1, shift_zero: [false; 3], zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, head_stride: 1, shift_zero: [false; 3], zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1105,7 +1119,7 @@ impl BlockOps for Assembly {
         let mut count = alu(OP_LZC);
         count.dst = self.sc(0);
         // Units sharing a head look at all their parts, so they all shift alike.
-        count.reduce_group = self.split.map_or(0, |(_, parts)| parts.trailing_zeros());
+        count.reduce_group = self.split.map_or(0, |(_, parts)| parts.trailing_zeros()).max(self.slab_group);
         self.push(count);
         self.load_shifts(None, None, Some(self.sc(0)));
         self.elements(len, &[], true, |s, i, vector| {
@@ -1430,6 +1444,37 @@ impl BlockOps for Assembly {
         self.outer_product(r.key_rows, r.delta, r.update, rows, value);
         self.add(r.state, r.update, r.next, cells.into());
         self.copy_part(r.next, 0.into(), r.state, 0.into(), cells.into());
+    }
+
+    fn in_slabs(&mut self, len: u32, outputs: &[u32], mut body: impl FnMut(&mut Self, Expr, u32)) {
+        // Slices of a power of two, whole blocks, that divide the vector among the units.
+        let lanes = 1u32 << self.lane_bits;
+        let slab = (1..=len.max(1).ilog2()).map(|bits| 1u32 << bits).find(|slab| *slab >= lanes && len.is_multiple_of(*slab) && len / slab <= self.clusters);
+        let Some(slab) = slab.filter(|slab| self.clusters > 1 && self.streams && len / slab > 1) else {
+            return body(self, 0.into(), len);
+        };
+        let units = len / slab;
+        let start = Var::Loop(self.loops);
+        self.loops += 1;
+        self.zero_place();
+        self.forget_shifts();
+        let before = std::mem::take(&mut self.steps);
+        let group = units.next_power_of_two().trailing_zeros();
+        let outer_group = std::mem::replace(&mut self.slab_group, group);
+        // The unit number times the slice length, so the start is known to sit on a block.
+        body(self, Expr::var(start) * slab, slab);
+        self.slab_group = outer_group;
+        let inside = std::mem::replace(&mut self.steps, before);
+        self.forget_shifts();
+        self.steps.push(Step::Clustered { vars: vec![start], assignments: (0..units).map(|unit| vec![unit]).collect(), body: inside });
+        self.clear_shifts();
+        for output in outputs {
+            self.elements(len.into(), &[], true, |s, i, vector| {
+                let mut step = alu(OP_MOV);
+                (step.a, step.dst, step.vector, step.gather_shift) = ((*output, i), (*output, i), vector, slab.trailing_zeros());
+                s.push(step);
+            });
+        }
     }
 
     fn each_head_split(&mut self, outer: u32, inner: u32, mut body: impl FnMut(&mut Self, Expr, Expr)) {

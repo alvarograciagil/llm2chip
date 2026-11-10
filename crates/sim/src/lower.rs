@@ -699,10 +699,31 @@ impl Layout {
         ops.gather_heads(&parts, dst);
     }
 
-    fn silu<O: BlockOps>(&self, ops: &mut O, src: u32, dst: u32, len: O::N) {
-        let t = self.temporaries[39];
-        ops.function(FN_SIGMOID, src, t, len);
-        ops.multiply(t, src, dst, len);
+    /// `a + b` or `a · b`, a slice per unit where the die has several.
+    fn pairwise<O: BlockOps>(&self, ops: &mut O, product: bool, (a, b): (u32, u32), dst: u32, len: u32) {
+        let t = &self.temporaries;
+        ops.in_slabs(len, &[dst], |ops, start, count| {
+            let (x, y, z) = (t[58], t[59], t[60]);
+            ops.copy_part(a, start, x, 0.into(), count.into());
+            ops.copy_part(b, start, y, 0.into(), count.into());
+            if product {
+                ops.multiply(x, y, z, count.into());
+            } else {
+                ops.add(x, y, z, count.into());
+            }
+            ops.copy_part(z, 0.into(), dst, start, count.into());
+        });
+    }
+
+    fn silu<O: BlockOps>(&self, ops: &mut O, src: u32, dst: u32, len: u32) {
+        let t = &self.temporaries;
+        ops.in_slabs(len, &[dst], |ops, start, count| {
+            let (x, sigmoid, y) = (t[58], t[39], t[59]);
+            ops.copy_part(src, start, x, 0.into(), count.into());
+            ops.function(FN_SIGMOID, x, sigmoid, count.into());
+            ops.multiply(sigmoid, x, y, count.into());
+            ops.copy_part(y, 0.into(), dst, start, count.into());
+        });
     }
 
     fn lower_op<O: BlockOps>(&self, ops: &mut O, program: &Program, op: &Op, token: O::N, position: O::N) -> Result<(), String> {
@@ -720,8 +741,8 @@ impl Layout {
                 ops.matvec(matrix, self.weights[matrix], 0.into(), self.reg(*src), self.reg(*dst), rows, cols);
             }
             Op::Copy { src, dst } => ops.copy_part(self.reg(*src), zero, self.reg(*dst), zero, size(*dst)),
-            Op::Add { a, b, dst } => ops.add(self.reg(*a), self.reg(*b), self.reg(*dst), size(*dst)),
-            Op::MulElem { a, b, dst } => ops.multiply(self.reg(*a), self.reg(*b), self.reg(*dst), size(*dst)),
+            Op::Add { a, b, dst } => self.pairwise(ops, false, (self.reg(*a), self.reg(*b)), self.reg(*dst), program.buffers[*dst] as u32),
+            Op::MulElem { a, b, dst } => self.pairwise(ops, true, (self.reg(*a), self.reg(*b)), self.reg(*dst), program.buffers[*dst] as u32),
             Op::Gelu { src, approximate, dst } => {
                 let table = t_gelu(*approximate);
                 let extra = self.temporaries[39];
@@ -772,7 +793,7 @@ impl Layout {
             }
             Op::Scale { src, factor, dst } => ops.scale(self.small[&format!("escala:{factor}")], self.reg(*src), self.reg(*dst), size(*dst)),
             Op::AddWeight { src, weight, dst } => ops.add(self.reg(*src), self.small[weight], self.reg(*dst), size(*dst)),
-            Op::Silu { src, dst } => self.silu(ops, self.reg(*src), self.reg(*dst), size(*dst)),
+            Op::Silu { src, dst } => self.silu(ops, self.reg(*src), self.reg(*dst), program.buffers[*dst] as u32),
             Op::Sigmoid { src, dst } => ops.function(FN_SIGMOID, self.reg(*src), self.reg(*dst), size(*dst)),
             Op::RmsNorm { src, weight, block, dst, .. } => {
                 let count = program.buffers[*dst] / block;
@@ -1013,7 +1034,7 @@ impl Layout {
             }
             ops.matvec(&matrix("switch_mlp.gate_proj"), reg_of("switch_mlp.gate_proj"), e * intermediate, x, gate, intermediate, hidden);
             ops.matvec(&matrix("switch_mlp.up_proj"), reg_of("switch_mlp.up_proj"), e * intermediate, x, up, intermediate, hidden);
-            self.silu(ops, gate, t[38], intermediate.into());
+            self.silu(ops, gate, t[38], intermediate);
             ops.multiply(t[38], up, product, intermediate.into());
             ops.matvec(&matrix("switch_mlp.down_proj"), reg_of("switch_mlp.down_proj"), e * hidden, product, down, hidden, intermediate);
             ops.align_to(down, zero, EXPERT_EXPONENT, outputs, e * hidden, hidden_n);
@@ -1026,7 +1047,7 @@ impl Layout {
         }
         ops.matvec(&matrix("shared_experts.gate_proj"), reg_of("shared_experts.gate_proj"), 0.into(), x, gate, shared, hidden);
         ops.matvec(&matrix("shared_experts.up_proj"), reg_of("shared_experts.up_proj"), 0.into(), x, up, shared, hidden);
-        self.silu(ops, gate, t[38], shared.into());
+        self.silu(ops, gate, t[38], shared);
         ops.multiply(t[38], up, product, shared.into());
         ops.matvec(&matrix("shared_experts.down_proj"), reg_of("shared_experts.down_proj"), 0.into(), product, down, hidden, shared);
         ops.add(mixed, down, dst, hidden_n);
@@ -1079,7 +1100,7 @@ impl Layout {
             }
             ops.matvec(&matrix("switch_mlp.gate_proj"), reg_of("switch_mlp.gate_proj"), e * intermediate, x, gate, intermediate, hidden);
             ops.matvec(&matrix("switch_mlp.up_proj"), reg_of("switch_mlp.up_proj"), e * intermediate, x, up, intermediate, hidden);
-            self.silu(ops, gate, t[38], intermediate.into());
+            self.silu(ops, gate, t[38], intermediate);
             ops.multiply(t[38], up, product, intermediate.into());
             ops.matvec(&matrix("switch_mlp.down_proj"), reg_of("switch_mlp.down_proj"), e * hidden, product, down, hidden, intermediate);
             ops.align_to(down, zero, EXPERT_EXPONENT, outputs, e * hidden, hidden_n);
@@ -1089,7 +1110,7 @@ impl Layout {
 
         ops.matvec(&matrix("shared_expert.gate_proj"), reg_of("shared_expert.gate_proj"), 0.into(), x, gate, shared, hidden);
         ops.matvec(&matrix("shared_expert.up_proj"), reg_of("shared_expert.up_proj"), 0.into(), x, up, shared, hidden);
-        self.silu(ops, gate, t[38], shared.into());
+        self.silu(ops, gate, t[38], shared);
         ops.multiply(t[38], up, product, shared.into());
         ops.matvec(&matrix("shared_expert.down_proj"), reg_of("shared_expert.down_proj"), 0.into(), product, down, hidden, shared);
         ops.matvec(&matrix("shared_expert_gate"), reg_of("shared_expert_gate"), 0.into(), x, t[49], 1, hidden);
