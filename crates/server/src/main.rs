@@ -255,6 +255,8 @@ struct SpeedRequest {
     activation_bits: u32,
     #[serde(default = "one_lane")]
     vector_lanes: u32,
+    #[serde(default = "one_lane")]
+    vector_units: u32,
 }
 
 /// Counts the cycles of a token at the last position of the context, on the die the image
@@ -268,7 +270,7 @@ fn run_speed(catalog: &Catalog, request: SpeedRequest) -> Result<serde_json::Val
     let program = compile_model(&entry.config)?;
     let weights = Weights::open(&dir)?;
     let context = request.context_tokens.max(1);
-    let image = ImageRequest { chips: vec![1], context_tokens: context, cells: request.cells.max(1), activation_bits: request.activation_bits.clamp(8, 24), lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), add_special: false, stop: Vec::new() };
+    let image = ImageRequest { chips: vec![1], context_tokens: context, cells: request.cells.max(1), activation_bits: request.activation_bits.clamp(8, 24), lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special: false, stop: Vec::new() };
     let die = fitted_die(&program, &weights, &image)?;
     let layout = Layout::for_image(&program, &weights, die, context as usize)?;
     let mut totals: Vec<(String, u64, u32)> = Vec::new();
@@ -281,7 +283,7 @@ fn run_speed(catalog: &Catalog, request: SpeedRequest) -> Result<serde_json::Val
     totals.sort_by_key(|row| std::cmp::Reverse(row.1));
     let total: u64 = totals.iter().map(|row| row.1).sum();
     let ops: Vec<_> = totals.iter().map(|(name, cycles, count)| serde_json::json!({ "name": name, "cycles": cycles, "count": count })).collect();
-    Ok(serde_json::json!({ "name": entry.name, "total": total, "position": context - 1, "cells": die.cells, "lanes": 1u32 << die.features.lane_bits, "ops": ops }))
+    Ok(serde_json::json!({ "name": entry.name, "total": total, "position": context - 1, "cells": die.cells, "lanes": 1u32 << die.features.lane_bits, "units": 1u32 << die.features.cluster_bits, "ops": ops }))
 }
 
 async fn speed(State(app): State<App>, Json(request): Json<SpeedRequest>) -> Response {
@@ -321,6 +323,8 @@ struct ImageStart {
     activation_bits: u32,
     #[serde(default = "one_lane")]
     vector_lanes: u32,
+    #[serde(default = "one_lane")]
+    vector_units: u32,
 }
 
 async fn image_status(State(app): State<App>) -> Response {
@@ -367,7 +371,7 @@ async fn image_start(State(app): State<App>, Json(request): Json<ImageStart>) ->
             let out = home().join(".llm2chip/images").join(format!("{}.chipimg", entry.name.replace('/', "--")));
             // A chip's image has one framing of the text: with its template, nothing is added.
             let add_special = prompt.render("", false)?.1;
-            let image = ImageRequest { chips: request.chips, context_tokens: request.context_tokens.max(1), cells: request.cells.max(1), activation_bits: request.activation_bits, lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), add_special, stop: prompt.stop.clone() };
+            let image = ImageRequest { chips: request.chips, context_tokens: request.context_tokens.max(1), cells: request.cells.max(1), activation_bits: request.activation_bits, lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special, stop: prompt.stop.clone() };
             let report = write_chip_image(&dir, &firmware, &image, &out, &job.done, &job.total, &job.cancel)?;
             Ok(serde_json::json!({ "path": out.to_string_lossy(), "bytes": report.bytes, "chips": report.chips, "tensors": report.tensors, "boot_words": report.boot_words, "seconds": report.seconds }))
         });
@@ -563,8 +567,9 @@ fn sample(logits: &[f32], temperature: f32, top_k: usize, seed: &mut u64) -> u32
 
 const SAMPLER_ENTRIES: u32 = 64;
 const FLOW_BITS: u32 = 16;
-/// Measured on Qwen3.8: with wider blocks, more loops are too short to fill one.
-const MAX_IMAGE_LANE_BITS: u32 = 5;
+/// Measured on Qwen3.8: past 128 lanes, too many loops are shorter than a block.
+const MAX_IMAGE_LANE_BITS: u32 = 7;
+const MAX_UNIT_BITS: u32 = 8;
 
 fn one_lane() -> u32 {
     1

@@ -484,6 +484,11 @@ pub struct Alu<N = u32> {
     pub load_shift_left: bool,
     pub load_wide_shift: bool,
     pub magnitude_scan: bool,
+    /// Keeps the largest mantissa read, across every lane of a block.
+    pub max_scan: bool,
+    pub max_clear: bool,
+    /// The result is that largest mantissa.
+    pub max_out: bool,
     pub magnitude_clear: bool,
     pub accumulate: bool,
     pub accumulator_clear: bool,
@@ -521,6 +526,9 @@ impl<N: Default> Alu<N> {
             load_shift_left: false,
             load_wide_shift: false,
             magnitude_scan: false,
+            max_scan: false,
+            max_clear: false,
+            max_out: false,
             magnitude_clear: false,
             accumulate: false,
             accumulator_clear: false,
@@ -569,6 +577,9 @@ impl Alu<Expr> {
             load_shift_left: self.load_shift_left,
             load_wide_shift: self.load_wide_shift,
             magnitude_scan: self.magnitude_scan,
+            max_scan: self.max_scan,
+            max_clear: self.max_clear,
+            max_out: self.max_out,
             magnitude_clear: self.magnitude_clear,
             accumulate: self.accumulate,
             accumulator_clear: self.accumulator_clear,
@@ -595,6 +606,7 @@ impl From<Alu<u32>> for Alu<Expr> {
         out.load_shift_left = s.load_shift_left;
         out.load_wide_shift = s.load_wide_shift;
         out.magnitude_scan = s.magnitude_scan;
+        (out.max_scan, out.max_clear, out.max_out) = (s.max_scan, s.max_clear, s.max_out);
         out.magnitude_clear = s.magnitude_clear;
         out.accumulate = s.accumulate;
         out.accumulator_clear = s.accumulator_clear;
@@ -951,7 +963,7 @@ fn can_stream(variable: Var, step: &Alu<Expr>, unit: u32) -> bool {
     let moves_with = |index: Expr| stride(index) == 0 || stride(index) == unit;
     // Moving elements to earlier places is safe: the reads stay ahead of the writes.
     let safe = |operand: At<Expr>| operand.0 != step.dst.0 || (stride(operand.1) == unit && (operand.1 == step.dst.1 || operand.1.is_after(step.dst.1)));
-    let plain = !(step.load_shift_a || step.load_shift_b || step.load_shift_left || step.load_wide_shift || step.link_send || step.magnitude_clear || step.accumulator_clear || step.wide_clear || step.wide_write) && step.literal.is_none();
+    let plain = !(step.load_shift_a || step.load_shift_b || step.load_shift_left || step.load_wide_shift || step.link_send || step.magnitude_clear || step.max_clear || step.max_out || step.accumulator_clear || step.wide_clear || step.wide_write) && step.literal.is_none();
     let streamable = matches!(step.op, OP_ADD | OP_SUB | OP_MUL | OP_MOV | OP_FUNCTION | OP_SHIFT_LEFT | OP_WIDE_OUT);
     let scans = !step.write;
     plain && streamable && (scans || stride(step.dst.1) == unit) && moves_with(step.a.1) && moves_with(step.b.1) && (scans || (safe(step.a) && safe(step.b)))
@@ -1444,6 +1456,20 @@ impl BlockOps for Assembly {
 
     fn maximum(&mut self, src: u32, len: Expr, dst: u32) {
         self.clear_shifts();
+        if self.streams {
+            let mut reset = alu(OP_MOV);
+            (reset.write, reset.max_clear) = (false, true);
+            self.push(reset);
+            self.elements(len, &[], true, |s, t, vector| {
+                let mut step = alu(OP_MOV);
+                (step.a, step.write, step.max_scan, step.vector) = ((src, t), false, true, vector);
+                s.push(step);
+            });
+            let mut out = alu(OP_MOV);
+            (out.dst, out.max_out) = ((dst, 0.into()), true);
+            self.push(out);
+            return self.binary(OP_MOV, self.exponent(src), self.sc(15), self.exponent(dst));
+        }
         let first: At<Expr> = (dst, 0.into());
         self.binary(OP_MOV, (src, 0.into()), self.sc(15), first);
         // Starting from the first element again keeps the count from ever being zero.

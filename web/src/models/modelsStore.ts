@@ -54,6 +54,7 @@ export interface SpeedResult {
   position: number;
   cells: number;
   lanes: number;
+  units: number;
   ops: { name: string; cycles: number; count: number }[];
 }
 
@@ -86,7 +87,7 @@ interface ModelsState {
   image: ImageStatus;
   speed: SpeedResult | null;
   measuring: boolean;
-  measureSpeed: (path: string, context: number, cells: number, bits: number, lanes: number) => Promise<void>;
+  measureSpeed: (path: string, context: number, cells: number, bits: number, lanes: number, units: number) => Promise<void>;
 
   set: (patch: Partial<ModelsState>) => void;
   loadSettings: () => Promise<void>;
@@ -99,7 +100,7 @@ interface ModelsState {
   cancel: (id: string) => Promise<void>;
   discard: (id: string) => Promise<void>;
   pollJobs: () => Promise<Job[]>;
-  startImage: (path: string, chips: number[], context: number, cells: number, bits: number, lanes: number) => Promise<void>;
+  startImage: (path: string, chips: number[], context: number, cells: number, bits: number, lanes: number, units: number) => Promise<void>;
   cancelImage: () => Promise<void>;
   pollImage: () => Promise<void>;
 }
@@ -133,10 +134,10 @@ export const useModels = create<ModelsState>((set, get) => ({
   image: { state: "idle" },
   speed: null,
   measuring: false,
-  async measureSpeed(path, context, cells, bits, lanes) {
+  async measureSpeed(path, context, cells, bits, lanes, units) {
     set({ measuring: true, error: null });
     try {
-      const speed = await call<SpeedResult>("/api/speed", { method: "POST", headers: json, body: JSON.stringify({ path, context_tokens: context, cells, activation_bits: bits, vector_lanes: lanes }) });
+      const speed = await call<SpeedResult>("/api/speed", { method: "POST", headers: json, body: JSON.stringify({ path, context_tokens: context, cells, activation_bits: bits, vector_lanes: lanes, vector_units: units }) });
       set({ speed, measuring: false });
     } catch (e) {
       set({ error: text(e), measuring: false });
@@ -145,9 +146,9 @@ export const useModels = create<ModelsState>((set, get) => ({
 
   set: (patch) => set(patch),
 
-  async startImage(path, chips, context, cells, bits, lanes) {
+  async startImage(path, chips, context, cells, bits, lanes, units) {
     try {
-      await call("/api/image", { method: "POST", headers: json, body: JSON.stringify({ path, chips, context_tokens: context, cells, activation_bits: bits, vector_lanes: lanes }) });
+      await call("/api/image", { method: "POST", headers: json, body: JSON.stringify({ path, chips, context_tokens: context, cells, activation_bits: bits, vector_lanes: lanes, vector_units: units }) });
       set({ error: null });
       await get().pollImage();
     } catch (e) {

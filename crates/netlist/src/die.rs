@@ -205,14 +205,18 @@ pub struct ControlWord {
     pub set_clusters: bool,
     /// The wide sum takes the total of what every vector unit holds at that place.
     pub wide_reduce: bool,
+    pub max_scan: bool,
+    pub max_clear: bool,
+    pub max_out: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 62;
+pub const FIELD_COUNT: usize = 65;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
 const WIDE_ACCUMULATE_FIELD: usize = 55;
+const MAX_SCAN_FIELD: usize = 62;
 
 pub const OP_ADD: u32 = 0;
 pub const OP_MUL: u32 = 1;
@@ -302,6 +306,9 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("x_only", c.features.cluster_bits + 1),
         ("set_clusters", 1),
         ("wide_reduce", 1),
+        ("max_scan", 1),
+        ("max_clear", 1),
+        ("max_out", 1),
     ]
 }
 
@@ -375,6 +382,9 @@ impl ControlWord {
             self.x_only as u128,
             self.set_clusters as u128,
             self.wide_reduce as u128,
+            self.max_scan as u128,
+            self.max_clear as u128,
+            self.max_out as u128,
         ]
     }
 
@@ -1074,6 +1084,36 @@ impl Gen {
             b.inst("magnitude_reg", &reg_a, &[("d", magnitude_d), ("q", magnitude.clone())]);
             let leading = leading_zeros(&mut b, "lzc", &magnitude[..top], a);
 
+            let (best, best_used) = if c.features.widths[MAX_SCAN_FIELD] > 0 {
+                b.group("Mayor valor");
+                let best = b.wire("best", a);
+                let (scan_best, clear_best) = (ctl("max_scan", &mut b, &fields), ctl("max_clear", &mut b, &fields));
+                let mut l = Logic { b: &mut b, next: 55_000 };
+                let top = a as usize - 1;
+                let larger = |l: &mut Logic, x: &[Bit], y: &[Bit]| -> Vec<Bit> {
+                    let inverted: Vec<Bit> = y.iter().map(|bit| l.not(*bit)).collect();
+                    let difference = l.adder(x, &inverted, Bit::One).0;
+                    let signs_differ = l.xor(x[top], y[top]);
+                    let less = l.mux(signs_differ, difference[top], x[top]);
+                    l.mux_bus(less, x, y)
+                };
+                let block = l.and(vector_flag, scan_best);
+                let mut largest = read_a.clone();
+                for (lane, bank) in banks_a.iter().enumerate().skip(1) {
+                    let taken = l.and(block, scanned_lane[lane]);
+                    let candidate = l.mux_bus(taken, &largest, bank);
+                    largest = larger(&mut l, &largest, &candidate);
+                }
+                let updated = larger(&mut l, &best, &largest);
+                let kept = l.mux_bus(scan_best, &best, &updated);
+                let lowest: Vec<Bit> = (0..a as usize).map(|i| if i == top { Bit::One } else { Bit::Zero }).collect();
+                let next = l.mux_bus(clear_best, &kept, &lowest);
+                l.connect_flops(&next, &best);
+                (best, true)
+            } else {
+                (Vec::new(), false)
+            };
+
             b.group("Acumulador vectorial");
             let accumulator_bits = 2 * a + 16;
             let acc_adder = self.ripple_adder(accumulator_bits);
@@ -1291,6 +1331,13 @@ impl Gen {
                 chosen_leaf(OP_EQUAL, equal),
             ];
             let result = mux_tree(&mut b, &mux_a, "op", leaves, &op);
+            let result = if best_used {
+                let y = b.wire("result_or_best", a);
+                b.inst("best_select", &mux_a, &[("s", vec![fields["max_out"][0]]), ("a", result), ("b", best.clone()), ("y", y.clone())]);
+                y
+            } else {
+                result
+            };
             // While the link holds the sequencer back, the result in flight must stay put.
             let result_held = b.wire("result_held", a);
             b.inst("result_hold", &mux_a, &[("s", vec![link_stall]), ("a", result), ("b", write_data.clone()), ("y", result_held.clone())]);
@@ -1993,7 +2040,7 @@ impl DieProgram {
                 (w.reg_b, w.literal_b, w.offset_b, w.window_b, w.fixed_b) = (step.b.0, literal_b, offset_b, step.window_b, fixed_b);
             }
             if (1..n + 1 + extra).contains(&k) {
-                (w.op, w.shift, w.function, w.magnitude_scan, w.accumulate, w.wide_scan) = (step.op, step.shift, step.function, step.magnitude_scan && k <= n, step.accumulate && k <= n, step.wide_scan && k <= n);
+                (w.op, w.shift, w.function, w.magnitude_scan, w.accumulate, w.wide_scan, w.max_scan) = (step.op, step.shift, step.function, step.magnitude_scan && k <= n, step.accumulate && k <= n, step.wide_scan && k <= n, step.max_scan && k <= n);
                 (w.broadcast_a, w.broadcast_b) = (step.broadcast_a, step.broadcast_b);
             }
             if (written..n + written).contains(&k) {
@@ -2237,6 +2284,7 @@ impl DieProgram {
             (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
             w.from_cluster = step.from_cluster;
             w.magnitude_clear = step.magnitude_clear;
+            w.max_clear = step.max_clear;
             w.accumulator_clear = step.accumulator_clear;
             w.wide_clear = step.wide_clear;
         }
@@ -2256,6 +2304,7 @@ impl DieProgram {
             w.shift = step.shift;
             w.function = step.function;
             w.magnitude_scan = step.magnitude_scan;
+            (w.max_scan, w.max_out) = (step.max_scan, step.max_out);
             w.accumulate = step.accumulate;
             w.wide_scan = step.wide_scan;
             w.wide_write = step.wide_write;

@@ -121,6 +121,9 @@ pub struct ChipParams {
     pub kv_bits: u32,
 
     pub vector_lanes_per_die: u64,
+    /// Copies of the vector unit, which compute several heads at once.
+    #[serde(default = "default_vector_units")]
+    pub vector_units_per_die: u64,
     pub vector_bits: u32,
     pub function_units_per_die: u32,
     /// Logits the sampling unit takes in per cycle.
@@ -137,6 +140,10 @@ pub struct ChipParams {
     pub load_interface: LoadInterface,
 
     pub optimizations: BTreeSet<String>,
+}
+
+fn default_vector_units() -> u64 {
+    64
 }
 
 impl Default for ChipParams {
@@ -176,6 +183,7 @@ impl Default for ChipParams {
             delta_state_bits: 32,
             kv_bits: 16,
             vector_lanes_per_die: 32_768,
+            vector_units_per_die: default_vector_units(),
             vector_bits: 16,
             function_units_per_die: 16,
             sampler_lanes: 64,

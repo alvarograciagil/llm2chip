@@ -34,13 +34,13 @@ function LocalList() {
   const makeImage = (m: ServerModel) => {
     const { params, report } = useDesign.getState();
     const dies = Math.max(1, Math.round(report?.dies ?? 1));
-    void startImage(m.path, Array.from({ length: dies }, (_, i) => i + 1), Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits), Number(params.vector_lanes_per_die));
+    void startImage(m.path, Array.from({ length: dies }, (_, i) => i + 1), Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits), Number(params.vector_lanes_per_die), Number(params.vector_units_per_die));
   };
   const measureSpeed = useModels((s) => s.measureSpeed);
   const measuring = useModels((s) => s.measuring);
   const measure = (m: ServerModel) => {
     const { params } = useDesign.getState();
-    void measureSpeed(m.path, Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits), Number(params.vector_lanes_per_die));
+    void measureSpeed(m.path, Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits), Number(params.vector_lanes_per_die), Number(params.vector_units_per_die));
   };
   const simulate = (m: ServerModel) => {
     setSimulator({ path: m.path });
@@ -393,7 +393,7 @@ function SpeedPanel() {
           <strong title={speed.name}>{speed.name}</strong>
         </div>
         <p className="muted-text">
-          {formatNumber(measured)} tok/s a {formatNumber(ghz)} GHz con {speed.cells.toLocaleString("es-ES")} celdas y {speed.lanes} carriles, en la posición {speed.position.toLocaleString("es-ES")}
+          {formatNumber(measured)} tok/s a {formatNumber(ghz)} GHz con {speed.cells.toLocaleString("es-ES")} celdas, {speed.units} unidades y {speed.lanes} carriles, en la posición {speed.position.toLocaleString("es-ES")}
           {target > 0 ? `. Objetivo: ${formatNumber(target)} tok/s (${formatNumber(target / measured)} veces más).` : "."}
         </p>
         <div className="lab-bars" role="table" aria-label="Ciclos por operación">
