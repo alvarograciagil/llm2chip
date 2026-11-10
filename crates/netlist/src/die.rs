@@ -565,6 +565,23 @@ fn reads_nothing(s: &Alu) -> bool {
     matches!(s.op, OP_IMMEDIATE | OP_LZC | OP_WIDE_LZC) && !s.magnitude_scan && !s.max_scan && !s.accumulate && !s.wide_scan
 }
 
+/// When `literals[k] = literals[0] + Σ_j bit_j(k) · d_j` for strides `d_j`, the same as
+/// `literals[0] + Σ_s (k >> s) · (d_s - 2 · d_(s-1))`: those terms that are not zero.
+fn bit_linear(literals: &[u32], mask: u64, bits: u32) -> Option<Vec<(u32, u64)>> {
+    let first = literals[0] as u64;
+    let stride = |j: u32| literals.get(1usize << j).map_or(0, |l| (*l as u64).wrapping_sub(first) & mask);
+    let strides: Vec<u64> = (0..bits).map(stride).collect();
+    let fits = literals.iter().enumerate().all(|(k, literal)| {
+        let sum = (0..bits).filter(|j| k >> j & 1 == 1).fold(first, |sum, j| sum.wrapping_add(strides[j as usize]));
+        sum & mask == *literal as u64 & mask
+    });
+    fits.then(|| (0..bits).filter_map(|s| {
+        let below = if s == 0 { 0 } else { strides[s as usize - 1].wrapping_mul(2) };
+        let factor = strides[s as usize].wrapping_sub(below) & mask;
+        (factor != 0).then_some((s, factor))
+    }).collect())
+}
+
 /// Whether `bits` holds at least `value`.
 fn at_least(l: &mut Logic, bits: &[Bit], value: u32) -> Bit {
     bits.iter().enumerate().fold(Bit::One, |reached, (i, bit)| if value >> i & 1 == 1 { l.and(*bit, reached) } else { l.or(*bit, reached) })
@@ -1011,7 +1028,23 @@ impl Gen {
             let running = if clusters > 1 {
                 let mut l = Logic { b: &mut b, next: 51_000 };
                 let set_now = l.and(global_running, fields["set_clusters"][0]);
-                let wanted = at_least(&mut l, &fields["literal_b"], cluster as u32 + 1);
+                let counted = at_least(&mut l, &fields["literal_b"], cluster as u32 + 1);
+                // With a field of the unit's number given, only those below a limit take part.
+                let width = c.features.cluster_bits as usize + 1;
+                let leaves: Vec<Vec<Bit>> = (0..1usize << fields["x_split"].len()).map(|shift| (0..width).map(|i| if (cluster >> shift.min(31)) >> i & 1 == 1 { Bit::One } else { Bit::Zero }).collect()).collect();
+                let moved = l.select(&fields["x_split"], &leaves);
+                let field: Vec<Bit> = moved.iter().enumerate().map(|(i, bit)| {
+                    let within = at_least(&mut l, &fields["literal_dst"], i as u32 + 1);
+                    l.and(*bit, within)
+                }).collect();
+                let limit: Vec<Bit> = (0..width).map(|i| fields["literal_a"].get(i).copied().unwrap_or(Bit::Zero)).collect();
+                let inverted: Vec<Bit> = limit.iter().map(|bit| l.not(*bit)).collect();
+                let reaches = l.adder(&field, &inverted, Bit::One).1;
+                let below = l.not(reaches);
+                let free = l.any(&fields["literal_dst"]);
+                let free = l.not(free);
+                let in_slot = l.or(free, below);
+                let wanted = l.and(counted, in_slot);
                 let next = l.mux(set_now, enabled, wanted);
                 let d = l.or(next, start);
                 l.connect_flops(&[d], &[enabled]);
@@ -2444,7 +2477,7 @@ impl DieProgram {
                 Step::Stream { variable, count, in_elements, body } => self.stream(*variable, *count, *in_elements, body),
                 Step::Combine { .. } => self.combine(step),
                 Step::CombineRows { .. } => self.combine_rows(step),
-                Step::Clustered { vars, assignments, body } => self.clustered(vars, assignments, body),
+                Step::Clustered { vars, assignments, slots, body } => self.clustered(vars, assignments, *slots, body),
                 Step::CellSeek { weights, factors } => self.cell_seek(*weights, *factors),
                 Step::CellPass => self.cell_pass(),
                 Step::CellGroup { src, length, start, quant_bits, last } => self.cell_group(*src, *length, *start, (*quant_bits, *last)),
@@ -2647,11 +2680,14 @@ impl DieProgram {
     }
 
     /// Runs the same words on several vector units, each with its own loop indices.
-    fn clustered(&mut self, vars: &[Var], assignments: &[Vec<u32>], body: &[Step]) {
+    fn clustered(&mut self, vars: &[Var], assignments: &[Vec<u32>], slots: Option<(u32, u32, u32)>, body: &[Step]) {
         let units = 1u32 << self.config.features.cluster_bits;
         let at = self.end();
         let w = self.slot(at);
         (w.set_clusters, w.literal_b) = (true, assignments.len() as u32);
+        if let Some((shift, bits, limit)) = slots {
+            (w.x_split, w.literal_dst, w.literal_a) = (shift, bits, limit);
+        }
 
         let mut keys = BTreeSet::new();
         let active = self.active.clone();
@@ -2686,6 +2722,16 @@ impl DieProgram {
                 let last = self.end() - 1;
                 let w = &mut self.cycles[last];
                 (w.x_scaled, w.literal_a, w.x_split, w.literal_dst) = (true, outer as u32, split, inner as u32);
+            } else if let Some(terms) = bit_linear(&literals, mask, self.config.features.cluster_bits).filter(|terms| splits > 0 && terms.len() < literals.len()) {
+                // Linear in each bit of the unit's number: unit `k` gets `first` plus a
+                // multiple of `k >> s` for a few shifts `s`, a word each.
+                self.set_index(register, source, literals[0]);
+                for (shift, factor) in terms {
+                    self.set_index(register, register, 0);
+                    let last = self.end() - 1;
+                    let w = &mut self.cycles[last];
+                    (w.x_scaled, w.literal_a, w.x_split) = (true, factor as u32, shift);
+                }
             } else {
                 for (unit, literal) in literals.iter().enumerate() {
                     self.set_index(register, source, *literal);

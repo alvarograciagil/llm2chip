@@ -588,3 +588,79 @@ fn the_firmware_scores_the_draft_head_like_the_software() {
     assert!(tries[0] > 0);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Three heads to each key head, in attention and in the delta rule: their units are laid
+/// out a power of two apart, with the units in between sitting out.
+const GROUPED: &str = r#"{
+  "model_type": "qwen3_5_text",
+  "hidden_size": 8, "intermediate_size": 16, "vocab_size": 8,
+  "num_attention_heads": 6, "num_key_value_heads": 2, "head_dim": 4,
+  "linear_num_key_heads": 2, "linear_key_head_dim": 4,
+  "linear_num_value_heads": 6, "linear_value_head_dim": 4,
+  "linear_conv_kernel_dim": 4, "partial_rotary_factor": 0.5,
+  "layer_types": ["linear_attention", "full_attention"],
+  "rope_parameters": { "rope_theta": 10000.0 }
+}"#;
+
+fn grouped_checkpoint(dir: &Path) {
+    let mut rng = Rng(0x0F1E_2D3C_4B5A_6978);
+    let mut w = Writer::default();
+    w.matrix("model.embed_tokens", 8, 8, &mut rng);
+    w.matrix("lm_head", 8, 8, &mut rng);
+    w.floats("model.norm.weight", &[1.0; 8]);
+    for (layer, full) in [(0, false), (1, true)] {
+        let p = |s: &str| format!("model.layers.{layer}.{s}");
+        w.floats(&p("input_layernorm.weight"), &[1.0; 8]);
+        w.floats(&p("post_attention_layernorm.weight"), &[1.0; 8]);
+        w.matrix(&p("mlp.gate_proj"), 16, 8, &mut rng);
+        w.matrix(&p("mlp.up_proj"), 16, 8, &mut rng);
+        w.matrix(&p("mlp.down_proj"), 8, 16, &mut rng);
+        if full {
+            w.matrix(&p("self_attn.q_proj"), 48, 8, &mut rng);
+            w.matrix(&p("self_attn.k_proj"), 8, 8, &mut rng);
+            w.matrix(&p("self_attn.v_proj"), 8, 8, &mut rng);
+            w.matrix(&p("self_attn.o_proj"), 8, 24, &mut rng);
+            w.floats(&p("self_attn.q_norm.weight"), &[1.0; 4]);
+            w.floats(&p("self_attn.k_norm.weight"), &[1.0; 4]);
+        } else {
+            w.matrix(&p("linear_attn.in_proj_qkv"), 40, 8, &mut rng);
+            w.matrix(&p("linear_attn.in_proj_z"), 24, 8, &mut rng);
+            w.matrix(&p("linear_attn.in_proj_a"), 6, 8, &mut rng);
+            w.matrix(&p("linear_attn.in_proj_b"), 6, 8, &mut rng);
+            w.matrix(&p("linear_attn.out_proj"), 8, 24, &mut rng);
+            let taps: Vec<f32> = (0..160).map(|i| if i % 4 == 3 { 0.9 } else { 0.05 }).collect();
+            w.floats(&p("linear_attn.conv1d.weight"), &taps);
+            w.floats(&p("linear_attn.A_log"), &[-1.0, -0.5, -0.7, -0.3, -0.9, -0.6]);
+            w.floats(&p("linear_attn.dt_bias"), &[1.0; 6]);
+            w.floats(&p("linear_attn.norm.weight"), &[1.0; 4]);
+        }
+    }
+    w.write(&dir.join("model.safetensors"));
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
+fn heads_in_groups_of_three_run_on_units_a_power_of_two_apart() {
+    let dir = std::env::temp_dir().join(format!("llm2chip-grouped-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    grouped_checkpoint(&dir);
+    let program = compile_qwen3_5(GROUPED).unwrap();
+    let tokens = [3u32, 5, 1];
+    let mut vm = ExactEngine::new(compile_qwen3_5(GROUPED).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
+    for (position, token) in tokens.iter().enumerate() {
+        vm.step(*token, position + 1 == tokens.len()).unwrap();
+    }
+    // Eight units take one part of each head; sixteen take two.
+    for cluster_bits in [3, 4] {
+        let c = DieConfig { cells: 4 << cluster_bits, features: cell_die_config().features.with_lane_bits(2).with_cluster_bits(cluster_bits), ..cell_die_config() };
+        let mut run = gates_in_cells(&program, &dir, c, &tokens);
+        for (buffer, length) in program.buffers.iter().enumerate() {
+            let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
+            for index in 0..*length as u32 {
+                let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
+                assert_eq!(mantissa, vm.mantissa(fast, index), "{} unidades, búfer {buffer}, elemento {index}", 1 << cluster_bits);
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

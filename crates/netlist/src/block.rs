@@ -686,7 +686,9 @@ pub enum Step {
     /// `wide[j] += weights · matrix[start + j]` for every `j` of a row, or from zero if `fresh`.
     Combine { weights: At<Expr>, matrix: u32, start: Expr, width: Expr, fresh: bool, window: Expr, window_a: bool, window_b: bool, moving: bool },
     /// One copy of `body` on several vector units, each with its own values of `vars`.
-    Clustered { vars: Vec<Var>, assignments: Vec<Vec<u32>>, body: Vec<Step> },
+    /// With `slots = (shift, bits, limit)`, only the units whose number has
+    /// `(k >> shift) mod 2^bits < limit` take part: the others fill out a power of two.
+    Clustered { vars: Vec<Var>, assignments: Vec<Vec<u32>>, slots: Option<(u32, u32, u32)>, body: Vec<Step> },
     /// Moves every cell to where a matrix starts.
     CellSeek { weights: Expr, factors: Expr },
     /// Clears the row totals and restarts the input vector.
@@ -783,7 +785,8 @@ pub struct Assembly {
     /// True inside a body that every unit runs with its own indices.
     in_units: bool,
     /// How many neighbouring units the last loop over heads gave each head.
-    head_stride: u32,
+    /// The unit that holds each head `each_head` laid out, for `gather_heads`.
+    head_units: Vec<u32>,
     /// Which of the A, B and left shifters are known to hold zero.
     shift_zero: [bool; 3],
     /// The die loads its shifters from the read ports, as described in `load_shifts_now`.
@@ -807,6 +810,18 @@ pub struct Assembly {
 
 impl Assembly {
     /// The units whose values count together inside the current loop.
+    /// Heads to a group of `inner` laid out `width` apart: a power of two when that costs no
+    /// units, so every index the units need is linear in the bits of their number, and the
+    /// units in between sit out.
+    fn head_slots(&self, outer: u32, inner: u32, parts: u32) -> (u32, Option<(u32, u32, u32)>) {
+        let padded = inner.next_power_of_two();
+        if padded != inner && outer > 1 && outer * padded * parts <= self.clusters {
+            (padded, Some((parts.trailing_zeros(), padded.trailing_zeros(), inner)))
+        } else {
+            (inner, None)
+        }
+    }
+
     fn group_bits(&self) -> u32 {
         self.split.map_or(0, |(_, parts)| parts.trailing_zeros()).max(self.slab_group)
     }
@@ -911,7 +926,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_stride: 1, shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1664,7 +1679,7 @@ impl BlockOps for Assembly {
         self.slab_group = outer_group;
         let inside = std::mem::replace(&mut self.steps, before);
         self.forget_shifts();
-        self.steps.push(Step::Clustered { vars: vec![start], assignments: (0..units).map(|unit| vec![unit]).collect(), body: inside });
+        self.steps.push(Step::Clustered { vars: vec![start], assignments: (0..units).map(|unit| vec![unit]).collect(), slots: None, body: inside });
         self.clear_shifts();
         // The units are told apart by the stream's counter, so the copy is a stream however
         // short it is.
@@ -1699,29 +1714,30 @@ impl BlockOps for Assembly {
         self.zero_place();
         self.forget_shifts();
         let before = std::mem::take(&mut self.steps);
+        let (width, slots) = self.head_slots(outer, inner, parts);
         self.split = Some((Expr::var(part), parts));
         self.in_units = true;
-        self.heads_at_once = heads * parts <= self.clusters;
+        self.heads_at_once = outer * width * parts <= self.clusters;
         body(self, Expr::var(first), Expr::var(second));
         self.heads_at_once = false;
         self.in_units = false;
         self.split = None;
         let inside = std::mem::replace(&mut self.steps, before);
         self.forget_shifts();
-        let total = heads * parts;
+        let total = outer * width * parts;
         for block in 0..total.div_ceil(self.clusters) {
             let assignments = (0..self.clusters.min(total - block * self.clusters)).map(|unit| {
                 let index = block * self.clusters + unit;
                 let head = index / parts;
-                vec![head / inner, head % inner, index % parts]
+                vec![head / width, head % width, index % parts]
             });
-            self.steps.push(Step::Clustered { vars: vec![first, second, part], assignments: assignments.collect(), body: inside.clone() });
+            self.steps.push(Step::Clustered { vars: vec![first, second, part], assignments: assignments.collect(), slots, body: inside.clone() });
         }
-        self.head_stride = parts;
+        self.head_units = (0..heads).map(|h| ((h / inner) * width + h % inner) * parts).collect();
     }
 
     fn each_head(&mut self, outer: u32, inner: u32, mut body: impl FnMut(&mut Self, Expr, Expr)) {
-        self.head_stride = 1;
+        self.head_units = (0..outer * inner).collect();
         if self.clusters <= 1 {
             return self.each(outer.into(), |s, o| s.each(inner.into(), |s, i| body(s, o, i)));
         }
@@ -1730,21 +1746,23 @@ impl BlockOps for Assembly {
         self.zero_place();
         self.forget_shifts();
         let before = std::mem::take(&mut self.steps);
+        let (width, slots) = self.head_slots(outer, inner, 1);
         self.in_units = true;
-        self.heads_at_once = outer * inner <= self.clusters;
+        self.heads_at_once = outer * width <= self.clusters;
         body(self, Expr::var(first), Expr::var(second));
         self.heads_at_once = false;
         self.in_units = false;
         let inside = std::mem::replace(&mut self.steps, before);
         self.forget_shifts();
-        let total = outer * inner;
+        let total = outer * width;
         for block in 0..total.div_ceil(self.clusters) {
             let assignments = (0..self.clusters.min(total - block * self.clusters)).map(|unit| {
                 let head = block * self.clusters + unit;
-                vec![head / inner, head % inner]
+                vec![head / width, head % width]
             });
-            self.steps.push(Step::Clustered { vars: vec![first, second], assignments: assignments.collect(), body: inside.clone() });
+            self.steps.push(Step::Clustered { vars: vec![first, second], assignments: assignments.collect(), slots, body: inside.clone() });
         }
+        self.head_units = (0..outer * inner).map(|h| (h / inner) * width + h % inner).collect();
     }
 
     fn align_heads(&mut self, reg: u32, len: u32) {
@@ -1767,6 +1785,11 @@ impl BlockOps for Assembly {
         });
         self.clear_shifts();
         self.binary(OP_MOV, largest, largest, exponent);
+        // Normalised together, as the gathered vector would be: the units' magnitudes
+        // combine, so every head moves by the same amount.
+        let outer = std::mem::replace(&mut self.slab_group, self.clusters.trailing_zeros());
+        self.normalize(reg, len.into());
+        self.slab_group = outer;
         self.heads_aligned += 1;
     }
 
@@ -1777,8 +1800,8 @@ impl BlockOps for Assembly {
         self.clear_shifts();
         let zero = self.sc(15);
         let (largest, shift, exponent) = (self.sc(1), self.sc(2), self.sc(3));
-        let stride = self.head_stride;
-        let unit_of = |part: usize, units: u32| part as u32 * stride % units + 1;
+        let head_units = self.head_units.clone();
+        let unit_of = |part: usize, units: u32| head_units.get(part).copied().unwrap_or(part as u32) % units + 1;
         let units = self.clusters;
         if self.heads_aligned > 0 {
             self.heads_aligned -= 1;
@@ -2074,7 +2097,7 @@ impl Assembly {
             self.cell_round(src, place, rows % per_unit, Expr::var(column));
         }
         let inside = std::mem::replace(&mut self.steps, before);
-        self.steps.push(Step::Clustered { vars: vec![column], assignments: (0..units).map(|unit| vec![unit * columns]).collect(), body: inside });
+        self.steps.push(Step::Clustered { vars: vec![column], assignments: (0..units).map(|unit| vec![unit * columns]).collect(), slots: None, body: inside });
         // A die that feeds its cells in a stream adds the units' rows as they drain.
         if units > 1 && !self.drains_add {
             self.steps.push(Step::WideReduce { rows: rows.into(), group: self.clusters.trailing_zeros() });
