@@ -47,6 +47,9 @@ pub struct Costs {
     /// lanes, and how much each doubling of the lanes and of the units adds.
     pub path: f64,
     pub path_lane_bit: f64,
+    /// With four units, where the network between them is already there, and what each
+    /// further doubling of the units adds.
+    pub path_four_units: f64,
     pub path_unit_bit: f64,
 }
 
@@ -83,13 +86,18 @@ impl Costs {
             let c = DieConfig { cells: 1 << (cluster_bits + lane_bits), features: base.features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits), ..small };
             netlist::Simulator::new(&die_design(c)).map_or(f64::INFINITY, |sim| sim.critical_path(GATE_DELAYS))
         };
-        let (start, wider, more) = (path(0, 2), path(0, 4), path(2, 2));
-        Costs { fixed: (f4 + f8) / 2.0, unit: u4 - 4.0 * lane, lane, level: l4 - 4.0 * level_lane, level_lane, cell, path: start, path_lane_bit: (wider - start) / 2.0, path_unit_bit: (more - start) / 2.0 }
+        let (start, wider, four, many) = (path(0, 2), path(0, 4), path(2, 2), path(5, 2));
+        Costs { fixed: (f4 + f8) / 2.0, unit: u4 - 4.0 * lane, lane, level: l4 - 4.0 * level_lane, level_lane, cell, path: start, path_lane_bit: (wider - start) / 2.0, path_four_units: four, path_unit_bit: ((many - four) / 3.0).max(0.0) }
     }
 
     /// The fastest clock of a die, given the delay of a full adder in its process.
     pub fn clock_hz(&self, cluster_bits: u32, lane_bits: u32, full_adder_ns: f64) -> f64 {
-        let path = self.path + self.path_lane_bit * (lane_bits as f64 - 2.0).max(0.0) + self.path_unit_bit * cluster_bits as f64;
+        let units = if cluster_bits >= 2 {
+            self.path_four_units + self.path_unit_bit * (cluster_bits - 2) as f64
+        } else {
+            self.path + (self.path_four_units - self.path) * cluster_bits as f64 / 2.0
+        };
+        let path = units + self.path_lane_bit * (lane_bits as f64 - 2.0).max(0.0);
         1e9 / (path * full_adder_ns)
     }
 

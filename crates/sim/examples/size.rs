@@ -32,7 +32,7 @@ fn main() {
     let base = DieConfig { cells: 1, cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_factor_steps(steps) };
     let costs = Costs::measure(base);
     println!("puertas: fijo {:.0}, unidad {:.0} + {:.0}/carril, nivel {:.0} + {:.0}/carril, celda {:.0}", costs.fixed, costs.unit, costs.lane, costs.level, costs.level_lane, costs.cell);
-    println!("camino crítico: {:.1} sumadores completos + {:.1} por cada doble de carriles + {:.1} por cada doble de unidades", costs.path, costs.path_lane_bit, costs.path_unit_bit);
+    println!("camino crítico: {:.1} sumadores completos con una unidad, {:.1} con cuatro, + {:.1} por cada doble de carriles y + {:.1} por cada doble de unidades más", costs.path, costs.path_four_units, costs.path_lane_bit, costs.path_unit_bit);
     // N6: the delay of a full adder in that process.
     let target = Target { tokens_per_second: wanted, prompt_seconds: first_ms / 1e3, prompt, chips: vec![1, 2, 4, 8], clock_hz: ghz * 1e9, full_adder_ns: 0.04, context, lane_bits: 6..=7, cluster_bits: 5..=11, cell_bits: 16..=25 };
     let found = search(&program, &weights, base, &costs, &target);
