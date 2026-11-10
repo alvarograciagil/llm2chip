@@ -1196,11 +1196,16 @@ impl Gen {
                 q
             };
             // Loaded from the result as it is written, or straight from the operands read.
+            // A move loads what it reads; any other step loads its own result as it computes
+            // it, so a count of leading zeros sets the shifter in the same step.
             let (from_a, from_b) = {
                 let now = ctl("shift_now", &mut b, &fields);
                 let mut l = Logic { b: &mut b, next: 46_000 };
-                let low = &write_data[..SHIFT_REG_BITS as usize];
-                (l.mux_bus(now, low, &read_a[..SHIFT_REG_BITS as usize]), l.mux_bus(now, low, &read_b[..SHIFT_REG_BITS as usize]))
+                let bits = SHIFT_REG_BITS as usize;
+                let low = &write_data[..bits];
+                let moving = l.equals(&fields["op"], OP_MOV);
+                let at_once = l.mux_bus(moving, &direct_result[..bits], &read_a[..bits]);
+                (l.mux_bus(now, low, &at_once), l.mux_bus(now, low, &read_b[..bits]))
             };
             let shift_a = held_shift(&mut b, "shift_a", load_shift_a, &from_a);
             let shift_b = held_shift(&mut b, "shift_b", load_shift_b, &from_b);

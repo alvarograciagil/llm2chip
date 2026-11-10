@@ -937,8 +937,26 @@ impl Layout {
                     Some(limit) => ops.window_slot(position, *limit as u32),
                     None => position,
                 };
-                ops.store_key(self.reg(*key), STATE_EXPONENT, self.keys[*slot], slot_place, width);
-                ops.store_key(self.reg(*value), STATE_EXPONENT, self.values[*slot], slot_place, width);
+                let reader = program.ops.iter().chain(program.draft.iter().flat_map(|d| d.ops.iter())).find_map(|inst| match inst.op {
+                    Op::AttnSum { slot: s, heads, kv_heads, head_dim, .. } if s == *slot => Some((heads, kv_heads, head_dim)),
+                    _ => None,
+                });
+                let (keys, values) = (self.keys[*slot], self.values[*slot]);
+                let (key, value) = (self.reg(*key), self.reg(*value));
+                match reader {
+                    // Units hold the columns they read: each writes just those, all at once.
+                    Some((heads, kv_heads, head_dim)) if (kv_heads * head_dim) as u32 == width => {
+                        let d = head_dim as u32;
+                        ops.each_head_split(kv_heads as u32, (heads / kv_heads) as u32, |ops, kv_head, _| {
+                            ops.store_key_part(key, STATE_EXPONENT, keys, slot_place, width, kv_head * d, d);
+                            ops.store_key_part(value, STATE_EXPONENT, values, slot_place, width, kv_head * d, d);
+                        });
+                    }
+                    _ => {
+                        ops.store_key(key, STATE_EXPONENT, keys, slot_place, width);
+                        ops.store_key(value, STATE_EXPONENT, values, slot_place, width);
+                    }
+                }
             }
             Op::AttnSum { slot, query, head_dim, scale_dim, heads, kv_heads, window, softcap, dst } => {
                 let group = heads / kv_heads;
@@ -974,9 +992,13 @@ impl Layout {
                 let taps = self.small[&format!("{weight}.weight")];
                 let reg = self.conv[*slot];
                 let (dim32, kernel32) = (dim as u32, kernel as u32);
-                ops.align_to(self.reg(*src), zero, STATE_EXPONENT, reg, (history * dim32).into(), dim32.into());
-                ops.depthwise(taps, reg, self.reg(*dst), dim32, kernel32);
-                ops.each(history.into(), |ops, k| ops.copy_elements(reg, (k + 1.into()) * dim32, k * dim32, dim32));
+                let (src, dst) = (self.reg(*src), self.reg(*dst));
+                // Each unit keeps the history of its own channels and convolves them.
+                ops.in_slabs(dim32, &[dst], |ops, start, n| {
+                    ops.align_to(src, start, STATE_EXPONENT, reg, start + (history * dim32).into(), n.into());
+                    ops.depthwise_part(taps, reg, dst, dim32, kernel32, start, n);
+                    ops.each(history.into(), |ops, k| ops.copy_elements(reg, (k + 1.into()) * dim32 + start, k * dim32 + start, n));
+                });
             }
             Op::DeltaStep { slot, mixed, a, b, a_log, dt_bias, key_dim, key_heads, value_dim, value_heads, dst } => {
                 let ratio = value_heads / key_heads;

@@ -408,6 +408,14 @@ pub trait BlockOps: Sized {
         self.dots(taps, history, dst, width.into(), kernel.into(), |c, k| ((taps, k * width + c), (history, k * width + c)));
     }
 
+    /// `depthwise` over the `len` channels from `start` of a convolution `width` wide.
+    /// Only a die that splits the channels among its units passes a start other than 0.
+    #[allow(clippy::too_many_arguments)]
+    fn depthwise_part(&mut self, taps: u32, history: u32, dst: u32, width: u32, kernel: u32, start: Self::N, len: u32) {
+        let _ = (start, len);
+        self.depthwise(taps, history, dst, width, kernel);
+    }
+
     /// Moves `width` elements of `reg` to an earlier place in the same register.
     fn copy_elements(&mut self, reg: u32, from: Self::N, to: Self::N, width: u32) {
         self.each(width.into(), |s, c| s.move_element((reg, from + c), (reg, to + c)));
@@ -431,6 +439,13 @@ pub trait BlockOps: Sized {
     /// Keeps the key of one token at its place in the store.
     fn store_key(&mut self, src: u32, exponent: i64, keys: u32, slot: Self::N, width: u32) {
         self.align_to(src, 0.into(), exponent, keys, slot * width, width.into());
+    }
+
+    /// `store_key` for the `len` elements from `from` of a key `width` wide. A die that
+    /// splits a head among units writes in each only the columns that unit reads.
+    #[allow(clippy::too_many_arguments)]
+    fn store_key_part(&mut self, src: u32, exponent: i64, keys: u32, slot: Self::N, width: u32, from: Self::N, len: u32) {
+        self.align_to(src, from, exponent, keys, slot * width + from, len.into());
     }
 
     /// `dst[t]` becomes the product of a query with the key of every stored token.
@@ -780,8 +795,15 @@ impl Assembly {
         count.dst = self.sc(0);
         // Units sharing a head look at all their parts, so they all shift alike.
         count.reduce_group = self.group_bits();
-        self.push(count);
-        self.load_shifts(None, None, Some(self.sc(0)));
+        if self.shifts_now {
+            // The count goes into the left shifter as it is written.
+            (count.load_shift_left, count.shift_now) = (true, true);
+            self.shift_zero[2] = false;
+            self.push(count);
+        } else {
+            self.push(count);
+            self.load_shifts(None, None, Some(self.sc(0)));
+        }
         self.elements(len, &[from], true, |s, i, vector| {
             let mut shift = alu(OP_SHIFT_LEFT);
             shift.a = (reg, from + i);
@@ -1143,6 +1165,15 @@ impl Assembly {
     }
 
     fn scan_and_shift(&mut self, reg: u32, from: Expr, len: Expr) {
+        // A step clears in its first cycle and scans in its second, so a scan that is a
+        // single step needs no clearing step of its own.
+        let lanes = 1u32 << self.lane_bits;
+        if len.is_constant() && (len.constant() == 1 || (len.constant() == lanes && from.is_multiple_of(lanes))) {
+            let mut scan = alu(OP_MOV);
+            (scan.a, scan.write, scan.magnitude_clear, scan.magnitude_scan) = ((reg, from), false, true, true);
+            scan.vector = len.constant() > 1;
+            return self.push(scan);
+        }
         let mut first = alu(OP_MOV);
         first.a = (reg, from);
         first.write = false;
@@ -1711,12 +1742,47 @@ impl BlockOps for Assembly {
         self.narrow_sums(taps, history, dst, width.into());
     }
 
+    fn depthwise_part(&mut self, taps: u32, history: u32, dst: u32, width: u32, kernel: u32, start: Expr, len: u32) {
+        if start == Expr::from(0) && len == width {
+            return self.depthwise(taps, history, dst, width, kernel);
+        }
+        assert!(self.combines, "solo un die que suma filas reparte la convolución");
+        let zero = self.sc(10);
+        self.immediate(0, zero);
+        self.steps.push(Step::Combine { weights: zero, matrix: history, start, width: len.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
+        self.each(kernel.into(), |s, k| s.steps.push(Step::Combine { weights: (taps, k * width + start), matrix: history, start: k * width + start, width: len.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: true }));
+        self.narrow_part_at(taps, history, dst, 0.into(), start, len.into());
+    }
+
     fn copy_elements(&mut self, reg: u32, from: Expr, to: Expr, width: u32) {
         self.elements(width.into(), &[from, to], true, |s, c, vector| {
             let mut step = alu(OP_MOV);
             (step.a, step.dst, step.vector) = ((reg, from + c), (reg, to + c), vector);
             s.push(step);
         });
+    }
+
+    fn store_key_part(&mut self, src: u32, exponent: i64, keys: u32, slot: Expr, width: u32, from: Expr, len: u32) {
+        // The columns this unit's share of the head reads, as `score_keys` splits them.
+        let (from, len) = match self.split.filter(|(_, parts)| len.is_multiple_of(*parts)) {
+            Some((part, parts)) => (from + part * (len / parts), len / parts),
+            None => (from, len),
+        };
+        let Some(capacity) = self.key_capacity else {
+            return self.align_to(src, from, exponent, keys, slot * width + from, len.into());
+        };
+        if self.key_shift == 0 {
+            // Columns written one element at a time: the whole key, as `store_key` does.
+            return self.store_key(src, exponent, keys, slot, width);
+        }
+        let start: Expr = 32u32.max(1 << self.lane_bits).into();
+        let scratch = self.scratch;
+        self.align_to(src, from, exponent, scratch, start, len.into());
+        let variable = Var::Loop(self.loops);
+        self.loops += 1;
+        let mut step = alu(OP_MOV);
+        (step.a, step.dst, step.write_spread) = ((scratch, start + Expr::var(variable)), (keys, slot + from * capacity), true);
+        self.steps.push(Step::Stream { variable, count: len.into(), in_elements: false, body: step });
     }
 
     fn store_key(&mut self, src: u32, exponent: i64, keys: u32, slot: Expr, width: u32) {
