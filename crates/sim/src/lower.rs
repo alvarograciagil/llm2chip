@@ -192,13 +192,18 @@ fn buffers_read(op: &Op) -> Vec<usize> {
 /// of its length, and read only by such steps, which take the same slices.
 fn spread_buffers(program: &Program) -> HashSet<usize> {
     let ops: Vec<&Op> = all_ops(program).map(|i| &i.op).collect();
-    let in_slices = |op: &Op| matches!(op, Op::Silu { .. } | Op::MulElem { .. } | Op::Add { .. } | Op::Dconv { .. });
+    // A norm over the whole vector at once also works in slices.
+    let in_slices = |op: &Op| match op {
+        Op::Silu { .. } | Op::Sigmoid { .. } | Op::MulElem { .. } | Op::Add { .. } | Op::Dconv { .. } => true,
+        Op::RmsNorm { src, block, .. } => program.buffers[*src] == *block,
+        _ => false,
+    };
     let mut kept: HashSet<usize> = [program.logits, program.final_hidden].into_iter().collect();
     if let Some(draft) = &program.draft {
         kept.extend([draft.hidden_in, draft.hidden_out]);
     }
     let made: HashMap<usize, &Op> = ops.iter().filter_map(|op| match op {
-        Op::Matvec { dst, .. } | Op::Silu { dst, .. } | Op::MulElem { dst, .. } | Op::Add { dst, .. } | Op::Dconv { dst, .. } => Some((*dst, *op)),
+        Op::Matvec { dst, .. } | Op::Silu { dst, .. } | Op::Sigmoid { dst, .. } | Op::MulElem { dst, .. } | Op::Add { dst, .. } | Op::Dconv { dst, .. } => Some((*dst, *op)),
         _ => None,
     }).collect();
     made.keys().copied().filter(|buffer| {
@@ -934,7 +939,7 @@ impl Layout {
     fn lower_op<O: BlockOps>(&self, ops: &mut O, program: &Program, op: &Op, token: O::N, position: O::N) -> Result<(), String> {
         let made: Vec<usize> = match op {
             Op::Matvec { matrix, dst, .. } => self.chains.get(matrix).map_or_else(|| vec![*dst], |parts| parts.iter().map(|(_, dst)| *dst).collect()),
-            Op::Silu { dst, .. } | Op::MulElem { dst, .. } | Op::Add { dst, .. } | Op::Dconv { dst, .. } => vec![*dst],
+            Op::Silu { dst, .. } | Op::Sigmoid { dst, .. } | Op::MulElem { dst, .. } | Op::Add { dst, .. } | Op::Dconv { dst, .. } => vec![*dst],
             _ => Vec::new(),
         };
         for buffer in made.into_iter().filter(|b| self.spread.contains(b)) {
@@ -1012,7 +1017,15 @@ impl Layout {
             Op::Scale { src, factor, dst } => ops.scale(self.small[&format!("escala:{factor}")], self.reg(*src), self.reg(*dst), size(*dst)),
             Op::AddWeight { src, weight, dst } => ops.add(self.reg(*src), self.small[weight], self.reg(*dst), size(*dst)),
             Op::Silu { src, dst } => self.silu(ops, self.reg(*src), self.reg(*dst), program.buffers[*dst] as u32),
-            Op::Sigmoid { src, dst } => ops.function(FN_SIGMOID, self.reg(*src), self.reg(*dst), size(*dst)),
+            Op::Sigmoid { src, dst } => {
+                let t = &self.temporaries;
+                ops.in_slabs(program.buffers[*dst] as u32, &[self.reg(*dst)], |ops, start, count| {
+                    let (x, y) = (t[58], t[59]);
+                    ops.copy_part(self.reg(*src), start, x, 0.into(), count.into());
+                    ops.function(FN_SIGMOID, x, y, count.into());
+                    ops.copy_part(y, 0.into(), self.reg(*dst), start, count.into());
+                });
+            }
             Op::RmsNorm { src, weight, block, dst, .. } => {
                 let count = program.buffers[*dst] / block;
                 let w = self.small[&format!("{weight}.weight")];
