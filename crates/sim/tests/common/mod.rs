@@ -58,6 +58,8 @@ impl Rng {
 thread_local! {
     /// Columns that share a scale and a bias in the matrices this thread writes.
     pub static GROUP: std::cell::Cell<usize> = const { std::cell::Cell::new(2) };
+    /// Bits of each code, packed as MLX packs them.
+    pub static BITS: std::cell::Cell<usize> = const { std::cell::Cell::new(4) };
 }
 
 #[derive(Default)]
@@ -80,7 +82,7 @@ impl Writer {
 
     /// One matrix in MLX's affine format: 4-bit codes in groups of two columns.
     pub fn matrix(&mut self, name: &str, rows: usize, cols: usize, rng: &mut Rng) {
-        let group = GROUP.with(|g| g.get());
+        let (group, bits) = (GROUP.with(|g| g.get()), BITS.with(|b| b.get()));
         let groups = cols / group;
         let mut codes = Vec::with_capacity(rows * cols);
         let (mut scales, mut biases) = (Vec::new(), Vec::new());
@@ -89,15 +91,18 @@ impl Writer {
                 scales.extend(half::f16::from_f32(0.02 + 0.03 * rng.unit().abs()).to_le_bytes());
                 biases.extend(half::f16::from_f32(-0.2 * rng.unit().abs() - 0.05).to_le_bytes());
                 for _ in 0..group {
-                    codes.push(((rng.unit() + 1.0) * 7.5) as u8 & 0xF);
+                    codes.push(((rng.unit() + 1.0) * ((1 << bits) as f32 / 2.0 - 0.5)) as u8 & ((1 << bits) - 1) as u8);
                 }
             }
         }
-        let mut packed = vec![0u8; rows * cols.div_ceil(8) * 4];
-        for (i, code) in codes.iter().enumerate() {
-            packed[i / 2] |= code << (4 * (i & 1));
+        let words = (cols * bits).div_ceil(32);
+        let mut packed = vec![0u8; rows * words * 4];
+        for (row, codes) in codes.chunks(cols).enumerate() {
+            for (i, code) in codes.iter().enumerate() {
+                packed[row * words * 4 + i * bits / 8] |= code << (i * bits % 8);
+            }
         }
-        self.tensor(&format!("{name}.weight"), "U32", &[rows, cols.div_ceil(8)], packed);
+        self.tensor(&format!("{name}.weight"), "U32", &[rows, words], packed);
         self.tensor(&format!("{name}.scales"), "F16", &[rows, groups], scales);
         self.tensor(&format!("{name}.biases"), "F16", &[rows, groups], biases);
     }

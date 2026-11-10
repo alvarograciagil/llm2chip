@@ -7,6 +7,14 @@ use crate::{Bit, Builder, Design, Module};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+/// log2 of the most codes a cell's word can hold: four, of a quarter of its width.
+pub const MAX_PACKING: u32 = 2;
+
+/// Bits of the field that says how many codes each word holds.
+pub fn bits_for_packing(most: u32) -> u32 {
+    u32::BITS - most.leading_zeros()
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct CellConfig {
     pub weight_bits: u32,
@@ -42,6 +50,16 @@ impl CellConfig {
     /// Weights held in each protected word: about 64 bits' worth.
     pub fn ecc_lanes(&self) -> u32 {
         1 << (64 / self.weight_bits.max(1)).max(1).ilog2()
+    }
+
+    /// log2 of the most integer codes the cell can keep in each word: two of half its width,
+    /// or four of a quarter, while a code keeps two bits. Zero when its codes are not
+    /// plain integers or its words are protected.
+    pub fn most_packing(&self) -> u32 {
+        if !matches!(self.coding, WeightCoding::Affine | WeightCoding::Fixed) || self.has_ecc() {
+            return 0;
+        }
+        (0..=MAX_PACKING).rev().find(|p| self.weight_bits.is_multiple_of(1 << p) && self.weight_bits >> p >= 2).unwrap_or(0)
     }
 
     /// Whether this cell really protects its memory.
@@ -538,7 +556,38 @@ impl Gen {
         b.group("Direcciones");
         let address = b.wire("address", c.addr_bits);
         let seek_ports = seekable.then(|| (b.input("seek", 1), b.input("seek_addr", c.addr_bits)));
-        let mut counter_pins = vec![("clear", vec![clear]), ("advance", vec![run]), ("address", address.clone())];
+        // A matrix whose codes are narrower keeps 2^p of them in each word: the cell takes them
+        // from the low end up, and moves to the next word after the last.
+        let most = if seekable { c.most_packing() } else { 0 };
+        let slots = (most > 0).then(|| {
+            let packing = b.input("packing", bits_for_packing(most));
+            let seek = seek_ports.as_ref().map_or(Bit::Zero, |(seek, _)| seek[0]);
+            let mut l = crate::rv32::Logic { b: &mut b, next: 70_000 };
+            let slot = l.fresh_bus(most as usize);
+            // The last slot of the word for each packing, and whether that one is chosen.
+            let last: Vec<Bit> = (0..=most).map(|p| {
+                let chosen = l.equals(&packing, p);
+                let full = l.all(&slot[..p as usize]);
+                l.and(chosen, full)
+            }).collect();
+            let last = l.any(&last);
+            let stepped = l.adder(&slot, &vec![Bit::Zero; most as usize], Bit::One).0;
+            let wrapped = l.mux_bus(last, &stepped, &vec![Bit::Zero; most as usize]);
+            let moved = l.mux_bus(run, &slot, &wrapped);
+            let restart = l.or(clear, seek);
+            let kept = l.not(restart);
+            let next: Vec<Bit> = moved.iter().map(|bit| l.and(*bit, kept)).collect();
+            l.connect_flops(&next, &slot);
+            let advance = l.and(run, last);
+            // The word read now was addressed a cycle ago, with that cycle's slot.
+            let late_slot = l.fresh_bus(most as usize);
+            l.connect_flops(&slot, &late_slot);
+            let late_packing = l.fresh_bus(packing.len());
+            l.connect_flops(&packing, &late_packing);
+            (advance, late_slot, late_packing)
+        });
+        let advance = slots.as_ref().map_or(run, |(advance, _, _)| *advance);
+        let mut counter_pins = vec![("clear", vec![clear]), ("advance", vec![advance]), ("address", address.clone())];
         if let Some((seek, target)) = seek_ports {
             counter_pins.extend([("seek", seek), ("target", target)]);
         }
@@ -561,6 +610,23 @@ impl Gen {
             }
         }
 
+        let weight = match slots {
+            Some((_, slot, packing)) => {
+                let mut l = crate::rv32::Logic { b: &mut b, next: 70_100 };
+                let mut chosen = weight.clone();
+                for p in 1..=most {
+                    let width = (w >> p) as usize;
+                    let pieces: Vec<Vec<Bit>> = weight.chunks(width).map(<[Bit]>::to_vec).collect();
+                    let piece = l.select(&slot[..p as usize], &pieces);
+                    let sign = piece[width - 1];
+                    let widened: Vec<Bit> = (0..w as usize).map(|i| piece.get(i).copied().unwrap_or(sign)).collect();
+                    let here = l.equals(&packing, p);
+                    chosen = l.mux_bus(here, &chosen, &widened);
+                }
+                chosen
+            }
+            None => weight,
+        };
         b.group("Decodificación del formato");
         let decoded = self.decode(&mut b, &c, weight, table_ports);
 

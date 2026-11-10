@@ -696,7 +696,8 @@ pub enum Step {
     /// `(k >> shift) mod 2^bits < limit` take part: the others fill out a power of two.
     Clustered { vars: Vec<Var>, assignments: Vec<Vec<u32>>, slots: Option<(u32, u32, u32)>, body: Vec<Step> },
     /// Moves every cell to where a matrix starts.
-    CellSeek { weights: Expr, factors: Expr },
+    /// `packing` is log2 of the codes the matrix keeps in each word.
+    CellSeek { weights: Expr, factors: Expr, packing: u32 },
     /// Clears the row totals and restarts the input vector.
     CellPass,
     /// One group of columns through the cells.
@@ -757,6 +758,8 @@ pub struct CellMatrix {
     /// Non-zero when each group is part of a quantisation group of `1 << quant_bits`
     /// columns, so the columns divide evenly among the units.
     pub quant_bits: u32,
+    /// log2 of the codes each word of the cells holds for this matrix.
+    pub packing: u32,
 }
 
 impl From<Alu<u32>> for Step {
@@ -2096,7 +2099,7 @@ impl Assembly {
         let columns = groups * place.group;
         let passes = rows.div_ceil(per_unit);
         let block = first.divided_by(rows);
-        self.steps.push(Step::CellSeek { weights: Expr::from(place.weights) + block * (passes * columns), factors: Expr::from(place.factors) + block * (passes * groups) });
+        self.steps.push(Step::CellSeek { weights: Expr::from(place.weights) + block * ((passes * columns) >> place.packing), factors: Expr::from(place.factors) + block * (passes * groups), packing: place.packing });
         let column = Var::Loop(self.loops);
         self.loops += 1;
         let before = std::mem::take(&mut self.steps);

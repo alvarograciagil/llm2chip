@@ -276,10 +276,12 @@ pub struct ControlWord {
     pub quant_bits: u32,
     /// The group ending now is a unit's last of the pass: its cells move on regardless.
     pub slice_end: bool,
+    /// With `cell_seek_weights`: log2 of the codes the matrix keeps in each word of the cells.
+    pub cell_packing: u32,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 78;
+pub const FIELD_COUNT: usize = 79;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
@@ -397,6 +399,7 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("wide_chain", 1),
         ("quant_bits", 3),
         ("slice_end", 1),
+        ("cell_packing", crate::cell::bits_for_packing(crate::cell::MAX_PACKING)),
     ]
 }
 
@@ -486,6 +489,7 @@ impl ControlWord {
             self.wide_chain as u128,
             self.quant_bits as u128,
             self.slice_end as u128,
+            self.cell_packing as u128,
         ]
     }
 
@@ -695,6 +699,9 @@ impl Gen {
         // A flush takes the group's sum and starts the next group with whatever product
         // arrives in that cycle, so groups can follow each other with no gap.
         let mut compute_pins = vec![("clear", vec![clear]), ("clear_total", vec![clear_group]), ("restart", vec![flush]), ("run", vec![run]), ("x", x.clone()), ("total", group_sum.clone()), ("seek", seek_weights), ("seek_addr", seek_addr.clone())];
+        if cfg.most_packing() > 0 {
+            compute_pins.push(("packing", b.input("packing", crate::cell::bits_for_packing(cfg.most_packing()))));
+        }
         if let Some((load_en, load_scale, load_addr, load_data)) = &load {
             let load_weight = and_not(&mut b, *load_en, *load_scale, "load_weight");
             compute_pins.extend([("load_en", vec![load_weight]), ("load_addr", load_addr.clone()), ("load_data", load_data[..cfg.weight_bits as usize].to_vec())]);
@@ -1023,6 +1030,16 @@ impl Gen {
             out
         };
         let cell_seek_weights = ctl("cell_seek_weights", &mut b, &fields);
+        // How many codes each word holds in the matrix the cells were last pointed at.
+        let cell_packing = {
+            let mut l = Logic { b: &mut b, next: 59_600 };
+            let width = crate::cell::bits_for_packing(cfg.most_packing()) as usize;
+            let mode = l.fresh_bus(width);
+            let field: Vec<Bit> = (0..width).map(|i| fields["cell_packing"].get(i).copied().unwrap_or(Bit::Zero)).collect();
+            let next = l.mux_bus(cell_seek_weights, &mode, &field);
+            l.connect_flops(&next, &mode);
+            mode
+        };
         let cell_seek_factors = ctl("cell_seek_factors", &mut b, &fields);
         let cell_clear = ctl("cell_clear", &mut b, &fields);
         let cell_clear_group = ctl("cell_clear_group", &mut b, &fields);
@@ -2074,6 +2091,9 @@ impl Gen {
                 let total = b.wire(&format!("cell{i}_total"), wide);
                 let mut cell_pins = vec![("clear", vec![cell_clear]), ("clear_group", vec![cell_clear_group]), ("flush", vec![cell_flush]), ("advance", vec![advance]), ("run", vec![cell_run]), ("x", x_bus.clone()), ("total", total.clone()), ("seek_weights", vec![cell_seek_weights]), ("seek_factors", vec![cell_seek_factors]), ("seek_addr", cell_seek_addr.clone())];
                 cell_pins.extend(factor_pins.iter().cloned());
+                if cfg.most_packing() > 0 {
+                    cell_pins.push(("packing", cell_packing.clone()));
+                }
                 if let Some((load_cell, load_scale, cell_addr)) = &cell_ports {
                     cell_pins.extend([("load_en", vec![load_cell[i]]), ("load_scale", vec![*load_scale]), ("load_addr", cell_addr.clone()), ("load_data", cell_data[..c.scale_bits.max(cfg.weight_bits) as usize].to_vec())]);
                 }
@@ -2432,7 +2452,7 @@ fn visit_indices(steps: &[Step], f: &mut impl FnMut(Expr)) {
                 f(body.dst.1);
                 f(body.window);
             }
-            Step::CellSeek { weights, factors } => {
+            Step::CellSeek { weights, factors, .. } => {
                 f(*weights);
                 f(*factors);
             }
@@ -2625,7 +2645,7 @@ impl DieProgram {
                 Step::Combine { .. } => self.combine(step),
                 Step::CombineRows { .. } => self.combine_rows(step),
                 Step::Clustered { vars, assignments, slots, body } => self.clustered(vars, assignments, *slots, body),
-                Step::CellSeek { weights, factors } => self.cell_seek(*weights, *factors),
+                Step::CellSeek { weights, factors, packing } => self.cell_seek(*weights, *factors, *packing),
                 Step::CellPass => self.cell_pass(),
                 Step::CellGroup { src, length, start, quant_bits, last } => self.cell_group(*src, *length, *start, (*quant_bits, *last)),
                 Step::WideReduce { rows, group } => self.wide_reduce(*rows, *group),
@@ -2929,11 +2949,11 @@ impl DieProgram {
     }
 
     /// Points every cell at the first weight and the first group of a matrix.
-    fn cell_seek(&mut self, weights: Expr, factors: Expr) {
+    fn cell_seek(&mut self, weights: Expr, factors: Expr, packing: u32) {
         let (literal, offset) = self.resolve(weights);
         let t = self.after_cells();
         let w = self.slot(t);
-        (w.use_literal, w.literal_a, w.offset_a, w.cell_seek_weights, w.write_reset) = (true, literal, offset, true, true);
+        (w.use_literal, w.literal_a, w.offset_a, w.cell_seek_weights, w.write_reset, w.cell_packing) = (true, literal, offset, true, true, packing);
         let (literal, offset) = self.resolve(factors);
         let w = self.slot(t + 1);
         (w.use_literal, w.literal_a, w.offset_a, w.cell_seek_factors) = (true, literal, offset, true);

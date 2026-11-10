@@ -148,6 +148,8 @@ struct CellEntry {
     /// Columns that share one scale and bias: `group` itself, or a multiple of it when
     /// the quantisation groups are cut so that the units share the columns evenly.
     quant: usize,
+    /// log2 of the codes each word of the cells holds: narrower codes share a word.
+    packing: u32,
     exponent: i64,
     /// Its rows follow those of the entry before, in the same passes of the cells.
     chained: bool,
@@ -243,12 +245,12 @@ fn place_in_cells(plan: &[CellEntry], cells: usize, units: usize, lanes: u32) ->
         let e = &parts[0];
         let quant_bits = if e.quant == e.group { 0 } else { e.quant.trailing_zeros() };
         for part in parts {
-            places.insert(part.name.clone(), CellMatrix { weights: weights as u32, factors: factors as u32, group: e.group as u32, groups: e.groups as u32, quant_bits });
+            places.insert(part.name.clone(), CellMatrix { weights: weights as u32, factors: factors as u32, group: e.group as u32, groups: e.groups as u32, quant_bits, packing: e.packing });
         }
         let blocks = if parts.len() == 1 { e.rows / e.block } else { 1 };
         let rounds = (blocks * block.div_ceil(per_unit)) as u64;
         let groups = e.groups.div_ceil(units) as u64;
-        weights += rounds * groups * e.group as u64;
+        weights += (rounds * groups * e.group as u64) >> e.packing;
         factors += rounds * e.factors_per_pass(units) as u64;
     }
     (places, weights, factors)
@@ -413,11 +415,14 @@ impl Layout {
                     let part = gcd(group, share);
                     let cut = config.features.feeds_cells() && units > 1 && block == rows && !groups.is_multiple_of(units) && cols.is_multiple_of(units) && group.is_power_of_two() && group <= 128 && (2..group).contains(&part) && part >= config.features.factor_steps as usize;
                     let (group, groups, quant) = if cut { (part, cols / part, group) } else { (group, groups, group) };
+                    // As many codes in each word of the cells as fit, while each group fills whole words.
+                    let code_bits = matrix.cell_code_bits(cols, config.cell.activation_bits);
+                    let packing = (0..=config.cell.most_packing()).rev().find(|p| code_bits << p <= config.cell.weight_bits && group.is_multiple_of(1 << p)).unwrap_or(0);
                     let exponent = matrix.exponent(cols);
                     setup.load_mantissas(reg, &[], exponent);
                     let chained = match (previous, &inst.op, cell_plan.last()) {
                         (Some(Op::Matvec { matrix: before, src: from, .. }), Op::Matvec { src, dst, .. }, Some(last)) => {
-                            last.name == *before && from == src && dst != src && uses[before] == 1 && uses[&name] == 1 && block == rows && last.block == last.rows && (last.cols, last.group, last.groups, last.quant) == (cols, group, groups, quant)
+                            last.name == *before && from == src && dst != src && uses[before] == 1 && uses[&name] == 1 && block == rows && last.block == last.rows && (last.cols, last.group, last.groups, last.quant, last.packing) == (cols, group, groups, quant, packing)
                         }
                         _ => false,
                     };
@@ -429,7 +434,7 @@ impl Layout {
                         chains.insert(name.clone(), vec![(name.clone(), *dst)]);
                         leader_of.insert(name.clone(), name.clone());
                     }
-                    cell_plan.push(CellEntry { block, name, rows, cols, group, groups, quant, exponent, chained });
+                    cell_plan.push(CellEntry { block, name, rows, cols, group, groups, quant, packing, exponent, chained });
                 }
             }
             previous = Some(&inst.op);
@@ -763,14 +768,18 @@ impl Layout {
                             let count = p.cols.div_ceil(p.quant);
                             let shared = |q: usize| if f.len() == count { f.get(q).copied() } else { (q < count).then(|| f[0]) };
                             factors.extend(quant_groups.clone().map(|q| shared(q).unwrap_or((0, 0))));
+                            // Each word keeps `1 << packing` codes of `chunk` bits, the first in the low bits.
+                            let chunk = self.config.cell.weight_bits >> p.packing;
+                            let mask = (1i64 << chunk) - 1;
                             for g in first..first + groups {
-                                for j in 0..p.group {
-                                    codes.push(w.get(g * p.group + j).copied().unwrap_or(0));
+                                for j in (0..p.group).step_by(1 << p.packing) {
+                                    let code = |slot: usize| w.get(g * p.group + j + slot).copied().unwrap_or(0);
+                                    codes.push(if p.packing == 0 { code(0) } else { (0..1 << p.packing).fold(0, |word, slot| word | (code(slot) & mask) << (slot as u32 * chunk)) });
                                 }
                             }
                         }
                         None => {
-                            codes.extend(std::iter::repeat_n(0, groups * e.group));
+                            codes.extend(std::iter::repeat_n(0, (groups * e.group) >> e.packing));
                             factors.extend(std::iter::repeat_n((0, 0), quant_groups.len()));
                         }
                     }

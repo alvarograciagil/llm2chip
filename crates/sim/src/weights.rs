@@ -295,7 +295,7 @@ impl Matrix<'_> {
                     let bias = half_at(biases, index * groups + g);
                     for j in 0..group_size {
                         let at = g * group_size + j;
-                        let q = if bits == 8 { row[at] } else { (row[at / 2] >> (4 * (at & 1))) & 0xF };
+                        let q = packed_code(row, at, bits);
                         y[at] = q as f32 * scale + bias;
                     }
                 }
@@ -447,10 +447,10 @@ impl Matrix<'_> {
                     let row = &words[r * stride..(r + 1) * stride];
                     let mut total = 0f32;
                     for (g, xs) in x.chunks_exact(group_size).enumerate() {
-                        let dot = if bits == 4 {
-                            dot_nibbles(&row[g * group_size / 2..(g + 1) * group_size / 2], xs)
-                        } else {
-                            dot_bytes(&row[g * group_size..(g + 1) * group_size], xs)
+                        let dot = match bits {
+                            4 => dot_nibbles(&row[g * group_size / 2..(g + 1) * group_size / 2], xs),
+                            8 => dot_bytes(&row[g * group_size..(g + 1) * group_size], xs),
+                            _ => xs.iter().enumerate().map(|(j, v)| packed_code(row, g * group_size + j, bits) as f32 * v).sum(),
                         };
                         total += dot * half_at(scales, r * groups + g) + half_at(biases, r * groups + g) * sums[g];
                     }
@@ -531,7 +531,7 @@ impl Matrix<'_> {
                     let (scale, bias) = affine_integers(half_at(scales, index * groups + g), half_at(biases, index * groups + g), factor);
                     for j in 0..group_size {
                         let at = g * group_size + j;
-                        let q = if bits == 8 { row[at] } else { (row[at / 2] >> (4 * (at & 1))) & 0xF };
+                        let q = packed_code(row, at, bits);
                         out.push(affine_weight(q, scale, bias, limit));
                     }
                 }
@@ -570,7 +570,7 @@ impl Matrix<'_> {
                 let row = &words[index * words_per_row * 4..(index + 1) * words_per_row * 4];
                 let middle = 1i64 << (width - 1);
                 let factor = fixed_factor(exponent, bits as i32 - 1);
-                let code = |at: usize| if width == 8 { row[at] } else { (row[at / 2] >> (4 * (at & 1))) & 0xF };
+                let code = |at: usize| packed_code(row, at, width);
                 let codes = (0..cols).map(|at| code(at) as i64 - middle).collect();
                 let factors = (0..*groups)
                     .map(|g| {
@@ -618,7 +618,7 @@ impl Matrix<'_> {
                 let (mut dot, mut sum) = (0i64, 0i64);
                 for (j, v) in xs.iter().enumerate() {
                     let at = g * group_size + j;
-                    let q = if width == 8 { row[at] } else { (row[at / 2] >> (4 * (at & 1))) & 0xF };
+                    let q = packed_code(row, at, width);
                     dot += q as i64 * *v as i64;
                     sum += *v as i64;
                 }
@@ -672,13 +672,12 @@ impl Matrix<'_> {
                     let mut code = vec![0u8; group_size];
                     let mut total = 0i64;
                     for (g, xs) in x.chunks_exact(group_size).enumerate() {
-                        if bits == 4 {
-                            for (j, c) in code.iter_mut().enumerate() {
-                                let at = g * group_size + j;
-                                *c = (row[at / 2] >> (4 * (at & 1))) & 0xF;
-                            }
-                        } else {
+                        if bits == 8 {
                             code.copy_from_slice(&row[g * group_size..(g + 1) * group_size]);
+                        } else {
+                            for (j, c) in code.iter_mut().enumerate() {
+                                *c = packed_code(row, g * group_size + j, bits);
+                            }
                         }
                         let (scale, bias) = affine_integers(half_at(scales, r * groups + g), half_at(biases, r * groups + g), factor);
                         total += dot_affine(&code, xs, scale, bias, limit);
@@ -732,6 +731,14 @@ fn dot_affine(codes: &[u8], x: &[i32], scale: i64, bias: i64, limit: i64) -> i64
         total += sum.iter().sum::<i64>();
     }
     total
+}
+
+/// The code at `at` of a row MLX packs as one stream of `bits`-bit codes, the first in the
+/// low bits of the first byte: 8, 4 or 2 bits share bytes evenly, 3, 5 or 6 cross them.
+fn packed_code(row: &[u8], at: usize, bits: usize) -> u8 {
+    let (byte, shift) = (at * bits / 8, at * bits % 8);
+    let pair = row[byte] as u16 | (row.get(byte + 1).copied().unwrap_or(0) as u16) << 8;
+    ((pair >> shift) & ((1 << bits) - 1)) as u8
 }
 
 #[cfg_attr(target_arch = "x86_64", multiversion::multiversion(targets("x86_64+avx512f", "x86_64+avx2+fma")))]

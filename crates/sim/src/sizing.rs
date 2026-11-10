@@ -141,8 +141,8 @@ pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32,
             let mut layout = Layout::for_image(program, weights, die, context as usize)?;
             layout.keep_weights_of(program, &plan, chip);
             let (depth, groups) = layout.cell_depths();
-            let (code_bits, _) = layout.cell_shape(weights)?;
-            cell_bits = cell_bits.max(depth * code_bits as u64 + groups * 2 * die.scale_bits as u64);
+            // The depth counts words, each as wide as the cell's weights.
+            cell_bits = cell_bits.max(depth * die.cell.weight_bits as u64 + groups * 2 * die.scale_bits as u64);
             layout.die_microprogram(program, &plan, chip)
         })
         .collect::<Result<Vec<_>, String>>()?;
