@@ -178,7 +178,7 @@ impl DieEngine for RunnerEngine<'_> {
 
 /// What each chip takes from the image when the model is shared among `chips` of them.
 pub fn plan_parts(program: &Program, dir: &Path, config: DieConfig, chip_tokens: usize, setup: &GenerationSetup, chips: usize) -> Result<Vec<ChipPart>, String> {
-    let plan = program.split(chips)?;
+    let plan = crate::lower::chip_plan(program, &Weights::open(dir)?, chips, chip_tokens, config.cell.activation_bits)?;
     (0..chips)
         .map(|chip| {
             let weights = Weights::open(dir)?;

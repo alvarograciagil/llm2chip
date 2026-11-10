@@ -6,7 +6,7 @@
 //! share grows with its lanes, each level of the network that joins the units costs every
 //! unit once more, and each cell costs the same wherever it is.
 
-use crate::lower::{Layout, ENTRY_LOGITS, ENTRY_TOKEN};
+use crate::lower::{chip_plan, vector_words, Layout, ENTRY_LOGITS, ENTRY_TOKEN};
 use crate::Weights;
 use compiler::Program;
 use netlist::{die_design, DieConfig, Microprogram};
@@ -29,8 +29,10 @@ pub struct Candidate {
     pub prompt_seconds: f64,
     /// Logic of all the chips in NAND2 equivalents, memories left out.
     pub gates: f64,
-    /// Silicon of all the chips: the logic and the cells' memories.
+    /// Silicon of all the chips: the logic, the cells' memories and the vector memories.
     pub area_mm2: f64,
+    /// Silicon of each chip, which a reticle limits.
+    pub die_mm2: f64,
 }
 
 /// Gate equivalents of the parts that change from one die to another.
@@ -128,13 +130,23 @@ pub struct Target {
 
 /// Each chip's microprogram when the model's layers are shared among `chips` of them.
 pub fn chip_programs(program: &Program, weights: &Weights, die: DieConfig, context: u32, chips: u32) -> Result<Vec<Microprogram>, String> {
-    Ok(built(program, weights, die, context, chips)?.0)
+    Ok(built(program, weights, die, context, chips)?.programs)
 }
 
-/// Each chip's microprogram, and the memory bits each cell needs on the chip that needs
-/// most: every chip is the same silicon.
-pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32, chips: u32) -> Result<(Vec<Microprogram>, u64), String> {
-    let plan = program.split(chips as usize)?;
+/// What the chips of a set run and the memory each needs.
+pub struct Built {
+    pub programs: Vec<Microprogram>,
+    /// Bits of each cell's memory on the chip that needs most: every chip is the same silicon.
+    pub cell_bits: u64,
+    /// Words of vector memory on the chip that needs most.
+    pub vector_words: u64,
+}
+
+/// Each chip's microprogram and the memory it needs, with the layers cut among the chips
+/// so the one with most memory has as little as can be.
+pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32, chips: u32) -> Result<Built, String> {
+    let plan = chip_plan(program, weights, chips as usize, context as usize, die.cell.activation_bits)?;
+    let vector = plan.iter().map(|ops| vector_words(program, ops.clone(), context as usize)).max().unwrap_or(0);
     let mut cell_bits = 0;
     let codes = (0..plan.len())
         .map(|chip| {
@@ -146,7 +158,7 @@ pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32,
             layout.die_microprogram(program, &plan, chip)
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok((codes, cell_bits))
+    Ok(Built { programs: codes, cell_bits, vector_words: vector })
 }
 
 /// Silicon of a process, for the area of what is generated.
@@ -159,6 +171,8 @@ pub struct Process {
     /// A memory bit, and how much periphery a memory block of a kilobit adds.
     pub sram_cell_um2: f64,
     pub sram_periphery_k: f64,
+    /// The largest die the process can expose at once.
+    pub reticle_mm2: f64,
 }
 
 impl Process {
@@ -205,19 +219,24 @@ pub fn die_of(base: DieConfig, context: u32, (cluster_bits, lane_bits, cell_bits
 /// One set of chips, measured: its own microprograms, its clock and its silicon.
 fn evaluate(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs, target: &Target, (chips, cluster_bits, lane_bits, cell_bits): (u32, u32, u32, u32)) -> Option<Candidate> {
     let die = die_of(base, target.context, (cluster_bits, lane_bits, cell_bits));
-    let (codes, bits) = built(program, weights, die, target.context, chips).ok()?;
+    let Built { programs: codes, cell_bits: bits, vector_words } = built(program, weights, die, target.context, chips).ok()?;
     let timing = timing(&codes, die, target.context, target.prompt, 256);
     let clock = target.clock_hz.min(costs.clock_hz(cluster_bits, lane_bits, target.process.full_adder_ns));
     let cycles = timing.token_cycles;
     let gates = costs.gates(cluster_bits, lane_bits, cell_bits);
-    let area_mm2 = chips as f64 * (gates * target.process.gate_um2 / 1e6 + target.process.memory_mm2(1 << cell_bits, bits));
-    Some(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, clock_hz: clock, tokens_per_second: clock / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / clock, gates: chips as f64 * gates, area_mm2 })
+    // Each lane of each unit keeps its share of the vectors twice, once for each read port.
+    let banks = 1u64 << (cluster_bits + lane_bits);
+    let vectors = 2.0 * target.process.memory_mm2(banks, (vector_words * die.cell.activation_bits as u64).div_ceil(banks));
+    let die_mm2 = gates * target.process.gate_um2 / 1e6 + target.process.memory_mm2(1 << cell_bits, bits) + vectors;
+    Some(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, clock_hz: clock, tokens_per_second: clock / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / clock, gates: chips as f64 * gates, area_mm2: chips as f64 * die_mm2, die_mm2 })
 }
 
 /// For each number of chips, width of unit and number of units, the fewest cells that
 /// reach the target, least silicon first. Those that cannot reach it are left out.
 pub fn search(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs, target: &Target) -> Vec<Candidate> {
     let measure = |shape: (u32, u32, u32, u32)| evaluate(program, weights, base, costs, target, shape);
+    // More cells only make a die faster and larger: the fewest that are fast enough, if
+    // they fit in the reticle.
     let fits = |c: &Candidate| c.tokens_per_second >= target.tokens_per_second && c.prompt_seconds <= target.prompt_seconds;
     let shapes: Vec<(u32, u32, u32)> = target.chips.iter().flat_map(|&n| target.lane_bits.clone().flat_map(move |l| target.cluster_bits.clone().map(move |u| (n, u, l)))).collect();
     let mut found: Vec<Candidate> = shapes
@@ -237,7 +256,7 @@ pub fn search(program: &Program, weights: &Weights, base: DieConfig, costs: &Cos
                     _ => low = middle + 1,
                 }
             }
-            Some(best)
+            Some(best).filter(|c| c.die_mm2 <= target.process.reticle_mm2)
         })
         .collect();
     found.sort_by(|a, b| a.area_mm2.total_cmp(&b.area_mm2));
@@ -255,7 +274,7 @@ pub fn frontier(program: &Program, weights: &Weights, base: DieConfig, costs: &C
     let mut all: Vec<Candidate> = shapes
         .par_iter()
         .filter_map(|&(chips, cluster_bits, lane_bits, cell_bits)| {
-            evaluate(program, weights, base, costs, target, (chips, cluster_bits, lane_bits, cell_bits))
+            evaluate(program, weights, base, costs, target, (chips, cluster_bits, lane_bits, cell_bits)).filter(|c| c.die_mm2 <= target.process.reticle_mm2)
         })
         .collect();
     all.sort_by(|a, b| a.area_mm2.total_cmp(&b.area_mm2));

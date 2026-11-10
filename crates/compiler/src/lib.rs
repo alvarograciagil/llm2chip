@@ -160,6 +160,57 @@ impl Program {
         Ok(ranges)
     }
 
+    /// Splits the work before the logits among `dies`, cutting between layers so that the
+    /// die with most `cost` has as little as can be. The first die also counts the cost
+    /// of the logits, which it makes.
+    pub fn split_by(&self, dies: usize, cost: impl Fn(usize) -> u64) -> Result<Vec<std::ops::Range<usize>>, String> {
+        let dies = dies.max(1);
+        let layers = self.num_layers.max(1);
+        if dies > layers {
+            return Err(format!("{dies} dies para {} capas", self.num_layers));
+        }
+        // Where each layer starts, and the cost of each: what comes before the first
+        // layer and the logits go with the first.
+        let mut starts = Vec::with_capacity(layers);
+        for layer in 1..layers as u32 {
+            starts.push(self.ops.iter().position(|inst| inst.layer == Some(layer)).ok_or("capa sin operaciones")?);
+        }
+        let bounds: Vec<usize> = std::iter::once(0).chain(starts).chain(std::iter::once(self.logits_from)).collect();
+        let mut load: Vec<u64> = bounds.windows(2).map(|w| (w[0]..w[1]).map(&cost).sum()).collect();
+        load[0] += (self.logits_from..self.ops.len()).map(&cost).sum::<u64>();
+        // best[k][i]: for `i` layers on `k + 1` dies, the least largest load and then the
+        // least sum of squared loads, so that the dies the largest does not bound are even
+        // too; and where the last die starts.
+        let prefix: Vec<u64> = std::iter::once(0).chain(load.iter().scan(0, |sum, l| {
+            *sum += l;
+            Some(*sum)
+        })).collect();
+        let square = |load: u64| (load as f64).powi(2);
+        let mut best = vec![vec![((u64::MAX, f64::INFINITY), 0usize); layers + 1]; dies];
+        for i in 1..=layers {
+            best[0][i] = ((prefix[i], square(prefix[i])), 0);
+        }
+        for k in 1..dies {
+            for i in k + 1..=layers {
+                best[k][i] = (k..i)
+                    .map(|j| {
+                        let ((largest, squares), _) = best[k - 1][j];
+                        let here = prefix[i] - prefix[j];
+                        ((largest.max(here), squares + square(here)), j)
+                    })
+                    .min_by(|a, b| a.0 .0.cmp(&b.0 .0).then(a.0 .1.total_cmp(&b.0 .1)))
+                    .unwrap();
+            }
+        }
+        let mut cuts = vec![layers];
+        for k in (1..dies).rev() {
+            cuts.push(best[k][*cuts.last().unwrap()].1);
+        }
+        cuts.push(0);
+        cuts.reverse();
+        Ok(cuts.windows(2).map(|w| bounds[w[0]]..bounds[w[1]]).collect())
+    }
+
     /// The one buffer that has to cross the cut before operation `cut`.
     pub fn crossing(&self, cut: usize) -> Result<Buf, String> {
         let mut last_writer = vec![None; self.buffers.len()];
@@ -772,6 +823,26 @@ mod tests {
             assert!(error.contains(word), "{error}");
         }
         assert!(compile_model(r#"{"model_type":"bert"}"#).unwrap_err().contains("bert"));
+    }
+
+    #[test]
+    fn a_split_by_cost_gives_the_first_die_fewer_layers_when_it_also_makes_the_logits() {
+        let program = compile_qwen3_5(QWEN).unwrap();
+        let matrices = |i: usize| match &program.ops[i].op {
+            Op::Matvec { src, dst, .. } => (program.buffers[*src] * program.buffers[*dst]) as u64,
+            _ => 0,
+        };
+        let even = program.split(8).unwrap();
+        let balanced = program.split_by(8, matrices).unwrap();
+        assert_eq!(balanced.len(), 8);
+        assert_eq!((balanced[0].start, balanced[7].end), (even[0].start, even[7].end));
+        assert!(balanced.windows(2).all(|w| w[0].end == w[1].start && !w[0].is_empty()));
+        let layers = |r: &std::ops::Range<usize>| program.ops[r.clone()].iter().filter_map(|i| i.layer).collect::<std::collections::HashSet<_>>().len();
+        assert!(layers(&balanced[0]) < layers(&even[0]), "{balanced:?}");
+        // No other cut leaves less on the die with most.
+        let load = |plan: &[std::ops::Range<usize>]| plan.iter().enumerate().map(|(d, r)| r.clone().map(matrices).sum::<u64>() + if d == 0 { (program.logits_from..program.ops.len()).map(matrices).sum() } else { 0 }).max().unwrap();
+        assert!(load(&balanced) < load(&even));
+        assert_eq!(program.split_by(1, matrices).unwrap(), program.split(1).unwrap());
     }
 
     #[test]

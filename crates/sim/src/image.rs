@@ -195,7 +195,7 @@ fn boot_plans(program: &Program, weights: &Weights, die: DieConfig, request: &Im
     let tokens = request.context_tokens as usize;
     let mut built: Vec<Vec<(Layout, Microprogram)>> = Vec::new();
     for chips in &request.chips {
-        let plan = program.split(*chips)?;
+        let plan = crate::lower::chip_plan(program, weights, *chips, tokens, die.cell.activation_bits)?;
         let parts = (0..*chips)
             .map(|chip| {
                 let mut layout = Layout::for_image(program, weights, die, tokens)?;

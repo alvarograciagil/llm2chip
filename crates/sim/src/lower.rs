@@ -19,6 +19,46 @@ const ONES_LENGTH: usize = 512;
 const TEMPORARIES: usize = 64;
 const PARTS: usize = 128;
 
+/// Words of vector memory the operation keeps from one token to the next: the keys and
+/// values of every position it can attend to, and the recurrent and convolution states.
+fn state_words(program: &Program, op: &Op, context: usize) -> u64 {
+    match op {
+        Op::KvAppend { slot, window, .. } => {
+            let shape = program.kv_slots[*slot];
+            2 * (shape.heads * shape.head_dim * window.map_or(context, |w| w.min(context))) as u64
+        }
+        Op::Mla { slot, .. } => (program.kv_slots[*slot].head_dim * context) as u64,
+        Op::DeltaStep { slot, .. } => program.delta_slots[*slot] as u64,
+        Op::Dconv { slot, .. } => {
+            let (dim, kernel) = program.conv_slots[*slot];
+            (dim * kernel) as u64
+        }
+        _ => 0,
+    }
+}
+
+/// Words of vector memory a chip needs for the operations `ops` at `context` tokens: their
+/// states, every buffer, the work registers and the rotation table.
+pub fn vector_words(program: &Program, ops: Range<usize>, context: usize) -> u64 {
+    let states: u64 = program.ops[ops].iter().map(|inst| state_words(program, &inst.op, context)).sum();
+    let buffers: u64 = program.buffers.iter().map(|b| *b as u64).sum();
+    // Work registers hold at most a hidden vector at a time.
+    let work = (TEMPORARIES + 2 * PARTS) as u64 * program.hidden as u64;
+    let rope_half = program.ops.iter().find_map(|i| if let Op::Rope { rotary, .. } = i.op { Some(rotary / 2) } else { None }).unwrap_or(0);
+    states + buffers + work + (context * (3 * rope_half + 1)) as u64
+}
+
+/// The layers each of `chips` chips runs, cut so the chip with most memory has as little as
+/// can be: its weights at their own widths, and its states for `context` tokens.
+pub fn chip_plan(program: &Program, weights: &Weights, chips: usize, context: usize, activation_bits: u32) -> Result<Vec<Range<usize>>, String> {
+    let bits = |index: usize| -> u64 {
+        let op = &program.ops[index].op;
+        let matrices: u64 = matrices_of(program, op).iter().map(|(name, rows, cols)| (rows * cols) as u64 * weights.matrix(name).map_or(activation_bits, |m| m.cell_code_bits(*cols, activation_bits)) as u64).sum();
+        matrices + state_words(program, op, context) * activation_bits as u64
+    };
+    program.split_by(chips, bits)
+}
+
 fn all_ops(program: &Program) -> impl Iterator<Item = &Inst> {
     program.ops.iter().chain(program.draft.iter().flat_map(|d| d.ops.iter()))
 }
