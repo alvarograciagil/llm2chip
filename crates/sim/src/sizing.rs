@@ -9,19 +9,23 @@
 use crate::lower::{Layout, ENTRY_LOGITS, ENTRY_TOKEN};
 use crate::Weights;
 use compiler::Program;
-use netlist::{die_design, DieConfig};
+use netlist::{die_design, DieConfig, Microprogram};
 use rayon::prelude::*;
 use serde::Serialize;
 
 /// One die the search tried.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Candidate {
+    /// Chips that share the layers, each one this die.
+    pub chips: u32,
     pub cluster_bits: u32,
     pub lane_bits: u32,
     pub cell_bits: u32,
     pub cycles: u64,
     pub tokens_per_second: f64,
-    /// Logic in NAND2 equivalents, memories left out.
+    /// Seconds to the first token after a prompt of `Target::prompt` tokens.
+    pub prompt_seconds: f64,
+    /// Logic of all the chips in NAND2 equivalents, memories left out.
     pub gates: f64,
 }
 
@@ -73,6 +77,10 @@ impl Costs {
 /// What the search is asked for and what it may try.
 pub struct Target {
     pub tokens_per_second: f64,
+    /// The longest wait for the first token, after a prompt of `prompt` tokens.
+    pub prompt_seconds: f64,
+    pub prompt: u32,
+    pub chips: Vec<u32>,
     pub clock_hz: f64,
     pub context: u32,
     pub lane_bits: std::ops::RangeInclusive<u32>,
@@ -80,28 +88,42 @@ pub struct Target {
     pub cell_bits: std::ops::RangeInclusive<u32>,
 }
 
-/// Cycles of one token at the last position of the context, logits included.
-pub fn cycles(program: &Program, weights: &Weights, die: DieConfig, context: u32) -> Result<u64, String> {
-    let layout = Layout::for_image(program, weights, die, context as usize)?;
-    let code = layout.microprogram(program)?;
-    Ok(code.cycles(&die, ENTRY_TOKEN, 1, context - 1) + code.cycles(&die, ENTRY_LOGITS, 1, context - 1))
+/// Each chip's microprogram when the model's layers are shared among `chips` of them.
+pub fn chip_programs(program: &Program, weights: &Weights, die: DieConfig, context: u32, chips: u32) -> Result<Vec<Microprogram>, String> {
+    let plan = program.split(chips as usize)?;
+    (0..plan.len())
+        .map(|chip| {
+            let mut layout = Layout::for_image(program, weights, die, context as usize)?;
+            layout.keep_weights_of(program, &plan, chip);
+            layout.die_microprogram(program, &plan, chip)
+        })
+        .collect()
 }
 
-/// Cycles from the first token of a prompt of `prompt` tokens to the logits of the last:
-/// each token at its own position, which only the attention's loops depend on. Positions
-/// are taken every `stride` and the ones between them counted along the line joining them.
-pub fn prompt_cycles(program: &Program, weights: &Weights, die: DieConfig, context: u32, prompt: u32, stride: u32) -> Result<u64, String> {
-    let layout = Layout::for_image(program, weights, die, context as usize)?;
-    let code = layout.microprogram(program)?;
-    let at = |position: u32| code.cycles(&die, ENTRY_TOKEN, 1, position) as f64;
-    let (mut total, mut from) = (0.0, 0);
+/// The speed and the wait of a set of chips, from their own microprograms.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct Timing {
+    /// One token at the last position of the context, through every chip, logits included.
+    pub token_cycles: u64,
+    /// From the first token of a prompt to the logits of its last: the chips work on
+    /// consecutive tokens at once, so after the first each token waits for the slowest.
+    pub prompt_cycles: u64,
+}
+
+pub fn timing(codes: &[Microprogram], die: DieConfig, context: u32, prompt: u32, stride: u32) -> Timing {
+    let token = |position: u32| -> Vec<u64> { codes.iter().map(|code| code.cycles(&die, ENTRY_TOKEN, 1, position)).collect() };
+    // The chips make the logits together: the last sends the first what it needs.
+    let logits = |position: u32| codes.iter().map(|code| code.cycles(&die, ENTRY_LOGITS, 1, position)).max().unwrap_or(0);
+    let token_cycles = token(context - 1).iter().sum::<u64>() + logits(context - 1);
+    let slowest = |position: u32| token(position).into_iter().max().unwrap_or(0) as f64;
+    // Positions every `stride`, the ones between counted along the line joining them.
+    let (mut total, mut from) = (token(0).iter().sum::<u64>() as f64, 1);
     while from < prompt {
         let to = (from + stride.max(1)).min(prompt);
-        let (first, last) = (at(from), at(to - 1));
-        total += (first + last) / 2.0 * (to - from) as f64;
+        total += (slowest(from) + slowest(to - 1)) / 2.0 * (to - from) as f64;
         from = to;
     }
-    Ok(total.round() as u64 + code.cycles(&die, ENTRY_LOGITS, 1, prompt - 1))
+    Timing { token_cycles, prompt_cycles: total.round() as u64 + logits(prompt.max(1) - 1) }
 }
 
 /// The die a candidate stands for.
@@ -109,27 +131,29 @@ pub fn die_of(base: DieConfig, context: u32, (cluster_bits, lane_bits, cell_bits
     DieConfig { cells: 1 << cell_bits, features: base.features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits).with_key_shift(context.next_power_of_two().trailing_zeros()), ..base }
 }
 
-/// For each width of unit and each number of units, the fewest cells that reach the target,
-/// best first. Those that cannot reach it with the most cells allowed are left out.
+/// For each number of chips, width of unit and number of units, the fewest cells that
+/// reach the target, least logic first. Those that cannot reach it are left out.
 pub fn search(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs, target: &Target) -> Vec<Candidate> {
-    let evaluate = |shape: (u32, u32, u32)| -> Option<Candidate> {
-        let die = die_of(base, target.context, shape);
-        let cycles = cycles(program, weights, die, target.context).ok()?;
-        let (cluster_bits, lane_bits, cell_bits) = shape;
-        Some(Candidate { cluster_bits, lane_bits, cell_bits, cycles, tokens_per_second: target.clock_hz / cycles as f64, gates: costs.gates(cluster_bits, lane_bits, cell_bits) })
+    let evaluate = |(chips, cluster_bits, lane_bits, cell_bits): (u32, u32, u32, u32)| -> Option<Candidate> {
+        let die = die_of(base, target.context, (cluster_bits, lane_bits, cell_bits));
+        let codes = chip_programs(program, weights, die, target.context, chips).ok()?;
+        let timing = timing(&codes, die, target.context, target.prompt, 256);
+        let cycles = timing.token_cycles;
+        Some(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, tokens_per_second: target.clock_hz / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / target.clock_hz, gates: chips as f64 * costs.gates(cluster_bits, lane_bits, cell_bits) })
     };
-    let shapes: Vec<(u32, u32)> = target.lane_bits.clone().flat_map(|l| target.cluster_bits.clone().map(move |u| (u, l))).collect();
+    let fits = |c: &Candidate| c.tokens_per_second >= target.tokens_per_second && c.prompt_seconds <= target.prompt_seconds;
+    let shapes: Vec<(u32, u32, u32)> = target.chips.iter().flat_map(|&n| target.lane_bits.clone().flat_map(move |l| target.cluster_bits.clone().map(move |u| (n, u, l)))).collect();
     let mut found: Vec<Candidate> = shapes
         .par_iter()
-        .filter_map(|&(cluster_bits, lane_bits)| {
+        .filter_map(|&(chips, cluster_bits, lane_bits)| {
             // Each unit needs a cell for each lane; more cells only shorten the products.
             let lowest = (*target.cell_bits.start()).max(cluster_bits + lane_bits);
             let (mut low, mut high) = (lowest, *target.cell_bits.end());
-            let mut best = evaluate((cluster_bits, lane_bits, high)).filter(|c| c.tokens_per_second >= target.tokens_per_second)?;
+            let mut best = evaluate((chips, cluster_bits, lane_bits, high)).filter(fits)?;
             while low < high {
                 let middle = (low + high) / 2;
-                match evaluate((cluster_bits, lane_bits, middle)) {
-                    Some(c) if c.tokens_per_second >= target.tokens_per_second => {
+                match evaluate((chips, cluster_bits, lane_bits, middle)) {
+                    Some(c) if fits(&c) => {
                         best = c;
                         high = middle;
                     }

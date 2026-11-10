@@ -651,27 +651,30 @@ impl Layout {
             asm.receive(self.reg(input), (program.buffers[input] as u32).into());
         }
         self.run_list(&mut asm, program, &program.ops[plan[die].clone()], token, position, true)?;
+        // A token's work only flows down the chain, so the first chip can start the next
+        // token of a prompt while the others are still on this one.
         if !last {
             let output = program.crossing(plan[die + 1].start)?;
             asm.send(self.reg(output), (program.buffers[output] as u32).into());
-        } else if several {
-            asm.send_signal();
-        }
-        if first && several {
-            asm.receive_signal();
         }
         code.assemble(&asm.steps);
         code.next_entry();
 
+        // The logits are made on the first chip, which samples them: the last one sends it
+        // the final hidden state, far shorter than the logits.
         let mut asm = self.assembly();
-        let logits_length: Expr = (program.vocab as u32).into();
-        if last {
-            self.run_list(&mut asm, program, &program.ops[program.logits_from..], token, position, false)?;
-            if several {
-                asm.send(self.reg(program.logits), logits_length);
+        let tail = &program.ops[program.logits_from..];
+        if several && (first || last) {
+            let hidden = program.crossing(program.logits_from)?;
+            let length: Expr = (program.buffers[hidden] as u32).into();
+            if last {
+                asm.send(self.reg(hidden), length);
+            } else {
+                asm.receive(self.reg(hidden), length);
             }
-        } else if first {
-            asm.receive(self.reg(program.logits), logits_length);
+        }
+        if first {
+            self.run_list(&mut asm, program, tail, token, position, false)?;
         }
         code.assemble(&asm.steps);
         Ok(code.finish_program())
@@ -779,9 +782,9 @@ impl Layout {
     }
 
     pub fn keep_weights_of(&mut self, program: &Program, plan: &[Range<usize>], die: usize) {
-        let last = die + 1 == plan.len();
+        // The first chip makes the logits, as `die_microprogram` lays out.
         let tail = program.logits_from..program.ops.len();
-        let used: HashSet<String> = plan[die].clone().chain(if last { tail } else { 0..0 }).flat_map(|i| matrices_of(program, &program.ops[i].op)).map(|(name, ..)| name).collect();
+        let used: HashSet<String> = plan[die].clone().chain(if die == 0 { tail } else { 0..0 }).flat_map(|i| matrices_of(program, &program.ops[i].op)).map(|(name, ..)| name).collect();
         let dropped: HashSet<u32> = self.weights.iter().filter(|(name, _)| !used.contains(*name)).map(|(_, reg)| *reg).collect();
         self.setup.initial.retain(|(register, _), _| !dropped.contains(register));
         self.cell_plan.retain(|e| used.contains(&e.name));
