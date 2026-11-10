@@ -143,7 +143,7 @@ pub struct ChipParams {
 }
 
 fn default_vector_units() -> u64 {
-    64
+    128
 }
 
 impl Default for ChipParams {
