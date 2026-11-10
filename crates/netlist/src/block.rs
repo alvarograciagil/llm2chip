@@ -119,6 +119,9 @@ pub struct DeltaRegs {
     pub update: u32,
     pub next: u32,
     pub out: u32,
+    /// Room for the rows of the key and the query that one unit keeps, when a head is shared.
+    pub key_rows: u32,
+    pub query_rows: u32,
 }
 
 /// A quantity the fixed microprogram only knows while it runs.
@@ -370,6 +373,11 @@ pub trait BlockOps: Sized {
         self.each(outer.into(), |s, o| s.each(inner.into(), |s, i| body(s, o, i)));
     }
 
+    /// Like `each_head`, for a body that can share each head's work among several units.
+    fn each_head_split(&mut self, outer: u32, inner: u32, body: impl FnMut(&mut Self, Self::N, Self::N)) {
+        self.each_head(outer, inner, body);
+    }
+
     /// Like `gather`, for parts that `each_head` left on the units that made them.
     fn gather_heads(&mut self, parts: &[(u32, u32)], dst: u32) {
         self.gather(parts, dst);
@@ -434,20 +442,7 @@ pub trait BlockOps: Sized {
 
     /// One Gated DeltaNet head: the delta rule on a `key × value` state matrix.
     fn delta_step(&mut self, r: DeltaRegs, key: u32, value: u32) {
-        let cells = key * value;
-        self.scale(r.decay, r.state, r.state, cells.into());
-        self.row_combination(r.key, r.state, r.memory, (value, value, 0.into()), key.into());
-        self.add_sub(true, (r.value, 0.into()), (r.memory, 0.into()), 1, r.error, value.into());
-        self.scale(r.beta, r.error, r.delta, value.into());
-        // The output reads the old state and the update apart, before rounding merges them:
-        // the update's contribution is often a tiny difference that rounding would erase.
-        self.row_combination(r.query, r.state, r.next, (value, value, 0.into()), key.into());
-        self.dot(r.key, r.query, r.memory, key.into());
-        self.scale(r.memory, r.delta, r.update, value.into());
-        self.add(r.next, r.update, r.out, value.into());
-        self.outer_product(r.key, r.delta, r.update, key, value);
-        self.add(r.state, r.update, r.next, cells.into());
-        self.copy_part(r.next, 0.into(), r.state, 0.into(), cells.into());
+        whole_delta_step(self, r, key, value);
     }
 
     fn outer_product(&mut self, a: u32, b: u32, dst: u32, rows: u32, cols: u32);
@@ -484,6 +479,8 @@ pub struct Alu<N = u32> {
     pub load_shift_left: bool,
     pub load_wide_shift: bool,
     pub magnitude_scan: bool,
+    /// A count of leading zeros looks at the magnitude of `1 << reduce_group` neighbouring units.
+    pub reduce_group: u32,
     /// Keeps the largest mantissa read, across every lane of a block.
     pub max_scan: bool,
     pub max_clear: bool,
@@ -528,6 +525,7 @@ impl<N: Default> Alu<N> {
             load_shift_left: false,
             load_wide_shift: false,
             magnitude_scan: false,
+            reduce_group: 0,
             max_scan: false,
             max_clear: false,
             max_out: false,
@@ -580,6 +578,7 @@ impl Alu<Expr> {
             load_shift_left: self.load_shift_left,
             load_wide_shift: self.load_wide_shift,
             magnitude_scan: self.magnitude_scan,
+            reduce_group: self.reduce_group,
             max_scan: self.max_scan,
             max_clear: self.max_clear,
             max_out: self.max_out,
@@ -610,6 +609,7 @@ impl From<Alu<u32>> for Alu<Expr> {
         out.load_shift_left = s.load_shift_left;
         out.load_wide_shift = s.load_wide_shift;
         out.magnitude_scan = s.magnitude_scan;
+        out.reduce_group = s.reduce_group;
         (out.max_scan, out.max_clear, out.max_out, out.write_spread) = (s.max_scan, s.max_clear, s.max_out, s.write_spread);
         out.magnitude_clear = s.magnitude_clear;
         out.accumulate = s.accumulate;
@@ -640,7 +640,7 @@ pub enum Step {
     /// One group of columns through the cells.
     CellGroup { src: u32, length: u32, start: Expr },
     /// The totals of all the vector units are added together in their wide memories.
-    WideReduce { rows: u32 },
+    WideReduce { rows: Expr, group: u32 },
     /// The totals of the first `rows` cells go to the wide memory.
     CellDrain { rows: u32 },
 }
@@ -695,6 +695,10 @@ pub struct Assembly {
     combines: bool,
     clusters: u32,
     key_shift: u32,
+    /// Inside a loop over heads split among units: this unit's part and how many there are.
+    split: Option<(Expr, u32)>,
+    /// How many neighbouring units the last loop over heads gave each head.
+    head_stride: u32,
     /// Which of the A, B and left shifters are known to hold zero.
     shift_zero: [bool; 3],
     zero_ready: bool,
@@ -705,8 +709,19 @@ pub struct Assembly {
 }
 
 impl Assembly {
+    /// `dst[j] = Σ weights[i] · matrix[i · width + j]` over this unit's `rows`, added
+    /// across a group of `1 << group` units.
+    fn combine_rows(&mut self, weights: u32, matrix: u32, dst: u32, (width, rows): (u32, u32), group: u32) {
+        let zero = self.sc(10);
+        self.immediate(0, zero);
+        self.steps.push(Step::Combine { weights: zero, matrix, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
+        self.each(rows.into(), |s, i| s.steps.push(Step::Combine { weights: (weights, i), matrix, start: i * width, width: width.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false }));
+        self.steps.push(Step::WideReduce { rows: width.into(), group });
+        self.narrow_sums(weights, matrix, dst, width.into());
+    }
+
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, shift_zero: [false; 3], zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_stride: 1, shift_zero: [false; 3], zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -994,6 +1009,24 @@ fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32)
     }
 }
 
+/// The delta rule on one unit, with the whole state.
+fn whole_delta_step<O: BlockOps>(ops: &mut O, r: DeltaRegs, key: u32, value: u32) {
+    let cells = key * value;
+    ops.scale(r.decay, r.state, r.state, cells.into());
+    ops.row_combination(r.key, r.state, r.memory, (value, value, 0.into()), key.into());
+    ops.add_sub(true, (r.value, 0.into()), (r.memory, 0.into()), 1, r.error, value.into());
+    ops.scale(r.beta, r.error, r.delta, value.into());
+    // The output reads the old state and the update apart, before rounding merges them:
+    // the update's contribution is often a tiny difference that rounding would erase.
+    ops.row_combination(r.query, r.state, r.next, (value, value, 0.into()), key.into());
+    ops.dot(r.key, r.query, r.memory, key.into());
+    ops.scale(r.memory, r.delta, r.update, value.into());
+    ops.add(r.next, r.update, r.out, value.into());
+    ops.outer_product(r.key, r.delta, r.update, key, value);
+    ops.add(r.state, r.update, r.next, cells.into());
+    ops.copy_part(r.next, 0.into(), r.state, 0.into(), cells.into());
+}
+
 /// Whether one loop can issue an element per cycle: results land two or three cycles
 /// after the read, so nothing may read a place an earlier element is still to write.
 fn can_stream(variable: Var, step: &Alu<Expr>, unit: u32) -> bool {
@@ -1071,6 +1104,8 @@ impl BlockOps for Assembly {
         self.scan_and_shift(reg, len);
         let mut count = alu(OP_LZC);
         count.dst = self.sc(0);
+        // Units sharing a head look at all their parts, so they all shift alike.
+        count.reduce_group = self.split.map_or(0, |(_, parts)| parts.trailing_zeros());
         self.push(count);
         self.load_shifts(None, None, Some(self.sc(0)));
         self.elements(len, &[], true, |s, i, vector| {
@@ -1332,7 +1367,28 @@ impl BlockOps for Assembly {
         let Some(capacity) = self.key_capacity else {
             return self.row_combination(probabilities, values, dst, (width, stride, offset), tokens);
         };
-        self.dots(probabilities, values, dst, width.into(), tokens, |j, t| ((probabilities, t), (values, (offset + j) * capacity + t)));
+        let Some((part, parts)) = self.split.filter(|(_, parts)| width.is_multiple_of(*parts)) else {
+            return self.dots(probabilities, values, dst, width.into(), tokens, |j, t| ((probabilities, t), (values, (offset + j) * capacity + t)));
+        };
+        // Each unit sums its share of the columns over every token; the rest of its sums
+        // stay zero, so adding the units' wide memories puts every column in all of them.
+        let share = width / parts;
+        let zero = self.sc(10);
+        self.immediate(0, zero);
+        self.steps.push(Step::Combine { weights: zero, matrix: values, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
+        let first = part * share;
+        self.each(share.into(), |s, k| {
+            let j = first + k;
+            s.clear_accumulator();
+            s.elements(tokens, &[0.into(), (offset + j) * capacity], true, |s, t, vector| {
+                let mut step = alu(OP_MOV);
+                (step.a, step.b, step.write, step.accumulate, step.vector) = ((probabilities, t), (values, (offset + j) * capacity + t), false, true, vector);
+                s.push(step);
+            });
+            s.store_accumulator(j);
+        });
+        self.steps.push(Step::WideReduce { rows: width.into(), group: parts.trailing_zeros() });
+        self.narrow_sums(probabilities, values, dst, width.into());
     }
 
     fn rotate(&mut self, x: u32, swapped: u32, (cos, sin): (u32, u32), dst: u32, width: u32, rotary: u32) {
@@ -1353,7 +1409,62 @@ impl BlockOps for Assembly {
         self.narrow_sums(x, cos, dst, width.into());
     }
 
+    fn delta_step(&mut self, r: DeltaRegs, key: u32, value: u32) {
+        let Some((part, parts)) = self.split.filter(|(_, parts)| key.is_multiple_of(*parts)) else {
+            return whole_delta_step(self, r, key, value);
+        };
+        // Each unit keeps its own rows of the state: element-wise work divides among them,
+        // and the sums over rows add up across the group, exact, before anything rounds.
+        let (rows, group) = (key / parts, parts.trailing_zeros());
+        let cells = rows * value;
+        self.copy_part(r.key, part * rows, r.key_rows, 0.into(), rows.into());
+        self.copy_part(r.query, part * rows, r.query_rows, 0.into(), rows.into());
+        self.scale(r.decay, r.state, r.state, cells.into());
+        self.combine_rows(r.key_rows, r.state, r.memory, (value, rows), group);
+        self.add_sub(true, (r.value, 0.into()), (r.memory, 0.into()), 1, r.error, value.into());
+        self.scale(r.beta, r.error, r.delta, value.into());
+        self.combine_rows(r.query_rows, r.state, r.next, (value, rows), group);
+        self.dot(r.key, r.query, r.memory, key.into());
+        self.scale(r.memory, r.delta, r.update, value.into());
+        self.add(r.next, r.update, r.out, value.into());
+        self.outer_product(r.key_rows, r.delta, r.update, rows, value);
+        self.add(r.state, r.update, r.next, cells.into());
+        self.copy_part(r.next, 0.into(), r.state, 0.into(), cells.into());
+    }
+
+    fn each_head_split(&mut self, outer: u32, inner: u32, mut body: impl FnMut(&mut Self, Expr, Expr)) {
+        let heads = outer * inner;
+        let mut parts = 1;
+        while heads * parts * 2 <= self.clusters {
+            parts *= 2;
+        }
+        if parts == 1 {
+            return self.each_head(outer, inner, body);
+        }
+        let (first, second, part) = (Var::Loop(self.loops), Var::Loop(self.loops + 1), Var::Loop(self.loops + 2));
+        self.loops += 3;
+        self.zero_place();
+        self.forget_shifts();
+        let before = std::mem::take(&mut self.steps);
+        self.split = Some((Expr::var(part), parts));
+        body(self, Expr::var(first), Expr::var(second));
+        self.split = None;
+        let inside = std::mem::replace(&mut self.steps, before);
+        self.forget_shifts();
+        let total = heads * parts;
+        for block in 0..total.div_ceil(self.clusters) {
+            let assignments = (0..self.clusters.min(total - block * self.clusters)).map(|unit| {
+                let index = block * self.clusters + unit;
+                let head = index / parts;
+                vec![head / inner, head % inner, index % parts]
+            });
+            self.steps.push(Step::Clustered { vars: vec![first, second, part], assignments: assignments.collect(), body: inside.clone() });
+        }
+        self.head_stride = parts;
+    }
+
     fn each_head(&mut self, outer: u32, inner: u32, mut body: impl FnMut(&mut Self, Expr, Expr)) {
+        self.head_stride = 1;
         if self.clusters <= 1 {
             return self.each(outer.into(), |s, o| s.each(inner.into(), |s, i| body(s, o, i)));
         }
@@ -1382,7 +1493,8 @@ impl BlockOps for Assembly {
         self.clear_shifts();
         let zero = self.sc(15);
         let (largest, shift, exponent) = (self.sc(1), self.sc(2), self.sc(3));
-        let unit_of = |part: usize, units: u32| part as u32 % units + 1;
+        let stride = self.head_stride;
+        let unit_of = |part: usize, units: u32| part as u32 * stride % units + 1;
         let units = self.clusters;
         for (part, (reg, _)) in parts.iter().enumerate() {
             let mut read = alu(OP_MOV);
@@ -1473,7 +1585,15 @@ impl BlockOps for Assembly {
         let zero = self.sc(10);
         self.immediate(0, zero);
         self.steps.push(Step::Combine { weights: zero, matrix: keys, start: 0.into(), width: tokens, fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
-        self.each(width.into(), |s, j| s.steps.push(Step::Combine { weights: (query, j), matrix: keys, start: (offset + j) * capacity, width: tokens, fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false }));
+        // Split among units, each adds its share of the columns and the units add up.
+        let (first, share, parts) = match self.split.filter(|(_, parts)| width.is_multiple_of(*parts)) {
+            Some((part, parts)) => (part * (width / parts), width / parts, parts),
+            None => (0.into(), width, 1),
+        };
+        self.each(share.into(), |s, j| s.steps.push(Step::Combine { weights: (query, first + j), matrix: keys, start: (offset + first + j) * capacity, width: tokens, fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false }));
+        if parts > 1 {
+            self.steps.push(Step::WideReduce { rows: tokens, group: parts.trailing_zeros() });
+        }
         self.narrow_sums(query, keys, dst, tokens);
     }
 
@@ -1575,7 +1695,7 @@ impl BlockOps for Assembly {
         let inside = std::mem::replace(&mut self.steps, before);
         self.steps.push(Step::Clustered { vars: vec![column], assignments: (0..units).map(|unit| vec![unit * columns]).collect(), body: inside });
         if units > 1 {
-            self.steps.push(Step::WideReduce { rows });
+            self.steps.push(Step::WideReduce { rows: rows.into(), group: self.clusters.trailing_zeros() });
         }
         self.narrow_sums(matrix, src, dst, rows.into());
     }

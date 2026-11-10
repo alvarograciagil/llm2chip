@@ -836,7 +836,7 @@ impl Layout {
                 let regs = AttentionRegs { scores: t[10], top: t[11], shifted: t[12], weights: t[13], total: t[14], inverse: t[15], probabilities: t[16], softcap: capped };
                 let first = self.parts[0];
                 let query = self.reg(*query);
-                ops.each_head(*kv_heads as u32, group as u32, |ops, kv_head, shared| {
+                ops.each_head_split(*kv_heads as u32, group as u32, |ops, kv_head, shared| {
                     {
                         let h = kv_head * group as u32 + shared;
                         ops.with_window(h, &[first], |ops, offset| {
@@ -870,7 +870,7 @@ impl Layout {
                 let (a_reg, b_reg) = (self.reg(*a), self.reg(*b));
                 let (scale_a, bias) = (self.small[a_log], self.small[dt_bias]);
                 let (first_state, first_out) = (self.delta[*slot][0], self.delta_parts[0]);
-                ops.each_head(*key_heads as u32, ratio as u32, |ops, key_head, shared| {
+                ops.each_head_split(*key_heads as u32, ratio as u32, |ops, key_head, shared| {
                     {
                         let h = key_head * ratio as u32 + shared;
                         ops.with_window(h, &[first_state, first_out], |ops, offset| {
@@ -903,7 +903,7 @@ impl Layout {
                             ops.multiply(t[33], self.minus_one, work, 1.into());
                             ops.function(FN_EXP, work, decay, 1.into());
 
-                            let regs = DeltaRegs { state: first_state + offset, key: kh, query: qh, value: vh, beta, decay, memory: t[10], error: t[11], delta: t[12], update: t[13], next: t[14], out: first_out + offset };
+                            let regs = DeltaRegs { state: first_state + offset, key: kh, query: qh, value: vh, beta, decay, memory: t[10], error: t[11], delta: t[12], update: t[13], next: t[14], out: first_out + offset, key_rows: t[56], query_rows: t[57] };
                             ops.delta_step(regs, kd, vd);
                         });
                     }
@@ -918,7 +918,9 @@ impl Layout {
                 let (src, z) = (self.reg(*src), self.reg(*z));
                 let d = *block as u32;
                 let (first_out, first_part) = (self.delta_parts[0], self.parts[0]);
-                ops.each_head(count as u32, 1, |ops, b, _| {
+                // Heads of a recurrent output stay on the units the delta rule gave them.
+                let split = |ops: &mut O, body: &mut dyn FnMut(&mut O, O::N)| if by_head { ops.each_head_split(count as u32, 1, |ops, b, _| body(ops, b)) } else { ops.each_head(count as u32, 1, |ops, b, _| body(ops, b)) };
+                split(ops, &mut |ops, b| {
                     ops.with_window(b, &[first_out, first_part], |ops, offset| {
                         if by_head {
                             ops.copy_part(first_out + offset, 0.into(), t[40], 0.into(), d.into());

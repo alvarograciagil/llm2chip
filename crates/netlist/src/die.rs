@@ -218,10 +218,12 @@ pub struct ControlWord {
     pub max_out: bool,
     /// Each write goes a whole column further on, to store one token's key.
     pub write_spread: bool,
+    /// The units add their wide memories in groups of `1 << reduce_group` neighbours.
+    pub reduce_group: u32,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 66;
+pub const FIELD_COUNT: usize = 67;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
@@ -320,6 +322,7 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("max_clear", 1),
         ("max_out", 1),
         ("write_spread", 1),
+        ("reduce_group", bits_for(c.features.cluster_bits + 1)),
     ]
 }
 
@@ -397,6 +400,7 @@ impl ControlWord {
             self.max_clear as u128,
             self.max_out as u128,
             self.write_spread as u128,
+            self.reduce_group as u128,
         ]
     }
 
@@ -442,6 +446,11 @@ fn and_not(b: &mut Builder, enable: Bit, value: Bit, name: &str) -> Bit {
 }
 
 /// Loadable counter: `clear` wins, then `advance` increments.
+/// The bits a count up to `value` needs.
+fn bits_for(value: u32) -> u32 {
+    (u32::BITS - value.leading_zeros()).max(1)
+}
+
 /// Whether `bits` holds at least `value`.
 fn at_least(l: &mut Logic, bits: &[Bit], value: u32) -> Bit {
     bits.iter().enumerate().fold(Bit::One, |reached, (i, bit)| if value >> i & 1 == 1 { l.and(*bit, reached) } else { l.or(*bit, reached) })
@@ -795,7 +804,9 @@ impl Gen {
         let unit_chains: Vec<Vec<Vec<Bit>>> = (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("unit{k}_chain{lane}"), wide)).collect()).collect();
         let wide_bits = 2 * a + 16 + FACTOR_FRACTION;
         let unit_wide: Vec<Vec<Vec<Bit>>> = (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("unit{k}_wide{lane}"), wide_bits)).collect()).collect();
-        let reduced: Vec<Vec<Bit>> = (0..lanes).map(|lane| b.wire(&format!("wide_reduced{lane}"), wide_bits)).collect();
+        let unit_magnitude: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_magnitude"), a - 1)).collect();
+        let group_magnitude: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_group_magnitude"), a - 1)).collect();
+        let reduced: Vec<Vec<Vec<Bit>>> = (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("unit{k}_reduced{lane}"), wide_bits)).collect()).collect();
         let global_running = running;
         let mut first_unit = None;
         let mut unit_ports = Vec::with_capacity(clusters);
@@ -1103,7 +1114,11 @@ impl Gen {
                 b.and_to(keep_magnitude, merged, magnitude_d[i]);
             }
             b.inst("magnitude_reg", &reg_a, &[("d", magnitude_d), ("q", magnitude.clone())]);
-            let leading = leading_zeros(&mut b, "lzc", &magnitude[..top], a);
+            for (from, to) in magnitude[..top].iter().zip(&unit_magnitude[cluster]) {
+                b.or_to(*from, Bit::Zero, *to);
+            }
+            let seen_magnitude: Vec<Bit> = if clusters > 1 { group_magnitude[cluster].clone() } else { magnitude[..top].to_vec() };
+            let leading = leading_zeros(&mut b, "lzc", &seen_magnitude, a);
 
             let (best, best_used) = if c.features.widths[MAX_SCAN_FIELD] > 0 {
                 b.group("Mayor valor");
@@ -1250,7 +1265,7 @@ impl Gen {
             let wide_fresh = fields["wide_fresh"][0];
             let across_units = (clusters > 1).then_some(fields["wide_reduce"][0]);
             if combines {
-                let sum = self.wide_sum(&mut b, ("wide_sum_adder", &wide_adder, &wide_register, &wide_mux), &wide_stored, &product, wide_fresh, (wide_bits, fraction), across_units.map(|on| (on, reduced[0].as_slice())));
+                let sum = self.wide_sum(&mut b, ("wide_sum_adder", &wide_adder, &wide_register, &wide_mux), &wide_stored, &product, wide_fresh, (wide_bits, fraction), across_units.map(|on| (on, reduced[cluster][0].as_slice())));
                 for (from, to) in sum.iter().zip(&lane_sums[0]) {
                     b.or_to(*from, Bit::Zero, *to);
                 }
@@ -1408,7 +1423,7 @@ impl Gen {
                 }
                 if combines {
                     let (adder_name, sum) = (name("wide_sum"), &lane_sums[lane]);
-                    let total = self.wide_sum(&mut b, (&adder_name, &wide_adder, &wide_register, &wide_mux), &wide_banks[lane], &product, wide_fresh, (wide_bits, fraction), across_units.map(|on| (on, reduced[lane].as_slice())));
+                    let total = self.wide_sum(&mut b, (&adder_name, &wide_adder, &wide_register, &wide_mux), &wide_banks[lane], &product, wide_fresh, (wide_bits, fraction), across_units.map(|on| (on, reduced[cluster][lane].as_slice())));
                     for (from, to) in total.iter().zip(sum) {
                         b.or_to(*from, Bit::Zero, *to);
                     }
@@ -1427,11 +1442,35 @@ impl Gen {
         b.set_prefix("");
         let write_data = first_unit.expect("al menos una unidad");
         {
+            // Each level adds a unit's value to its neighbour's, so after `g` levels every
+            // unit in a group of `1 << g` holds the group's total.
             let mut l = Logic { b: &mut b, next: 60_000 };
-            for (lane, output) in reduced.iter().enumerate() {
-                let total = unit_wide.iter().skip(1).fold(unit_wide[0][lane].clone(), |sum, unit| l.adder(&sum, &unit[lane], Bit::Zero).0);
-                for (from, to) in total.iter().zip(output) {
+            let levels = c.features.cluster_bits as usize;
+            let on: Vec<Bit> = (0..levels).map(|level| at_least(&mut l, &fields["reduce_group"], level as u32 + 1)).collect();
+            let mut seen: Vec<Vec<Bit>> = unit_magnitude.clone();
+            for (level, active) in on.iter().enumerate() {
+                seen = (0..clusters).map(|k| {
+                    let merged: Vec<Bit> = seen[k].iter().zip(&seen[k ^ (1 << level)]).map(|(x, y)| l.or(*x, *y)).collect();
+                    l.mux_bus(*active, &seen[k], &merged)
+                }).collect();
+            }
+            for (value, output) in seen.iter().zip(&group_magnitude) {
+                for (from, to) in value.iter().zip(output) {
                     l.b.or_to(*from, Bit::Zero, *to);
+                }
+            }
+            for lane in 0..lanes {
+                let mut values: Vec<Vec<Bit>> = unit_wide.iter().map(|unit| unit[lane].clone()).collect();
+                for (level, active) in on.iter().enumerate() {
+                    values = (0..clusters).map(|k| {
+                        let sum = l.adder(&values[k], &values[k ^ (1 << level)], Bit::Zero).0;
+                        l.mux_bus(*active, &values[k], &sum)
+                    }).collect();
+                }
+                for (unit, value) in values.iter().enumerate() {
+                    for (from, to) in value.iter().zip(&reduced[unit][lane]) {
+                        l.b.or_to(*from, Bit::Zero, *to);
+                    }
                 }
             }
         }
@@ -1847,7 +1886,8 @@ fn visit_indices(steps: &[Step], f: &mut impl FnMut(Expr)) {
             }
             Step::Clustered { body, .. } => visit_indices(body, f),
             Step::CellGroup { start, .. } => f(*start),
-            Step::CellPass | Step::CellDrain { .. } | Step::WideReduce { .. } => {}
+            Step::WideReduce { rows, .. } => f(*rows),
+            Step::CellPass | Step::CellDrain { .. } => {}
         }
     }
 }
@@ -2018,7 +2058,7 @@ impl DieProgram {
                 Step::CellSeek { weights, factors } => self.cell_seek(*weights, *factors),
                 Step::CellPass => self.cell_pass(),
                 Step::CellGroup { src, length, start } => self.cell_group(*src, *length, *start),
-                Step::WideReduce { rows } => self.wide_reduce(*rows),
+                Step::WideReduce { rows, group } => self.wide_reduce(*rows, *group),
                 Step::CellDrain { rows } => self.cell_drain(*rows),
             }
         }
@@ -2273,16 +2313,16 @@ impl DieProgram {
     }
 
     /// Replaces each sum in the wide memory by the total over all the vector units.
-    fn wide_reduce(&mut self, rows: u32) {
+    fn wide_reduce(&mut self, rows: Expr, group: u32) {
         let vector = self.config.features.lane_bits > 0;
         let mut temporaries = Vec::new();
         let word = |k: usize| {
-            let mut w = ControlWord { vector, wide_accumulate: true, read_step: true, ..Default::default() };
+            let mut w = ControlWord { vector, wide_accumulate: true, read_step: true, reduce_group: group, ..Default::default() };
             w.wide_reduce = k >= 1;
             w.wide_write = k >= 2;
             w
         };
-        self.emit_variable_stream(rows.into(), 2, &mut temporaries, word);
+        self.emit_variable_stream(rows, 2, &mut temporaries, word);
         for temporary in temporaries {
             self.release(temporary);
         }
@@ -2325,6 +2365,7 @@ impl DieProgram {
             w.shift = step.shift;
             w.function = step.function;
             w.magnitude_scan = step.magnitude_scan;
+            w.reduce_group = step.reduce_group;
             (w.max_scan, w.max_out) = (step.max_scan, step.max_out);
             w.accumulate = step.accumulate;
             w.wide_scan = step.wide_scan;
