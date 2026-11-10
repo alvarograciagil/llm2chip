@@ -105,6 +105,8 @@ export function SimulatorView() {
   const params = useDesign((s) => s.params);
   const output = useSimulator((s) => s.output);
   const prompt = useSimulator((s) => s.prompt);
+  const image = useSimulator((s) => s.image);
+  const imageReport = useSimulator((s) => s.imageReport);
   const set = useSimulator((s) => s.set);
   const generate = useSimulator((s) => s.generate);
   const stop = useSimulator((s) => s.stop);
@@ -138,7 +140,24 @@ export function SimulatorView() {
             <div><strong>{error}</strong></div>
           </div>
         )}
+        {image && (
+          <figure className="attached">
+            <img src={image.preview} alt="Imagen adjunta" />
+            <figcaption>
+              {image.width} × {image.height} px{imageReport ? ` · ${formatNumber(imageReport.patches)} parches → ${formatNumber(imageReport.tokens)} tokens en ${formatNumber(imageReport.seconds)} s` : ""}
+              <button className="link inline" onClick={() => set({ image: null, imageReport: null })}>Quitar</button>
+            </figcaption>
+          </figure>
+        )}
         <div className="composer">
+          <label className="pill attach" title="Adjuntar una imagen: el codificador del modelo la convierte en tokens que se leen antes de la pregunta">
+            Imagen
+            <input type="file" accept="image/*" onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void readImage(file).then((picture) => set({ image: picture, imageReport: null }));
+              e.target.value = "";
+            }} />
+          </label>
           <textarea
             aria-label="Texto de entrada"
             rows={3}
@@ -159,6 +178,30 @@ export function SimulatorView() {
       </div>
     </section>
   );
+}
+
+/** Longest side, in pixels, of a picture sent to the encoder: more only costs time. */
+const IMAGE_SIDE = 512;
+
+/** A picture's pixels as RGB, scaled down to at most `IMAGE_SIDE` on its longer side. */
+async function readImage(file: File): Promise<{ width: number; height: number; rgb: number[]; preview: string }> {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, IMAGE_SIDE / Math.max(bitmap.width, bitmap.height));
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d")!;
+  context.drawImage(bitmap, 0, 0, width, height);
+  const rgba = context.getImageData(0, 0, width, height).data;
+  const rgb: number[] = new Array(width * height * 3);
+  for (let i = 0, j = 0; i < rgba.length; i += 4, j += 3) {
+    rgb[j] = rgba[i];
+    rgb[j + 1] = rgba[i + 1];
+    rgb[j + 2] = rgba[i + 2];
+  }
+  return { width, height, rgb, preview: canvas.toDataURL("image/jpeg", 0.85) };
 }
 
 export function SimulatorPanel() {

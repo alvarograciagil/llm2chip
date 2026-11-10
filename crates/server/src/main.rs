@@ -52,6 +52,8 @@ struct Loaded {
     firmware_tables: Option<(u64, Vec<u32>)>,
     load_report: Option<LoadReport>,
     prompt: PromptStyle,
+    /// The image encoder, opened the first time an image arrives.
+    vision: Option<sim::vision::VisionTower>,
 }
 
 #[derive(Clone)]
@@ -444,7 +446,7 @@ fn load_model(catalog: &Catalog, request: LoadRequest) -> Result<Loaded, String>
     } else {
         Box::new(Engine::new(program, weights, mode)?)
     };
-    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator, dir: dir.to_path_buf(), firmware_tables: None, load_report, prompt })
+    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator, dir: dir.to_path_buf(), firmware_tables: None, load_report, prompt, vision: None })
 }
 
 async fn load(State(app): State<App>, Json(request): Json<LoadRequest>) -> Response {
@@ -473,12 +475,22 @@ struct GenerateRequest {
     /// The most tokens the model may reason before its reasoning is closed for it.
     #[serde(default)]
     think_budget: Option<u32>,
+    /// A picture the question is about, as RGB pixels row by row.
+    #[serde(default)]
+    image: Option<ImageInput>,
     /// Also runs the draft head and reports how often it guessed right.
     #[serde(default)]
     mtp_depth: usize,
     /// How much of the chip around the die to simulate.
     #[serde(default)]
     fidelity: Fidelity,
+}
+
+#[derive(Deserialize)]
+struct ImageInput {
+    width: usize,
+    height: usize,
+    rgb: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -714,10 +726,33 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     use std::sync::atomic::Ordering::Relaxed;
     let mut guard = app.loaded.lock().unwrap();
     let loaded = guard.as_mut().ok_or("carga un modelo primero")?;
-    let (text, add_special) = loaded.prompt.render(&request.prompt, request.thinking)?;
+    let (text, add_special) = match request.image {
+        Some(_) => (loaded.prompt.render_with_image(&request.prompt, request.thinking)?, false),
+        None => loaded.prompt.render(&request.prompt, request.thinking)?,
+    };
     let ids = loaded.tokenizer.encode(text.as_str(), add_special).map_err(|e| e.to_string())?.get_ids().to_vec();
     loaded.engine.reset();
-    let _ = sender.blocking_send(serde_json::json!({ "type": "start", "prompt_tokens": ids.len() }));
+    // The image becomes the tokens that take the place of its `<|image_pad|>`.
+    let image = match &request.image {
+        Some(input) => {
+            if request.fidelity.firmware || request.mtp_depth > 0 {
+                return Err("las imágenes aún no pasan por el firmware ni por la cabeza MTP".into());
+            }
+            if loaded.vision.is_none() {
+                loaded.vision = Some(sim::vision::VisionTower::open(&loaded.dir)?.ok_or("este modelo no trae codificador de imágenes")?);
+            }
+            let tower = loaded.vision.as_ref().unwrap();
+            let started = std::time::Instant::now();
+            let patches = sim::vision::patches(&tower.config, &input.rgb, input.width, input.height)?;
+            let tokens = tower.encode(&patches)?;
+            let _ = sender.blocking_send(serde_json::json!({ "type": "image", "patches": patches.rows * patches.cols, "tokens": tokens.len(), "seconds": started.elapsed().as_secs_f64() }));
+            loaded.engine.set_mrope(tower.config.mrope_section);
+            Some((tokens, patches.rows, patches.cols, tower.config.merge, tower.config.image_token))
+        }
+        None => None,
+    };
+    let image_tokens = image.as_ref().map_or(0, |(tokens, ..)| tokens.len().saturating_sub(1));
+    let _ = sender.blocking_send(serde_json::json!({ "type": "start", "prompt_tokens": ids.len() + image_tokens }));
     if request.fidelity.firmware {
         return run_firmware(loaded, &text, add_special, &ids, &request, sender, cancelled);
     }
@@ -734,6 +769,17 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
         }
         let last = i + 1 == ids.len();
         let wants_mtp = request.mtp_depth > 0;
+        if let Some((tokens, rows, cols, merge, _)) = image.as_ref().filter(|image| *id == image.4) {
+            // The image's tokens all take the position the placeholder had, plus their row
+            // and column; the text after it goes on past the image's longer side.
+            let (positions, after) = sim::vision::image_positions(i as u64, *rows, *cols, *merge);
+            for (token, position) in tokens.iter().zip(positions) {
+                loaded.engine.step_embedding(token, position, false)?;
+            }
+            loaded.engine.continue_text_at(after);
+            let _ = sender.blocking_send(serde_json::json!({ "type": "prefill", "done": i + 1 + image_tokens, "total": ids.len() + image_tokens, "seconds": 0.0 }));
+            continue;
+        }
         let (logits, stats) = loaded.engine.step(*id, last || wants_mtp)?;
         if last {
             if let Some(l) = logits {
@@ -745,7 +791,8 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
             loaded.engine.feed_draft_from_main();
             loaded.engine.draft(following, false)?;
         }
-        let _ = sender.blocking_send(serde_json::json!({ "type": "prefill", "done": i + 1, "total": ids.len(), "seconds": stats.seconds }));
+        let done = if image.as_ref().is_some_and(|image| ids[..i].contains(&image.4)) { i + 1 + image_tokens } else { i + 1 };
+        let _ = sender.blocking_send(serde_json::json!({ "type": "prefill", "done": done, "total": ids.len() + image_tokens, "seconds": stats.seconds }));
     }
 
     if request.mtp_depth > 0 && !loaded.engine.has_draft_head() {

@@ -52,6 +52,10 @@ interface SimulatorState {
   chip: { cycles: number; dieCycles: number; tokenizerMatch: boolean | null } | null;
   acceptance: { hits: number[]; tries: number[] };
   prompt: string;
+  /** A picture the question is about: its pixels as RGB, and a preview to show. */
+  image: { width: number; height: number; rgb: number[]; preview: string } | null;
+  /** What the encoder made of the picture in the last run. */
+  imageReport: { patches: number; tokens: number; seconds: number } | null;
   maxTokens: number;
   temperature: number;
   topK: number;
@@ -103,6 +107,8 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   chip: null,
   acceptance: { hits: [], tries: [] },
   prompt: "¿Cuál es la capital de Francia? Responde en una frase.",
+  image: null,
+  imageReport: null,
   maxTokens: 64,
   temperature: 0,
   topK: 20,
@@ -154,7 +160,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   },
 
   generate() {
-    const { prompt, maxTokens, temperature, topK, mtpDepth, thinking, thinkBudget, firmware, samplerUnit, firmwareTokenizer } = get();
+    const { prompt, maxTokens, temperature, topK, mtpDepth, thinking, thinkBudget, firmware, samplerUnit, firmwareTokenizer, image } = get();
     const budget = thinkBudget.trim() === "" ? null : Math.max(0, Math.floor(Number(thinkBudget) || 0));
     const metric = (id: string) => useDesign.getState().report?.metrics.find((m) => m.id === id)?.value ?? 0;
     const rate = metric("tok_s");
@@ -164,11 +170,12 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${location.host}/api/generate`);
     socket = ws;
-    ws.onopen = () => ws.send(JSON.stringify({ prompt, max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, mtp_depth: mtpDepth, fidelity }));
+    ws.onopen = () => ws.send(JSON.stringify({ prompt, max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, mtp_depth: mtpDepth, fidelity, image: image && { width: image.width, height: image.height, rgb: image.rgb } }));
     ws.onerror = () => set({ error: "Se perdió la conexión con el motor.", running: false });
     ws.onclose = () => set({ running: false });
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
+      if (data.type === "image") set({ imageReport: { patches: data.patches, tokens: data.tokens, seconds: data.seconds } });
       if (data.type === "start") set({ promptTokens: data.prompt_tokens, phase: "Leyendo el prompt" });
       if (data.type === "prefill") set((s) => ({ prefilled: data.done, saturated: s.saturated, pulse: s.pulse + 1 }));
       if (data.type === "token") {

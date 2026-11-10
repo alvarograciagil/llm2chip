@@ -93,6 +93,16 @@ impl PromptStyle {
         Self { template, bos, eos, chatml_thinking: false, stop, think: think_tokens(tokenizer) }
     }
 
+    /// The text with an image before the question, which the chip reads as one
+    /// `<|image_pad|>` that its tokens replace.
+    pub fn render_with_image(&self, prompt: &str, thinking: bool) -> Result<String, String> {
+        if !self.chatml_thinking {
+            return Err("este modelo no lee imágenes".into());
+        }
+        let think = if thinking { "<think>\n" } else { "<think>\n\n</think>\n\n" };
+        Ok(format!("<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{prompt}<|im_end|>\n<|im_start|>assistant\n{think}"))
+    }
+
     /// The text to tokenize, and whether the tokenizer must add its special tokens.
     pub fn render(&self, prompt: &str, thinking: bool) -> Result<(String, bool), String> {
         if self.chatml_thinking {
@@ -120,6 +130,13 @@ impl PromptStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_goes_before_the_question_as_one_placeholder() {
+        let qwen = PromptStyle { template: None, bos: String::new(), eos: String::new(), chatml_thinking: true, stop: vec![], think: None };
+        assert_eq!(qwen.render_with_image("¿Qué es?", false).unwrap(), "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>¿Qué es?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+        assert!(style(None, vec![2]).render_with_image("hola", false).is_err());
+    }
 
     fn style(template: Option<&str>, stop: Vec<u32>) -> PromptStyle {
         PromptStyle { template: template.map(String::from), bos: "<s>".into(), eos: "</s>".into(), chatml_thinking: false, stop, think: None }

@@ -2429,3 +2429,38 @@ button.model-toggle {
   font-size: 12px;
   line-height: 1.45;
 }
+
+.attached {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+}
+
+.attached img {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 0.5px solid var(--separator);
+}
+
+.attached figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--label-2);
+  font-size: 12px;
+}
+
+.pill.attach {
+  position: relative;
+  cursor: pointer;
+}
+
+.pill.attach input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
