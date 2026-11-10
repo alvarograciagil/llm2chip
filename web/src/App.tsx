@@ -10,6 +10,7 @@ import { SchematicPanel } from "./schematic/SchematicPanel";
 import { SchematicView } from "./schematic/SchematicView";
 import { ModelsPanel, ModelsView } from "./models/ModelsView";
 import { NumericPanel, NumericView } from "./numeric/NumericView";
+import { ParamDocsView } from "./docs/ParamDocsView";
 import { useCellSim } from "./schematic/simStore";
 import { useDesign } from "./store";
 
@@ -60,6 +61,7 @@ export function App() {
         {view === "numerico" && <NumericPanel />}
         {view === "modelos" && <ModelsView />}
         {view === "modelos" && <ModelsPanel />}
+        {view === "parametros" && <ParamDocsView />}
       </main>
     </div>
   );

@@ -2268,3 +2268,140 @@ button.model-toggle {
 .lab-summary dd {
   margin: 0;
 }
+
+/* Each parameter explains itself on hover, and opens its documentation on click. */
+.info {
+  position: relative;
+  display: inline-flex;
+}
+
+.info-button {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0.5px solid var(--label-3);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--label-2);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: help;
+}
+
+.info-button:hover,
+.info-button:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tooltip {
+  position: fixed;
+  z-index: 40;
+  width: 260px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--group-solid);
+  box-shadow: var(--shadow);
+  color: var(--label);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: normal;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.12s ease 0.25s;
+  pointer-events: none;
+}
+
+.tooltip em {
+  display: block;
+  margin-top: 6px;
+  color: var(--label-2);
+  font-style: normal;
+}
+
+.tooltip.shown {
+  visibility: visible;
+  opacity: 1;
+}
+
+.docs-stage {
+  overflow-y: auto;
+}
+
+.docs-column {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 20px 16px 48px;
+  color: var(--label);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.docs-column h1 {
+  margin: 0 0 6px;
+  font-size: 22px;
+}
+
+.docs-column h2 {
+  margin: 28px 0 8px;
+  font-size: 16px;
+  scroll-margin-top: 12px;
+}
+
+.docs-index {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin: 12px 0 4px;
+}
+
+.docs-index a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.docs-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  border-radius: 10px;
+  background: var(--group);
+  overflow: hidden;
+}
+
+.docs-entry {
+  padding: 10px 14px;
+  border-bottom: 0.5px solid var(--separator);
+  scroll-margin-top: 12px;
+}
+
+.docs-entry:last-child {
+  border-bottom: none;
+}
+
+.docs-entry.focused {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.docs-entry dt {
+  font-weight: 600;
+}
+
+.docs-entry dt code {
+  margin-left: 6px;
+  color: var(--label-2);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.docs-entry dd {
+  margin: 4px 0 0;
+}
+
+.docs-entry dd p {
+  margin: 0 0 4px;
+}

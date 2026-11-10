@@ -128,6 +128,15 @@ pub struct ChipParams {
     pub function_units_per_die: u32,
     /// Logits the sampling unit takes in per cycle.
     pub sampler_lanes: u32,
+    /// Candidates the sampling unit keeps: the largest top-k it can draw from.
+    pub sampler_entries: u32,
+    /// log2 of the entries in each function table: its resolution.
+    pub function_table_bits: u32,
+    /// Cycles a cell takes to apply a group's scale and bias, a part of each a cycle,
+    /// while it adds up the next group. One is a whole multiplier.
+    pub factor_steps: u32,
+    /// Activations each link between dies carries per cycle.
+    pub link_words: u32,
 
     pub weight_backend: WeightBackend,
     pub kv_backend: KvBackend,
@@ -187,6 +196,10 @@ impl Default for ChipParams {
             vector_bits: 16,
             function_units_per_die: 16,
             sampler_lanes: 64,
+            sampler_entries: 64,
+            function_table_bits: 12,
+            factor_steps: 1,
+            link_words: 16,
             weight_backend: WeightBackend::Sram,
             kv_backend: KvBackend::Sram,
             hbm_stacks: 8,

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { createPortal } from "react-dom";
 import type { Maturity, QualityRisk } from "../engine";
 import { formatNumber, fromLog, toLog } from "../format";
 import { matchingPreset, PARAM_GROUPS, type Field } from "../params";
@@ -46,8 +47,35 @@ function ValueInput({ field, value, onCommit }: { field: RangeField; value: numb
   );
 }
 
+/** A "?" that explains a parameter while the pointer is on it, above everything so no
+ * scrolling panel cuts it, and opens its documentation when pressed. */
+function InfoTip({ id, label, text, onOpen }: { id: string; label: string; text: string; onOpen: () => void }) {
+  const [at, setAt] = useState<{ x: number; y: number; above: boolean } | null>(null);
+  const show = (e: { currentTarget: HTMLElement }) => {
+    const box = e.currentTarget.getBoundingClientRect();
+    const above = box.bottom + 160 > window.innerHeight;
+    setAt({ x: Math.max(8, Math.min(box.left - 8, window.innerWidth - 276)), y: above ? box.top - 6 : box.bottom + 6, above });
+  };
+  return (
+    <span className="info">
+      <button className="info-button" aria-label={`Qué es ${label}`} aria-describedby={id} onClick={onOpen} onMouseEnter={show} onMouseLeave={() => setAt(null)} onFocus={show} onBlur={() => setAt(null)}>
+        ?
+      </button>
+      {/* The sidebar's blur would make a fixed position its own: the tip lives in the page. */}
+      {createPortal(
+        <span className={at ? "tooltip shown" : "tooltip"} role="tooltip" id={id} style={at ? { left: at.x, top: at.y, transform: at.above ? "translateY(-100%)" : undefined } : undefined}>
+          {text}
+          <em>Pulsa para ver la documentación completa.</em>
+        </span>,
+        document.body,
+      )}
+    </span>
+  );
+}
+
 function Row({ field, children, below }: { field: Field; children: React.ReactNode; below?: React.ReactNode }) {
   const setHelp = useDesign((s) => s.setHelp);
+  const openDocs = useDesign((s) => s.openDocs);
   const value = useDesign((s) => s.params[field.key]);
   const fallback = useDesign((s) => s.defaults[field.key]);
   const resetParam = useDesign((s) => s.resetParam);
@@ -70,6 +98,7 @@ function Row({ field, children, below }: { field: Field; children: React.ReactNo
       <div className="row-head">
         <span className="row-label">
           {field.label}
+          {field.help && <InfoTip id={`ayuda-${field.key}`} label={field.label} text={field.help} onOpen={() => openDocs(field.key)} />}
           {changed && (
             <button className="changed" aria-label={`Restablecer ${field.label}`} title="Restablecer" onClick={() => resetParam(field.key)} />
           )}

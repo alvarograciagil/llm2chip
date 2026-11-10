@@ -23,7 +23,7 @@ export type Selection =
 
 export type Overlay = "funcion" | "capa" | "actividad" | "energia" | "ancho" | "densidad";
 export type SidebarTab = "parametros" | "optimizaciones";
-export type View = "plano" | "funcionamiento" | "esquematico" | "simulador" | "explorador" | "modelos" | "numerico";
+export type View = "plano" | "funcionamiento" | "esquematico" | "simulador" | "explorador" | "modelos" | "numerico" | "parametros";
 export type Appearance = "auto" | "light" | "dark";
 
 export interface SavedDesign {
@@ -55,6 +55,8 @@ interface DesignState {
   appearance: Appearance;
   sidebarTab: SidebarTab;
   help: string | null;
+  /** The parameter the documentation shows first. */
+  docsFocus: string | null;
   revealed: { key: string; at: number } | null;
 
   bootstrap: () => void;
@@ -78,6 +80,7 @@ interface DesignState {
   setAppearance: (a: Appearance) => void;
   setSidebarTab: (t: SidebarTab) => void;
   setHelp: (text: string | null) => void;
+  openDocs: (key: string) => void;
   reveal: (key: string) => void;
 }
 
@@ -205,6 +208,7 @@ export const useDesign = create<DesignState>((set, get) => {
     appearance: "auto",
     sidebarTab: "parametros",
     help: null,
+    docsFocus: null,
     revealed: null,
 
     bootstrap() {
@@ -322,6 +326,7 @@ export const useDesign = create<DesignState>((set, get) => {
     },
     setSidebarTab: (sidebarTab) => set({ sidebarTab }),
     setHelp: (help) => set({ help }),
+    openDocs: (key) => set({ view: "parametros", docsFocus: key }),
     reveal: (key) => set({ sidebarTab: "parametros", revealed: { key, at: performance.now() } }),
   };
 });

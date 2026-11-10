@@ -375,6 +375,10 @@ const PACKAGE_MAX_MM2: f64 = 4700.0;
 const UCIE_ENDPOINT_MM2: f64 = 2.0;
 const SERDES_ENDPOINT_MM2: f64 = 6.0;
 const UCIE_HOP_NS: f64 = 10.0;
+/// What one endpoint of each kind carries, in bits per nanosecond: a UCIe module of 64
+/// lanes at 32 GT/s, and eight SerDes lanes of 112 Gb/s.
+const UCIE_ENDPOINT_GBPS: f64 = 2048.0;
+const SERDES_ENDPOINT_GBPS: f64 = 896.0;
 const SERDES_HOP_NS: f64 = 150.0;
 
 /// How a ring of dies is cut into packages, and what each hop travels over.
@@ -409,18 +413,16 @@ pub const TOKENIZER_BITS_PER_TOKEN: f64 = 500.0;
 /// The CPU's program memory, the firmware's size rounded up to a power of two.
 pub const FIRMWARE_PROGRAM_BYTES: u32 = 1 << 15;
 
-/// Candidates the sampling unit keeps.
-const SAMPLER_ENTRIES: f64 = 64.0;
-
 /// Cycles sampling adds to each generated token. Logits are filtered as `lm_head`
 /// produces them, so only a unit too narrow to keep up delays the die.
 fn sampling_cycles(p: &ChipParams, model: &ModelGraph) -> f64 {
     let vocabulary = model.vocab_size as f64;
     let head = vocabulary * model.hidden_size as f64 / p.macs_per_die as f64;
     let stream = vocabulary / p.sampler_lanes.max(1) as f64;
+    let entries = p.sampler_entries.max(1) as f64;
     // A random stream improves on the k-th best about k·ln(n/k) times.
-    let insertions = SAMPLER_ENTRIES * (1.0 + (vocabulary / SAMPLER_ENTRIES).max(1.0).ln());
-    let selection = 2.0 + 3.0 * SAMPLER_ENTRIES;
+    let insertions = entries * (1.0 + (vocabulary / entries).max(1.0).ln());
+    let selection = 2.0 + 3.0 * entries;
     (stream - head).max(0.0) + insertions + selection
 }
 
@@ -506,7 +508,9 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     if p.uses_groups() {
         let width = p.effective_accumulator() as f64;
         // A power-of-two scale is a barrel shifter, not a multiplier.
-        let unit = if p.scale_is_multiplied() { p.scale_bits as f64 * width * tech.fa_um2 } else { width * width.log2().ceil() * tech.mux_um2 };
+        // Applied over several cycles, each cycle takes only a part of the scale's bits.
+        let steps = p.factor_steps.clamp(1, p.scale_bits.max(1)) as f64;
+        let unit = if p.scale_is_multiplied() { (p.scale_bits as f64 / steps).ceil() * width * tech.fa_um2 + width * tech.ff_um2 * (steps > 1.0) as u8 as f64 } else { width * width.log2().ceil() * tech.mux_um2 };
         push("scale_units", "Escala y sesgo por grupo", n * unit * um2 * ROUTING_OVERHEAD,
             "Aplican la escala y el sesgo que comparten los pesos de cada grupo.");
     }
@@ -521,7 +525,7 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
         p.vector_lanes_per_die as f64 * lane * um2 * ROUTING_OVERHEAD,
         "Multiplican activación por activación o estado: atención Q·K, regla delta y puertas.");
 
-    let table_bits = 65_536.0;
+    let table_bits = (1u64 << p.function_table_bits.clamp(4, 20)) as f64 * p.activation_bits as f64;
     push("function_units", "Unidades de función",
         p.function_units_per_die as f64 * (table_bits / 1e6 / tech.sram_density(64.0) + 5000.0 * um2),
         "Tablas para SiLU, sigmoide, softplus, exp, raíz inversa y softmax.");
@@ -557,7 +561,7 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
 
     let logit_bits = p.activation_bits as f64;
     let index_bits = (model.vocab_size.max(2) as f64).log2().ceil();
-    let sampler_um2 = SAMPLER_ENTRIES * ((logit_bits + index_bits) * (tech.ff_um2 + tech.mux_um2) + logit_bits * tech.fa_um2)
+    let sampler_um2 = p.sampler_entries.max(1) as f64 * ((logit_bits + index_bits) * (tech.ff_um2 + tech.mux_um2) + logit_bits * tech.fa_um2)
         + p.sampler_lanes as f64 * logit_bits * tech.fa_um2
         + 24.0 * 16.0 * tech.fa_um2;
     push("sampler", "Unidad de muestreo", sampler_um2 * um2 * ROUTING_OVERHEAD / d,
@@ -586,7 +590,10 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     if dies > 1 {
         // Sized for the worst each die can be, since its own area depends on this.
         let plan = link_plan(p.link, dies, p.die_max_mm2.min(tech.die_max_mm2));
-        let endpoint = (plan.ucie_hops as f64 * UCIE_ENDPOINT_MM2 + plan.serdes_hops as f64 * SERDES_ENDPOINT_MM2) / d;
+        // A wider link takes as many endpoints as its bits per nanosecond need.
+        let rate = p.link_words.max(1) as f64 * p.activation_bits as f64 * p.freq_ghz;
+        let endpoints = |capacity: f64| (rate / capacity).ceil().max(1.0);
+        let endpoint = (plan.ucie_hops as f64 * UCIE_ENDPOINT_MM2 * endpoints(UCIE_ENDPOINT_GBPS) + plan.serdes_hops as f64 * SERDES_ENDPOINT_MM2 * endpoints(SERDES_ENDPOINT_GBPS)) / d;
         push("links", "Enlaces entre dies", endpoint, "Pasan un vector de activación entre capas consecutivas.");
     }
     if p.has("checkpoint_estado") || p.has("embedding_externo") {
@@ -618,15 +625,16 @@ fn driven_by(id: &str) -> &'static [&'static str] {
         "cpu_memory" => &["context_tokens"],
         "cell_ecc" => &["macs_per_die"],
         "cell_macs" => &["macs_per_die", "multiplier_kind", "weight_coding", "weight_bits", "weight_exponent_bits", "activation_bits", "mac_stages"],
-        "scale_units" => &["group_size", "scale_bits"],
+        "scale_units" => &["group_size", "scale_bits", "factor_steps"],
         "activation_noc" => &["macs_per_die", "activation_bits", "noc_stages"],
         "vector_units" => &["vector_lanes_per_die", "vector_bits"],
-        "function_units" => &["function_units_per_die"],
+        "function_units" => &["function_units_per_die", "function_table_bits"],
+        "sampler" => &["sampler_lanes", "sampler_entries"],
         "activation_buffers" => &["activation_bits"],
         "kv_sram" => &["context_tokens", "kv_bits", "kv_backend"],
         "delta_state" => &["delta_state_bits"],
         "mtp_rollback" => &["mtp_enabled", "mtp_depth", "delta_state_bits"],
-        "links" => &["link", "dies"],
+        "links" => &["link", "link_words", "dies"],
         "hbm_phy" => &["hbm_stacks"],
         _ => &[],
     }
@@ -1022,7 +1030,10 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             field: Some("link"),
         });
     }
-    let link_cycles = if dies > 1 { plan.delay_ns() * freq } else { 0.0 };
+    // Each die passes on the hidden vector, `link_words` activations a cycle, after the
+    // hops' own delay.
+    let transfer = model.hidden_size as f64 / p.link_words.max(1) as f64;
+    let link_cycles = if dies > 1 { plan.delay_ns() * freq + (dies - 1) as f64 * transfer } else { 0.0 };
     let total_cycles = weight_cycles + vector_cycles + latency_cycles + link_cycles;
     let compute_time = total_cycles / (freq * 1e9);
 
@@ -1151,7 +1162,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             "control" => (1.0, 0.0, 0.0, "Área fija estimada por die.".into()),
             "tokenizer_tables" => (0.0, 0.0, 0.0, format!("{:.0} Mbit para un vocabulario de {} tokens.", model.vocab_size as f64 * TOKENIZER_BITS_PER_TOKEN / 1e6, model.vocab_size)),
             "cpu_memory" => (0.0, 0.0, 0.0, format!("Para prompts de hasta {} tokens.", p.context_tokens)),
-            "sampler" => (0.0, 0.0, 0.0, format!("{} carriles de filtro y {} candidatos.", p.sampler_lanes, SAMPLER_ENTRIES)),
+            "sampler" => (0.0, 0.0, 0.0, format!("{} carriles de filtro y {} candidatos.", p.sampler_lanes, p.sampler_entries)),
             "links" => (link_cycles / total_cycles, 0.0, link_bytes, format!("{} enlaces UCIe y {} SerDes, en {} encapsulados.", plan.ucie_hops, plan.serdes_hops, plan.packages)),
             _ => (0.0, 0.0, 0.0, "Área fija estimada.".into()),
         };

@@ -144,6 +144,7 @@ export function Toolbar() {
           ["explorador", "Explorador"],
           ["numerico", "Numérico"],
           ["modelos", "Modelos"],
+          ["parametros", "Parámetros"],
         ]}
         onChange={setView}
       />
