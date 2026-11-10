@@ -673,6 +673,9 @@ pub enum Step {
     Repeat { variable: Var, count: Expr, body: Vec<Step> },
     /// A single-operation loop that issues one element, or block, per cycle.
     Stream { variable: Var, count: Expr, in_elements: bool, body: Alu<Expr> },
+    /// `wide[j] = Σ_i weights[i] · matrix[start + i · lanes + j]` over `rows` rows of one
+    /// block each, one row a cycle, from zero.
+    CombineRows { weights: At<Expr>, matrix: u32, start: Expr, rows: u32, window: Expr, window_a: bool, window_b: bool },
     /// `wide[j] += weights · matrix[start + j]` for every `j` of a row, or from zero if `fresh`.
     Combine { weights: At<Expr>, matrix: u32, start: Expr, width: Expr, fresh: bool, window: Expr, window_a: bool, window_b: bool, moving: bool },
     /// One copy of `body` on several vector units, each with its own values of `vars`.
@@ -773,6 +776,11 @@ pub struct Assembly {
     shift_zero: [bool; 3],
     /// The die loads its shifters from the read ports, as described in `load_shifts_now`.
     shifts_now: bool,
+    /// The die adds the units' totals as their chains drain, as `DieProgram::drain_into` does.
+    drains_add: bool,
+    /// A stream of blocks can take one element of a scalar operand for each block, and pile
+    /// rows of one block up in the wide memory.
+    rows_stream: bool,
     zero_ready: bool,
     /// With keys kept in columns, how many tokens each column has room for.
     pub key_capacity: Option<u32>,
@@ -841,12 +849,19 @@ impl Assembly {
         self.immediate(accumulator_bits(self.bits) as i64 - self.bits as i64, self.sc(1));
         self.binary(OP_SUB, self.sc(1), self.sc(0), self.sc(2));
         self.immediate(0, self.sc(3));
-        self.binary(OP_MAX, self.sc(2), self.sc(3), self.sc(4));
-        let mut load = alu(OP_MOV);
-        load.a = self.sc(4);
-        load.write = false;
-        load.load_wide_shift = true;
-        self.push(load);
+        if self.shifts_now {
+            // The shift goes into the wide shifter as it is written.
+            let mut most = alu(OP_MAX);
+            (most.a, most.b, most.dst, most.load_wide_shift, most.shift_now) = (self.sc(2), self.sc(3), self.sc(4), true, true);
+            self.push(most);
+        } else {
+            self.binary(OP_MAX, self.sc(2), self.sc(3), self.sc(4));
+            let mut load = alu(OP_MOV);
+            load.a = self.sc(4);
+            load.write = false;
+            load.load_wide_shift = true;
+            self.push(load);
+        }
         self.elements(sets, &[wide, from], true, |s, set, vector| {
             let mut out = alu(OP_WIDE_OUT);
             out.a = (0, wide + set);
@@ -864,6 +879,12 @@ impl Assembly {
     /// `dst[j] = Σ weights[i] · matrix[i · width + j]` over this unit's `rows`, added
     /// across a group of `1 << group` units.
     fn combine_rows(&mut self, weights: u32, matrix: u32, dst: u32, (width, rows): (u32, u32), group: u32) {
+        if self.rows_stream && width == 1 << self.lane_bits && rows > 1 {
+            // Rows of one block go through one a cycle, adding up in a single block.
+            self.steps.push(Step::CombineRows { weights: (weights, 0.into()), matrix, start: 0.into(), rows, window: 0.into(), window_a: false, window_b: false });
+            self.steps.push(Step::WideReduce { rows: width.into(), group });
+            return self.narrow_sums(weights, matrix, dst, width.into());
+        }
         let zero = self.sc(10);
         self.immediate(0, zero);
         self.steps.push(Step::Combine { weights: zero, matrix, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
@@ -873,7 +894,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_stride: 1, shift_zero: [false; 3], shifts_now: c.features.shifts_now(), zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_stride: 1, shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -945,7 +966,7 @@ impl Assembly {
             emit(self, Expr::var(variable) * lanes, true);
             let inner = std::mem::replace(&mut self.steps, outer);
             if let [Step::One(step)] = inner.as_slice() {
-                if can_stream(variable, step, lanes) {
+                if can_stream(variable, step, lanes, false) {
                     self.steps.push(Step::Stream { variable, count: len, in_elements: true, body: *step });
                     return;
                 }
@@ -974,7 +995,7 @@ impl Assembly {
             return;
         };
         let (variable, count, step) = (*variable, *count, *step);
-        if can_stream(variable, &step, unit) {
+        if can_stream(variable, &step, unit, self.rows_stream) {
             *self.steps.last_mut().expect("bucle") = Step::Stream { variable, count, in_elements: false, body: step };
         }
     }
@@ -1213,7 +1234,7 @@ fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32)
                     *body = marked;
                 }
             }
-            Step::Combine { weights, matrix, window, window_a, window_b, .. } => {
+            Step::Combine { weights, matrix, window, window_a, window_b, .. } | Step::CombineRows { weights, matrix, window, window_a, window_b, .. } => {
                 *window = step;
                 *window_a = windowed.contains(&weights.0);
                 *window_b = windowed.contains(matrix);
@@ -1245,15 +1266,17 @@ fn whole_delta_step<O: BlockOps>(ops: &mut O, r: DeltaRegs, key: u32, value: u32
 
 /// Whether one loop can issue an element per cycle: results land two or three cycles
 /// after the read, so nothing may read a place an earlier element is still to write.
-fn can_stream(variable: Var, step: &Alu<Expr>, unit: u32) -> bool {
+/// With `per_block`, a broadcast operand A may also take one element for each block.
+fn can_stream(variable: Var, step: &Alu<Expr>, unit: u32, per_block: bool) -> bool {
     let stride = |index: Expr| index.coefficient(variable);
     let moves_with = |index: Expr| stride(index) == 0 || stride(index) == unit;
+    let a_per_block = per_block && unit > 1 && step.vector && step.broadcast_a && stride(step.a.1) == 1;
     // Moving elements to earlier places is safe: the reads stay ahead of the writes.
     let safe = |operand: At<Expr>| operand.0 != step.dst.0 || (stride(operand.1) == unit && (operand.1 == step.dst.1 || operand.1.is_after(step.dst.1)));
     let plain = !(step.load_shift_a || step.load_shift_b || step.load_shift_left || step.load_wide_shift || step.link_send || step.magnitude_clear || step.max_clear || step.max_out || step.accumulator_clear || step.wide_clear || step.wide_write) && step.literal.is_none();
     let streamable = matches!(step.op, OP_ADD | OP_SUB | OP_MUL | OP_MOV | OP_FUNCTION | OP_SHIFT_LEFT | OP_WIDE_OUT);
     let scans = !step.write;
-    plain && streamable && (scans || stride(step.dst.1) == unit) && moves_with(step.a.1) && moves_with(step.b.1) && (scans || (safe(step.a) && safe(step.b)))
+    plain && streamable && (scans || stride(step.dst.1) == unit) && (moves_with(step.a.1) || a_per_block) && moves_with(step.b.1) && (scans || (safe(step.a) && safe(step.b)))
 }
 
 impl BlockOps for Assembly {
@@ -1384,6 +1407,7 @@ impl BlockOps for Assembly {
                 s.push(product);
             });
         });
+        self.stream_last(1 << self.lane_bits);
         self.product_exponent(a, b, dst, 0);
         self.normalize(dst, (rows * cols).into());
     }
@@ -1623,12 +1647,22 @@ impl BlockOps for Assembly {
         self.forget_shifts();
         self.steps.push(Step::Clustered { vars: vec![start], assignments: (0..units).map(|unit| vec![unit]).collect(), body: inside });
         self.clear_shifts();
+        // The units are told apart by the stream's counter, so the copy is a stream however
+        // short it is.
+        let (count, unit) = if lanes > 1 { (len / lanes, lanes) } else { (len, 1) };
         for output in outputs {
-            self.elements(len.into(), &[], true, |s, i, vector| {
-                let mut step = alu(OP_MOV);
-                (step.a, step.dst, step.vector, step.gather_shift) = ((*output, i), (*output, i), vector, slab.trailing_zeros());
-                s.push(step);
-            });
+            let variable = Var::Loop(self.loops);
+            self.loops += 1;
+            let mut step = alu(OP_MOV);
+            let at = Expr::var(variable) * unit;
+            (step.a, step.dst, step.vector, step.gather_shift) = ((*output, at), (*output, at), lanes > 1, slab.trailing_zeros());
+            self.steps.push(Step::Stream { variable, count: count.into(), in_elements: false, body: step });
+            // Units that held no slice never wrote the exponent: they take unit 0's.
+            if units < self.clusters {
+                let mut exponent = alu(OP_MOV);
+                (exponent.a, exponent.dst, exponent.from_cluster) = (self.exponent(*output), self.exponent(*output), 1);
+                self.push(exponent);
+            }
         }
     }
 
@@ -1976,7 +2010,8 @@ impl Assembly {
         }
         let inside = std::mem::replace(&mut self.steps, before);
         self.steps.push(Step::Clustered { vars: vec![column], assignments: (0..units).map(|unit| vec![unit * columns]).collect(), body: inside });
-        if units > 1 {
+        // A die that feeds its cells in a stream adds the units' rows as they drain.
+        if units > 1 && !self.drains_add {
             self.steps.push(Step::WideReduce { rows: rows.into(), group: self.clusters.trailing_zeros() });
         }
     }
@@ -2082,7 +2117,7 @@ impl Behavior {
                         self.walk(&[Step::One(*body)], token, position, loops);
                     }
                 }
-                Step::Clustered { .. } | Step::Combine { .. } | Step::CellSeek { .. } | Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } | Step::WideReduce { .. } => panic!("este modelo no guarda los pesos de las celdas"),
+                Step::Clustered { .. } | Step::Combine { .. } | Step::CombineRows { .. } | Step::CellSeek { .. } | Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } | Step::WideReduce { .. } => panic!("este modelo no guarda los pesos de las celdas"),
             }
         }
     }

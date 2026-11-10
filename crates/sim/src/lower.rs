@@ -476,6 +476,12 @@ impl Layout {
                 return Err(format!("cada columna de claves tiene sitio para {capacity} tokens y el contexto es de {tokens}"));
             }
         }
+        // A pass of the cells drains whole blocks: fewer cells than lanes on a unit would
+        // leave lanes idle and its rows out of place.
+        let (units, lanes) = (1u32 << config.features.cluster_bits, 1u32 << config.features.lane_bits);
+        if cells && config.cells / units < lanes {
+            return Err(format!("cada unidad necesita al menos {lanes} celdas, una por carril, y tiene {}", config.cells / units));
+        }
         let (in_cells, cell_weights, cell_factors) = place_in_cells(&cell_plan, config.cells as usize, 1 << config.features.cluster_bits, 1 << config.features.lane_bits);
         chains.retain(|_, parts| parts.len() > 1);
         let followers: HashSet<String> = chains.values().flat_map(|parts| parts[1..].iter().map(|(name, _)| name.clone())).collect();

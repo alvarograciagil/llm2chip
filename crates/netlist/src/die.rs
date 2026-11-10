@@ -92,6 +92,12 @@ impl DieFeatures {
         self.widths[CELL_FEED_FIELD] > 0
     }
 
+    /// Whether a stream of blocks can step through a scalar operand one element a block
+    /// and pile its rows up in one block of the wide memory.
+    pub fn streams_rows(&self) -> bool {
+        self.lane_bits > 0 && self.widths[A_SHIFT_FIELD] > 0 && self.widths[WIDE_CHAIN_FIELD] > 0
+    }
+
     /// Whether the die can add whole rows into the wide memory.
     pub fn combines(&self) -> bool {
         self.widths[WIDE_ACCUMULATE_FIELD] > 0
@@ -246,16 +252,24 @@ pub struct ControlWord {
     pub cell_feed: bool,
     /// It is the last of a group: the cells apply the group's factors once it is in.
     pub cell_end: bool,
+    /// Operand A walks the read counter shifted right this far, so a stream of blocks
+    /// can take one element of A for each block of B.
+    pub a_shift: u32,
+    /// The wide sums add onto their own last total instead of what the memory holds, so
+    /// a stream of rows piles up in one block.
+    pub wide_chain: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 74;
+pub const FIELD_COUNT: usize = 76;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
 const X_SPLIT_FIELD: usize = 70;
 const SHIFT_NOW_FIELD: usize = 71;
 const CELL_FEED_FIELD: usize = 72;
+const A_SHIFT_FIELD: usize = 74;
+const WIDE_CHAIN_FIELD: usize = 75;
 const WIDE_ACCUMULATE_FIELD: usize = 55;
 const MAX_SCAN_FIELD: usize = 62;
 
@@ -359,6 +373,8 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("shift_now", 1),
         ("cell_feed", 1),
         ("cell_end", 1),
+        ("a_shift", bits_for(c.features.lane_bits)),
+        ("wide_chain", 1),
     ]
 }
 
@@ -444,6 +460,8 @@ impl ControlWord {
             self.shift_now as u128,
             self.cell_feed as u128,
             self.cell_end as u128,
+            self.a_shift as u128,
+            self.wide_chain as u128,
         ]
     }
 
@@ -497,9 +515,45 @@ fn bits_for(value: u32) -> u32 {
 /// Steps whose result can be written as it is computed: nothing reads it through the
 /// result register afterwards, and no other unit has to see it on the way.
 fn writes_at_once(s: &Alu) -> bool {
-    let late_shift = (s.load_shift_a || s.load_shift_b || s.load_shift_left) && !s.shift_now;
-    let later = late_shift || s.load_wide_shift || s.link_send || s.wide_write;
+    let late_shift = (s.load_shift_a || s.load_shift_b || s.load_shift_left || s.load_wide_shift) && !s.shift_now;
+    let later = late_shift || s.link_send || s.wide_write;
     !later && !matches!(s.op, OP_FUNCTION | OP_LINK | OP_CELLS)
+}
+
+/// Whether `next` may read in the cycle `previous` computes in: it reads nothing
+/// `previous` writes, clears nothing `previous` updates, and the fields both cycles use
+/// agree. Addresses only matter when they are presented, so those may differ.
+fn can_follow(previous: &Alu, next: &Alu, lanes: u32) -> bool {
+    let clears = next.magnitude_clear || next.max_clear || next.accumulator_clear || next.wide_clear;
+    let windowed = |s: &Alu| s.window_a || s.window_b || s.window_dst;
+    let agree = previous.vector == next.vector
+        && previous.broadcast_a == next.broadcast_a
+        && previous.broadcast_b == next.broadcast_b
+        && previous.from_cluster == next.from_cluster
+        && (!windowed(previous) && !windowed(next) || previous.window_x == next.window_x)
+        // The compute cycle of an immediate or a literal step uses literal B as its value.
+        && (previous.literal.is_none() && previous.op != OP_IMMEDIATE || previous.literal.unwrap_or(previous.b.1) == next.b.1);
+    let span = |vector: bool| if vector { lanes } else { 1 };
+    let touches = |(reg, at): (u32, u32), offset: u32, window: bool, vector: bool| {
+        let (written, from) = previous.dst;
+        if reg != written {
+            return false;
+        }
+        if offset != 0 || previous.offset_dst != 0 || window || previous.window_dst {
+            return true;
+        }
+        let (a, b) = (span(vector), span(previous.vector));
+        at < from + b && from < at + a
+    };
+    // Scalar reads of what the step before writes come forwarded from its result.
+    let forwarded = !previous.vector && !next.vector && next.from_cluster == 0 && !next.broadcast_a && !next.broadcast_b;
+    let depends = previous.write && !forwarded && (touches(next.a, next.offset_a, next.window_a, next.vector) || touches(next.b, next.offset_b, next.window_b, next.vector));
+    !clears && (agree || reads_nothing(next)) && !depends
+}
+
+/// Steps that read no register, so their read cycle may carry any address fields.
+fn reads_nothing(s: &Alu) -> bool {
+    matches!(s.op, OP_IMMEDIATE | OP_LZC | OP_WIDE_LZC) && !s.magnitude_scan && !s.max_scan && !s.accumulate && !s.wide_scan
 }
 
 /// Whether `bits` holds at least `value`.
@@ -686,11 +740,16 @@ impl Gen {
 
     /// What the wide memory holds plus a product, or the total over the units, registered for its write.
     #[allow(clippy::too_many_arguments)]
-    fn wide_sum(&mut self, b: &mut Builder, (name, adder, register, mux): (&str, &str, &str, &str), held: &[Bit], product: &[Bit], fresh: Bit, (bits, fraction): (u32, usize), across: Option<(Bit, &[Bit])>) -> Vec<Bit> {
+    #[allow(clippy::too_many_arguments)]
+    fn wide_sum(&mut self, b: &mut Builder, (name, adder, register, mux): (&str, &str, &str, &str), held: &[Bit], product: &[Bit], (fresh, chain): (Bit, Bit), (bits, fraction): (u32, usize), across: Option<(Bit, &[Bit])>) -> Vec<Bit> {
+        let q = b.wire(&format!("{name}_q"), bits);
+        // Chained, the sum goes on from its own last total.
+        let base = b.wire(&format!("{name}_base"), bits);
+        b.inst(&format!("{name}_chain"), mux, &[("s", vec![chain]), ("a", held.to_vec()), ("b", q.clone()), ("y", base.clone())]);
         let keep = b.wire(&format!("{name}_keep"), 1)[0];
         b.not_to(fresh, keep);
         let start = b.wire(&format!("{name}_start"), bits);
-        for (from, to) in held.iter().zip(&start) {
+        for (from, to) in base.iter().zip(&start) {
             b.and_to(keep, *from, *to);
         }
         let sign = *product.last().expect("producto vacío");
@@ -706,7 +765,6 @@ impl Gen {
             }
             None => sum,
         };
-        let q = b.wire(&format!("{name}_q"), bits);
         b.inst(&format!("{name}_reg"), register, &[("d", chosen), ("q", q.clone())]);
         q
     }
@@ -1056,7 +1114,18 @@ impl Gen {
                 b.inst(&format!("{name}_select"), &mux_index, &[("s", vec![select]), ("a", counter.to_vec()), ("b", literal.to_vec()), ("y", y.clone())]);
                 y
             };
-            let plain_a = pick(&mut b, "plain_a", fields["fixed_a"][0], &read_index, &fields["literal_a"]);
+            // A can walk the counter more slowly: one of its elements for each block of B.
+            let read_index_a = {
+                let mut l = Logic { b: &mut b, next: 57_000 };
+                let mut index = read_index.clone();
+                for (level, bit) in fields["a_shift"].iter().enumerate() {
+                    let by = 1usize << level;
+                    let shifted: Vec<Bit> = (0..index.len()).map(|i| index.get(i + by).copied().unwrap_or(Bit::Zero)).collect();
+                    index = l.mux_bus(*bit, &index, &shifted);
+                }
+                index
+            };
+            let plain_a = pick(&mut b, "plain_a", fields["fixed_a"][0], &read_index_a, &fields["literal_a"]);
             let plain_b = pick(&mut b, "plain_b", fields["fixed_b"][0], &read_index, &fields["literal_b"]);
             let plain_w = pick(&mut b, "plain_w", Bit::Zero, &write_index, &fields["literal_dst"]);
             let plain_w = if c.features.key_shift > 0 {
@@ -1171,6 +1240,24 @@ impl Gen {
                 l.connect_flops(&raddr_a[..lane_bits], &bank_a);
                 l.connect_flops(&addr_b[..lane_bits], &bank_b);
                 let (chosen_a, chosen_b) = (l.select(&bank_a, &banks_a), l.select(&bank_b, &banks_b));
+                // A read in the cycle of a write to the same place gets the old value from
+                // the memory; the value written is kept a cycle and taken instead, so a step
+                // can read what the one before it is writing.
+                let last_written = l.fresh_bus(a as usize);
+                l.connect_flops(&wdata, &last_written);
+                let forward = |l: &mut Logic, addr: &[Bit]| -> Bit {
+                    let same: Vec<Bit> = addr.iter().zip(&waddr).map(|(x, y)| l.xor(*x, *y)).collect();
+                    let differs = l.any(&same);
+                    let equal = l.not(differs);
+                    let now = l.and(equal, we);
+                    let late = l.fresh();
+                    l.connect_flops(&[now], &[late]);
+                    let mine = l.not(foreign);
+                    l.and(late, mine)
+                };
+                let (forward_a, forward_b) = (forward(&mut l, &raddr_a), forward(&mut l, &addr_b));
+                let chosen_a = l.mux_bus(forward_a, &chosen_a, &last_written);
+                let chosen_b = l.mux_bus(forward_b, &chosen_b, &last_written);
                 for (from, to) in chosen_a.iter().zip(&read_a).chain(chosen_b.iter().zip(&read_b)) {
                     l.b.or_to(*from, Bit::Zero, *to);
                 }
@@ -1376,10 +1463,6 @@ impl Gen {
             let wide_read: Vec<Bit> = wide_stored[fraction..].to_vec();
             let chain_out = unit_chains[cluster][0].clone();
             let chain_shifted = barrel_right(&mut b, &mux_wide, "chain_shift", &chain_out, &fields["shift"]);
-            let widen = |chain: &[Bit]| -> Vec<Bit> {
-                let sign = *chain.last().expect("cadena vacía");
-                (0..wide_bits as usize).map(|i| chain.get(i).copied().unwrap_or(sign)).collect()
-            };
             for (from, to) in accumulator.iter().zip(&unit_accumulator[cluster]) {
                 b.and_to(*from, enabled, *to);
             }
@@ -1387,7 +1470,9 @@ impl Gen {
             let from_accumulator: Vec<Bit> = std::iter::repeat_n(Bit::Zero, fraction).chain(stored_sum.iter().copied()).collect();
             let wide_data = b.wire("wide_data", wide_bits);
             let from_outside = b.wire("wide_outside", wide_bits);
-            b.inst("wide_data_select", &wide_mux, &[("s", vec![wide_from_chain]), ("a", from_accumulator), ("b", widen(&chain_out)), ("y", from_outside.clone())]);
+            // Chains drain through the network that adds the units, which keeps a unit's own
+            // total when no level of it is on.
+            b.inst("wide_data_select", &wide_mux, &[("s", vec![wide_from_chain]), ("a", from_accumulator), ("b", reduced[cluster][0].clone()), ("y", from_outside.clone())]);
             let combines = c.features.combines();
             let lane_sums: Vec<Vec<Bit>> = (0..lanes).map(|lane| b.wire(&format!("wide_sum{lane}"), wide_bits)).collect();
             if combines {
@@ -1417,7 +1502,7 @@ impl Gen {
                     let data = if lane == 0 {
                         wide_data.clone()
                     } else {
-                        let block = l.mux_bus(wide_from_chain, sum, &widen(&unit_chains[cluster][lane]));
+                        let block = l.mux_bus(wide_from_chain, sum, &reduced[cluster][lane]);
                         l.mux_bus(together, &wide_data, &block)
                     };
                     let name = if lanes == 1 { "wide_memory".to_string() } else { format!("wide_memory{lane}") };
@@ -1435,7 +1520,7 @@ impl Gen {
                     l.b.or_to(*from, Bit::Zero, *to);
                 }
             }
-            let wide_fresh = fields["wide_fresh"][0];
+            let wide_fresh = (fields["wide_fresh"][0], fields["wide_chain"][0]);
             let across_units = (clusters > 1).then_some(fields["wide_reduce"][0]);
             if combines {
                 let sum = self.wide_sum(&mut b, ("wide_sum_adder", &wide_adder, &wide_register, &wide_mux), &wide_stored, &product, wide_fresh, (wide_bits, fraction), across_units.map(|on| (on, reduced[cluster][0].as_slice())));
@@ -1475,7 +1560,7 @@ impl Gen {
             }
             let seen_wide: Vec<Bit> = if clusters > 1 { group_wide_magnitude[cluster].clone() } else { wide_magnitude.clone() };
             let wide_leading = leading_zeros(&mut b, "wide_lzc", &seen_wide, a);
-            let wide_shift = held_shift(&mut b, "wide_shift", load_wide_shift, &write_data[..SHIFT_REG_BITS as usize]);
+            let wide_shift = held_shift(&mut b, "wide_shift", load_wide_shift, &from_a);
             let wide_shifted = self.rounded_right(&mut b, "wide_right", &wide_read, &wide_shift, a as usize);
 
             b.group("Desplazamiento a la izquierda");
@@ -1661,8 +1746,15 @@ impl Gen {
                     }
                 }
             }
+            // While the chains drain, the network adds what they give out instead, so every
+            // unit stores the total over all of them in the same cycle.
+            let draining = fields["wide_from_chain"][0];
             for lane in 0..lanes {
-                let mut values: Vec<Vec<Bit>> = unit_wide.iter().map(|unit| unit[lane].clone()).collect();
+                let mut values: Vec<Vec<Bit>> = unit_wide.iter().zip(&unit_chains).map(|(unit, chains)| {
+                    let sign = *chains[lane].last().expect("cadena vacía");
+                    let chain: Vec<Bit> = (0..wide_bits as usize).map(|i| chains[lane].get(i).copied().unwrap_or(sign)).collect();
+                    l.mux_bus(draining, &unit[lane], &chain)
+                }).collect();
                 for (level, active) in on.iter().enumerate() {
                     values = (0..clusters).map(|k| {
                         let sum = l.adder(&values[k], &values[k ^ (1 << level)], Bit::Zero).0;
@@ -1996,6 +2088,9 @@ pub struct DieProgram {
     /// Blocks of totals loaded into the result chains and not yet moved to the wide memory:
     /// the next pass of the cells moves them while it computes.
     drain_pending: u32,
+    /// The last two-cycle step and the cycle it computes in, which the next step's read
+    /// may share when it does not depend on it.
+    last_short: Option<(usize, Alu)>,
 }
 
 /// One index register the CPU sets before starting the die.
@@ -2074,6 +2169,11 @@ fn visit_indices(steps: &[Step], f: &mut impl FnMut(Expr)) {
                 f(alu.window);
             }
             Step::Repeat { body, .. } => visit_indices(body, f),
+            Step::CombineRows { weights, start, window, .. } => {
+                f(weights.1);
+                f(*start);
+                f(*window);
+            }
             Step::Combine { weights, start, width, window, .. } => {
                 f(*width);
                 f(weights.1);
@@ -2107,7 +2207,7 @@ impl DieProgram {
     pub fn new(config: DieConfig) -> Self {
         // The microcode read port takes one cycle to deliver the first word.
         let cycles = vec![ControlWord::default()];
-        Self { config, cycles, labels: BTreeSet::from([0]), entries: vec![0], parameters: Vec::new(), scoped: HashMap::new(), active: Vec::new(), in_use: BTreeSet::new(), cells_settle: 0, drain_pending: 0 }
+        Self { config, cycles, labels: BTreeSet::from([0]), entries: vec![0], parameters: Vec::new(), scoped: HashMap::new(), active: Vec::new(), in_use: BTreeSet::new(), cells_settle: 0, drain_pending: 0, last_short: None }
     }
 
     fn slot(&mut self, at: usize) -> &mut ControlWord {
@@ -2242,6 +2342,7 @@ impl DieProgram {
         w.branch = true;
         w.x_limit = limit;
         w.target = start as u32;
+        self.last_short = None;
         if fed_inside {
             self.cells_settle = self.end() + self.feed_latency();
         }
@@ -2277,6 +2378,7 @@ impl DieProgram {
                 Step::Repeat { variable, count, body } => self.compile_loop(*variable, *count, body),
                 Step::Stream { variable, count, in_elements, body } => self.stream(*variable, *count, *in_elements, body),
                 Step::Combine { .. } => self.combine(step),
+                Step::CombineRows { .. } => self.combine_rows(step),
                 Step::Clustered { vars, assignments, body } => self.clustered(vars, assignments, body),
                 Step::CellSeek { weights, factors } => self.cell_seek(*weights, *factors),
                 Step::CellPass => self.cell_pass(),
@@ -2311,6 +2413,9 @@ impl DieProgram {
         let offset_dst = self.moving_offset(step.dst.1.without(variable), &mut temporaries);
         let window_x = if step.window_a || step.window_b || step.window_dst { self.resolve(step.window).1 } else { 0 };
         let (fixed_a, fixed_b) = (!moves(step.a.1), !moves(step.b.1));
+        // A broadcast operand that moves one element for each block of the others.
+        let lane_bits = self.config.features.lane_bits;
+        let a_shift = if step.vector && lane_bits > 0 && step.a.1.coefficient(variable) == 1 { lane_bits } else { 0 };
         let extra = usize::from(step.op == OP_FUNCTION);
         let written = 2 + extra;
         let by_blocks = count.is_constant() && !in_elements;
@@ -2320,7 +2425,7 @@ impl DieProgram {
             let mut w = ControlWord { vector: step.vector, window_x, from_cluster: step.from_cluster, gather_shift: step.gather_shift, ..Default::default() };
             if k < n {
                 w.read_step = true;
-                (w.reg_a, w.literal_a, w.offset_a, w.window_a, w.fixed_a) = (step.a.0, literal_a, offset_a, step.window_a, fixed_a);
+                (w.reg_a, w.literal_a, w.offset_a, w.window_a, w.fixed_a, w.a_shift) = (step.a.0, literal_a, offset_a, step.window_a, fixed_a, a_shift);
                 (w.reg_b, w.literal_b, w.offset_b, w.window_b, w.fixed_b) = (step.b.0, literal_b, offset_b, step.window_b, fixed_b);
             }
             if (1..n + 1 + extra).contains(&k) {
@@ -2384,6 +2489,37 @@ impl DieProgram {
         for k in until.max(from.min(n + written))..n + written {
             let at = self.end();
             *self.slot(at) = word(k);
+        }
+    }
+
+    /// Rows of one block, each times its own weight, added up into the first block of the
+    /// wide memory: one row a cycle, the sum carried in the adders' register.
+    fn combine_rows(&mut self, step: &Step) {
+        let Step::CombineRows { weights, matrix, start, rows, window, window_a, window_b } = *step else {
+            unreachable!("solo se llama con una combinación de filas");
+        };
+        let mut temporaries = Vec::new();
+        let offset_a = self.moving_offset(weights.1, &mut temporaries);
+        let offset_b = self.moving_offset(start, &mut temporaries);
+        let window_x = if window_a || window_b { self.resolve(window).1 } else { 0 };
+        let lane_bits = self.config.features.lane_bits;
+        let n = rows as usize;
+        let word = |k: usize| {
+            let mut w = ControlWord { vector: true, window_x, wide_accumulate: true, ..Default::default() };
+            if k < n {
+                w.read_step = true;
+                (w.reg_a, w.offset_a, w.window_a, w.a_shift) = (weights.0, offset_a, window_a, lane_bits);
+                (w.reg_b, w.offset_b, w.window_b) = (matrix, offset_b, window_b);
+            }
+            if (1..n + 1).contains(&k) {
+                (w.broadcast_a, w.wide_fresh, w.wide_chain) = (true, k == 1, k > 1);
+            }
+            w.wide_write = k == n + 1;
+            w
+        };
+        self.emit_stream(n, 2, true, word);
+        for temporary in temporaries {
+            self.release(temporary);
         }
     }
 
@@ -2541,10 +2677,12 @@ impl DieProgram {
     /// Moves one pending block of totals from the chains into the wide memory at `t`.
     fn drain_into(&mut self, t: usize) {
         if self.drain_pending > 0 {
-            let vector = self.config.features.lane_bits > 0;
+            let (vector, units) = (self.config.features.lane_bits > 0, self.config.features.cluster_bits);
             let w = self.slot(t);
             (w.wide_write, w.wide_from_chain, w.chain_shift) = (true, true, true);
             w.vector |= vector && !w.read_step;
+            // Every unit holds part of the same rows: the drain adds them up on the way.
+            w.reduce_group = units;
             self.drain_pending -= 1;
         }
     }
@@ -2703,10 +2841,19 @@ impl DieProgram {
         w.load_wide_shift = step.load_wide_shift;
     }
 
-    /// A step that needs nothing after its result: read, then compute and write.
+    /// A step that needs nothing after its result: read, then compute and write. Its read
+    /// shares the previous step's compute cycle when nothing ties the two together.
     fn short_alu(&mut self, step: &Alu) {
-        let t0 = self.end();
-        {
+        let lanes = 1u32 << self.config.features.lane_bits;
+        let t0 = match self.last_short {
+            // A word that steps or jumps on the indices keeps its own literal B.
+            Some((at, previous)) if at + 1 == self.end() && !self.labels.contains(&self.end()) && !self.cycles[at].x_write && can_follow(&previous, step, lanes) => at,
+            _ => self.end(),
+        };
+        self.last_short = Some((t0 + 1, *step));
+        // Sharing a cycle, a step that reads nothing leaves that cycle's fields as they are.
+        let shared = t0 < self.end();
+        if !shared || !reads_nothing(step) {
             let w = self.slot(t0);
             w.use_literal = true;
             (w.reg_a, w.literal_a, w.offset_a) = (step.a.0, step.a.1, step.offset_a);
@@ -2731,6 +2878,7 @@ impl DieProgram {
         (w.accumulate, w.wide_scan) = (step.accumulate, step.wide_scan);
         (w.reg_dst, w.literal_dst, w.offset_dst, w.write_now) = (step.dst.0, step.dst.1, step.offset_dst, step.write);
         (w.load_shift_a, w.load_shift_b, w.load_shift_left, w.shift_now) = (step.load_shift_a, step.load_shift_b, step.load_shift_left, step.shift_now);
+        w.load_wide_shift = step.load_wide_shift;
     }
 
     /// Leaves the die idle for `cycles`, for example while a link settles.

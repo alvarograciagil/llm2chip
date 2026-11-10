@@ -400,7 +400,7 @@ fn the_cells_reach_the_same_bits_as_the_exact_machine() {
     let base = die_config();
     let serial = gates_after(&program, &dir, base, &tokens).cycles;
     let mut cycles = Vec::new();
-    for (cells, lane_bits, cluster_bits) in [(1u32, 0u32, 0u32), (2, 0, 0), (8, 0, 0), (8, 2, 0), (4, 0, 1), (8, 1, 2)] {
+    for (cells, lane_bits, cluster_bits) in [(1u32, 0u32, 0u32), (2, 0, 0), (8, 0, 0), (8, 2, 0), (4, 0, 1), (8, 1, 2), (16, 2, 2), (16, 3, 1)] {
         let c = DieConfig { cells, features: cell_die_config().features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits), ..cell_die_config() };
         let mut run = gates_in_cells(&program, &dir, c, &tokens);
         for (buffer, length) in program.buffers.iter().enumerate() {
@@ -413,7 +413,7 @@ fn the_cells_reach_the_same_bits_as_the_exact_machine() {
         }
         cycles.push(run.cycles);
     }
-    eprintln!("ciclos: {serial} en serie; con 1, 2 y 8 celdas, y con 8 y 4 carriles {cycles:?}");
+    eprintln!("ciclos: {serial} en serie; con 1, 2 y 8 celdas, y con 8 y 4 carriles, y con carriles y unidades {cycles:?}");
     assert!(cycles[2] < cycles[1] && cycles[1] < cycles[0], "{cycles:?}");
     std::fs::remove_dir_all(dir).unwrap();
 }
