@@ -87,6 +87,23 @@ pub fn cycles(program: &Program, weights: &Weights, die: DieConfig, context: u32
     Ok(code.cycles(&die, ENTRY_TOKEN, 1, context - 1) + code.cycles(&die, ENTRY_LOGITS, 1, context - 1))
 }
 
+/// Cycles from the first token of a prompt of `prompt` tokens to the logits of the last:
+/// each token at its own position, which only the attention's loops depend on. Positions
+/// are taken every `stride` and the ones between them counted along the line joining them.
+pub fn prompt_cycles(program: &Program, weights: &Weights, die: DieConfig, context: u32, prompt: u32, stride: u32) -> Result<u64, String> {
+    let layout = Layout::for_image(program, weights, die, context as usize)?;
+    let code = layout.microprogram(program)?;
+    let at = |position: u32| code.cycles(&die, ENTRY_TOKEN, 1, position) as f64;
+    let (mut total, mut from) = (0.0, 0);
+    while from < prompt {
+        let to = (from + stride.max(1)).min(prompt);
+        let (first, last) = (at(from), at(to - 1));
+        total += (first + last) / 2.0 * (to - from) as f64;
+        from = to;
+    }
+    Ok(total.round() as u64 + code.cycles(&die, ENTRY_LOGITS, 1, prompt - 1))
+}
+
 /// The die a candidate stands for.
 pub fn die_of(base: DieConfig, context: u32, (cluster_bits, lane_bits, cell_bits): (u32, u32, u32)) -> DieConfig {
     DieConfig { cells: 1 << cell_bits, features: base.features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits).with_key_shift(context.next_power_of_two().trailing_zeros()), ..base }

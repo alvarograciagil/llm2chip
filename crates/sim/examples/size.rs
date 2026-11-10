@@ -27,6 +27,14 @@ fn main() {
     if found.is_empty() {
         println!("ningún die del rango alcanza {wanted} tok/s");
     }
+    // The time to the first token of the chosen die, for prompts of several lengths.
+    if let Some(best) = found.first() {
+        let die = sim::sizing::die_of(base, context, (best.cluster_bits, best.lane_bits, best.cell_bits));
+        for prompt in [128, 1024, context] {
+            let cycles = sim::sizing::prompt_cycles(&program, &weights, die, context, prompt, 64).unwrap();
+            println!("primer token tras {prompt} tokens de prompt: {cycles} ciclos, {:.1} ms", cycles as f64 / (ghz * 1e6));
+        }
+    }
     for c in found.iter().take(10) {
         println!("{:>5} unidades x {:>3} carriles, {:>9} celdas: {:>8} ciclos, {:>6.0} tok/s, {:>8.1} M puertas", 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.cycles, c.tokens_per_second, c.gates / 1e6);
     }
