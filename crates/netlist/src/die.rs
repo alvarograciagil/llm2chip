@@ -539,13 +539,15 @@ fn writes_at_once(s: &Alu) -> bool {
 /// `previous` writes, clears nothing `previous` updates, and the fields both cycles use
 /// agree. Addresses only matter when they are presented, so those may differ.
 fn can_follow(previous: &Alu, next: &Alu, lanes: u32) -> bool {
-    let clears = next.magnitude_clear || next.max_clear || next.accumulator_clear || next.wide_clear;
+    // A clear in the read cycle loses only what `previous` would gather in that cycle.
+    let clears = (next.magnitude_clear && previous.magnitude_scan)
+        || (next.max_clear && previous.max_scan)
+        || (next.accumulator_clear && previous.accumulate)
+        || (next.wide_clear && previous.wide_scan);
     let windowed = |s: &Alu| s.window_a || s.window_b || s.window_dst;
-    let agree = previous.vector == next.vector
-        && previous.broadcast_a == next.broadcast_a
-        && previous.broadcast_b == next.broadcast_b
-        && previous.from_cluster == next.from_cluster
-        && (!windowed(previous) && !windowed(next) || previous.window_x == next.window_x)
+    // Lanes, broadcasts and the unit to read from act when the data arrives, so the
+    // shared word keeps those of `previous`.
+    let agree = (!windowed(previous) && !windowed(next) || previous.window_x == next.window_x)
         // Only an immediate carries a literal, and it carries it in the jump target.
         && (previous.literal.is_none() || previous.op == OP_IMMEDIATE);
     let span = |vector: bool| if vector { lanes } else { 1 };
@@ -560,8 +562,8 @@ fn can_follow(previous: &Alu, next: &Alu, lanes: u32) -> bool {
         let (a, b) = (span(vector), span(previous.vector));
         at < from + b && from < at + a
     };
-    // Scalar reads of what the step before writes come forwarded from its result.
-    let forwarded = !previous.vector && !next.vector && next.from_cluster == 0 && !next.broadcast_a && !next.broadcast_b;
+    // Reads of a unit's own registers take what the step before is writing from the banks.
+    let forwarded = next.from_cluster == 0;
     let depends = previous.write && !forwarded && (touches(next.a, next.offset_a, next.window_a, next.vector) || touches(next.b, next.offset_b, next.window_b, next.vector));
     !clears && (agree || reads_nothing(next)) && !depends
 }
@@ -992,8 +994,12 @@ impl Gen {
                 owner = l.mux_bus(*select, &owner, &moved);
             }
             let unit_bits = c.features.cluster_bits as usize;
+            // The unit named with a read gives the data that arrives a cycle later, so the
+            // cycle a step computes in can already carry the next step's read.
             let picked: Vec<Bit> = (0..clusters as u32).map(|k| {
-                let named = l.equals(&fields["from_cluster"], k + 1);
+                let now = l.equals(&fields["from_cluster"], k + 1);
+                let named = l.fresh();
+                l.connect_flops(&[now], &[named]);
                 let owns = l.equals(&owner[..unit_bits.min(owner.len())], k);
                 let owns = l.and(owns, gathering);
                 l.or(named, owns)
@@ -1265,6 +1271,15 @@ impl Gen {
                 let bank_bits = addr_bits - lane_bits as u32;
                 let mut l = Logic { b: &mut b, next: 40_000 };
                 let written_together = l.and(any_write, vector_flag);
+                // A read in the cycle of a write to the same place gets the old value from the
+                // memory; each bank keeps what it wrote a cycle and gives that instead, so a
+                // step can read what the one before it is writing, a block or one element.
+                let same_place = |l: &mut Logic, addr: &[Bit]| -> Bit {
+                    let differ: Vec<Bit> = addr[lane_bits..].iter().zip(&waddr[lane_bits..]).map(|(x, y)| l.xor(*x, *y)).collect();
+                    let any = l.any(&differ);
+                    l.not(any)
+                };
+                let (same_a, same_b) = (same_place(&mut l, &raddr_a), same_place(&mut l, &addr_b));
                 for (lane, (late, direct)) in lane_results.iter().zip(&lane_direct).enumerate() {
                     let here = l.equals(&waddr[..lane_bits], lane as u32);
                     let alone = l.and(we, here);
@@ -1279,9 +1294,18 @@ impl Gen {
                     let (name_a, name_b) = if lanes == 1 { ("vectors_a".to_string(), "vectors_b".to_string()) } else { (format!("vectors_a{lane}"), format!("vectors_b{lane}")) };
                     let (read_this_a, read_this_b) = (l.b.wire(&format!("{name_a}_data"), a), l.b.wire(&format!("{name_b}_data"), a));
                     l.b.ram2p(&name_a, bank_bits, a, &[("raddr", raddr_a[lane_bits..].to_vec()), ("waddr", waddr[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data.clone()), ("rdata", read_this_a.clone())]);
-                    l.b.ram2p(&name_b, bank_bits, a, &[("raddr", addr_b[lane_bits..].to_vec()), ("waddr", waddr[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data), ("rdata", read_this_b.clone())]);
-                    banks_a.push(read_this_a);
-                    banks_b.push(read_this_b);
+                    l.b.ram2p(&name_b, bank_bits, a, &[("raddr", addr_b[lane_bits..].to_vec()), ("waddr", waddr[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data.clone()), ("rdata", read_this_b.clone())]);
+                    let written = l.fresh_bus(a as usize);
+                    l.connect_flops(&data, &written);
+                    let take = |l: &mut Logic, same: Bit, memory: Vec<Bit>| -> Vec<Bit> {
+                        let now = l.and(write, same);
+                        let late = l.fresh();
+                        l.connect_flops(&[now], &[late]);
+                        l.mux_bus(late, &memory, &written)
+                    };
+                    let (own_a, own_b) = (take(&mut l, same_a, read_this_a), take(&mut l, same_b, read_this_b));
+                    banks_a.push(own_a);
+                    banks_b.push(own_b);
                 }
             }
             // Reading a register of another unit takes its lanes instead of this unit's.
@@ -1302,24 +1326,6 @@ impl Gen {
                 l.connect_flops(&raddr_a[..lane_bits], &bank_a);
                 l.connect_flops(&addr_b[..lane_bits], &bank_b);
                 let (chosen_a, chosen_b) = (l.select(&bank_a, &banks_a), l.select(&bank_b, &banks_b));
-                // A read in the cycle of a write to the same place gets the old value from
-                // the memory; the value written is kept a cycle and taken instead, so a step
-                // can read what the one before it is writing.
-                let last_written = l.fresh_bus(a as usize);
-                l.connect_flops(&wdata, &last_written);
-                let forward = |l: &mut Logic, addr: &[Bit]| -> Bit {
-                    let same: Vec<Bit> = addr.iter().zip(&waddr).map(|(x, y)| l.xor(*x, *y)).collect();
-                    let differs = l.any(&same);
-                    let equal = l.not(differs);
-                    let now = l.and(equal, we);
-                    let late = l.fresh();
-                    l.connect_flops(&[now], &[late]);
-                    let mine = l.not(foreign);
-                    l.and(late, mine)
-                };
-                let (forward_a, forward_b) = (forward(&mut l, &raddr_a), forward(&mut l, &addr_b));
-                let chosen_a = l.mux_bus(forward_a, &chosen_a, &last_written);
-                let chosen_b = l.mux_bus(forward_b, &chosen_b, &last_written);
                 for (from, to) in chosen_a.iter().zip(&read_a).chain(chosen_b.iter().zip(&read_b)) {
                     l.b.or_to(*from, Bit::Zero, *to);
                 }
@@ -2993,12 +2999,14 @@ impl DieProgram {
             (w.reg_a, w.literal_a, w.offset_a) = (step.a.0, step.a.1, step.offset_a);
             (w.reg_b, w.literal_b, w.offset_b) = (step.b.0, step.b.1, step.offset_b);
             (w.window_x, w.window_a, w.window_b) = (step.window_x, step.window_a, step.window_b);
-            (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
+            if !shared {
+                (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
+            }
             w.from_cluster = step.from_cluster;
-            w.magnitude_clear = step.magnitude_clear;
-            w.max_clear = step.max_clear;
-            w.accumulator_clear = step.accumulator_clear;
-            w.wide_clear = step.wide_clear;
+            w.magnitude_clear |= step.magnitude_clear;
+            w.max_clear |= step.max_clear;
+            w.accumulator_clear |= step.accumulator_clear;
+            w.wide_clear |= step.wide_clear;
         }
         let w = self.slot(t0 + 1);
         w.use_literal = true;

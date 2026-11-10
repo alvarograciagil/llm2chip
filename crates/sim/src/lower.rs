@@ -1132,8 +1132,16 @@ impl Layout {
                             let qh = t[20];
                             ops.copy_part(query, h * d, qh, zero, d.into());
                             ops.normalize(qh, d.into());
+                            // A scale of 1/√d that is a power of two only moves the query's
+                            // exponent, which costs nothing next to scaling every score.
+                            let scale = if scale_dim.is_power_of_two() && scale_dim.trailing_zeros() % 2 == 0 {
+                                ops.subtract_exponent(qh, scale_dim.trailing_zeros() as i64 / 2);
+                                None
+                            } else {
+                                Some(self.inverse_root[scale_dim])
+                            };
                             let store = KeyStore { keys, values, stride: width, offset: kv_head * d };
-                            ops.attention(qh, store, self.ones, first + offset, d, tokens, Some(self.inverse_root[scale_dim]), regs);
+                            ops.attention(qh, store, self.ones, first + offset, d, tokens, scale, regs);
                             ops.align_heads(first + offset, d);
                         });
                     }
