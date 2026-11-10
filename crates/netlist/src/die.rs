@@ -220,10 +220,14 @@ pub struct ControlWord {
     pub write_spread: bool,
     /// The units add their wide memories in groups of `1 << reduce_group` neighbours.
     pub reduce_group: u32,
+    /// The result is written in the same cycle it is computed, not one later.
+    pub write_now: bool,
+    /// Each unit also adds its own number times `literal_a` to an index it writes.
+    pub x_scaled: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 67;
+pub const FIELD_COUNT: usize = 69;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
@@ -323,6 +327,8 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("max_out", 1),
         ("write_spread", 1),
         ("reduce_group", bits_for(c.features.cluster_bits + 1)),
+        ("write_now", 1),
+        ("x_scaled", 1),
     ]
 }
 
@@ -401,6 +407,8 @@ impl ControlWord {
             self.max_out as u128,
             self.write_spread as u128,
             self.reduce_group as u128,
+            self.write_now as u128,
+            self.x_scaled as u128,
         ]
     }
 
@@ -449,6 +457,13 @@ fn and_not(b: &mut Builder, enable: Bit, value: Bit, name: &str) -> Bit {
 /// The bits a count up to `value` needs.
 fn bits_for(value: u32) -> u32 {
     (u32::BITS - value.leading_zeros()).max(1)
+}
+
+/// Steps whose result can be written as it is computed: nothing reads it through the
+/// result register afterwards, and no other unit has to see it on the way.
+fn writes_at_once(s: &Alu) -> bool {
+    let later = s.load_shift_a || s.load_shift_b || s.load_shift_left || s.load_wide_shift || s.link_send || s.wide_write;
+    !s.vector && !later && !matches!(s.op, OP_FUNCTION | OP_LINK | OP_CELLS) && !s.broadcast_a && !s.broadcast_b
 }
 
 /// Whether `bits` holds at least `value`.
@@ -865,7 +880,22 @@ impl Gen {
                 }
                 let sum = l.fresh_bus(width);
                 let carry = l.fresh();
-                l.b.inst("x_step", &x_adder, &[("a", source), ("b", fields["literal_b"].clone()), ("cin", vec![Bit::Zero]), ("sum", sum.clone()), ("cout", vec![carry])]);
+                // Unit `k` adds `k · literal_a` as well, so one word gives every unit its own index.
+                let step: Vec<Bit> = if cluster == 0 {
+                    fields["literal_b"].clone()
+                } else {
+                    let scaled = l.and(fields["x_scaled"][0], Bit::One);
+                    let stride: Vec<Bit> = fields["literal_a"].iter().take(width).map(|bit| l.and(*bit, scaled)).collect();
+                    let mut total: Vec<Bit> = fields["literal_b"].clone();
+                    for shift in 0..u32::BITS as usize - (cluster as u32).leading_zeros() as usize {
+                        if cluster >> shift & 1 == 1 {
+                            let moved: Vec<Bit> = (0..width).map(|i| if i < shift { Bit::Zero } else { stride.get(i - shift).copied().unwrap_or(Bit::Zero) }).collect();
+                            total = l.adder(&total, &moved, Bit::Zero).0;
+                        }
+                    }
+                    total
+                };
+                l.b.inst("x_step", &x_adder, &[("a", source), ("b", step), ("cin", vec![Bit::Zero]), ("sum", sum.clone()), ("cout", vec![carry])]);
 
                 let target_register = l.mux_bus(param_write, &fields["x_dst"], &param_index);
                 let data = l.mux_bus(param_write, &sum, &param_data);
@@ -957,8 +987,14 @@ impl Gen {
             let waddr = b.wire("waddr", addr_bits);
             b.inst("waddr_select", &mux_addr, &[("s", vec![load_vec]), ("a", addr_w), ("b", vec_addr.clone()), ("y", waddr.clone())]);
             let wdata = b.wire("wdata", a);
-            b.inst("wdata_select", &mux_a, &[("s", vec![load_vec]), ("a", write_data.clone()), ("b", vec_data.clone()), ("y", wdata.clone())]);
-            let we = bus_or(&mut b, write_en, load_vec, "vec_we");
+            // A simple step writes its result as soon as it has it.
+            let direct_result = b.wire("direct_result", a);
+            let write_now = ctl("write_now", &mut b, &fields);
+            let finished = b.wire("finished_result", a);
+            b.inst("finished_select", &mux_a, &[("s", vec![write_now]), ("a", write_data.clone()), ("b", direct_result.clone()), ("y", finished.clone())]);
+            b.inst("wdata_select", &mux_a, &[("s", vec![load_vec]), ("a", finished), ("b", vec_data.clone()), ("y", wdata.clone())]);
+            let any_write = bus_or(&mut b, write_en, write_now, "any_write");
+            let we = bus_or(&mut b, any_write, load_vec, "vec_we");
             let raddr_a = b.wire("raddr_a", addr_bits);
             let host_reading = bus_or(&mut b, start, halt_flag, "host_reads");
             b.inst("raddr_select", &mux_addr, &[("s", vec![host_reading]), ("a", addr_a), ("b", vec_addr.clone()), ("y", raddr_a.clone())]);
@@ -1374,6 +1410,9 @@ impl Gen {
             } else {
                 result
             };
+            for (from, to) in result.iter().zip(&direct_result) {
+                b.or_to(*from, Bit::Zero, *to);
+            }
             // While the link holds the sequencer back, the result in flight must stay put.
             let result_held = b.wire("result_held", a);
             b.inst("result_hold", &mux_a, &[("s", vec![link_stall]), ("a", result), ("b", write_data.clone()), ("y", result_held.clone())]);
@@ -2241,11 +2280,21 @@ impl DieProgram {
         for ExprKey(key) in keys {
             let register = self.allocate();
             let source = self.resolve(key.restricted(|v| !vars.contains(&v))).1;
-            for (unit, values) in assignments.iter().enumerate() {
-                let literal = vars.iter().zip(values).map(|(v, value)| key.coefficient(*v) * value).sum();
-                self.set_index(register, source, literal);
+            let mask = (1u64 << self.config.index_bits) - 1;
+            let literals: Vec<u32> = assignments.iter().map(|values| vars.iter().zip(values).map(|(v, value)| key.coefficient(*v).wrapping_mul(*value)).fold(0u32, u32::wrapping_add)).collect();
+            let step = literals.get(1).map_or(0, |second| second.wrapping_sub(literals[0])) as u64 & mask;
+            let even = literals.iter().enumerate().all(|(unit, literal)| (*literal as u64 & mask) == (literals[0] as u64).wrapping_add(unit as u64 * step) & mask);
+            if even {
+                // Evenly spaced across the units: a single word writes them all.
+                self.set_index(register, source, literals[0]);
                 let last = self.end() - 1;
-                self.cycles[last].x_only = unit as u32 + 1;
+                (self.cycles[last].x_scaled, self.cycles[last].literal_a) = (true, step as u32);
+            } else {
+                for (unit, literal) in literals.iter().enumerate() {
+                    self.set_index(register, source, *literal);
+                    let last = self.end() - 1;
+                    self.cycles[last].x_only = unit as u32 + 1;
+                }
             }
             self.scoped.insert(key, register);
             registers.push((key, register));
@@ -2330,6 +2379,9 @@ impl DieProgram {
 
     /// One single-element operation. Nothing overlaps, so each takes a few cycles.
     pub fn alu(&mut self, step: &Alu) {
+        if self.config.features.streams() && writes_at_once(step) {
+            return self.short_alu(step);
+        }
         let t0 = self.end();
         let extra = usize::from(step.op == OP_FUNCTION);
         {
@@ -2401,6 +2453,33 @@ impl DieProgram {
         w.load_shift_left = step.load_shift_left;
         w.link_send = step.link_send;
         w.load_wide_shift = step.load_wide_shift;
+    }
+
+    /// A step that needs nothing after its result: read, then compute and write.
+    fn short_alu(&mut self, step: &Alu) {
+        let t0 = self.end();
+        {
+            let w = self.slot(t0);
+            w.use_literal = true;
+            (w.reg_a, w.literal_a, w.offset_a) = (step.a.0, step.a.1, step.offset_a);
+            (w.reg_b, w.literal_b, w.offset_b) = (step.b.0, step.b.1, step.offset_b);
+            (w.window_x, w.window_a, w.window_b) = (step.window_x, step.window_a, step.window_b);
+            w.from_cluster = step.from_cluster;
+            w.magnitude_clear = step.magnitude_clear;
+            w.max_clear = step.max_clear;
+            w.accumulator_clear = step.accumulator_clear;
+            w.wide_clear = step.wide_clear;
+        }
+        let w = self.slot(t0 + 1);
+        w.use_literal = true;
+        (w.reg_a, w.literal_a, w.offset_a) = (step.a.0, step.a.1, step.offset_a);
+        (w.reg_b, w.literal_b, w.offset_b) = (step.b.0, step.literal.unwrap_or(step.b.1), step.offset_b);
+        (w.window_x, w.window_a, w.window_b, w.window_dst) = (step.window_x, step.window_a, step.window_b, step.window_dst);
+        w.from_cluster = step.from_cluster;
+        (w.op, w.shift, w.function) = (step.op, step.shift, step.function);
+        (w.magnitude_scan, w.reduce_group, w.max_scan, w.max_out) = (step.magnitude_scan, step.reduce_group, step.max_scan, step.max_out);
+        (w.accumulate, w.wide_scan) = (step.accumulate, step.wide_scan);
+        (w.reg_dst, w.literal_dst, w.offset_dst, w.write_now) = (step.dst.0, step.dst.1, step.offset_dst, step.write);
     }
 
     /// Leaves the die idle for `cycles`, for example while a link settles.
