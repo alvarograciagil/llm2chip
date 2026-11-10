@@ -29,6 +29,8 @@ pub struct Candidate {
     pub prompt_seconds: f64,
     /// Logic of all the chips in NAND2 equivalents, memories left out.
     pub gates: f64,
+    /// Silicon of all the chips: the logic and the cells' memories.
+    pub area_mm2: f64,
 }
 
 /// Gate equivalents of the parts that change from one die to another.
@@ -117,8 +119,7 @@ pub struct Target {
     pub chips: Vec<u32>,
     /// The highest clock wanted; each die runs at the lower of this and its own fastest.
     pub clock_hz: f64,
-    /// A full adder's delay in the process, which sets each die's fastest clock.
-    pub full_adder_ns: f64,
+    pub process: Process,
     pub context: u32,
     pub lane_bits: std::ops::RangeInclusive<u32>,
     pub cluster_bits: std::ops::RangeInclusive<u32>,
@@ -127,14 +128,47 @@ pub struct Target {
 
 /// Each chip's microprogram when the model's layers are shared among `chips` of them.
 pub fn chip_programs(program: &Program, weights: &Weights, die: DieConfig, context: u32, chips: u32) -> Result<Vec<Microprogram>, String> {
+    Ok(built(program, weights, die, context, chips)?.0)
+}
+
+/// Each chip's microprogram, and the memory bits each cell needs on the chip that needs
+/// most: every chip is the same silicon.
+pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32, chips: u32) -> Result<(Vec<Microprogram>, u64), String> {
     let plan = program.split(chips as usize)?;
-    (0..plan.len())
+    let mut cell_bits = 0;
+    let codes = (0..plan.len())
         .map(|chip| {
             let mut layout = Layout::for_image(program, weights, die, context as usize)?;
             layout.keep_weights_of(program, &plan, chip);
+            let (depth, groups) = layout.cell_depths();
+            let (code_bits, _) = layout.cell_shape(weights)?;
+            cell_bits = cell_bits.max(depth * code_bits as u64 + groups * 2 * die.scale_bits as u64);
             layout.die_microprogram(program, &plan, chip)
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((codes, cell_bits))
+}
+
+/// Silicon of a process, for the area of what is generated.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct Process {
+    /// A full adder's delay, which sets each die's fastest clock.
+    pub full_adder_ns: f64,
+    /// Square micrometres of a NAND2 equivalent of logic, wiring included.
+    pub gate_um2: f64,
+    /// A memory bit, and how much periphery a memory block of a kilobit adds.
+    pub sram_cell_um2: f64,
+    pub sram_periphery_k: f64,
+}
+
+impl Process {
+    /// Square millimetres of `cells` memories of `bits` each: a small one wastes more on
+    /// its periphery.
+    pub fn memory_mm2(&self, cells: u64, bits: u64) -> f64 {
+        let kbit = (bits as f64 / 1e3).max(0.25);
+        let efficiency = 1.0 / (1.0 + self.sram_periphery_k / kbit.sqrt());
+        cells as f64 * bits as f64 * self.sram_cell_um2 / efficiency / 1e6
+    }
 }
 
 /// The speed and the wait of a set of chips, from their own microprograms.
@@ -168,17 +202,22 @@ pub fn die_of(base: DieConfig, context: u32, (cluster_bits, lane_bits, cell_bits
     DieConfig { cells: 1 << cell_bits, features: base.features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits).with_key_shift(context.next_power_of_two().trailing_zeros()), ..base }
 }
 
+/// One set of chips, measured: its own microprograms, its clock and its silicon.
+fn evaluate(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs, target: &Target, (chips, cluster_bits, lane_bits, cell_bits): (u32, u32, u32, u32)) -> Option<Candidate> {
+    let die = die_of(base, target.context, (cluster_bits, lane_bits, cell_bits));
+    let (codes, bits) = built(program, weights, die, target.context, chips).ok()?;
+    let timing = timing(&codes, die, target.context, target.prompt, 256);
+    let clock = target.clock_hz.min(costs.clock_hz(cluster_bits, lane_bits, target.process.full_adder_ns));
+    let cycles = timing.token_cycles;
+    let gates = costs.gates(cluster_bits, lane_bits, cell_bits);
+    let area_mm2 = chips as f64 * (gates * target.process.gate_um2 / 1e6 + target.process.memory_mm2(1 << cell_bits, bits));
+    Some(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, clock_hz: clock, tokens_per_second: clock / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / clock, gates: chips as f64 * gates, area_mm2 })
+}
+
 /// For each number of chips, width of unit and number of units, the fewest cells that
-/// reach the target, least logic first. Those that cannot reach it are left out.
+/// reach the target, least silicon first. Those that cannot reach it are left out.
 pub fn search(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs, target: &Target) -> Vec<Candidate> {
-    let evaluate = |(chips, cluster_bits, lane_bits, cell_bits): (u32, u32, u32, u32)| -> Option<Candidate> {
-        let die = die_of(base, target.context, (cluster_bits, lane_bits, cell_bits));
-        let codes = chip_programs(program, weights, die, target.context, chips).ok()?;
-        let timing = timing(&codes, die, target.context, target.prompt, 256);
-        let cycles = timing.token_cycles;
-        let clock = target.clock_hz.min(costs.clock_hz(cluster_bits, lane_bits, target.full_adder_ns));
-        Some(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, clock_hz: clock, tokens_per_second: clock / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / clock, gates: chips as f64 * costs.gates(cluster_bits, lane_bits, cell_bits) })
-    };
+    let measure = |shape: (u32, u32, u32, u32)| evaluate(program, weights, base, costs, target, shape);
     let fits = |c: &Candidate| c.tokens_per_second >= target.tokens_per_second && c.prompt_seconds <= target.prompt_seconds;
     let shapes: Vec<(u32, u32, u32)> = target.chips.iter().flat_map(|&n| target.lane_bits.clone().flat_map(move |l| target.cluster_bits.clone().map(move |u| (n, u, l)))).collect();
     let mut found: Vec<Candidate> = shapes
@@ -187,10 +226,10 @@ pub fn search(program: &Program, weights: &Weights, base: DieConfig, costs: &Cos
             // Each unit needs a cell for each lane; more cells only shorten the products.
             let lowest = (*target.cell_bits.start()).max(cluster_bits + lane_bits);
             let (mut low, mut high) = (lowest, *target.cell_bits.end());
-            let mut best = evaluate((chips, cluster_bits, lane_bits, high)).filter(fits)?;
+            let mut best = measure((chips, cluster_bits, lane_bits, high)).filter(fits)?;
             while low < high {
                 let middle = (low + high) / 2;
-                match evaluate((chips, cluster_bits, lane_bits, middle)) {
+                match measure((chips, cluster_bits, lane_bits, middle)) {
                     Some(c) if fits(&c) => {
                         best = c;
                         high = middle;
@@ -201,6 +240,53 @@ pub fn search(program: &Program, weights: &Weights, base: DieConfig, costs: &Cos
             Some(best)
         })
         .collect();
-    found.sort_by(|a, b| a.gates.total_cmp(&b.gates));
+    found.sort_by(|a, b| a.area_mm2.total_cmp(&b.area_mm2));
     found
+}
+
+/// Every shape in the target's ranges, measured, keeping those no other beats on both
+/// speed and logic: from the smallest to the fastest.
+pub fn frontier(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs, target: &Target) -> Vec<Candidate> {
+    let shapes: Vec<(u32, u32, u32, u32)> = target
+        .chips
+        .iter()
+        .flat_map(|&n| target.lane_bits.clone().flat_map(move |l| target.cluster_bits.clone().flat_map(move |u| target.cell_bits.clone().filter(move |c| *c >= u + l).map(move |c| (n, u, l, c)))))
+        .collect();
+    let mut all: Vec<Candidate> = shapes
+        .par_iter()
+        .filter_map(|&(chips, cluster_bits, lane_bits, cell_bits)| {
+            evaluate(program, weights, base, costs, target, (chips, cluster_bits, lane_bits, cell_bits))
+        })
+        .collect();
+    all.sort_by(|a, b| a.area_mm2.total_cmp(&b.area_mm2));
+    let mut best = 0.0;
+    all.retain(|c| {
+        let better = c.tokens_per_second > best;
+        best = best.max(c.tokens_per_second);
+        better
+    });
+    all
+}
+
+/// The point of the frontier past which each token per second costs much more silicon than
+/// those before it: the last whose next step costs at most `ratio` times the area per
+/// token per second that the point itself has.
+pub fn balanced(frontier: &[Candidate], ratio: f64) -> Option<Candidate> {
+    let mut chosen = *frontier.first()?;
+    for pair in frontier.windows(2) {
+        let (here, next) = (pair[0], pair[1]);
+        let marginal = (next.area_mm2 - here.area_mm2) / (next.tokens_per_second - here.tokens_per_second);
+        let average = here.area_mm2 / here.tokens_per_second;
+        if marginal > ratio * average {
+            break;
+        }
+        chosen = next;
+    }
+    Some(chosen)
+}
+
+/// The point of the frontier that gives the most speed for its silicon: the least area for
+/// each token per second.
+pub fn efficient(frontier: &[Candidate]) -> Option<Candidate> {
+    frontier.iter().copied().min_by(|a, b| (a.area_mm2 / a.tokens_per_second).total_cmp(&(b.area_mm2 / b.tokens_per_second)))
 }
