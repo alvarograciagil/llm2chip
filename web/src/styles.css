@@ -1807,6 +1807,10 @@ button.logic-step:hover {
   --logic-color: var(--cat-estado);
 }
 
+.logic-step.system {
+  --logic-color: var(--cat-sistema);
+}
+
 .logic-arrow {
   width: 2px;
   height: 18px;
@@ -1992,8 +1996,8 @@ button.logic-step:hover {
   }
 }
 
-/* Seven views and the design's actions no longer fit on one line. */
-@media (min-width: 721px) and (max-width: 940px) {
+/* Eight views and the design's actions no longer fit on one line. */
+@media (max-width: 940px) {
   .toolbar {
     grid-template-columns: 1fr auto;
     height: auto;
@@ -2011,6 +2015,14 @@ button.logic-step:hover {
 @media (max-width: 640px) {
   .toolbar .segmented button {
     padding: 2px 4px;
+  }
+
+  /* The views scroll sideways rather than overflow the window. */
+  .toolbar > .segmented,
+  .toolbar > [role="radiogroup"] {
+    justify-self: stretch;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
 }
 
@@ -2404,4 +2416,16 @@ button.model-toggle {
 
 .docs-entry dd p {
   margin: 0 0 4px;
+}
+
+.sim-explain strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.sim-explain p {
+  margin: 0;
+  color: var(--label-2);
+  font-size: 12px;
+  line-height: 1.45;
 }

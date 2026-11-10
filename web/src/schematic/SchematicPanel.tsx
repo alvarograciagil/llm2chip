@@ -71,6 +71,7 @@ function DiePanel() {
   const restart = useCellSim((s) => s.restart);
   const demo = useCellSim((s) => s.demo);
   const setDemo = useCellSim((s) => s.setDemo);
+  const activity = useCellSim((s) => s.dieActivity);
   if (!die || !counts) return null;
   const within = (v: number, e: number) => Math.abs(v - e) <= results!.tolerance * Math.max(Math.abs(e), 0.05);
   const ok = results && results.exact && results.got.every((v, i) => within(v, results.expected[i]));
@@ -85,6 +86,12 @@ function DiePanel() {
         <button className="pill" disabled={done} onClick={runAll}>Ejecutar todo</button>
         <button className="pill" onClick={restart}>Reiniciar</button>
       </div>
+      {activity && demo !== "boot" && (
+        <div className="inset padded sim-explain" aria-live="polite">
+          <strong>{done ? "Programa terminado" : `Palabra ${activity.pc} del microprograma`}</strong>
+          <p>{done ? "El secuenciador se ha detenido: el resultado está en el banco de vectores." : activity.text}</p>
+        </div>
+      )}
       <dl className="inset metrics">
         <div><dt>Estado</dt><dd>{done ? "Terminado" : cycle > 0 ? "Ejecutando" : "Cargado"}</dd></div>
         <div><dt>Ciclo de reloj</dt><dd>{formatNumber(cycle)}</dd></div>
@@ -191,7 +198,8 @@ function CellPanel({ selector }: { selector: React.ReactNode }) {
   const expected = "error" in parsed ? null : BigInt(handle.expected(parsed.weights.map(String).join(","), parsed.activations.map(String).join(",")));
   const finished = index >= script.length && script.length > 0;
   const total = topTotal !== undefined ? toSigned(topTotal) : null;
-  const status = script[index]?.label ?? (finished ? "Terminado" : "Sin programa");
+  const done = index > 0 ? script[index - 1] : null;
+  const next = script[index]?.label ?? (finished ? "Nada: la suma está en el acumulador" : "—");
   const counts = Object.entries(info.counts);
 
   return (
@@ -231,10 +239,14 @@ function CellPanel({ selector }: { selector: React.ReactNode }) {
         </button>
       </div>
 
+      <div className="inset padded sim-explain" aria-live="polite">
+        <strong>{done ? done.label : "Antes de empezar"}</strong>
+        <p>{done ? done.explain : "Pulsa Paso para avanzar un ciclo de reloj: cada paso fija las entradas de la celda, el circuito calcula y los cables con valor se iluminan en el esquemático."}</p>
+      </div>
       <dl className="inset metrics">
         <div>
-          <dt>Fase</dt>
-          <dd>{status}</dd>
+          <dt>Siguiente paso</dt>
+          <dd>{next}</dd>
         </div>
         <div>
           <dt>Ciclo de reloj</dt>

@@ -183,3 +183,18 @@ fn two_dies_pass_a_value_over_the_link() {
     sim.tick();
     assert_eq!(sim.get("d1_vec_out").unwrap(), 12 * 34 + 500);
 }
+
+#[test]
+fn a_microcode_word_reads_back_as_what_it_does() {
+    use netlist::die::{decode_word, describe_word, OP_ADD};
+    let c = config();
+    let word = netlist::ControlWord { op: OP_ADD, reg_a: 2, reg_b: 3, reg_dst: 5, write_en: true, ..Default::default() };
+    let bits: String = word.encode_words(&c).iter().rev().map(|w| format!("{w:032b}")).collect::<String>();
+    let bits = &bits[bits.len() - netlist::word_bits(&c) as usize..];
+    let fields = decode_word(bits, &c);
+    assert_eq!((fields["op"], fields["reg_a"], fields["reg_b"], fields["reg_dst"]), (OP_ADD as u128, 2, 3, 5));
+    assert_eq!(describe_word(&fields), "Suma r2 + r3 y lo guarda en r5.");
+    let halt = netlist::ControlWord { halt: true, ..Default::default() };
+    let bits: String = halt.encode_words(&c).iter().rev().map(|w| format!("{w:032b}")).collect();
+    assert!(describe_word(&decode_word(&bits[bits.len() - netlist::word_bits(&c) as usize..], &c)).starts_with("Fin de la rutina"));
+}

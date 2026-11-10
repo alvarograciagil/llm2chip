@@ -388,6 +388,17 @@ impl DieSimulation {
         self.sim.cycle() as f64
     }
 
+    /// The word the sequencer is running: where it is in the microprogram and what the
+    /// word makes the die do.
+    pub fn activity(&self) -> Result<String, JsError> {
+        // In the whole chip of the boot demo, the die sits under the controller.
+        let nets = self.sim.snapshot("").filter(|n| n.contains_key("code")).or_else(|| self.sim.snapshot("/die"));
+        let Some(nets) = nets else { return to_js(&serde_json::Value::Null) };
+        let (Some(code), Some(pc)) = (nets.get("code"), nets.get("pc")) else { return to_js(&serde_json::Value::Null) };
+        let fields = netlist::die::decode_word(code, &self.config);
+        to_js(&serde_json::json!({ "pc": u64::from_str_radix(pc, 2).unwrap_or(0), "text": netlist::die::describe_word(&fields) }))
+    }
+
     pub fn snapshot(&self, path: &str) -> Result<String, JsError> {
         to_js(&self.sim.snapshot(path))
     }

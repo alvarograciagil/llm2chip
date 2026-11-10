@@ -74,9 +74,9 @@ function Overview({ program }: { program: Program }) {
         {program.num_layers} capas y {compact(total)} multiplicaciones por token, sin contar la atención, que crece con el contexto, ni la regla delta. Pulsa cualquier paso para ver qué calcula y cómo lo hace el circuito.
       </p>
       <div className="logic-flow">
-        <Step title="Texto de entrada" text="Bytes UTF-8 que llegan por el puerto de host" />
+        <Step title="Texto de entrada" text="Bytes UTF-8 que llegan por el puerto de host" tag="CPU de control: cola de entrada" unit="system" />
         <Arrow />
-        <Step title="Tokenizador" text="Convierte el texto en identificadores" tag="Fuera del chip por ahora" />
+        <Step title="Tokenizador" text="El firmware parte el texto en tokens con las tablas BPE del modelo, cargadas con la imagen" tag="CPU de control: firmware RISC-V" unit="system" />
         <Arrow />
         {outer.filter((i) => i.op.op === "emb_read").map(opStep)}
         <Arrow />
@@ -105,9 +105,9 @@ function Overview({ program }: { program: Program }) {
           </div>
         ))}
         <Arrow />
-        <Step title="Muestreo" text="Elige el token siguiente a partir de los logits" tag="Fuera del chip por ahora" />
+        <Step title="Muestreo" text="Filtra los logits a medida que salen, guarda los mejores candidatos y sortea uno con la temperatura; el firmware aplica la lista de parada y el presupuesto de razonamiento" tag="Unidad de muestreo y firmware" unit="system" />
         <Arrow />
-        <Step title="Texto de salida" text="El token vuelve a bytes UTF-8" tag="Fuera del chip por ahora" />
+        <Step title="Texto de salida" text="El firmware convierte el token en bytes UTF-8 y lo devuelve como entrada del siguiente paso" tag="CPU de control: cola de salida" unit="system" />
       </div>
     </div>
   );

@@ -516,6 +516,101 @@ impl ControlWord {
     }
 }
 
+/// The fields of a microcode word given as its bits, most significant first, as the
+/// simulator shows the sequencer's `code`.
+pub fn decode_word(bits: &str, c: &DieConfig) -> BTreeMap<&'static str, u128> {
+    let low_first: Vec<bool> = bits.chars().rev().map(|b| b == '1').collect();
+    let mut offset = 0usize;
+    field_layout(c)
+        .into_iter()
+        .map(|(name, width)| {
+            let value = (0..width as usize).filter(|bit| low_first.get(offset + bit) == Some(&true)).fold(0u128, |v, bit| v | 1 << bit);
+            offset += width as usize;
+            (name, value)
+        })
+        .collect()
+}
+
+/// What a microcode word makes the die do, in a sentence for someone following it.
+pub fn describe_word(f: &BTreeMap<&'static str, u128>) -> String {
+    let get = |name: &str| f.get(name).copied().unwrap_or(0);
+    let on = |name: &str| get(name) != 0;
+    if on("halt") {
+        return "Fin de la rutina: el die avisa a la CPU de que ha terminado.".into();
+    }
+    let place = |reg: &str, literal: &str| if on("use_literal") { format!("r{}[{}]", get(reg), get(literal)) } else { format!("r{}", get(reg)) };
+    let (a, b, dst) = (place("reg_a", "literal_a"), place("reg_b", "literal_b"), place("reg_dst", "literal_dst"));
+    let mut parts: Vec<String> = Vec::new();
+    if on("cell_seek_weights") || on("cell_seek_factors") {
+        parts.push(format!("las celdas se colocan al principio de una matriz (pesos en la palabra {})", get("literal_a")));
+    }
+    if on("cell_run") || on("cell_feed") {
+        parts.push(format!("las celdas reciben {a} por la red de activaciones, lo multiplican por su peso y lo acumulan"));
+    }
+    if on("cell_clear") || on("cell_clear_group") {
+        parts.push("las celdas empiezan una suma nueva".into());
+    }
+    if on("cell_flush") || on("wide_write") || on("wide_reduce") {
+        parts.push("las sumas pasan a la memoria ancha de cada unidad".into());
+    }
+    let written = on("write_en") || on("write_now");
+    let what = match get("op") as u32 {
+        OP_ADD => Some(format!("suma {a} + {b}")),
+        OP_SUB => Some(format!("resta {a} − {b}")),
+        OP_MUL => Some(format!("multiplica {a} × {b}")),
+        OP_FUNCTION => {
+            let name = match get("function") as u32 {
+                crate::block::FN_EXP => "exponencial",
+                crate::block::FN_SIGMOID => "sigmoide",
+                crate::block::FN_RECIPROCAL => "inverso",
+                crate::block::FN_INV_SQRT => "raíz inversa",
+                crate::block::FN_SOFTPLUS => "softplus",
+                crate::block::FN_GELU | crate::block::FN_GELU_TANH => "GELU",
+                crate::block::FN_TANH => "tangente hiperbólica",
+                _ => "función",
+            };
+            Some(format!("aplica la tabla de {name} a {a}"))
+        }
+        OP_CELLS => Some("recoge el resultado de las celdas".to_string()),
+        OP_MAX => Some(format!("busca el máximo de {a}")),
+        OP_LZC | OP_WIDE_LZC => Some(format!("cuenta los ceros a la izquierda de {a} para normalizarlo")),
+        OP_MOV => Some(format!("copia {a}")),
+        OP_SHIFT_LEFT => Some(format!("desplaza {a} a la izquierda")),
+        OP_ACCUMULATOR => Some("lee el acumulador de la unidad".to_string()),
+        OP_IMMEDIATE => Some("toma un número fijo de la propia instrucción".to_string()),
+        OP_PARITY => Some(format!("calcula la paridad de {a}")),
+        OP_LINK => Some("recibe una palabra del chip anterior".to_string()),
+        OP_WIDE_OUT => Some("lee la memoria ancha y la redondea".to_string()),
+        OP_EQUAL => Some(format!("compara {a} con {b}")),
+        _ => None,
+    };
+    if let Some(what) = what {
+        let lanes = if on("vector") { " en todos los carriles a la vez" } else { "" };
+        parts.push(if written { format!("{what}{lanes} y lo guarda en {dst}") } else { format!("{what}{lanes}") });
+    }
+    if on("accumulate") {
+        parts.push("lo suma al acumulador".into());
+    }
+    if on("link_send") {
+        parts.push("lo envía al chip siguiente".into());
+    }
+    if get("repeat") > 0 {
+        let times = get("repeat");
+        parts.push(format!("repite el paso {times} {} más, avanzando por los elementos", if times == 1 { "vez" } else { "veces" }));
+    }
+    if on("branch") {
+        parts.push(format!("si el contador x{} no ha llegado a su límite, vuelve a la palabra {}", get("x_src"), get("target")));
+    }
+    if parts.is_empty() {
+        return "Espera: deja pasar un ciclo mientras termina un resultado anterior.".into();
+    }
+    let mut text = parts.join("; ");
+    if let Some(first) = text.get(..1) {
+        text = first.to_uppercase() + &text[1..];
+    }
+    text + "."
+}
+
 pub fn word_bits(c: &DieConfig) -> u32 {
     field_layout(c).iter().map(|(_, w)| w).sum()
 }

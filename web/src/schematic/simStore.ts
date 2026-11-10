@@ -3,6 +3,8 @@ import { CellSimulation, DieSimulation, type CellInfo, type Design } from "../en
 
 export interface ScriptStep {
   label: string;
+  /** What this step does in the circuit, with its values, in plain words. */
+  explain: string;
   inputs: [string, string][];
 }
 
@@ -24,6 +26,8 @@ interface CellSimState {
   dieCounts: Record<string, number> | null;
   dieDone: boolean;
   dieResults: DieResults | null;
+  /** The microcode word the die runs now, and what it does. */
+  dieActivity: { pc: number; text: string } | null;
   setScope: (scope: Scope) => void;
   demo: DieDemo;
   setDemo: (demo: DieDemo) => void;
@@ -82,29 +86,33 @@ export function expectedTotal(weights: bigint[], activations: bigint[], bits: nu
 function buildScript(info: CellInfo, weights: bigint[], activations: bigint[]): ScriptStep[] {
   const { weight_bits, activation_bits, addr_bits } = info.config;
   const off: [string, string][] = [["load_en", "0"], ["run", "0"]];
-  const steps: ScriptStep[] = [{ label: "Puesta a cero", inputs: [["clear", "1"], ...off, ...(usesShifter(info) ? ([["exp_base", "0"]] as [string, string][]) : [])] }];
+  const steps: ScriptStep[] = [{ label: "Puesta a cero", explain: "clear = 1 vacía el acumulador y lleva el contador de direcciones a 0. Con load_en y run a 0, la memoria y el multiplicador no hacen nada.", inputs: [["clear", "1"], ...off, ...(usesShifter(info) ? ([["exp_base", "0"]] as [string, string][]) : [])] }];
   if (info.config.coding === "codebook" && !info.config.fixed_weights) {
     for (let i = 0; i < 2 ** info.config.weight_bits; i++) {
       const signed = BigInt.asIntN(info.config.weight_bits, BigInt(i));
-      steps.push({ label: `Tabla ${i + 1}`, inputs: [["clear", "0"], ["table_en", "1"], ["table_addr", String(i)], ["table_data", toUnsigned(signed, 16)]] });
+      steps.push({ label: `Tabla ${i + 1}`, explain: `Escribe en la tabla de la celda el valor real del código ${signed}: los pesos guardan índices a esta tabla.`, inputs: [["clear", "0"], ["table_en", "1"], ["table_addr", String(i)], ["table_data", toUnsigned(signed, 16)]] });
     }
-    steps.push({ label: "Fin de la tabla", inputs: [["table_en", "0"]] });
+    steps.push({ label: "Fin de la tabla", explain: "table_en = 0: la tabla queda fija y la celda solo la lee.", inputs: [["table_en", "0"]] });
   }
   if (!info.config.fixed_weights) weights.forEach((w, i) =>
     steps.push({
       label: `Carga de pesos ${i + 1}/${weights.length}`,
+      explain: `load_en = 1 escribe el código ${w} (${BigInt.asUintN(weight_bits, w).toString(2).padStart(weight_bits, "0")} en ${weight_bits} bits) en la dirección ${i} de la memoria de pesos. Así llega cada peso a su celda al arrancar el chip.`,
       inputs: [["clear", "0"], ["load_en", "1"], ["load_addr", toUnsigned(BigInt(i), addr_bits)], ["load_data", toUnsigned(w, weight_bits)]],
     }),
   );
-  steps.push({ label: info.config.fixed_weights ? "Pesos ya grabados" : "Fin de la carga", inputs: [["clear", "1"], ...off] });
-  activations.forEach((x, i) =>
+  steps.push({ label: info.config.fixed_weights ? "Pesos ya grabados" : "Fin de la carga", explain: info.config.fixed_weights ? "Los pesos están grabados en la ROM desde fábrica: no hay carga. clear = 1 deja el acumulador a cero." : "La carga termina y clear = 1 devuelve el contador a la dirección 0, para que la celda lea los pesos en el mismo orden en que llegan las activaciones.", inputs: [["clear", "1"], ...off] });
+  let partial = 0n;
+  activations.forEach((x, i) => {
+    partial += weights[i] * x;
     steps.push({
       label: `Multiplicación ${i + 1}/${activations.length}`,
+      explain: `run = 1: la red de activaciones trae x = ${x}; la celda lee el peso ${i} (${weights[i]}) de su memoria, los multiplica (${weights[i]} × ${x} = ${weights[i] * x}) y el contador pasa a la dirección ${i + 1}. ${info.latency > 0 ? `El producto atraviesa ${info.latency} etapas de registros antes de sumarse` : "El producto se suma al momento"}: la suma de referencia hasta aquí es ${partial}.`,
       inputs: [["clear", "0"], ["load_en", "0"], ["run", "1"], ["x", toUnsigned(x, activation_bits)]],
-    }),
-  );
+    });
+  });
   for (let i = 0; i < info.latency; i++) {
-    steps.push({ label: `Vaciando etapas ${i + 1}/${info.latency}`, inputs: [["clear", "0"], ...off] });
+    steps.push({ label: `Vaciando etapas ${i + 1}/${info.latency}`, explain: `Ya no entran activaciones (run = 0), pero aún quedan productos en las etapas del multiplicador y del sumador: en ${info.latency - i} ciclo${info.latency - i === 1 ? "" : "s"} más el acumulador tendrá la suma completa, ${partial}.`, inputs: [["clear", "0"], ...off] });
   }
   // A cell with its weights in ROM has no loading ports to drive.
   return info.config.fixed_weights ? steps.map((s) => ({ ...s, inputs: s.inputs.filter(([port]) => !port.startsWith("load_")) })) : steps;
@@ -129,7 +137,7 @@ export const useCellSim = create<CellSimState>((set, get) => {
     const { handle, die, scope, path } = get();
     const active = scope === "die" ? die : handle;
     if (!active) return;
-    set({ snapshot: JSON.parse(active.snapshot(pathText(path))) ?? {}, cycle: active.cycle() });
+    set({ snapshot: JSON.parse(active.snapshot(pathText(path))) ?? {}, cycle: active.cycle(), dieActivity: scope === "die" && die ? JSON.parse(die.activity()) : null });
   };
 
   const freshDie = (params: string) => {
@@ -176,6 +184,7 @@ export const useCellSim = create<CellSimState>((set, get) => {
     scope: "cell",
     die: null,
     dieCounts: null,
+    dieActivity: null,
     dieDone: false,
     dieResults: null,
     setScope(scope) {
