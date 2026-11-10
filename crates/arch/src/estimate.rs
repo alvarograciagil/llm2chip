@@ -1206,6 +1206,12 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
         "Inverso del tiempo de un token.".into());
     m("prefill_tok_s", "Velocidad", "Lectura de prompt", prefill_rate, "tok/s", Supuesta,
         "Los tokens ya se conocen, así que todos los dies trabajan a la vez.".into());
+    if let (true, Some(vision)) = (p.include_vision, model.vision) {
+        // The encoder runs on one die's cells, before the prompt's text.
+        let macs = vision.macs_per_image(512, 512) as f64;
+        m("image_ms", "Velocidad", "Imagen de 512×512", macs / (p.macs_per_die.max(1) as f64 * freq * 1e9) * 1e3, "ms", Supuesta,
+            format!("{:.1} G multiplicaciones del codificador por imagen, en los multiplicadores de un die.", macs / 1e9));
+    }
     m("freq_ghz", "Velocidad", "Frecuencia efectiva", freq, "GHz", Supuesta,
         format!("Limitada a {fmax:.2} GHz por las etapas del multiplicador."));
     m("cycles_token", "Velocidad", "Ciclos por token", total_cycles, "", Supuesta,

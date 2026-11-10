@@ -2,7 +2,7 @@
 
 use crate::{
     matvec, require_u64, tensor, vector, Block, ModelError, ModelGraph, Stage, StageKind,
-    StateInfo, WeightTensor,
+    StateInfo, VisionShape, WeightTensor,
 };
 use serde_json::Value;
 
@@ -106,9 +106,13 @@ pub(crate) fn build(name: &str, config: &Value) -> Result<ModelGraph, ModelError
     if text.get("mtp_num_hidden_layers").and_then(Value::as_u64).unwrap_or(0) > 0 {
         add_mtp_head(&d, &mut tensors, &mut stages);
     }
-    if let Some(vision) = config.get("vision_config") {
-        tensors.extend(vision_tensors(vision)?);
-    }
+    let vision = match config.get("vision_config") {
+        Some(v) => {
+            tensors.extend(vision_tensors(v)?);
+            Some(vision_shape(v)?)
+        }
+        None => None,
+    };
 
     Ok(ModelGraph {
         name: name.into(),
@@ -120,6 +124,7 @@ pub(crate) fn build(name: &str, config: &Value) -> Result<ModelGraph, ModelError
         tensors,
         stages,
         state,
+        vision,
     })
 }
 
@@ -285,11 +290,26 @@ fn add_mtp_head(d: &Dims, tensors: &mut Vec<WeightTensor>, stages: &mut Vec<Stag
     stages.push(matvec("mtp: lm_head", None, b, d.vocab * d.hidden));
 }
 
+fn vision_shape(vision: &Value) -> Result<VisionShape, ModelError> {
+    let or = |key: &str, default: u64| vision.get(key).and_then(Value::as_u64).unwrap_or(default);
+    Ok(VisionShape {
+        depth: require_u64(vision, "depth")?,
+        hidden: require_u64(vision, "hidden_size")?,
+        intermediate: require_u64(vision, "intermediate_size")?,
+        patch: or("patch_size", 16),
+        temporal: or("temporal_patch_size", 2),
+        merge: or("spatial_merge_size", 2),
+        out_hidden: or("out_hidden_size", require_u64(vision, "hidden_size")?),
+    })
+}
+
+/// The encoder's blocks, its patch and position embeddings and the merger.
 fn vision_tensors(vision: &Value) -> Result<Vec<WeightTensor>, ModelError> {
-    let depth = require_u64(vision, "depth")?;
-    let hidden = require_u64(vision, "hidden_size")?;
-    let intermediate = require_u64(vision, "intermediate_size")?;
-    let attention = depth * 4 * hidden * hidden;
-    let mlp = depth * 2 * hidden * intermediate;
-    Ok(vec![tensor("visual".into(), 1, attention + mlp, Block::Vision, None, false)])
+    let v = vision_shape(vision)?;
+    let attention = v.depth * 4 * v.hidden * v.hidden;
+    let mlp = v.depth * 2 * v.hidden * v.intermediate;
+    let embed = 3 * v.temporal * v.patch * v.patch * v.hidden + vision.get("num_position_embeddings").and_then(Value::as_u64).unwrap_or(0) * v.hidden;
+    let merged = v.hidden * v.merge * v.merge;
+    let merger = merged * merged + merged * v.out_hidden;
+    Ok(vec![tensor("visual".into(), 1, attention + mlp + embed + merger, Block::Vision, None, false)])
 }

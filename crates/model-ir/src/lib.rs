@@ -67,6 +67,34 @@ pub struct StateInfo {
     pub conv_values: u64,
 }
 
+/// The shape of a model's image encoder: a ViT on patches, then a merger of
+/// `merge × merge` of them into each token of the language model.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VisionShape {
+    pub depth: u64,
+    pub hidden: u64,
+    pub intermediate: u64,
+    pub patch: u64,
+    pub temporal: u64,
+    pub merge: u64,
+    pub out_hidden: u64,
+}
+
+impl VisionShape {
+    /// Multiplications to encode an image of `width × height` pixels, which the encoder
+    /// first rounds to whole merged tokens: every patch through every block, attention
+    /// against every other patch, and the merger once per token.
+    pub fn macs_per_image(&self, width: u64, height: u64) -> u64 {
+        let side = self.patch * self.merge;
+        let patches = width.div_ceil(side) * height.div_ceil(side) * self.merge * self.merge;
+        let embed = 3 * self.temporal * self.patch * self.patch * self.hidden;
+        let block = 4 * self.hidden * self.hidden + 2 * self.hidden * self.intermediate + 2 * patches * self.hidden;
+        let merged = self.hidden * self.merge * self.merge;
+        let merger = (merged * merged + merged * self.out_hidden) / (self.merge * self.merge);
+        patches * (embed + self.depth * block + merger)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelGraph {
     pub name: String,
@@ -78,6 +106,9 @@ pub struct ModelGraph {
     pub tensors: Vec<WeightTensor>,
     pub stages: Vec<Stage>,
     pub state: StateInfo,
+    /// The image encoder, for models that read images.
+    #[serde(default)]
+    pub vision: Option<VisionShape>,
 }
 
 /// The `model_type`s a circuit can be estimated for.

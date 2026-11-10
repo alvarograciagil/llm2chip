@@ -118,5 +118,6 @@ fn build(name: &str, family: &str, d: Dims) -> ModelGraph {
         tensors,
         stages,
         state: StateInfo { kv_values_per_token: d.layers * 2 * kv, delta_values: 0, conv_values: 0 },
+        vision: None,
     }
 }

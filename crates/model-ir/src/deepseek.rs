@@ -89,5 +89,6 @@ pub(crate) fn build(name: &str, c: &Value) -> Result<ModelGraph, ModelError> {
         tensors,
         stages,
         state: StateInfo { kv_values_per_token: layers * (lora + rope), delta_values: 0, conv_values: 0 },
+        vision: None,
     })
 }

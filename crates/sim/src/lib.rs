@@ -8,6 +8,7 @@ pub mod image;
 pub mod lower;
 pub mod sizing;
 pub mod tokenizer;
+pub mod vision;
 mod requant;
 mod vm;
 mod weights;

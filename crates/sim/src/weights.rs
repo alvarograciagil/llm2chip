@@ -69,14 +69,24 @@ fn canonical_name(name: &str) -> String {
 }
 
 impl Weights {
+    /// The language model's weights: every safetensors file but the image encoder's.
     pub fn open(dir: &Path) -> Result<Self, String> {
+        Self::open_where(dir, |name| !name.starts_with("model-vision"))
+    }
+
+    /// The image encoder's weights, which some checkpoints keep in a file of their own.
+    pub fn open_vision(dir: &Path) -> Result<Self, String> {
+        Self::open_where(dir, |name| name.starts_with("model-vision"))
+    }
+
+    fn open_where(dir: &Path, keep: impl Fn(&str) -> bool) -> Result<Self, String> {
         let mut paths: Vec<_> = std::fs::read_dir(dir)
             .map_err(|e| e.to_string())?
             .filter_map(Result::ok)
             .map(|e| e.path())
             .filter(|p| {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                name.ends_with(".safetensors") && !name.starts_with("model-vision")
+                name.ends_with(".safetensors") && keep(name)
             })
             .collect();
         paths.sort();

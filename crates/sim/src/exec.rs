@@ -128,6 +128,16 @@ pub struct Engine {
     functions: Functions,
     rope_position: u64,
     draft_tokens: usize,
+    /// Time, row and column positions of the token being run, for models whose rotary
+    /// frequencies follow three positions; text has the same in all three.
+    rope_positions: [u64; 3],
+    /// How many of the rotary frequencies follow each of the three positions, interleaved.
+    mrope_section: Option<[usize; 3]>,
+    /// Added to the token count to give text its position: an image takes fewer
+    /// positions than tokens.
+    rope_offset: i64,
+    /// A vector that takes the place of the next token's embedding, such as an image's.
+    input: Option<Vec<f32>>,
 }
 
 fn round_fixed(values: &mut [f32], bits: u32, frac: u32, saturated: &mut u64) {
@@ -195,7 +205,7 @@ impl Engine {
             (0..rotary / 2).map(|i| 1.0 / program.local_rope_theta.unwrap_or(program.rope_theta).powf((2 * i) as f32 / rotary as f32)).collect(),
         ];
         let table_bits = if let Numeric::Block { table_bits, .. } = numeric { table_bits } else { None };
-        Ok(Self { program, weights, floats, buffers, kv, delta, conv, position: 0, numeric, inverse_freq, saturated: 0, functions: Functions { table_bits }, rope_position: 0, draft_tokens: 0 })
+        Ok(Self { program, weights, floats, buffers, kv, delta, conv, position: 0, numeric, inverse_freq, saturated: 0, functions: Functions { table_bits }, rope_position: 0, draft_tokens: 0, rope_positions: [0; 3], mrope_section: None, rope_offset: 0, input: None })
     }
 
     /// Everything the recurrent layers remember, one slice per layer.
@@ -210,6 +220,7 @@ impl Engine {
     pub fn reset(&mut self) {
         self.position = 0;
         self.draft_tokens = 0;
+        self.rope_offset = 0;
         for k in &mut self.kv {
             k.keys.clear();
             k.values.clear();
@@ -250,9 +261,32 @@ impl Engine {
 
     /// Runs one token. Logits are only produced when `want_logits` is set.
     pub fn step(&mut self, token: u32, want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
+        let text = (self.position as i64 + self.rope_offset) as u64;
+        self.run_token(token, [text; 3], want_logits)
+    }
+
+    /// Runs a vector in place of a token's embedding, such as one of an image's tokens,
+    /// at its own time, row and column positions.
+    pub fn step_embedding(&mut self, embedding: &[f32], positions: [u64; 3], want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
+        self.input = Some(embedding.to_vec());
+        self.run_token(0, positions, want_logits)
+    }
+
+    /// Rotary frequencies follow three positions, `section` of them each, interleaved.
+    pub fn set_mrope(&mut self, section: [usize; 3]) {
+        self.mrope_section = Some(section);
+    }
+
+    /// Where the text after an image goes on from: its next token takes `position`.
+    pub fn continue_text_at(&mut self, position: u64) {
+        self.rope_offset = position as i64 - self.position as i64;
+    }
+
+    fn run_token(&mut self, token: u32, positions: [u64; 3], want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
         let started = Instant::now();
         self.saturated = 0;
-        self.rope_position = self.position;
+        self.rope_position = positions[0];
+        self.rope_positions = positions;
         let limit = if want_logits { self.program.ops.len() } else { self.program.logits_from };
         for index in 0..limit {
             let op = self.program.ops[index].op.clone();
@@ -301,6 +335,7 @@ impl Engine {
     pub fn draft(&mut self, next_token: u32, want_logits: bool) -> Result<Option<&[f32]>, String> {
         let draft = self.program.draft.as_ref().ok_or("este modelo no tiene cabeza MTP")?.clone();
         self.rope_position = self.draft_tokens as u64;
+        self.rope_positions = [self.draft_tokens as u64; 3];
         let limit = if want_logits { draft.ops.len() } else { draft.logits_from };
         for inst in &draft.ops[..limit] {
             self.run_op(&inst.op, next_token)?;
@@ -451,13 +486,31 @@ impl Engine {
         Ok(())
     }
 
+    /// The position rotary frequency `i` follows: with three positions interleaved, the
+    /// row takes every third from the second and the column from the third, as far as
+    /// their sections reach; time takes the rest.
+    fn frequency_position(&self, i: usize) -> u64 {
+        match self.mrope_section {
+            Some([_, rows, _]) if i % 3 == 1 && i < 3 * rows => self.rope_positions[1],
+            Some([_, _, cols]) if i % 3 == 2 && i < 3 * cols => self.rope_positions[2],
+            _ => self.rope_positions[0],
+        }
+    }
+
     fn run_op(&mut self, op: &Op, token: u32) -> Result<(), String> {
         match op {
             Op::EmbRead { table, dst } => {
-                let matrix = self.weights.matrix(table)?;
-                let len = self.buffers[*dst].len();
-                let row = matrix.row(token as usize, len)?;
-                self.buffers[*dst].copy_from_slice(&row);
+                // The given vector serves this token only.
+                match self.input.take() {
+                    Some(given) if given.len() == self.buffers[*dst].len() => self.buffers[*dst].copy_from_slice(&given),
+                    Some(given) => return Err(format!("la entrada tiene {} valores y el modelo espera {}", given.len(), self.buffers[*dst].len())),
+                    None => {
+                        let matrix = self.weights.matrix(table)?;
+                        let len = self.buffers[*dst].len();
+                        let row = matrix.row(token as usize, len)?;
+                        self.buffers[*dst].copy_from_slice(&row);
+                    }
+                }
                 self.quantize(*dst);
             }
             Op::Matvec { matrix, src, dst } => {
@@ -548,8 +601,14 @@ impl Engine {
                 }
             }
             Op::Rope { buf, block, rotary, table } => {
-                let position = self.rope_position as f32;
-                let (cos, sin): (Vec<f32>, Vec<f32>) = self.inverse_freq[*table].iter().map(|f| ((position * f).cos(), (position * f).sin())).unzip();
+                let (cos, sin): (Vec<f32>, Vec<f32>) = self.inverse_freq[*table]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let position = self.frequency_position(i) as f32;
+                        ((position * f).cos(), (position * f).sin())
+                    })
+                    .unzip();
                 let half = rotary / 2;
                 for head in self.buffers[*buf].chunks_exact_mut(*block) {
                     let original: Vec<f32> = head[..*rotary].to_vec();

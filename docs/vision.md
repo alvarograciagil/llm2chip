@@ -1,0 +1,39 @@
+# Imágenes en el chip
+
+Qwen3.5 lee imágenes con un codificador propio (un ViT) que convierte cada imagen en tokens que el modelo de lenguaje lee en lugar de `<|image_pad|>`. Este documento describe ese codificador tal como lo reproduce llm2chip, lo que ya funciona y cómo se llevará al circuito.
+
+## El codificador de Qwen3.8-27B
+
+Sale de `vision_config` y de `model-vision.safetensors` (pesos en BF16, unos 460 M de parámetros).
+
+| Paso | Qué hace | Tamaño en Qwen3.8-27B |
+|---|---|---|
+| Preprocesado | Redimensiona a lados múltiplos de 32 px (entre 256×256 y 16 M de píxeles), normaliza a [−1, 1] y corta parches de 16×16 en dos fotogramas iguales | 1 536 valores por parche |
+| Embedding de parche | Una convolución 3D que equivale a una matriz por parche, con sesgo | 1 536 → 1 152 |
+| Posición aprendida | Una tabla de 48×48 interpolada bilinealmente a la rejilla de la imagen | 1 152 por parche |
+| 27 bloques | LayerNorm, atención bidireccional con RoPE 2D (la mitad de las frecuencias sigue la fila y la otra mitad la columna), LayerNorm y MLP con GELU tanh; todo con sesgos | 16 cabezas de 72 |
+| Fusión | LayerNorm y, por cada 2×2 parches vecinos, 4 608 → 4 608 → 5 120 con GELU | 1 token por 4 parches |
+
+Los parches van ordenados por bloques de 2×2, así que cada token del modelo de lenguaje es la concatenación de cuatro parches consecutivos.
+
+En el modelo de lenguaje, cada token tiene tres posiciones (tiempo, fila, columna) para la RoPE: de las 32 frecuencias rotadas, las de índice 1, 4, 7… (hasta 33) siguen la fila, las de índice 2, 5, 8… (hasta 30) la columna y el resto el tiempo (`mrope_section` [11, 11, 10], intercalado). El texto tiene las tres iguales, por eso los modelos sin imágenes no notan la diferencia. Tras una imagen de h×w tokens que empieza en la posición p, todos sus tokens tienen tiempo p, filas p…p+h−1 y columnas p…p+w−1, y el texto sigue en p + max(h, w).
+
+## Lo que ya funciona
+
+- **Referencia en coma flotante** (`crates/sim/src/vision.rs`): preprocesado, codificador completo y fusión, contra los pesos reales.
+- **Modelo de lenguaje con imágenes** (`Engine::step_embedding`, `set_mrope`, `continue_text_at`): los tokens de imagen entran como vectores con sus tres posiciones, y el texto siguiente continúa donde toca.
+- **Ejemplo** `cargo run --release -p sim --example see -- <modelo> rojo`: dibuja una figura de color, se la enseña al Qwen real y le pregunta de qué color es.
+- **Estimador**: con «Incluir visión», el área cuenta todos los pesos del codificador (bloques, embeddings y fusión) y aparece el tiempo de procesar una imagen de 512×512 en los multiplicadores de un die.
+
+## Cómo se llevará al circuito
+
+Casi todo se compone con operaciones que el die ya tiene:
+
+1. **Embedding de parche y fusión**: productos matriz-vector en las celdas, con sus sesgos (`AddWeight`) y GELU por tabla (`FN_GELU_TANH`, `FN_GELU`).
+2. **LayerNorm**: la media es una suma con el registro de unos, escalada; después, la misma norma que RMSNorm sobre el vector centrado, y el sesgo.
+3. **Atención bidireccional**: la misma atención del modelo de lenguaje sobre un almacén de claves y valores de la imagen, pero sin máscara causal. Exige recorrer el codificador capa a capa: primero todas las claves y valores de un bloque, después todas las consultas. El firmware lo ordena con dos rutinas por bloque (`VIT_QKV` y `VIT_RESTO`) y un índice de parche, y guarda el estado de cada parche entre bloques en un almacén como el de la caché KV.
+4. **RoPE 2D**: el firmware escribe para cada parche su fila y su columna; las dos tablas de cosenos y senos ya existen para la RoPE del texto.
+5. **M-RoPE en el texto**: la tabla de rotación de cada token se compone con tres filas de la tabla (tiempo, fila, columna) y una máscara fija de qué frecuencia sigue a cuál.
+6. **Entrada de imagen**: la rutina de token del modelo de lenguaje acepta como entrada un registro en lugar del embedding, igual que ya acepta la salida de la cabeza MTP.
+
+Lo que falta para hacerlo en puertas es el orden capa a capa del firmware y las rutinas del codificador; la aritmética ya está.
