@@ -682,6 +682,23 @@ impl Layout {
         let t = &self.temporaries;
         let d = block as u32;
         let first = self.parts[0];
+        // One long block is sliced among the units, its sum of squares added across them.
+        if count == 1 {
+            let w = weight;
+            return ops.in_slabs(d, &[dst], |ops, start, n| {
+                ops.copy_part(src, start, t[40], 0.into(), n.into());
+                ops.normalize(t[40], n.into());
+                ops.rms_normalize_part(t[40], t[41], (n, d), (t[42], t[43]), self.inverse_len.get(&block).copied(), Some(self.epsilon));
+                match w {
+                    Some(w) => {
+                        ops.copy_part(w, start, t[44], 0.into(), n.into());
+                        ops.multiply(t[41], t[44], t[45], n.into());
+                    }
+                    None => ops.copy_part(t[41], 0.into(), t[45], 0.into(), n.into()),
+                }
+                ops.copy_part(t[45], 0.into(), dst, start, n.into());
+            });
+        }
         // Each block is normalised on its own, so several vector units can share them.
         ops.each_head(count as u32, 1, |ops, b, _| {
             ops.with_window(b, &[first], |ops, offset| {

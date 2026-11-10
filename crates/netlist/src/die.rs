@@ -839,6 +839,10 @@ impl Gen {
         let unit_chains: Vec<Vec<Vec<Bit>>> = (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("unit{k}_chain{lane}"), wide)).collect()).collect();
         let wide_bits = 2 * a + 16 + FACTOR_FRACTION;
         let unit_wide: Vec<Vec<Vec<Bit>>> = (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("unit{k}_wide{lane}"), wide_bits)).collect()).collect();
+        let unit_wide_magnitude: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_wide_magnitude"), 2 * a + 15)).collect();
+        let group_wide_magnitude: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_group_wide_magnitude"), 2 * a + 15)).collect();
+        let unit_accumulator: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_accumulator"), 2 * a + 16)).collect();
+        let group_accumulator: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_group_accumulator"), 2 * a + 16)).collect();
         let unit_magnitude: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_magnitude"), a - 1)).collect();
         let group_magnitude: Vec<Vec<Bit>> = (0..clusters).map(|k| b.wire(&format!("unit{k}_group_magnitude"), a - 1)).collect();
         let reduced: Vec<Vec<Vec<Bit>>> = (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("unit{k}_reduced{lane}"), wide_bits)).collect()).collect();
@@ -1274,7 +1278,11 @@ impl Gen {
                 let sign = *chain.last().expect("cadena vacía");
                 (0..wide_bits as usize).map(|i| chain.get(i).copied().unwrap_or(sign)).collect()
             };
-            let from_accumulator: Vec<Bit> = std::iter::repeat_n(Bit::Zero, fraction).chain(accumulator.iter().copied()).collect();
+            for (from, to) in accumulator.iter().zip(&unit_accumulator[cluster]) {
+                b.and_to(*from, enabled, *to);
+            }
+            let stored_sum: Vec<Bit> = if clusters > 1 { group_accumulator[cluster].clone() } else { accumulator.clone() };
+            let from_accumulator: Vec<Bit> = std::iter::repeat_n(Bit::Zero, fraction).chain(stored_sum.iter().copied()).collect();
             let wide_data = b.wire("wide_data", wide_bits);
             let from_outside = b.wire("wide_outside", wide_bits);
             b.inst("wide_data_select", &wide_mux, &[("s", vec![wide_from_chain]), ("a", from_accumulator), ("b", widen(&chain_out)), ("y", from_outside.clone())]);
@@ -1359,7 +1367,11 @@ impl Gen {
             }
             let wide_magnitude_reg = self.register(accumulator_bits - 1);
             b.inst("wide_magnitude_reg", &wide_magnitude_reg, &[("d", wide_magnitude_d), ("q", wide_magnitude.clone())]);
-            let wide_leading = leading_zeros(&mut b, "wide_lzc", &wide_magnitude, a);
+            for (from, to) in wide_magnitude.iter().zip(&unit_wide_magnitude[cluster]) {
+                b.and_to(*from, enabled, *to);
+            }
+            let seen_wide: Vec<Bit> = if clusters > 1 { group_wide_magnitude[cluster].clone() } else { wide_magnitude.clone() };
+            let wide_leading = leading_zeros(&mut b, "wide_lzc", &seen_wide, a);
             let wide_shift = held_shift(&mut b, "wide_shift", load_wide_shift, &low);
             let wide_shifted = self.rounded_right(&mut b, "wide_right", &wide_read, &wide_shift, a as usize);
 
@@ -1522,6 +1534,25 @@ impl Gen {
             for (value, output) in seen.iter().zip(&group_magnitude) {
                 for (from, to) in value.iter().zip(output) {
                     l.b.or_to(*from, Bit::Zero, *to);
+                }
+            }
+            let mut wide_seen: Vec<Vec<Bit>> = unit_wide_magnitude.clone();
+            let mut sums: Vec<Vec<Bit>> = unit_accumulator.clone();
+            for (level, active) in on.iter().enumerate() {
+                wide_seen = (0..clusters).map(|k| {
+                    let merged: Vec<Bit> = wide_seen[k].iter().zip(&wide_seen[k ^ (1 << level)]).map(|(x, y)| l.or(*x, *y)).collect();
+                    l.mux_bus(*active, &wide_seen[k], &merged)
+                }).collect();
+                sums = (0..clusters).map(|k| {
+                    let added = l.adder(&sums[k], &sums[k ^ (1 << level)], Bit::Zero).0;
+                    l.mux_bus(*active, &sums[k], &added)
+                }).collect();
+            }
+            for (values, outputs) in [(&wide_seen, &group_wide_magnitude), (&sums, &group_accumulator)] {
+                for (value, output) in values.iter().zip(outputs) {
+                    for (from, to) in value.iter().zip(output) {
+                        l.b.or_to(*from, Bit::Zero, *to);
+                    }
                 }
             }
             for lane in 0..lanes {
@@ -2445,6 +2476,7 @@ impl DieProgram {
             w.magnitude_scan = step.magnitude_scan;
             w.reduce_group = step.reduce_group;
             (w.max_scan, w.max_out) = (step.max_scan, step.max_out);
+            w.reduce_group = step.reduce_group;
             w.accumulate = step.accumulate;
             w.wide_scan = step.wide_scan;
             w.wide_write = step.wide_write;

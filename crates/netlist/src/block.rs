@@ -335,7 +335,12 @@ pub trait BlockOps: Sized {
     /// `inverse_len` holds `1 / len` when `len` is not a power of two; otherwise a shift does it.
     /// `epsilon`, when given, keeps an almost silent vector from being blown up.
     fn rms_normalize(&mut self, x: u32, dst: u32, len: u32, temporary: (u32, u32), inverse_len: Option<u32>, epsilon: Option<u32>) {
-        self.dot(x, x, temporary.0, len.into());
+        self.rms_normalize_part(x, dst, (len, len), temporary, inverse_len, epsilon);
+    }
+
+    /// `rms_normalize` on a slice of `part` elements of a vector of `len`.
+    fn rms_normalize_part(&mut self, x: u32, dst: u32, (part, len): (u32, u32), temporary: (u32, u32), inverse_len: Option<u32>, epsilon: Option<u32>) {
+        self.dot(x, x, temporary.0, part.into());
         let (mean, spare) = match inverse_len {
             Some(factor) => {
                 self.scale(factor, temporary.0, temporary.1, 1.into());
@@ -346,7 +351,7 @@ pub trait BlockOps: Sized {
                 temporary
             }
         };
-        self.invert_root_and_scale(x, dst, len, (mean, spare), epsilon);
+        self.invert_root_and_scale(x, dst, part, (mean, spare), epsilon);
     }
 
     fn l2_normalize(&mut self, x: u32, dst: u32, len: u32, temporary: (u32, u32), epsilon: Option<u32>) {
@@ -711,6 +716,8 @@ pub struct Assembly {
     split: Option<(Expr, u32)>,
     /// Inside slices of one vector: the units counted together when normalising.
     slab_group: u32,
+    /// True inside a body that every unit runs with its own indices.
+    in_units: bool,
     /// How many neighbouring units the last loop over heads gave each head.
     head_stride: u32,
     /// Which of the A, B and left shifters are known to hold zero.
@@ -723,6 +730,74 @@ pub struct Assembly {
 }
 
 impl Assembly {
+    /// The units whose values count together inside the current loop.
+    fn group_bits(&self) -> u32 {
+        self.split.map_or(0, |(_, parts)| parts.trailing_zeros()).max(self.slab_group)
+    }
+
+    /// Normalises `len` elements of `reg` from `from`, sharing its one exponent.
+    fn normalize_from(&mut self, reg: u32, from: Expr, len: Expr) {
+        self.clear_shifts();
+        self.scan_and_shift(reg, from, len);
+
+        let mut count = alu(OP_LZC);
+        count.dst = self.sc(0);
+        // Units sharing a head look at all their parts, so they all shift alike.
+        count.reduce_group = self.group_bits();
+        self.push(count);
+        self.load_shifts(None, None, Some(self.sc(0)));
+        self.elements(len, &[from], true, |s, i, vector| {
+            let mut shift = alu(OP_SHIFT_LEFT);
+            shift.a = (reg, from + i);
+            shift.dst = (reg, from + i);
+            shift.vector = vector;
+            s.push(shift);
+        });
+        self.binary(OP_SUB, self.exponent(reg), self.sc(0), self.exponent(reg));
+        self.clear_shifts();
+    }
+
+    /// Narrows `sets` wide sums from `from` into the same places of `dst`.
+    fn narrow_part(&mut self, a: u32, b: u32, dst: u32, from: Expr, sets: Expr) {
+        let mut clear = alu(OP_MOV);
+        clear.write = false;
+        clear.wide_clear = true;
+        self.push(clear);
+        self.elements(sets, &[from], true, |s, set, vector| {
+            let mut scan = alu(OP_MOV);
+            scan.a = (0, from + set);
+            scan.write = false;
+            scan.wide_scan = true;
+            scan.vector = vector;
+            s.push(scan);
+        });
+        let mut count = alu(OP_WIDE_LZC);
+        count.dst = self.sc(0);
+        count.reduce_group = self.group_bits();
+        self.push(count);
+        self.immediate(accumulator_bits(self.bits) as i64 - self.bits as i64, self.sc(1));
+        self.binary(OP_SUB, self.sc(1), self.sc(0), self.sc(2));
+        self.immediate(0, self.sc(3));
+        self.binary(OP_MAX, self.sc(2), self.sc(3), self.sc(4));
+        let mut load = alu(OP_MOV);
+        load.a = self.sc(4);
+        load.write = false;
+        load.load_wide_shift = true;
+        self.push(load);
+        self.elements(sets, &[from], true, |s, set, vector| {
+            let mut out = alu(OP_WIDE_OUT);
+            out.a = (0, from + set);
+            out.dst = (dst, from + set);
+            out.vector = vector;
+            s.push(out);
+        });
+        self.binary(OP_ADD, self.exponent(a), self.exponent(b), self.sc(5));
+        self.binary(OP_ADD, self.sc(5), self.sc(4), self.sc(6));
+        self.immediate(1 - self.bits as i64, self.sc(7));
+        self.binary(OP_ADD, self.sc(6), self.sc(7), self.exponent(dst));
+        self.normalize_from(dst, from, sets);
+    }
+
     /// `dst[j] = Σ weights[i] · matrix[i · width + j]` over this unit's `rows`, added
     /// across a group of `1 << group` units.
     fn combine_rows(&mut self, weights: u32, matrix: u32, dst: u32, (width, rows): (u32, u32), group: u32) {
@@ -735,7 +810,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, head_stride: 1, shift_zero: [false; 3], zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_stride: 1, shift_zero: [false; 3], zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -920,6 +995,8 @@ impl Assembly {
         let mut write = alu(OP_MOV);
         write.write = false;
         write.wide_write = true;
+        // Units that each summed a slice store the total of all of them.
+        write.reduce_group = self.slab_group;
         write.dst = (0, wide_index);
         self.push(write);
     }
@@ -971,15 +1048,15 @@ impl Assembly {
         self.push(word);
     }
 
-    fn scan_and_shift(&mut self, reg: u32, len: Expr) {
+    fn scan_and_shift(&mut self, reg: u32, from: Expr, len: Expr) {
         let mut first = alu(OP_MOV);
-        first.a = (reg, 0.into());
+        first.a = (reg, from);
         first.write = false;
         first.magnitude_clear = true;
         self.push(first);
-        self.elements(len, &[], true, |s, i, vector| {
+        self.elements(len, &[from], true, |s, i, vector| {
             let mut scan = alu(OP_MOV);
-            scan.a = (reg, i);
+            scan.a = (reg, from + i);
             scan.magnitude_scan = true;
             scan.write = false;
             scan.vector = vector;
@@ -1114,24 +1191,9 @@ impl BlockOps for Assembly {
     }
 
     fn normalize(&mut self, reg: u32, len: Expr) {
-        self.clear_shifts();
-        self.scan_and_shift(reg, len);
-        let mut count = alu(OP_LZC);
-        count.dst = self.sc(0);
-        // Units sharing a head look at all their parts, so they all shift alike.
-        count.reduce_group = self.split.map_or(0, |(_, parts)| parts.trailing_zeros()).max(self.slab_group);
-        self.push(count);
-        self.load_shifts(None, None, Some(self.sc(0)));
-        self.elements(len, &[], true, |s, i, vector| {
-            let mut shift = alu(OP_SHIFT_LEFT);
-            shift.a = (reg, i);
-            shift.dst = (reg, i);
-            shift.vector = vector;
-            s.push(shift);
-        });
-        self.binary(OP_SUB, self.exponent(reg), self.sc(0), self.exponent(reg));
-        self.clear_shifts();
+        self.normalize_from(reg, 0.into(), len);
     }
+
 
     fn add_sub(&mut self, subtract: bool, a: At<Expr>, b: At<Expr>, b_stride: u32, dst: u32, len: Expr) {
         self.clear_shifts();
@@ -1257,42 +1319,7 @@ impl BlockOps for Assembly {
     }
 
     fn narrow_sums(&mut self, a: u32, b: u32, dst: u32, sets: Expr) {
-        let mut clear = alu(OP_MOV);
-        clear.write = false;
-        clear.wide_clear = true;
-        self.push(clear);
-        self.elements(sets, &[], true, |s, set, vector| {
-            let mut scan = alu(OP_MOV);
-            scan.a = (0, set);
-            scan.write = false;
-            scan.wide_scan = true;
-            scan.vector = vector;
-            s.push(scan);
-        });
-        let mut count = alu(OP_WIDE_LZC);
-        count.dst = self.sc(0);
-        self.push(count);
-        self.immediate(accumulator_bits(self.bits) as i64 - self.bits as i64, self.sc(1));
-        self.binary(OP_SUB, self.sc(1), self.sc(0), self.sc(2));
-        self.immediate(0, self.sc(3));
-        self.binary(OP_MAX, self.sc(2), self.sc(3), self.sc(4));
-        let mut load = alu(OP_MOV);
-        load.a = self.sc(4);
-        load.write = false;
-        load.load_wide_shift = true;
-        self.push(load);
-        self.elements(sets, &[], true, |s, set, vector| {
-            let mut out = alu(OP_WIDE_OUT);
-            out.a = (0, set);
-            out.dst = (dst, set);
-            out.vector = vector;
-            s.push(out);
-        });
-        self.binary(OP_ADD, self.exponent(a), self.exponent(b), self.sc(5));
-        self.binary(OP_ADD, self.sc(5), self.sc(4), self.sc(6));
-        self.immediate(1 - self.bits as i64, self.sc(7));
-        self.binary(OP_ADD, self.sc(6), self.sc(7), self.exponent(dst));
-        self.normalize(dst, sets);
+        self.narrow_part(a, b, dst, 0.into(), sets);
     }
 
     fn function(&mut self, function: u32, src: u32, dst: u32, len: Expr) {
@@ -1450,7 +1477,8 @@ impl BlockOps for Assembly {
         // Slices of a power of two, whole blocks, that divide the vector among the units.
         let lanes = 1u32 << self.lane_bits;
         let slab = (1..=len.max(1).ilog2()).map(|bits| 1u32 << bits).find(|slab| *slab >= lanes && len.is_multiple_of(*slab) && len / slab <= self.clusters);
-        let Some(slab) = slab.filter(|slab| self.clusters > 1 && self.streams && len / slab > 1) else {
+        // Units already running separate copies of a loop cannot split again.
+        let Some(slab) = slab.filter(|slab| self.clusters > 1 && self.streams && len / slab > 1 && !self.in_units) else {
             return body(self, 0.into(), len);
         };
         let units = len / slab;
@@ -1462,7 +1490,9 @@ impl BlockOps for Assembly {
         let group = units.next_power_of_two().trailing_zeros();
         let outer_group = std::mem::replace(&mut self.slab_group, group);
         // The unit number times the slice length, so the start is known to sit on a block.
+        self.in_units = true;
         body(self, Expr::var(start) * slab, slab);
+        self.in_units = false;
         self.slab_group = outer_group;
         let inside = std::mem::replace(&mut self.steps, before);
         self.forget_shifts();
@@ -1492,7 +1522,9 @@ impl BlockOps for Assembly {
         self.forget_shifts();
         let before = std::mem::take(&mut self.steps);
         self.split = Some((Expr::var(part), parts));
+        self.in_units = true;
         body(self, Expr::var(first), Expr::var(second));
+        self.in_units = false;
         self.split = None;
         let inside = std::mem::replace(&mut self.steps, before);
         self.forget_shifts();
@@ -1518,7 +1550,9 @@ impl BlockOps for Assembly {
         self.zero_place();
         self.forget_shifts();
         let before = std::mem::take(&mut self.steps);
+        self.in_units = true;
         body(self, Expr::var(first), Expr::var(second));
+        self.in_units = false;
         let inside = std::mem::replace(&mut self.steps, before);
         self.forget_shifts();
         let total = outer * inner;
@@ -1742,7 +1776,8 @@ impl BlockOps for Assembly {
         if units > 1 {
             self.steps.push(Step::WideReduce { rows: rows.into(), group: self.clusters.trailing_zeros() });
         }
-        self.narrow_sums(matrix, src, dst, rows.into());
+        // Every unit holds every total; each narrows a slice and one stream collects them.
+        self.in_slabs(rows, &[dst], |s, start, count| s.narrow_part(matrix, src, dst, start, count.into()));
     }
 
     fn copy_row(&mut self, _name: &str, matrix: u32, row: Expr, cols: u32, dst: u32) {
