@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { fpgaBoards, type Maturity, type QualityRisk } from "../engine";
 import { makers, type FpgaBoard } from "../wizard/plan";
 import { formatNumber, fromLog, toLog } from "../format";
+import { dieLimit, fitDie } from "../dieSize";
 import { matchingPreset, PARAM_GROUPS, type Field } from "../params";
 import { useDesign } from "../store";
 import { useT } from "../i18n";
@@ -214,7 +215,11 @@ function TargetRows() {
   const area = Number(params.die_max_mm2);
   const width = Number(params.die_width_mm) || Math.round(Math.sqrt(area) * 10) / 10;
   const height = Number(params.die_height_mm) || Math.round((area / width) * 10) / 10;
-  const setSize = (w: number, h: number) => setParams({ die_width_mm: w, die_height_mm: h, die_max_mm2: Math.round(w * h) });
+  const limitOf = (id: string) => dieLimit(nodes.find((n) => n.id === id)?.die_max_mm2);
+  const limit = limitOf(node);
+  // Editing one side keeps the other and stops where the process limit is reached.
+  const setWidth = (w: number) => setParams(fitDie(Math.min(w, Math.floor((limit / height) * 10) / 10), height, limit));
+  const setHeight = (h: number) => setParams(fitDie(width, Math.min(h, Math.floor((limit / width) * 10) / 10), limit));
 
   return (
     <>
@@ -229,8 +234,12 @@ function TargetRows() {
               setParams(
                 target === "fpga"
                   ? { node: "fpga_u250", fpga_board: params.fpga_board || "kv260", dies: 1 }
-                  : // A die is at most the scanner's reticle, 26 × 33 mm.
-                    { node: silicon.some((n) => n.id === params.node) ? params.node : "n6", ...(area > 858 ? { die_width_mm: 26, die_height_mm: 33, die_max_mm2: 858 } : {}) },
+                  : (() => {
+                      const chosen = silicon.some((n) => n.id === params.node) ? node : "n6";
+                      // A die is at most the scanner's reticle, 26 × 33 mm, or what the process takes.
+                      const fitted = area > 858 ? fitDie(26, 33, limitOf(chosen)) : fitDie(width, height, limitOf(chosen));
+                      return { node: chosen, ...fitted };
+                    })(),
               )
             }
           />
@@ -261,7 +270,7 @@ function TargetRows() {
           <div className="row">
             <div className="row-head">
               <span className="row-label">{t("Proceso")}</span>
-              <select aria-label={t("Proceso")} value={node} onChange={(e) => setParam("node", e.target.value)}>
+              <select aria-label={t("Proceso")} value={node} onChange={(e) => setParams({ node: e.target.value, ...fitDie(width, height, limitOf(e.target.value)) })}>
                 {silicon.map((n) => (
                   <option key={n.id} value={n.id}>
                     {n.label}
@@ -274,12 +283,13 @@ function TargetRows() {
             <div className="row-head">
               <span className="row-label">{t("Tamaño del die")}</span>
               <span className="die-size">
-                <input type="number" min={1} max={33} step={0.5} aria-label={t("Ancho del die")} value={width} onChange={(e) => setSize(Number(e.target.value) || 1, height)} />
+                <input type="number" min={1} max={33} step={0.5} aria-label={t("Ancho del die")} value={width} onChange={(e) => setWidth(Number(e.target.value) || 1)} />
                 ×
-                <input type="number" min={1} max={33} step={0.5} aria-label={t("Alto del die")} value={height} onChange={(e) => setSize(width, Number(e.target.value) || 1)} />
+                <input type="number" min={1} max={33} step={0.5} aria-label={t("Alto del die")} value={height} onChange={(e) => setHeight(Number(e.target.value) || 1)} />
                 <small>mm</small>
               </span>
             </div>
+            {limit < 858 && <p className="row-note">{t("Este proceso admite dies de hasta")} {formatNumber(limit)} mm².</p>}
           </div>
           <div className="row">
             <div className="row-head">

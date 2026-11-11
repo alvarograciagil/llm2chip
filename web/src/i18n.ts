@@ -252,6 +252,7 @@ const EN: Record<string, string> = {
   "Repetir el layout": "Lay it out again",
   "El circuito cambió desde este layout.": "The circuit changed since this layout.",
   "Usar las cifras medidas": "Use the measured figures",
+  "Este proceso admite dies de hasta": "This process takes dies of up to",
   "Volver a la estimación": "Back to the estimate",
   "El estimador usa el área y la frecuencia medidas de esta celda.": "The estimator uses this cell's measured area and frequency.",
   "Área de la celda": "Cell area",

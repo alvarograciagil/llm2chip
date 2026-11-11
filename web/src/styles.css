@@ -3012,3 +3012,9 @@ label:hover > .hint-icon {
   border-radius: 8px;
   background: #000;
 }
+
+.row-note {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--label-2);
+}

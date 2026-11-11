@@ -330,12 +330,6 @@ Por dónde llegan los pesos al encender el chip: NVMe, PCIe 5.0 o UART. Solo afe
 
 *Opciones: NVMe, PCIe 5.0 x16, UART.*
 
-### Celda medida (`measured_cell`, `measured_cell_um2`, `measured_cell_fmax_ghz`)
-
-El área (µm²) y la frecuencia máxima (GHz) de la celda de cálculo tras hacer su layout con OpenROAD. No se tocan a mano: los escribe el botón «Usar las cifras medidas» del apartado de layout. `measured_cell` identifica la celda y el proceso (`proceso:codificación-bits de peso-bits de activación-multiplicador-etapas de multiplicador-etapas de suma`), y el estimador solo usa estas cifras mientras el diseño tenga esa misma celda en ese proceso. Ver [asic.md](asic.md).
-
-*Vacío y 0: se usa la estimación.*
-
 ## Generador de puertas
 
 El circuito que se simula puerta a puerta y se exporta a Verilog sale de estos parámetros. La mayoría no se eligen a mano: el generador los deduce del modelo y del microprograma para que el die tenga justo lo que necesita.

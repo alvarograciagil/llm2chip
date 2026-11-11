@@ -128,6 +128,8 @@ export interface Optimization {
 export interface TechNode {
   id: string;
   label: string;
+  /** The largest die the process takes, in mm². */
+  die_max_mm2?: number;
 }
 
 export interface ModelSource {
