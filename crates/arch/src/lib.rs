@@ -3,6 +3,7 @@
 
 mod estimate;
 mod floorplan;
+pub mod fpga;
 mod optim;
 mod params;
 mod tech;

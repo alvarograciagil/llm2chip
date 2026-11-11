@@ -80,6 +80,9 @@ pub struct Violation {
     pub fix: String,
     /// The parameter to reveal when the user asks how to fix this.
     pub field: Option<&'static str>,
+    /// A value of that parameter that clears this, when there is one to offer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -350,20 +353,20 @@ fn check_envelope(model: &ModelGraph, p: &ChipParams, out: &mut Vec<Violation>) 
             severity: Severity::Error,
             message: "Con ROM cada die lleva grabados pesos distintos, así que no pueden ser todos iguales.".into(),
             fix: "Usa SRAM o genera cada die a medida.".into(),
-            field: Some("die_mode"),
+            field: Some("die_mode"), value: Some(serde_json::json!("custom")),
         });
     }
-    for (too_big, what, field) in [
-        (model.num_layers > p.max_layers, "capas", "max_layers"),
-        (model.hidden_size > p.max_hidden_size as u64, "ancho interno", "max_hidden_size"),
-        (model.vocab_size > p.max_vocabulary as u64, "vocabulario", "max_vocabulary"),
+    for (too_big, what, field, model_value) in [
+        (model.num_layers > p.max_layers, "capas", "max_layers", model.num_layers as u64),
+        (model.hidden_size > p.max_hidden_size as u64, "ancho interno", "max_hidden_size", model.hidden_size),
+        (model.vocab_size > p.max_vocabulary as u64, "vocabulario", "max_vocabulary", model.vocab_size),
     ] {
         if too_big {
             out.push(Violation {
                 severity: Severity::Error,
                 message: format!("El modelo supera el límite de {what} de este diseño."),
                 fix: "Sube ese límite.".into(),
-                field: Some(field),
+                field: Some(field), value: Some(serde_json::json!(model_value)),
             });
         }
     }
@@ -650,12 +653,14 @@ fn check_optimizations(p: &ChipParams, out: &mut Vec<Violation>) {
         message: message.into(),
         fix: fix.into(),
         field: None,
+        value: None,
     };
     let error = |message: &str, fix: &str| Violation {
         severity: Severity::Error,
         message: message.into(),
         fix: fix.into(),
         field: None,
+        value: None,
     };
     for id in &p.optimizations {
         if !catalog().iter().any(|o| o.id == id) {
@@ -692,19 +697,13 @@ fn check_optimizations(p: &ChipParams, out: &mut Vec<Violation>) {
             severity: Severity::Aviso,
             message: format!("Este formato de pesos necesita un acumulador de {} bits; se usa ese ancho en lugar de {}.", p.effective_accumulator(), p.accumulator_bits),
             fix: "Sube los bits de acumulador o usa un formato más estrecho.".into(),
-            field: Some("accumulator_bits"),
+            field: Some("accumulator_bits"), value: Some(serde_json::json!(p.effective_accumulator())),
         });
     }
     if p.has("pesos_csd") && p.weight_backend != WeightBackend::Rom {
         out.push(aviso(
             "Los pesos CSD solo ahorran área si están grabados en ROM: con memoria cargable la celda necesita un multiplicador general.",
             "Elige ROM como memoria de pesos.",
-        ));
-    }
-    if p.weight_backend == WeightBackend::Rom {
-        out.push(aviso(
-            "Con ROM el chip solo sirve para este modelo: cambiarlo exige fabricar máscaras nuevas.",
-            "Usa SRAM para poder cargar otros pesos.",
         ));
     }
 }
@@ -855,8 +854,18 @@ fn resolve_circuit(tech: &TechNode, model: &ModelGraph, p: &ChipParams, widest: 
     Resolved { params, decisions, narrow }
 }
 
-/// Estimates area, speed and energy. A speed target decides the multipliers per die.
+/// Estimates area, speed and energy. A speed target decides the multipliers per die. On
+/// an FPGA board, the board sets the clock and the external memory, and the report says
+/// how much of the board the design takes.
 pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
+    let Some(board) = crate::fpga::target(p) else { return estimate_on_silicon(model, p) };
+    let on_board = crate::fpga::on_board(p, board);
+    let mut report = estimate_on_silicon(model, &on_board)?;
+    crate::fpga::check(&mut report, &on_board, board);
+    Ok(report)
+}
+
+fn estimate_on_silicon(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
     if p.target_tok_s <= 0.0 {
         return estimate_design(model, p);
     }
@@ -875,7 +884,7 @@ pub fn estimate(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
             severity: Severity::Aviso,
             message: "No se alcanza la velocidad objetivo solo con más multiplicadores.".into(),
             fix: "Sube los carriles vectoriales, la frecuencia o el ancho de banda de memoria.".into(),
-            field: Some("target_tok_s"),
+            field: Some("target_tok_s"), value: Some(serde_json::json!((report.metric("tok_s_base").unwrap_or(0.0) / 100.0).floor() * 100.0)),
         });
     }
     Ok(report)
@@ -923,7 +932,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
                 budget / 1e9
             ),
             fix: "Sube los parámetros máximos.".into(),
-            field: Some("max_params_g"),
+            field: Some("max_params_g"), value: Some(serde_json::json!((included / 1e9 * 100.0).ceil() / 100.0)),
         });
     }
     if model.max_context > 0 && p.context_tokens > model.max_context {
@@ -931,7 +940,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             severity: Severity::Aviso,
             message: format!("El modelo declara {} tokens de contexto nativos; por encima puede perder calidad.", model.max_context),
             fix: "Reduce el contexto si la calidad cae.".into(),
-            field: Some("context_tokens"),
+            field: Some("context_tokens"), value: Some(serde_json::json!(model.max_context)),
         });
     }
     if p.mtp_enabled && model.params_in(Block::Mtp) == 0 {
@@ -939,7 +948,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             severity: Severity::Aviso,
             message: "Este modelo no tiene cabeza MTP.".into(),
             fix: "Desactiva MTP.".into(),
-            field: Some("mtp_enabled"),
+            field: Some("mtp_enabled"), value: Some(serde_json::json!(false)),
         });
     }
 
@@ -972,11 +981,12 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
                 p.ddr_capacity_gb
             ),
             fix: "Amplía la memoria externa o reduce los bits de peso.".into(),
-            field: Some("ddr_capacity_gb"),
+            field: Some("ddr_capacity_gb"), value: Some(serde_json::json!((store.chip_bits / 8e9).ceil())),
         });
     }
 
-    let die_limit = p.die_max_mm2.min(tech.die_max_mm2);
+    // On an FPGA board the board itself is the limit, which `fpga::check` applies.
+    let die_limit = if crate::fpga::target(p).is_some() { f64::MAX } else { p.die_max_mm2.min(tech.die_max_mm2) };
     let mut dies = if p.dies > 0 { p.dies } else { 1 };
     let mut blocks = blocks_for(&inputs, dies);
     if p.dies == 0 {
@@ -991,7 +1001,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             severity: Severity::Error,
             message: format!("Cada die ocupa {die_area:.0} mm² y el máximo es {die_limit:.0} mm²."),
             fix: "Añade dies, reduce multiplicadores o contexto, o activa optimizaciones de memoria.".into(),
-            field: Some("dies"),
+            field: Some("dies"), value: Some(serde_json::json!(0)),
         });
     }
     let d = dies as f64;
@@ -1010,7 +1020,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             severity: Severity::Aviso,
             message: format!("Con {} etapas de multiplicador el máximo son {fmax:.2} GHz; se simula a esa frecuencia.", p.mac_stages),
             fix: "Añade etapas o baja la frecuencia.".into(),
-            field: Some("freq_ghz"),
+            field: Some("freq_ghz"), value: Some(serde_json::json!((fmax * 100.0).floor() / 100.0)),
         });
     }
     let tree_levels = n.log2().ceil().max(1.0);
@@ -1027,7 +1037,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             severity: Severity::Aviso,
             message: format!("{total_area:.0} mm² de silicio no caben en un encapsulado de {PACKAGE_MAX_MM2:.0} mm²."),
             fix: "Elige el enlace automático, que reparte los dies en varios encapsulados unidos por SerDes.".into(),
-            field: Some("link"),
+            field: Some("link"), value: Some(serde_json::json!("auto")),
         });
     }
     // Chips that share each layer, and stages in a chain: by layers each chip is a stage
@@ -1054,7 +1064,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             severity: Severity::Aviso,
             message: format!("Los grupos de {group} chips que comparten cada capa no caben en un encapsulado: sus sumas cruzarían la placa, mucho más lenta."),
             fix: "Usa grupos más pequeños (reparto mixto) o dies menores para que cada grupo quepa en un encapsulado.".into(),
-            field: Some("tensor_group"),
+            field: Some("tensor_group"), value: Some(serde_json::json!(dies.div_ceil(plan.packages).max(1))),
         });
     }
     let compute_time = total_cycles / (freq * 1e9);

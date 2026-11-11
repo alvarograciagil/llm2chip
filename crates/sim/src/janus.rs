@@ -312,3 +312,171 @@ impl Janus {
         Ok((0..n).flat_map(|i| (0..3).map(move |ch| (ch, i))).map(|(ch, i)| (((rgb.values[ch * n + i].clamp(-1.0, 1.0) + 1.0) * 127.5).round()) as u8).collect())
     }
 }
+
+/// What Janus sees in a picture: a SigLIP encoder of 16×16 patches of a 384×384 image and
+/// a small network that turns each patch into a vector the language model reads in place
+/// of one `<image_placeholder>`.
+pub struct JanusEye {
+    weights: Weights,
+    side: usize,
+    patch: usize,
+    hidden: usize,
+    heads: usize,
+    layers: usize,
+    epsilon: f32,
+    background: [f32; 3],
+    /// The tokens around the image in the prompt: before it, in place of each patch, after it.
+    pub begin: u32,
+    pub placeholder: u32,
+    pub end: u32,
+}
+
+/// Each row of `xs` times the matrix, plus the bias: one row per patch, the patches at once.
+fn rows_times(xs: &[Vec<f32>], weight: &[f32], bias: &[f32]) -> Vec<Vec<f32>> {
+    let inputs = xs.first().map_or(0, Vec::len);
+    xs.par_iter().map(|x| bias.iter().enumerate().map(|(o, b)| weight[o * inputs..(o + 1) * inputs].iter().zip(x).map(|(w, v)| w * v).sum::<f32>() + b).collect()).collect()
+}
+
+fn layer_norm(x: &[f32], weight: &[f32], bias: &[f32], epsilon: f32) -> Vec<f32> {
+    let n = x.len() as f32;
+    let mean = x.iter().sum::<f32>() / n;
+    let variance = x.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
+    let scale = 1.0 / (variance + epsilon).sqrt();
+    x.iter().zip(weight).zip(bias).map(|((v, w), b)| (v - mean) * scale * w + b).collect()
+}
+
+impl JanusEye {
+    pub fn open(dir: &Path) -> Result<Option<Self>, String> {
+        let config: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        let vision = &config["vision_config"];
+        if config["model_type"].as_str() != Some("janus") || !vision.is_object() {
+            return Ok(None);
+        }
+        let processor: Value = std::fs::read_to_string(dir.join("preprocessor_config.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+        let number = |v: &Value, d: usize| v.as_u64().map_or(d, |n| n as usize);
+        let tokenizer: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("tokenizer.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        let token = |text: &str, default: u32| tokenizer["added_tokens"].as_array().and_then(|a| a.iter().find(|t| t["content"] == text)).and_then(|t| t["id"].as_u64()).map_or(default, |v| v as u32);
+        let gray = |i: usize| processor["background_color"][i].as_f64().unwrap_or(127.0) as f32;
+        Ok(Some(Self {
+            weights: Weights::open(dir)?,
+            side: number(&vision["image_size"], 384),
+            patch: number(&vision["patch_size"], 16),
+            hidden: number(&vision["hidden_size"], 1024),
+            heads: number(&vision["num_attention_heads"], 16),
+            layers: number(&vision["num_hidden_layers"], 24),
+            epsilon: vision["layer_norm_eps"].as_f64().unwrap_or(1e-6) as f32,
+            background: [gray(0), gray(1), gray(2)],
+            begin: token("<begin_of_image>", 100_003),
+            placeholder: token("<image_placeholder>", 100_581),
+            end: token("<end_of_image>", 100_580),
+        }))
+    }
+
+    /// How many vectors a picture becomes: one per patch.
+    pub fn tokens(&self) -> usize {
+        (self.side / self.patch).pow(2)
+    }
+
+    fn tensor(&self, name: &str) -> Result<Vec<f32>, String> {
+        self.weights.floats(&format!("model.{name}"))
+    }
+
+    /// The picture in the encoder's frame: its longer side brought to the encoder's, the rest
+    /// filled with the processor's gray, and each value taken from [0, 255] to [-1, 1].
+    fn frame(&self, rgb: &[u8], width: usize, height: usize) -> Result<Vec<f32>, String> {
+        if rgb.len() != width * height * 3 || width == 0 || height == 0 {
+            return Err(format!("la imagen de {width}×{height} debería tener {} bytes RGB", width * height * 3));
+        }
+        let side = self.side;
+        let scale = side as f32 / width.max(height) as f32;
+        let (w, h) = (((width as f32 * scale).round() as usize).clamp(1, side), ((height as f32 * scale).round() as usize).clamp(1, side));
+        let (left, top) = ((side - w) / 2, (side - h) / 2);
+        let mut planes = vec![0.0f32; 3 * side * side];
+        for y in 0..side {
+            for x in 0..side {
+                for c in 0..3 {
+                    let value = if (left..left + w).contains(&x) && (top..top + h).contains(&y) {
+                        // Bilinear, from the centre of the output pixel.
+                        let sx = ((x - left) as f32 + 0.5) / scale - 0.5;
+                        let sy = ((y - top) as f32 + 0.5) / scale - 0.5;
+                        let (x0, y0) = (sx.floor().max(0.0) as usize, sy.floor().max(0.0) as usize);
+                        let (x1, y1) = ((x0 + 1).min(width - 1), (y0 + 1).min(height - 1));
+                        let (fx, fy) = ((sx - x0 as f32).clamp(0.0, 1.0), (sy - y0 as f32).clamp(0.0, 1.0));
+                        let at = |xx: usize, yy: usize| rgb[(yy * width + xx) * 3 + c] as f32;
+                        (at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx) * (1.0 - fy) + (at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx) * fy
+                    } else {
+                        self.background[c]
+                    };
+                    planes[(c * side + y) * side + x] = (value / 255.0 - 0.5) / 0.5;
+                }
+            }
+        }
+        Ok(planes)
+    }
+
+    /// The vectors the language model reads for a picture, one per patch, row by row.
+    pub fn encode(&self, rgb: &[u8], width: usize, height: usize) -> Result<Vec<Vec<f32>>, String> {
+        let planes = self.frame(rgb, width, height)?;
+        let (side, patch, hidden) = (self.side, self.patch, self.hidden);
+        let grid = side / patch;
+        // Patches through the convolution that has a patch for kernel and stride.
+        let kernel = self.tensor("vision_model.embeddings.patch_embedding.weight")?;
+        let kernel_bias = self.tensor("vision_model.embeddings.patch_embedding.bias")?;
+        let place = self.tensor("vision_model.embeddings.position_embedding.weight")?;
+        let mut x: Vec<Vec<f32>> = (0..grid * grid)
+            .into_par_iter()
+            .map(|p| {
+                let (row, col) = (p / grid, p % grid);
+                let pixels: Vec<f32> = (0..3).flat_map(|c| (0..patch).flat_map(move |dy| (0..patch).map(move |dx| (c, dy, dx)))).map(|(c, dy, dx)| planes[(c * side + row * patch + dy) * side + col * patch + dx]).collect();
+                (0..hidden).map(|o| kernel[o * pixels.len()..(o + 1) * pixels.len()].iter().zip(&pixels).map(|(w, v)| w * v).sum::<f32>() + kernel_bias[o] + place[p * hidden + o]).collect()
+            })
+            .collect();
+        let heads = self.heads;
+        let head = hidden / heads;
+        for layer in 0..self.layers {
+            let p = |name: &str| self.tensor(&format!("vision_model.encoder.layers.{layer}.{name}"));
+            let (w1, b1) = (p("layer_norm1.weight")?, p("layer_norm1.bias")?);
+            let normed: Vec<Vec<f32>> = x.iter().map(|v| layer_norm(v, &w1, &b1, self.epsilon)).collect();
+            let (q, k, v) = (rows_times(&normed, &p("self_attn.q_proj.weight")?, &p("self_attn.q_proj.bias")?), rows_times(&normed, &p("self_attn.k_proj.weight")?, &p("self_attn.k_proj.bias")?), rows_times(&normed, &p("self_attn.v_proj.weight")?, &p("self_attn.v_proj.bias")?));
+            let scale = 1.0 / (head as f32).sqrt();
+            // Every patch looks at every other, in each head.
+            let attended: Vec<Vec<f32>> = (0..x.len())
+                .into_par_iter()
+                .map(|i| {
+                    let mut out = vec![0.0f32; hidden];
+                    for h in 0..heads {
+                        let range = h * head..(h + 1) * head;
+                        let scores: Vec<f32> = k.iter().map(|kj| q[i][range.clone()].iter().zip(&kj[range.clone()]).map(|(a, b)| a * b).sum::<f32>() * scale).collect();
+                        let top = scores.iter().copied().fold(f32::MIN, f32::max);
+                        let weights: Vec<f32> = scores.iter().map(|s| (s - top).exp()).collect();
+                        let total: f32 = weights.iter().sum();
+                        for (w, vj) in weights.iter().zip(&v) {
+                            for (o, value) in out[range.clone()].iter_mut().zip(&vj[range.clone()]) {
+                                *o += w / total * value;
+                            }
+                        }
+                    }
+                    out
+                })
+                .collect();
+            let projected = rows_times(&attended, &p("self_attn.projection_layer.weight")?, &p("self_attn.projection_layer.bias")?);
+            for (row, add) in x.iter_mut().zip(&projected) {
+                row.iter_mut().zip(add).for_each(|(a, b)| *a += b);
+            }
+            let (w2, b2) = (p("layer_norm2.weight")?, p("layer_norm2.bias")?);
+            let normed: Vec<Vec<f32>> = x.iter().map(|v| layer_norm(v, &w2, &b2, self.epsilon)).collect();
+            let mut up = rows_times(&normed, &p("mlp.fc1.weight")?, &p("mlp.fc1.bias")?);
+            up.par_iter_mut().for_each(|row| row.iter_mut().for_each(|v| *v = gelu(*v)));
+            let down = rows_times(&up, &p("mlp.fc2.weight")?, &p("mlp.fc2.bias")?);
+            for (row, add) in x.iter_mut().zip(&down) {
+                row.iter_mut().zip(add).for_each(|(a, b)| *a += b);
+            }
+        }
+        let (w, b) = (self.tensor("vision_model.post_layernorm.weight")?, self.tensor("vision_model.post_layernorm.bias")?);
+        let x: Vec<Vec<f32>> = x.iter().map(|v| layer_norm(v, &w, &b, self.epsilon)).collect();
+        // The aligner: up to the language model's width, a GELU, and one more layer.
+        let mut aligned = rows_times(&x, &self.tensor("aligner.fc1.weight")?, &self.tensor("aligner.fc1.bias")?);
+        aligned.par_iter_mut().for_each(|row| row.iter_mut().for_each(|v| *v = gelu(*v)));
+        Ok(rows_times(&aligned, &self.tensor("aligner.hidden_layers.0.weight")?, &self.tensor("aligner.hidden_layers.0.bias")?))
+    }
+}

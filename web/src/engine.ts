@@ -4,6 +4,7 @@ import init, {
   builtin_models,
   default_params,
   estimate_design,
+  fpga_boards,
   optimization_catalog,
   presets,
   schedule_design,
@@ -86,6 +87,8 @@ export interface Violation {
   message: string;
   fix: string;
   field: string | null;
+  /** A value of `field` that clears the problem, when the estimator can offer one. */
+  value?: unknown;
 }
 
 export interface Report {
@@ -131,6 +134,8 @@ export interface ModelSource {
   id: string;
   name: string;
   config: string;
+  /** The folder with its weights, for a model chosen from this computer. */
+  path?: string;
 }
 
 export interface Preset {
@@ -226,6 +231,8 @@ export const defaultParams = (): ChipParams => JSON.parse(default_params());
 export const optimizationCatalog = (): Optimization[] => JSON.parse(optimization_catalog());
 export const designPresets = (): Preset[] => JSON.parse(presets());
 export const techNodes = (): TechNode[] => JSON.parse(tech_nodes());
+/** The FPGA boards a design can target. */
+export const fpgaBoards = (): unknown[] => JSON.parse(fpga_boards());
 
 /** Null for models the compiler cannot lower yet. */
 export function programDesign(model: ModelSource): Program | null {

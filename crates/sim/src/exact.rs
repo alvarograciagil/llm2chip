@@ -26,6 +26,7 @@ fn exact_config(bits: u32) -> DieConfig {
 pub struct ExactEngine {
     program: Program,
     layout: Layout,
+    bits: u32,
     vm: BlockVm,
     position: usize,
     draft_tokens: usize,
@@ -42,9 +43,10 @@ impl ExactEngine {
         let config = exact_config(bits);
         let weights = Arc::new(weights);
         let layout = Layout::new(&program, &weights, config, None)?;
+        let exponents = exponent_register(&config);
         let mut vm = BlockVm::new(&config, layout.registers_used() as usize + 8, Some(weights));
         vm.compute_in_cells();
-        let mut engine = Self { program, layout, vm, position: 0, draft_tokens: 0, exponents: exponent_register(&config), logits: Vec::new() };
+        let mut engine = Self { program, layout, bits, vm, position: 0, draft_tokens: 0, exponents, logits: Vec::new() };
         engine.reset();
         Ok(engine)
     }
@@ -81,6 +83,24 @@ impl ExactEngine {
 
     pub fn position(&self) -> usize {
         self.position
+    }
+
+    /// A vector in place of a token's embedding, such as a picture's: the chip loads it,
+    /// in its own format, where the token's row would go. Only text positions: the three
+    /// positions of M-RoPE are not computed by the chip yet.
+    pub fn step_embedding(&mut self, embedding: &[f32], positions: [u64; 3], want_logits: bool) -> Result<Option<Vec<f32>>, String> {
+        if positions[1] != positions[0] || positions[2] != positions[0] {
+            return Err("las imágenes de este modelo usan M-RoPE (tres posiciones), que el chip aún no calcula".into());
+        }
+        if positions[0] != self.position as u64 {
+            return Err("el chip solo coloca cada vector en la posición siguiente".into());
+        }
+        let values: Vec<f64> = embedding.iter().map(|v| *v as f64).collect();
+        let (mantissas, exponent) = netlist::block::encode_vector(&values, self.bits);
+        self.vm.feed_row(mantissas, exponent);
+        self.layout.run_token(&mut self.vm, &self.program, 0, self.position as u32, want_logits)?;
+        self.position += 1;
+        Ok(want_logits.then(|| self.vm.floats(self.layout.logits_register(&self.program), self.program.vocab)))
     }
 
     pub fn step(&mut self, token: u32, want_logits: bool) -> Result<Option<Vec<f32>>, String> {

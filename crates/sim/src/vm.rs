@@ -31,9 +31,17 @@ pub struct BlockVm {
     matrix_exponents: RefCell<HashMap<String, i64>>,
     wide: Vec<i64>,
     in_cells: bool,
+    /// A row that takes the place of the next one read from an embedding table, as the
+    /// chip's loader puts a picture's vector where a token's row would go.
+    row_in: Option<(Vec<i64>, i64)>,
 }
 
 impl BlockVm {
+    /// The row the next embedding read gives instead of the table's.
+    pub fn feed_row(&mut self, mantissas: Vec<i64>, exponent: i64) {
+        self.row_in = Some((mantissas, exponent));
+    }
+
     pub fn new(config: &DieConfig, registers: usize, weights: Option<Arc<Weights>>) -> Self {
         Self {
             bits: config.cell.activation_bits,
@@ -45,6 +53,7 @@ impl BlockVm {
             matrix_exponents: RefCell::new(HashMap::new()),
             wide: Vec::new(),
             in_cells: false,
+            row_in: None,
         }
     }
 
@@ -384,6 +393,9 @@ impl BlockOps for BlockVm {
     }
 
     fn copy_row(&mut self, name: &str, _matrix: u32, row: u32, cols: u32, dst: u32) {
+        if let Some((mantissas, exponent)) = self.row_in.take() {
+            return self.load_mantissas(dst, &mantissas, exponent);
+        }
         let weights = self.weights.clone().expect("la máquina necesita los pesos");
         let exponent = self.matrix_exponent(name, cols);
         let matrix = weights.matrix(name).expect("matriz del programa");

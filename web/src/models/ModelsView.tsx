@@ -15,8 +15,8 @@ function useToDesigner() {
   const addModel = useDesign((s) => s.addModel);
   const setParam = useDesign((s) => s.setParam);
   const setView = useDesign((s) => s.setView);
-  return (name: string, config: string, adaptation: Adaptation) => {
-    addModel(name, config);
+  return (name: string, config: string, adaptation: Adaptation, path?: string) => {
+    addModel(name, config, path);
     // The chip is sized for this model, with a sliver so that rounding never leaves it short.
     if (adaptation.parameters) setParam("max_params_g", (adaptation.parameters / 1e9) * 1.001);
     setView("plano");
@@ -72,7 +72,7 @@ function LocalList() {
             <p className="model-path" title={m.path}>{m.path}</p>
           </div>
           <div className="model-actions">
-            <button className="pill" disabled={!m.adaptation.design} onClick={() => toDesigner(m.name, m.config, m.adaptation)}>Diseñar chip</button>
+            <button className="pill" disabled={!m.adaptation.design} onClick={() => toDesigner(m.name, m.config, m.adaptation, m.path)}>Diseñar chip</button>
             <button className="pill" disabled={!m.supported} onClick={() => simulate(m)}>Simular</button>
             <button className="pill" disabled={!m.supported || writing} onClick={() => makeImage(m)} title="Prepara la imagen de arranque del chip: microcódigo, pesos y tablas que el firmware carga al encender">Imagen de arranque</button>
             <button className="pill" disabled={!m.supported || measuring} onClick={() => measure(m)}>Medir velocidad</button>

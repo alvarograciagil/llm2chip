@@ -18,5 +18,6 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 sim = { path = "../sim" }
+tokenizer-rt = { path = "../tokenizer-rt" }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 tokio = { version = "1", features = ["fs", "macros", "io-util", "rt-multi-thread", "sync", "time"] }

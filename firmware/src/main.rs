@@ -5,7 +5,7 @@
 
 use core::arch::global_asm;
 use core::ptr::{read_volatile, write_volatile};
-use tokenizer_rt::{Decoding, Tokenizer, F_ARENA_WORDS, F_TEXT, F_TEXT_BYTES};
+use tokenizer_rt::{Decoding, LoopWatch, Tokenizer, F_ARENA_WORDS, F_TEXT, F_TEXT_BYTES};
 
 const HOST_RX_DATA: *const u32 = 0x2000_0000 as *const u32;
 const HOST_RX_STATUS: *const u32 = 0x2000_0004 as *const u32;
@@ -437,6 +437,8 @@ extern "C" fn main() {
     let mut decoding = if info(INFO_RAW_TOKENS) != 0 { Decoding::default() } else { tokenizer().decoding() };
     let mut pending = [(0u32, [0u32; MAX_DRAFT_DEPTH]); MAX_DRAFT_DEPTH + 1];
     let (mut waiting, mut produced, mut previous) = (0usize, 0u32, 0u32);
+    // A model that never writes its end token stops once it repeats itself.
+    let mut watch = LoopWatch::default();
     for _ in 0..info(INFO_MAX_NEW) {
         run_die(entry_logits, last, position - 1);
         last = reasoning.steer(sample());
@@ -478,6 +480,9 @@ extern "C" fn main() {
             draft_position += 1;
         }
         emit(last, &mut decoding);
+        if watch.push(last) {
+            return;
+        }
         run_die(entry_token, last, position);
         position += 1;
         produced += 1;

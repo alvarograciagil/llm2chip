@@ -274,3 +274,47 @@ fn an_fpga_gets_its_multipliers_as_products_it_can_map() {
         assert_eq!(fpga.matches("module ").count(), structural.matches("module ").count());
     }
 }
+
+#[test]
+fn an_fpga_gets_its_adders_as_sums_that_match_the_gates() {
+    use netlist::soc::{soc_design, SocConfig};
+    let c = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 2, coding: WeightCoding::Fixed, exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false };
+    // The cell and the CPU have ripple adders, and a Wallace tree ends in a prefix adder.
+    let mut modules = cell_design(c).modules;
+    modules.extend(cell_design(CellConfig { multiplier: netlist::multiplier::MultiplierKind::Wallace, ..c }).modules);
+    modules.extend(soc_design(SocConfig { program_bits: 10, data_bits: 10, fifo_bits: 4 }).modules);
+    let adders: Vec<String> = modules.keys().filter(|n| n.starts_with("ripple_adder_") || n.starts_with("prefix_adder_")).cloned().collect();
+    assert!(adders.iter().any(|n| n.starts_with("prefix_adder_")) && adders.iter().any(|n| n.starts_with("ripple_adder_")), "{adders:?}");
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for name in adders {
+        let design = netlist::Design { top: name.clone(), modules: modules.clone() };
+        let text = netlist::to_verilog_for_fpga(&design);
+        let body = text.split(&format!("module {name} (")).nth(1).unwrap().split("endmodule").next().unwrap();
+        assert!(body.contains("assign") && body.contains("a + b"), "{name}: {body}");
+        // What the sum says, the gates do.
+        let width: u32 = name.rsplit('_').next().unwrap().parse().unwrap();
+        let carries = design.modules[&name].ports.iter().any(|p| p.name == "cin");
+        let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+        let mut sim = Simulator::new(&design).unwrap();
+        for _ in 0..200 {
+            let (a, b, cin) = (next() & mask, next() & mask, next() & 1);
+            sim.set("a", a).unwrap();
+            sim.set("b", b).unwrap();
+            if carries {
+                sim.set("cin", cin).unwrap();
+            }
+            sim.settle();
+            let total = a as u128 + b as u128 + if carries { cin as u128 } else { 0 };
+            assert_eq!(sim.get("sum").unwrap(), (total as u64) & mask, "{name}: {a} + {b} + {cin}");
+            if carries {
+                assert_eq!(sim.get("cout").unwrap(), (total >> width) as u64 & 1, "{name}: acarreo");
+            }
+        }
+    }
+}

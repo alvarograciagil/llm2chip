@@ -1,5 +1,7 @@
-import type { BlockArea, Confidence, DiePlan, Metric, Report } from "../engine";
+import { fpgaBoards, type BlockArea, type Confidence, type DiePlan, type Metric, type Report } from "../engine";
 import { formatNumber } from "../format";
+import { Icon } from "./icons";
+import { useT } from "../i18n";
 import { fieldLabel } from "../params";
 import { useDesign, type Selection } from "../store";
 
@@ -15,6 +17,7 @@ export const CATEGORY_LABEL: Record<BlockArea["category"], string> = {
 };
 
 const HEADLINE = ["tok_s", "dies", "total_area_mm2", "power_w"];
+const BOARD_HEADLINE = ["tok_s", "fpga_memory_pct", "fpga_logic_pct", "fpga_dsp_pct"];
 const ARRAY_IDS = ["cell_weights", "cell_macs", "scale_units", "activation_noc"];
 
 
@@ -39,15 +42,30 @@ function Delta({ current, base, unit }: { current: number; base: number | undefi
   );
 }
 
+/** A value the estimator offers for `field`, as the person reads it. */
+function describeValue(field: string, value: unknown): string {
+  if (typeof value === "boolean") return value ? "activar" : "desactivar";
+  if (typeof value === "number") return value === 0 ? "automático" : formatNumber(value);
+  if (field === "fpga_board") return (fpgaBoards() as { id: string; name: string }[]).find((b) => b.id === value)?.name ?? String(value);
+  if (value === "external_ddr") return field === "kv_backend" ? "caché en la memoria de la placa" : "pesos en la memoria de la placa";
+  const named: Record<string, string> = { auto: "automático", custom: "a medida", sram: "SRAM", rom: "ROM" };
+  return typeof value === "string" ? (named[value] ?? value) : String(value);
+}
+
 function Summary({ report }: { report: Report }) {
+  const t = useT();
   const baseline = useDesign((s) => s.baseline);
   const reveal = useDesign((s) => s.reveal);
+  const setParam = useDesign((s) => s.setParam);
   const setSelection = useDesign((s) => s.setSelection);
   const estimateMs = useDesign((s) => s.estimateMs);
   const base = (id: string) => baseline?.report.metrics.find((m) => m.id === id)?.value;
 
-  const sections = [...new Set(report.metrics.map((m) => m.section))];
-  const headline = HEADLINE.map((id) => report.metrics.find((m) => m.id === id)).filter((m): m is Metric => !!m);
+  // On a board, how much of it the design takes comes first.
+  const sections = [...new Set(report.metrics.map((m) => m.section))].sort((a, b) => Number(b === "FPGA") - Number(a === "FPGA"));
+  // On an FPGA board what matters is how much of it the design takes, not square millimetres.
+  const onBoard = report.metrics.some((m) => m.id === "fpga_memory_pct");
+  const headline = (onBoard ? BOARD_HEADLINE : HEADLINE).map((id) => report.metrics.find((m) => m.id === id)).filter((m): m is Metric => !!m);
   const blocks = [...report.blocks].sort((a, b) => b.per_die_mm2 - a.per_die_mm2);
   const largest = blocks[0]?.per_die_mm2 ?? 1;
 
@@ -60,7 +78,7 @@ function Summary({ report }: { report: Report }) {
               {formatNumber(m.value)}
               {m.unit && <small> {m.unit}</small>}
             </span>
-            <span className="stat-label">{m.label}</span>
+            <span className="stat-label">{t(m.label)}</span>
             <Delta current={m.value} base={base(m.id)} unit={m.unit} />
           </div>
         ))}
@@ -69,7 +87,7 @@ function Summary({ report }: { report: Report }) {
 
       {report.decisions.length > 0 && (
         <>
-          <h3>Circuito elegido para estos parámetros</h3>
+          <h3>{t("Circuito elegido para estos parámetros")}</h3>
           <dl className="inset metrics">
             <div><dt>Multiplicadores por die</dt><dd>{formatNumber(report.macs_per_die)}</dd></div>
             {report.decisions.map((d) => (
@@ -86,21 +104,32 @@ function Summary({ report }: { report: Report }) {
         <div className="issues">
           {report.violations.map((v, i) => (
             <div key={i} className={`issue ${v.severity}`} role={v.severity === "error" ? "alert" : "status"}>
-              <span className="issue-icon" aria-hidden="true">
-                {v.severity === "error" ? "!" : "i"}
+              <span className="issue-glyph" aria-hidden="true">
+                <Icon name={v.severity === "error" ? "warning" : "info"} size={16} />
               </span>
               <div>
                 <strong>{v.message}</strong>
                 <p>{v.fix}</p>
-                {v.field && <button className="link" onClick={() => reveal(v.field!)}>Mostrar ajuste</button>}
+                {v.field && (
+                  <div className="issue-actions">
+                    {v.value !== undefined && (
+                      <button className="link" onClick={() => setParam(v.field!, v.value)}>
+                        {t("Corregir")}: {describeValue(v.field!, v.value)}
+                      </button>
+                    )}
+                    <button className="link" onClick={() => reveal(v.field!)}>
+                      {t("Mostrar ajuste")}
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           ))}
         </div>
       )}
 
-      <h3>Reparto del área por die</h3>
-      <div className="inset">
+      {!onBoard && <h3>{t("Reparto del área por die")}</h3>}
+      <div className="inset" hidden={onBoard}>
         {blocks.map((b) => (
           <button className="area-row" key={b.id} onClick={() => setSelection(ARRAY_IDS.includes(b.id) ? { kind: "array", die: 0 } : { kind: "block", die: 0, id: b.id })}>
             <i className={`swatch cat-${b.category}`} aria-hidden="true" />
@@ -115,7 +144,7 @@ function Summary({ report }: { report: Report }) {
 
       {sections.map((section) => (
         <div key={section}>
-          <h3>{section}</h3>
+          <h3>{t(section)}</h3>
           <dl className="inset metrics">
             {report.metrics
               .filter((m) => m.section === section)
@@ -125,7 +154,7 @@ function Summary({ report }: { report: Report }) {
                     <i className="glyph" aria-label={CONFIDENCE[m.confidence]} title={CONFIDENCE[m.confidence]}>
                       {GLYPH[m.confidence]}
                     </i>
-                    {m.label}
+                    {t(m.label)}
                   </dt>
                   <dd>
                     {formatNumber(m.value)} {m.unit}

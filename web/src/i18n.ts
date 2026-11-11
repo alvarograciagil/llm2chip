@@ -1,0 +1,253 @@
+import { useDesign } from "./store";
+
+export type Language = "es" | "en";
+
+/** English for the Spanish the interface is written in. A text not here stays in Spanish,
+ * so translation can go part by part. */
+const EN: Record<string, string> = {
+  // Views and toolbar
+  Plano: "Floorplan",
+  Funcionamiento: "How it works",
+  Esquemático: "Schematic",
+  Simulador: "Simulator",
+  Explorador: "Explorer",
+  Numérico: "Numerics",
+  Modelos: "Models",
+  Parámetros: "Parameters",
+  Vista: "View",
+  "Nuevo proyecto": "New project",
+  "Exportar hoja de datos": "Export datasheet",
+  Deshacer: "Undo",
+  Rehacer: "Redo",
+  Apariencia: "Appearance",
+  Automática: "Automatic",
+  Clara: "Light",
+  Oscura: "Dark",
+  Idioma: "Language",
+  Guardar: "Save",
+  Cancelar: "Cancel",
+  "Nombre del diseño": "Design name",
+  "Sin título": "Untitled",
+  Plantillas: "Templates",
+  "Mis diseños": "My designs",
+  Fijar: "Pin",
+  Quitar: "Remove",
+  " como referencia": " as baseline",
+  " referencia": " baseline",
+  // Sidebar
+  Optimizaciones: "Optimizations",
+  "Buscar parámetro": "Search parameter",
+  "Ningún parámetro coincide.": "No parameter matches.",
+  "Restablecer todo": "Reset all",
+  Restablecer: "Reset",
+  Modelo: "Model",
+  Tecnología: "Technology",
+  Placa: "Board",
+  "Sin placa: escala genérica": "No board: generic scale",
+  "Buscar otros modelos…": "Find other models…",
+  "Cargar config.json de otro modelo…": "Load another model's config.json…",
+  // Parameter groups
+  Objetivo: "Goal",
+  Organización: "Organization",
+  Memoria: "Memory",
+  Aritmética: "Arithmetic",
+  Etapas: "Pipeline stages",
+  "Unidades vectoriales": "Vector units",
+  Sistema: "System",
+  // Parameter labels
+  "Parámetros máximos": "Max parameters",
+  Contexto: "Context",
+  "Soporte MTP": "MTP support",
+  "Profundidad MTP": "MTP depth",
+  "Incluir visión": "Include vision",
+  "Velocidad objetivo": "Target speed",
+  Frecuencia: "Frequency",
+  "Tipo de dies": "Die type",
+  "Capas máximas": "Max layers",
+  "Ancho interno máximo": "Max hidden size",
+  "Vocabulario máximo": "Max vocabulary",
+  Dies: "Dies",
+  "Reparto entre chips": "Chip split",
+  "Chips por grupo": "Chips per group",
+  "Área máxima por die": "Max die area",
+  Pesos: "Weights",
+  "Caché y estado": "Cache and state",
+  "Pilas HBM4": "HBM4 stacks",
+  "Ancho de banda DRAM": "DRAM bandwidth",
+  "Ancho de banda externo": "External bandwidth",
+  "Capacidad externa": "External capacity",
+  "Formato de pesos": "Weight format",
+  Codificación: "Coding",
+  "Bits de peso": "Weight bits",
+  "Bits de exponente": "Exponent bits",
+  "Mantener tensores de 8 bits": "Keep 8-bit tensors",
+  "Sesgo por grupo": "Bias per group",
+  "Escala fina por grupo": "Fine scale per group",
+  "Pesos por grupo": "Weights per group",
+  "Bits de escala y sesgo": "Scale and bias bits",
+  "Bits de activación": "Activation bits",
+  "Bits de acumulador": "Accumulator bits",
+  "Bits de estado DeltaNet": "DeltaNet state bits",
+  "Bits de caché KV": "KV cache bits",
+  "Circuito a medida": "Custom circuit",
+  Priorizar: "Prioritize",
+  "Ciclos de escala y sesgo": "Scale and bias cycles",
+  "Red de activaciones": "Activation network",
+  "Carriles por die": "Lanes per die",
+  "Unidades vectoriales por die": "Vector units per die",
+  "Logits por ciclo al muestrear": "Logits per cycle when sampling",
+  "Candidatos del muestreo": "Sampling candidates",
+  "Bits por carril": "Bits per lane",
+  "Unidades de función": "Function units",
+  "Resolución de las tablas": "Table resolution",
+  "Enlace entre dies": "Die-to-die link",
+  "Ancho del enlace": "Link width",
+  "Carga de pesos": "Weight loading",
+  "Multiplicadores por die": "Multipliers per die",
+  "Tipo de multiplicador": "Multiplier type",
+  Multiplicador: "Multiplier",
+  "Árbol de suma": "Adder tree",
+  // Options
+  "A medida de este modelo": "Tailored to this model",
+  "Todos iguales (ampliable)": "All alike (expandable)",
+  "Por capas, en cadena": "By layers, in a chain",
+  "Por tensor, todos a la vez": "By tensor, all at once",
+  "Mixto: grupos en tensor, en cadena": "Mixed: tensor groups in a chain",
+  "SRAM (modelo intercambiable)": "SRAM (swappable model)",
+  "ROM (modelo grabado)": "ROM (model etched in)",
+  "DRAM apilada": "Stacked DRAM",
+  "Memoria externa": "External memory",
+  "Afín por grupos": "Grouped affine",
+  "Punto fijo": "Fixed point",
+  "Coma flotante": "Floating point",
+  Logarítmico: "Logarithmic",
+  "Libro de códigos": "Codebook",
+  "Automático según encapsulado": "Automatic by package",
+  "SerDes en placa": "Board SerDes",
+  "Múltiplos precalculados": "Precomputed multiples",
+  Área: "Area",
+  Energía: "Energy",
+  "Área y energía": "Area and energy",
+  "Mezcla de 4 y 8 bits (Qwen real)": "Mix of 4 and 8 bits (real Qwen)",
+  "Afín por grupos (MLX)": "Grouped affine (MLX)",
+  "Punto fijo (Q)": "Fixed point (Q)",
+  Microescalado: "Microscaling",
+  // Inspector
+  "Generación con un usuario": "Generation, one user",
+  "Área total": "Total area",
+  "Potencia generando": "Power while generating",
+  "Memoria interna usada": "On-chip memory used",
+  "Lógica usada": "Logic used",
+  "Multiplicadores usados": "Multipliers used",
+  "Reloj en esta placa": "Clock on this board",
+  "Circuito elegido para estos parámetros": "Circuit chosen for these parameters",
+  "Reparto del área por die": "Area per die",
+  "Mostrar ajuste": "Show setting",
+  Corregir: "Fix",
+  // Simulator
+  "El chip que se simula": "The chip being simulated",
+  "Qué se simula": "What is simulated",
+  Generación: "Generation",
+  Medidas: "Measurements",
+  "El die": "The die",
+  "El chip completo": "The whole chip",
+  "A medida": "Custom",
+  "CPU y firmware del chip": "Chip CPU and firmware",
+  "Unidad de muestreo del chip": "Chip sampling unit",
+  "Tokenizador en el firmware": "Tokenizer in firmware",
+  "Comprobar la carga de la imagen": "Check the image load",
+  "Acelerar con la GPU": "Use the GPU",
+  "Cargar el chip": "Load the chip",
+  Recargar: "Reload",
+  "Cargando…": "Loading…",
+  Responder: "Answer",
+  Dibujar: "Draw",
+  Enviar: "Send",
+  Detener: "Stop",
+  Imagen: "Image",
+  "Tokens máximos": "Max tokens",
+  "Razonar antes de responder": "Think before answering",
+  // Wizard
+  "¿Desde dónde empiezas?": "Where do you start from?",
+  "¿Qué placa tienes o quieres comprar?": "Which board do you have or want to buy?",
+  "Unas preguntas": "A few questions",
+  "¿Qué modelo?": "Which model?",
+  Resumen: "Summary",
+  "Una FPGA": "An FPGA",
+  "Un solo chip": "A single chip",
+  "Un modelo": "A model",
+  Siguiente: "Next",
+  Atrás: "Back",
+  "Crear proyecto": "Create project",
+  "Nombre del proyecto": "Project name",
+  Fabricante: "Maker",
+  "Web oficial de": "Official site of",
+  Recomendado: "Recommended",
+  "Calculando cada diseño…": "Estimating each design…",
+  "Eliges una placa y te dice qué modelos le caben, dónde van sus pesos y a qué velocidad irían.": "Pick a board and see which models fit, where their weights go and how fast they would run.",
+  "Todo en un die: eliges el proceso, el área y la velocidad, y ves qué modelos caben.": "Everything on one die: choose the process, the area and the speed, and see which models fit.",
+  "Eliges el LLM; el número de chips y su reparto salen de la velocidad que pidas.": "Choose the LLM; the number of chips and how they share it follow from the speed you ask for.",
+  "Los parámetros por defecto con el modelo que elijas, para ajustarlo todo tú.": "The default parameters with the model you choose, to tune everything yourself.",
+  // Sections of the report
+  Silicio: "Silicon",
+  Velocidad: "Speed",
+  "Ancho de banda": "Bandwidth",
+  Estado: "State",
+  FPGA: "FPGA",
+  Calidad: "Quality",
+  Carga: "Loading",
+  Destino: "Target",
+  "Chip propio": "Own chip",
+  Proceso: "Process",
+  "Tamaño del die": "Die size",
+  "Ancho del die": "Die width",
+  "Alto del die": "Die height",
+  Chips: "Chips",
+  "Sin límite": "No limit",
+  "Número de chips": "Number of chips",
+  // Floorplan
+  Función: "Function",
+  Capa: "Layer",
+  Actividad: "Activity",
+  Datos: "Data",
+  Densidad: "Density",
+  "Capa de color": "Colour layer",
+  "Memoria de pesos": "Weight memory",
+  Cálculo: "Compute",
+  Interconexión: "Interconnect",
+  "Control y sistema": "Control and system",
+};
+
+const DICTIONARIES: Record<Language, Record<string, string>> = { es: {}, en: EN };
+
+/** The text in `language`, or as written when there is no translation yet. */
+export function translate(language: Language, text: string): string {
+  return DICTIONARIES[language][text] ?? text;
+}
+
+/** A translator for the interface's current language, redrawn when it changes. */
+export function useT(): (text: string) => string {
+  const language = useDesign((s) => s.language);
+  return (text: string) => translate(language, text);
+}
+
+const LANGUAGE_KEY = "llm2chip.language";
+
+export function readLanguage(): Language {
+  try {
+    const stored = localStorage.getItem(LANGUAGE_KEY);
+    if (stored === "en" || stored === "es") return stored;
+  } catch {
+    // Without storage the browser's language decides.
+  }
+  return navigator.language.toLowerCase().startsWith("es") ? "es" : "en";
+}
+
+export function writeLanguage(language: Language) {
+  try {
+    localStorage.setItem(LANGUAGE_KEY, language);
+  } catch {
+    // The choice lasts until the page reloads.
+  }
+  document.documentElement.lang = language;
+}

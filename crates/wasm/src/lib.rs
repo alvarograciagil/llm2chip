@@ -42,6 +42,12 @@ pub fn builtin_models() -> Result<String, JsError> {
     to_js(&list)
 }
 
+/// The FPGA boards a design can target, with what each offers.
+#[wasm_bindgen]
+pub fn fpga_boards() -> Result<String, JsError> {
+    to_js(&arch::fpga::boards())
+}
+
 #[wasm_bindgen]
 pub fn presets() -> Result<String, JsError> {
     let list: Vec<serde_json::Value> = PRESETS

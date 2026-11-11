@@ -53,7 +53,7 @@ struct Loaded {
     load_report: Option<LoadReport>,
     prompt: PromptStyle,
     /// The image encoder, opened the first time an image arrives.
-    vision: Option<sim::vision::VisionTower>,
+    vision: Option<Seer>,
     /// The image generator, opened the first time a picture is asked for.
     painter: Option<sim::janus::Janus>,
 }
@@ -726,7 +726,9 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
         return Err("el texto no cabe en la memoria de trabajo del tokenizador del chip".into());
     }
     let tokenizer_match = use_tables.then(|| runner.tokens.len() >= ids.len() && runner.tokens[..ids.len()] == *ids);
-    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": emitted, "chip": { "cycles": cpu.cycle, "die_cycles": runner.die_cycles, "tokenizer_match": tokenizer_match } }));
+    // Short of the limit, the firmware stopped by its own rules: an end token or a loop.
+    let reason = if emitted >= request.max_tokens { "limit" } else { "chip" };
+    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": emitted, "reason": reason, "chip": { "cycles": cpu.cycle, "die_cycles": runner.die_cycles, "tokenizer_match": tokenizer_match } }));
     Ok(())
 }
 
@@ -815,19 +817,30 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
                 return Err("las imágenes aún no pasan por el firmware ni por la cabeza MTP".into());
             }
             if loaded.vision.is_none() {
-                loaded.vision = Some(sim::vision::VisionTower::open(&loaded.dir)?.ok_or("este modelo no trae codificador de imágenes")?);
+                loaded.vision = Some(Seer::open(&loaded.dir)?.ok_or("este modelo no trae codificador de imágenes")?);
             }
-            let tower = loaded.vision.as_ref().unwrap();
             let started = std::time::Instant::now();
-            let patches = sim::vision::patches(&tower.config, &input.rgb, input.width, input.height)?;
-            let tokens = tower.encode(&patches)?;
-            let _ = sender.blocking_send(serde_json::json!({ "type": "image", "patches": patches.rows * patches.cols, "tokens": tokens.len(), "seconds": started.elapsed().as_secs_f64() }));
-            loaded.engine.set_mrope(tower.config.mrope_section);
-            Some((tokens, patches.rows, patches.cols, tower.config.merge, tower.config.image_token))
+            let plan = match loaded.vision.as_ref().unwrap() {
+                Seer::Qwen(tower) => {
+                    let patches = sim::vision::patches(&tower.config, &input.rgb, input.width, input.height)?;
+                    let tokens = tower.encode(&patches)?;
+                    loaded.engine.set_mrope(tower.config.mrope_section);
+                    (tokens, patches.rows * patches.cols, Placement::Grid(patches.rows, patches.cols, tower.config.merge), tower.config.image_token)
+                }
+                // Janus reads its patches one after another, as text.
+                Seer::Janus(eye) => (eye.encode(&input.rgb, input.width, input.height)?, eye.tokens(), Placement::Line, eye.placeholder),
+            };
+            let _ = sender.blocking_send(serde_json::json!({ "type": "image", "patches": plan.1, "tokens": plan.0.len(), "seconds": started.elapsed().as_secs_f64() }));
+            Some((plan.0, plan.2, plan.3))
         }
         None => None,
     };
     let image_tokens = image.as_ref().map_or(0, |(tokens, ..)| tokens.len().saturating_sub(1));
+    // The chip remembers its context and no more: the prompt must fit, and the answer ends there.
+    let context = request.fidelity.context_tokens as usize;
+    if context > 0 && ids.len() + image_tokens >= context {
+        return Err(format!("el prompt ocupa {} tokens y el chip recuerda {context}: sube el contexto del diseño", ids.len() + image_tokens));
+    }
     let _ = sender.blocking_send(serde_json::json!({ "type": "start", "prompt_tokens": ids.len() + image_tokens }));
     if request.fidelity.firmware {
         return run_firmware(loaded, &text, add_special, &ids, &request, sender, cancelled);
@@ -845,10 +858,14 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
         }
         let last = i + 1 == ids.len();
         let wants_mtp = request.mtp_depth > 0;
-        if let Some((tokens, rows, cols, merge, _)) = image.as_ref().filter(|image| *id == image.4) {
-            // The image's tokens all take the position the placeholder had, plus their row
-            // and column; the text after it goes on past the image's longer side.
-            let (positions, after) = sim::vision::image_positions(i as u64, *rows, *cols, *merge);
+        if let Some((tokens, layout, _)) = image.as_ref().filter(|image| *id == image.2) {
+            // In a grid, the image's tokens all take the position the placeholder had, plus
+            // their row and column, and the text goes on past the longer side; in a line,
+            // each takes the next position.
+            let (positions, after) = match layout {
+                Placement::Grid(rows, cols, merge) => sim::vision::image_positions(i as u64, *rows, *cols, *merge),
+                Placement::Line => ((0..tokens.len() as u64).map(|k| [i as u64 + k; 3]).collect(), (i + tokens.len()) as u64),
+            };
             for (token, position) in tokens.iter().zip(positions) {
                 loaded.engine.step_embedding(token, position, false)?;
             }
@@ -867,7 +884,7 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
             loaded.engine.feed_draft_from_main();
             loaded.engine.draft(following, false)?;
         }
-        let done = if image.as_ref().is_some_and(|image| ids[..i].contains(&image.4)) { i + 1 + image_tokens } else { i + 1 };
+        let done = if image.as_ref().is_some_and(|image| ids[..i].contains(&image.2)) { i + 1 + image_tokens } else { i + 1 };
         let _ = sender.blocking_send(serde_json::json!({ "type": "prefill", "done": done, "total": ids.len() + image_tokens, "seconds": stats.seconds }));
     }
 
@@ -878,11 +895,24 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     let mut shown = 0;
     let (mut hits, mut tries) = (vec![0u32; request.mtp_depth], vec![0u32; request.mtp_depth]);
     let mut pending: Vec<(usize, Vec<u32>)> = Vec::new();
+    // The chip's own rule: its firmware stops a text that goes round in circles.
+    let mut watch = tokenizer_rt::LoopWatch::default();
+    let mut reason = "limit";
     for _ in 0..request.max_tokens {
-        if cancelled.load(Relaxed) || loaded.prompt.stop.contains(&next) {
+        if cancelled.load(Relaxed) {
+            reason = "cancelled";
+            break;
+        }
+        if loaded.prompt.stop.contains(&next) {
+            reason = "stop";
+            break;
+        }
+        if context > 0 && ids.len() + image_tokens + output.len() >= context {
+            reason = "context";
             break;
         }
         output.push(next);
+        let looping = watch.push(next);
         let decoded = loaded.tokenizer.decode(&output, true).map_err(|e| e.to_string())?;
         let piece = if decoded.ends_with('\u{FFFD}') { String::new() } else { let part = decoded[shown..].to_string(); shown = decoded.len(); part };
         let (logits, stats) = loaded.engine.step(next, true)?;
@@ -921,9 +951,36 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
             loaded.engine.draft(next, false)?;
         }
         let _ = sender.blocking_send(serde_json::json!({ "type": "token", "id": token, "text": piece, "seconds": seconds, "saturated": saturated, "index": output.len(), "hits": hits, "tries": tries }));
+        if looping {
+            reason = "loop";
+            break;
+        }
     }
-    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": output.len() }));
+    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": output.len(), "reason": reason }));
     Ok(())
+}
+
+/// The image encoder of the loaded model.
+enum Seer {
+    Qwen(sim::vision::VisionTower),
+    Janus(sim::janus::JanusEye),
+}
+
+impl Seer {
+    fn open(dir: &Path) -> Result<Option<Self>, String> {
+        if let Some(eye) = sim::janus::JanusEye::open(dir)? {
+            return Ok(Some(Seer::Janus(eye)));
+        }
+        Ok(sim::vision::VisionTower::open(dir)?.map(Seer::Qwen))
+    }
+}
+
+/// How an image's tokens take their positions.
+enum Placement {
+    /// Rows and columns of patches merged `merge` by `merge`, with M-RoPE.
+    Grid(usize, usize, usize),
+    /// One after another.
+    Line,
 }
 
 async fn guard(State(app): State<App>, request: Request, next: Next) -> Response {

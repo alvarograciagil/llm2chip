@@ -358,8 +358,32 @@ pub fn compile_model(config: &str) -> Result<Program, String> {
         // Janus writes text and images with the Llama in its text configuration.
         Some("janus") => compile_model(&value["text_config"].to_string()),
         Some(other) => Err(format!("no hay compilador para la arquitectura «{other}»")),
+        // llama2.c describes its models with its own names: they are Llamas.
+        None if value.get("dim").is_some() && value.get("n_layers").is_some() => compile_llama(&llama2c_as_llama(&value)?),
         None => Err("el config no indica model_type".into()),
     }
+}
+
+/// A llama2.c configuration (`dim`, `n_layers`, …) as the Llama configuration it stands for,
+/// with the hidden size of its MLP worked out as llama2.c does.
+fn llama2c_as_llama(config: &Value) -> Result<Value, String> {
+    let number = |key: &str| config.get(key).and_then(Value::as_u64).ok_or_else(|| format!("al config de llama2.c le falta «{key}»"));
+    let (dim, heads, multiple_of) = (number("dim")?, number("n_heads")?, number("multiple_of").unwrap_or(32));
+    let hidden = config.get("hidden_dim").and_then(Value::as_u64).unwrap_or_else(|| multiple_of * (2 * (4 * dim) / 3).div_ceil(multiple_of));
+    Ok(serde_json::json!({
+        "model_type": "llama",
+        "hidden_size": dim,
+        "intermediate_size": hidden,
+        "num_hidden_layers": number("n_layers")?,
+        "num_attention_heads": heads,
+        "num_key_value_heads": config.get("n_kv_heads").and_then(Value::as_u64).unwrap_or(heads),
+        "vocab_size": number("vocab_size")?,
+        "max_position_embeddings": config.get("max_seq_len").and_then(Value::as_u64).unwrap_or(2048),
+        "rms_norm_eps": 1e-5,
+        "rope_theta": 10000.0,
+        "hidden_act": "silu",
+        "tie_word_embeddings": true,
+    }))
 }
 
 /// How a layer of the plain family differs from the others.
@@ -780,6 +804,15 @@ mod tests {
     use model_ir::{Block, ModelGraph, StageKind};
 
     const QWEN: &str = include_str!("../../../models/qwen3.8-27b.json");
+
+    #[test]
+    fn every_model_of_the_catalogue_compiles_including_llama2c_ones() {
+        for config in [include_str!("../../../models/stories110m.json"), include_str!("../../../models/stories15m.json"), include_str!("../../../models/stories260k.json"), include_str!("../../../models/llama-3.1-8b.json")] {
+            let program = compile_model(config).unwrap_or_else(|e| panic!("{e}: {config}"));
+            let graph = ModelGraph::from_config_json("modelo", config).unwrap();
+            assert_eq!(program.hidden as u64, graph.hidden_size, "{config}");
+        }
+    }
 
     #[test]
     fn program_covers_exactly_the_stages_the_estimator_counts() {

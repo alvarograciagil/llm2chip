@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { estimateDesign, type ChipParams, type ModelSource, type Report } from "../engine";
+import { estimateDesign, fpgaBoards, type ChipParams, type ModelSource, type Report } from "../engine";
 import { formatNumber } from "../format";
 import { useDesign } from "../store";
 import { Segmented } from "../components/controls";
-import { BASE_LOGIC_K, buildable, chipParams, DEFAULT_ANSWERS, FPGA_BOARDS, FPGA_MAKERS, fpgaFit, fpgaParams, formatMbit, metric, modelParams, suggested, type Answers, type FpgaBoard, type FpgaFit, type Start } from "./plan";
+import { useT } from "../i18n";
+import { buildable, chipParams, DEFAULT_ANSWERS, fpgaParams, makers, metric, modelParams, suggested, type Answers, type FpgaBoard, type Start } from "./plan";
 
 const STARTS: { id: Start; title: string; text: string }[] = [
   { id: "fpga", title: "Una FPGA", text: "Eliges una placa y te dice qué modelos le caben, dónde van sus pesos y a qué velocidad irían." },
@@ -58,17 +59,20 @@ function sized(model: ModelSource, defaults: ChipParams, params: Partial<ChipPar
 }
 
 /** Each model, judged for the start chosen: whether it fits and how fast it would go. */
-function judge(answers: Answers, models: ModelSource[], defaults: ChipParams): Row[] {
-  const board = FPGA_BOARDS.find((b) => b.id === answers.board) ?? FPGA_BOARDS[0];
+function judge(answers: Answers, models: ModelSource[], defaults: ChipParams, boards: FpgaBoard[]): Row[] {
+  const board = boards.find((b) => b.id === answers.board) ?? boards[0];
   return models.map((model) => {
     if (answers.start === "fpga") {
-      // First where the weights and the cache would go, then the speed with them there.
-      const sizing = estimate(model, defaults, fpgaParams(answers, board, { where: "chip", memory_mbit: 0, logic_share: 0 }));
-      const fit: FpgaFit = sizing ? fpgaFit(board, metric(sizing, "model_weights_gb"), metric(sizing, "kv_gb")) : { where: "none", reason: "El estimador no admite este modelo." };
-      const { params, report: placed } = sized(model, defaults, fpgaParams(answers, board, fit));
-      const report = fit.where === "none" ? null : placed;
-      const note = fit.where === "none" ? fit.reason : fit.where === "chip" ? `En la memoria de la FPGA: ${formatMbit(fit.memory_mbit)} de ${board.bram_mbit} Mbit, lógica al ${Math.round(fit.logic_share * 100)} %.` : `Pesos en la memoria de la placa (${formatMbit(fit.memory_mbit)}): su ancho de banda marca la velocidad.`;
-      return { model, id: model.id, params_g: metric(sizing, "model_params_g"), tok_s: metric(report, "tok_s"), fits: fit.where !== "none" && !!report, note, params };
+      // Inside the FPGA if it fits there, else with the weights in the board's memory: the
+      // engine says which, with the same checks the design will show afterwards.
+      const inside = sized(model, defaults, fpgaParams(answers, board, false));
+      const placed = buildable(inside.report) ? inside : sized(model, defaults, fpgaParams(answers, board, true));
+      const { params, report } = placed;
+      const fits = buildable(report);
+      const problem = report?.violations.find((v) => v.severity === "error")?.message;
+      const where = placed === inside ? `En la memoria de la FPGA: ${Math.round(metric(report, "fpga_memory_pct"))} % ocupada, lógica al ${Math.round(metric(report, "fpga_logic_pct"))} %.` : "Pesos en la memoria de la placa: su ancho de banda marca la velocidad.";
+      const note = !report ? "El estimador no admite este modelo." : fits ? where : (problem ?? "No cabe en esta placa.");
+      return { model, id: model.id, params_g: metric(report, "model_params_g"), tok_s: metric(report, "tok_s"), fits, note, params };
     }
     const { params, report } = sized(model, defaults, answers.start === "chip" ? chipParams(answers) : answers.start === "model" ? modelParams(answers) : {});
     const fits = buildable(report) && (answers.start !== "chip" || report?.dies === 1);
@@ -106,7 +110,8 @@ function Question({ label, help, children }: { label: string; help: string; chil
   );
 }
 
-const CONTEXTS: [string, string][] = [["64", "64"], ["256", "256"], ["2048", "2 K"], ["8192", "8 K"], ["32768", "32 K"]];
+const CONTEXTS: [number, string][] = [[64, "64"], [128, "128"], [256, "256"], [512, "512"], [1024, "1 K"], [2048, "2 K"], [4096, "4 K"], [8192, "8 K"], [16384, "16 K"], [32768, "32 K"], [65536, "64 K"], [131072, "128 K"], [262144, "256 K"], [1048576, "1 M"]];
+const WEIGHT_BITS: [number, string][] = [[2, "2 bits"], [3, "3 bits"], [4, "4 bits (q4)"], [5, "5 bits"], [6, "6 bits"], [8, "8 bits (q8)"], [16, "16 bits, sin cuantizar"]];
 const SPEEDS: [string, string][] = [["100", "100"], ["1000", "1 000"], ["5000", "5 000"], ["20000", "20 000"]];
 
 function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<Answers>) => void }) {
@@ -119,11 +124,23 @@ function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<An
           <Segmented label="Objetivo" value={answers.goal} options={[["validate", "Validar que funciona"], ["largest", "El modelo más grande"], ["fastest", "La mayor velocidad"]]} onChange={(goal) => set({ goal })} />
         </Question>
       )}
-      <Question label="Bits de peso" help="Con 8 bits el modelo apenas pierde calidad; con 4 ocupa la mitad y caben modelos el doble de grandes.">
-        <Segmented label="Bits de peso" value={String(answers.weight_bits)} options={[["8", "8 bits"], ["4", "4 bits"]]} onChange={(v) => set({ weight_bits: Number(v) })} />
+      <Question label="Bits de peso" help="Con 8 bits el modelo apenas pierde calidad; con 4 ocupa la mitad y caben modelos el doble de grandes; por debajo de 4 la calidad cae deprisa. Con 16 se guardan como vienen.">
+        <select aria-label="Bits de peso" value={answers.weight_bits} onChange={(e) => set({ weight_bits: Number(e.target.value) })}>
+          {WEIGHT_BITS.map(([bits, label]) => (
+            <option key={bits} value={bits}>
+              {label}
+            </option>
+          ))}
+        </select>
       </Question>
       <Question label="Contexto" help="Los tokens que el chip recuerda. La caché crece con él, y es lo que más memoria pide después de los pesos.">
-        <Segmented label="Contexto" value={String(answers.context_tokens)} options={start === "fpga" ? CONTEXTS.slice(0, 4) : CONTEXTS.slice(2)} onChange={(v) => set({ context_tokens: Number(v) })} />
+        <select aria-label="Contexto" value={answers.context_tokens} onChange={(e) => set({ context_tokens: Number(e.target.value) })}>
+          {CONTEXTS.map(([tokens, label]) => (
+            <option key={tokens} value={tokens}>
+              {label} tokens
+            </option>
+          ))}
+        </select>
       </Question>
       {start !== "fpga" && (
         <>
@@ -178,6 +195,11 @@ function ModelList({ rows, answers, choose }: { rows: Row[]; answers: Answers; c
   );
 }
 
+/** The basic chip in look-up tables, as synthesised for each family. */
+function baseLogic(lut: string): number {
+  return lut === "LUT6" ? 45.9 : lut === "LE" ? 48.3 : 43.1;
+}
+
 /** A drawing of a board, for those whose maker's photo could not be checked. */
 function BoardDrawing({ board }: { board: FpgaBoard }) {
   return (
@@ -210,18 +232,19 @@ function BoardDrawing({ board }: { board: FpgaBoard }) {
 }
 
 function BoardPicker({ board, choose }: { board: string; choose: (id: string) => void }) {
-  const current = FPGA_BOARDS.find((b) => b.id === board) ?? FPGA_BOARDS[0];
+  const boards = useMemo(() => fpgaBoards() as FpgaBoard[], []);
+  const current = boards.find((b) => b.id === board) ?? boards[0];
   const [photoFailed, setPhotoFailed] = useState<string | null>(null);
-  const models = FPGA_BOARDS.filter((b) => b.maker === current.maker).sort((a, b) => a.price_usd - b.price_usd);
-  const logic = BASE_LOGIC_K[current.lut] / current.luts_k;
+  const models = boards.filter((b) => b.maker === current.maker).sort((a, b) => a.price_usd - b.price_usd);
+  const logic = baseLogic(current.lut) / current.luts_k;
   const memory = (mb: number) => (mb >= 1 ? `${mb} GB` : `${Math.round(mb * 1000)} MB`);
   return (
     <div className="board-picker">
       <div className="board-menus">
         <label>
           Fabricante
-          <select value={current.maker} onChange={(e) => choose([...FPGA_BOARDS].filter((b) => b.maker === e.target.value).sort((a, b) => a.price_usd - b.price_usd)[0].id)}>
-            {FPGA_MAKERS.map((m) => (
+          <select value={current.maker} onChange={(e) => choose([...boards].filter((b) => b.maker === e.target.value).sort((a, b) => a.price_usd - b.price_usd)[0].id)}>
+            {makers(boards).map((m) => (
               <option key={m}>{m}</option>
             ))}
           </select>
@@ -257,8 +280,10 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
             <dd>{current.dsp} DSP</dd>
             <dt>Memoria en la placa</dt>
             <dd>{current.ddr_gb > 0 ? `${memory(current.ddr_gb)}, ~${current.ddr_gbps} GB/s` : "Ninguna"}</dd>
-            <dt>Reloj estimado</dt>
-            <dd>{current.clock_mhz} MHz</dd>
+            <dt>Reloj</dt>
+            <dd>
+              {current.clock_mhz} MHz{current.clock_measured ? ", medido rutando el chip" : ", estimado"}
+            </dd>
             <dt>Herramientas</dt>
             <dd>{current.tools}</dd>
             <dt>Precio</dt>
@@ -309,8 +334,10 @@ function Summary({ report, model, board }: { report: Report | null; model: Model
 }
 
 export function ProjectWizard({ onClose }: { onClose: () => void }) {
+  const t = useT();
   const models = useDesign((s) => s.models);
   const defaults = useDesign((s) => s.defaults);
+  const boards = useMemo(() => fpgaBoards() as FpgaBoard[], []);
   const createProject = useDesign((s) => s.createProject);
   const [answers, setAnswers] = useState<Answers>({ ...DEFAULT_ANSWERS, model: models[0]?.id ?? "" });
   const [step, setStep] = useState(0);
@@ -320,12 +347,31 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
 
   const steps = STEPS[answers.start];
   const current = steps[step];
-  const rows = useMemo(() => (current === "model" || current === "name" ? judge(answers, models, defaults) : []), [current, answers, models, defaults]);
+  // Only a board or a single die needs every model judged; otherwise only the chosen one
+  // is estimated, at the end: a large model with its chips chosen for it takes a while.
+  const judged = answers.start === "fpga" || answers.start === "chip";
+  // The estimates run after the step is drawn, so the window shows that it is working; and
+  // choosing another model only recomputes what depends on it.
+  const [rows, setRows] = useState<Row[]>([]);
+  const [busy, setBusy] = useState(false);
+  const key = JSON.stringify({ ...answers, model: judged ? "" : answers.model });
+  useEffect(() => {
+    if (current !== "model" && current !== "name") return;
+    setBusy(true);
+    const timer = setTimeout(() => {
+      const listed: Row[] = models.map((model) => ({ model, id: model.id, params_g: NaN, tok_s: NaN, fits: true, note: "", params: {} }));
+      setRows(judged ? judge(answers, models, defaults, boards) : current === "name" ? listed.map((r) => (r.id === answers.model ? judge(answers, [r.model], defaults, boards)[0] : r)) : listed);
+      setBusy(false);
+    }, 30);
+    return () => clearTimeout(timer);
+    // `key` stands for the answers that change the estimates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current, key, judged, models, defaults, boards]);
   const row = rows.find((r) => r.id === answers.model);
   const params = useMemo(() => row?.params ?? {}, [row]);
   const model = models.find((m) => m.id === answers.model);
   const report = useMemo(() => (current === "name" && model ? estimate(model, defaults, params) : null), [current, model, defaults, params]);
-  const board = answers.start === "fpga" ? (FPGA_BOARDS.find((b) => b.id === answers.board)?.name ?? null) : null;
+  const board = answers.start === "fpga" ? (boards.find((b) => b.id === answers.board)?.name ?? null) : null;
 
   // On the model step, the suggestion is chosen unless the person picked a model that fits.
   useEffect(() => {
@@ -357,42 +403,43 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
           <span className="wizard-steps">
             Paso {step + 1} de {steps.length}
           </span>
-          <h2>{STEP_TITLES[current]}</h2>
+          <h2>{t(STEP_TITLES[current])}</h2>
         </header>
         <div className="wizard-body">
           {current === "start" && (
             <div className="wizard-grid">
               {STARTS.map((s) => (
-                <Choice key={s.id} selected={answers.start === s.id} title={s.title} onClick={() => set({ start: s.id, weight_bits: s.id === "fpga" ? 8 : answers.weight_bits, context_tokens: s.id === "fpga" ? 256 : Math.max(answers.context_tokens, 2048) })}>
-                  <p>{s.text}</p>
+                <Choice key={s.id} selected={answers.start === s.id} title={t(s.title)} onClick={() => set({ start: s.id, weight_bits: s.id === "fpga" ? 8 : answers.weight_bits, context_tokens: s.id === "fpga" ? 256 : Math.max(answers.context_tokens, 2048) })}>
+                  <p>{t(s.text)}</p>
                 </Choice>
               ))}
             </div>
           )}
           {current === "board" && <BoardPicker board={answers.board} choose={(board) => set({ board })} />}
           {current === "questions" && <Questions answers={answers} set={set} />}
-          {current === "model" && <ModelList rows={rows} answers={answers} choose={(id) => set({ model: id })} />}
+          {busy && <p className="wizard-empty">Calculando cada diseño…</p>}
+          {current === "model" && !busy && <ModelList rows={rows} answers={answers} choose={(id) => set({ model: id })} />}
           {current === "name" && (
             <>
-              <Summary report={report} model={model} board={board} />
+              {!busy && <Summary report={report} model={model} board={board} />}
               <label className="wizard-name">
-                Nombre del proyecto
+                {t("Nombre del proyecto")}
                 <input type="text" value={name} placeholder={model ? `${model.name}${board ? ` en ${board}` : ""}` : ""} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && finish()} />
               </label>
             </>
           )}
         </div>
         <footer>
-          <button onClick={onClose}>Cancelar</button>
+          <button onClick={onClose}>{t("Cancelar")}</button>
           <span />
-          {step > 0 && <button onClick={() => setStep(step - 1)}>Atrás</button>}
+          {step > 0 && <button onClick={() => setStep(step - 1)}>{t("Atrás")}</button>}
           {current === "name" ? (
             <button className="primary" disabled={!model} onClick={finish}>
-              Crear proyecto
+              {t("Crear proyecto")}
             </button>
           ) : (
             <button className="primary" disabled={!canGo} onClick={() => setStep(step + 1)}>
-              Siguiente
+              {t("Siguiente")}
             </button>
           )}
         </footer>

@@ -211,7 +211,7 @@ export function LogicView() {
   if (!program) {
     return (
       <section className="stage logic">
-        <div className="logic-page"><h2>Funcionamiento</h2><p className="muted-text">El compilador aún no admite este modelo. Elige un Qwen3.5 para ver sus operaciones.</p></div>
+        <div className="logic-page"><h2>Funcionamiento</h2><p className="muted-text">El compilador aún no admite la arquitectura de este modelo, así que no hay operaciones que mostrar. Admite Qwen3.5, Llama (y llama2.c), Mistral, Qwen2 y 3, Gemma, DeepSeek V3 y Janus.</p></div>
       </section>
     );
   }

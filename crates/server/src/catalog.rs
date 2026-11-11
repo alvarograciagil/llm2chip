@@ -79,7 +79,9 @@ pub struct ImageAbility {
 
 /// What the checkpoint in `dir` does with images, from its configuration and files.
 pub fn image_ability(dir: &Path, config: &Value) -> ImageAbility {
-    let reads = sim::vision::VisionConfig::read(dir).ok().flatten().is_some() && config.get("model_type").and_then(Value::as_str).is_some_and(|t| t.starts_with("qwen3_5"));
+    let model_type = config.get("model_type").and_then(Value::as_str).unwrap_or("");
+    // Qwen3.5's encoder and Janus's SigLIP are the two the simulator runs.
+    let reads = (sim::vision::VisionConfig::read(dir).ok().flatten().is_some() && model_type.starts_with("qwen3_5")) || (model_type == "janus" && config.get("vision_config").is_some());
     // Models that draw emit image tokens a decoder turns into pixels: Janus describes its
     // generator apart, Chameleon and Emu3 a VQ model.
     let draws = ["gen_vision_config", "gen_head_config", "gen_aligner_config", "vq_config", "vqmodel_config"].iter().any(|key| config.get(key).is_some());
@@ -408,8 +410,8 @@ mod image_tests {
         assert!(!other.reads && other.note.unwrap().contains("codificador"));
         let other = ability(r#"{"model_type":"multi_modality","gen_vision_config":{}}"#);
         assert!(!other.makes && other.note.unwrap().contains("genera imágenes"));
-        let janus = ability(r#"{"model_type":"janus","vq_config":{"num_patches":24}}"#);
-        assert!(janus.makes && janus.note.is_none());
+        let janus = ability(r#"{"model_type":"janus","vq_config":{"num_patches":24},"vision_config":{"image_size":384}}"#);
+        assert!(janus.makes && janus.reads && janus.note.is_none(), "Janus lee y dibuja");
         std::fs::remove_dir_all(dir).ok();
     }
 }

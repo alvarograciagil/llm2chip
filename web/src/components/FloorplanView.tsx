@@ -5,6 +5,7 @@ import type { Rect, Report } from "../engine";
 import { formatNumber } from "../format";
 import { useDesign, type Overlay, type Selection } from "../store";
 import { CATEGORY_LABEL } from "./Inspector";
+import { useT } from "../i18n";
 import { IconButton, Segmented } from "./controls";
 import { draw, fitCamera, hitTest, overlayRange, readTheme, type Camera, type Hit, type Theme } from "./floorplanRender";
 
@@ -30,6 +31,7 @@ const MAX_CELL_PX = 2400;
 
 
 function Legend({ report, overlay }: { report: Report; overlay: Overlay }) {
+  const t = useT();
   if (overlay === "funcion") {
     const used = [...new Set(report.blocks.map((b) => b.category))];
     return (
@@ -37,7 +39,7 @@ function Legend({ report, overlay }: { report: Report; overlay: Overlay }) {
         {used.map((c) => (
           <span key={c}>
             <i className={`swatch cat-${c}`} aria-hidden="true" />
-            {CATEGORY_LABEL[c]}
+            {t(CATEGORY_LABEL[c])}
           </span>
         ))}
       </div>
@@ -65,9 +67,10 @@ function Legend({ report, overlay }: { report: Report; overlay: Overlay }) {
 }
 
 function Breadcrumb({ selection, onSystem, onDie }: { selection: Selection; onSystem: () => void; onDie: (die: number) => void }) {
+  const t = useT();
   return (
     <nav className="breadcrumb" aria-label="Posición en el chip">
-      <button onClick={onSystem}>Sistema</button>
+      <button onClick={onSystem}>{t("Sistema")}</button>
       {selection && (
         <>
           <span aria-hidden="true">›</span>
@@ -93,6 +96,7 @@ function Breadcrumb({ selection, onSystem, onDie }: { selection: Selection; onSy
 }
 
 export function FloorplanView() {
+  const t = useT();
   const report = useDesign((s) => s.report);
   const overlay = useDesign((s) => s.overlay);
   const setOverlay = useDesign((s) => s.setOverlay);
@@ -371,7 +375,7 @@ export function FloorplanView() {
           }}
           onDie={goToDie}
         />
-        <Segmented label="Capa de color" value={overlay} options={OVERLAYS} onChange={setOverlay} />
+        <Segmented label={t("Capa de color")} value={overlay} options={OVERLAYS.map(([id, label]) => [id, t(label)])} onChange={setOverlay} />
       </div>
       <div className="hud bottom">
         <Legend report={report} overlay={overlay} />

@@ -40,7 +40,7 @@ impl VisionConfig {
         let text = std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?;
         let config: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
         let vision = &config["vision_config"];
-        if !vision.is_object() || !dir.join("model-vision.safetensors").exists() {
+        if !vision.is_object() || !has_encoder(dir) {
             return Ok(None);
         }
         let number = |value: &Value, default: usize| value.as_u64().map_or(default, |v| v as usize);
@@ -229,10 +229,24 @@ pub struct VisionTower {
     weights: Weights,
 }
 
+/// Whether the checkpoint carries the image encoder: in a file of its own, or among the
+/// language model's tensors, as the Qwen3.6 mixtures of experts keep it.
+fn has_encoder(dir: &Path) -> bool {
+    if dir.join("model-vision.safetensors").exists() {
+        return true;
+    }
+    let index = std::fs::read_to_string(dir.join("model.safetensors.index.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    if let Some(map) = index.as_ref().and_then(|i| i["weight_map"].as_object()) {
+        return map.keys().any(|k| k.starts_with("vision_tower."));
+    }
+    Weights::open(dir).is_ok_and(|w| w.raw_tensors().iter().any(|(name, ..)| name.starts_with("vision_tower.")))
+}
+
 impl VisionTower {
     pub fn open(dir: &Path) -> Result<Option<Self>, String> {
         let Some(config) = VisionConfig::read(dir)? else { return Ok(None) };
-        Ok(Some(Self { config, weights: Weights::open_vision(dir)? }))
+        let weights = if dir.join("model-vision.safetensors").exists() { Weights::open_vision(dir)? } else { Weights::open(dir)? };
+        Ok(Some(Self { config, weights }))
     }
 
     fn tensor(&self, name: &str) -> Result<Vec<f32>, String> {

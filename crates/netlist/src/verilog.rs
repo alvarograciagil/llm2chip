@@ -196,6 +196,23 @@ fn behavioural_multiplier(m: &Module) -> Option<String> {
     })
 }
 
+/// An adder written as a sum, so the FPGA tools put it on their carry chains instead of
+/// in a chain of look-up tables. Ports `a`, `b`, optional `cin` and `cout`, and `sum`.
+fn behavioural_adder(m: &Module) -> Option<String> {
+    let width: u32 = m.name.strip_prefix("ripple_adder_").or_else(|| m.name.strip_prefix("prefix_adder_"))?.parse().ok()?;
+    let mut ports: Vec<&str> = m.ports.iter().map(|p| p.name.as_str()).filter(|p| *p != "clk").collect();
+    ports.sort_unstable();
+    let top = width - 1;
+    match ports.as_slice() {
+        ["a", "b", "cin", "cout", "sum"] => Some(format!(
+            "module {} (\n  input clk,\n  input [{top}:0] a,\n  input [{top}:0] b,\n  input cin,\n  output [{top}:0] sum,\n  output cout\n);\n  assign {{cout, sum}} = a + b + cin;\nendmodule\n\n",
+            m.name
+        )),
+        ["a", "b", "sum"] => Some(format!("module {} (\n  input clk,\n  input [{top}:0] a,\n  input [{top}:0] b,\n  output [{top}:0] sum\n);\n  assign sum = a + b;\nendmodule\n\n", m.name)),
+        _ => None,
+    }
+}
+
 fn write_design(design: &Design, fpga: bool) -> String {
     let mut out = String::from("// Generado por llm2chip.\n\n");
     out.push_str(LIBRARY);
@@ -216,7 +233,7 @@ fn write_design(design: &Design, fpga: bool) -> String {
     visit(design, &design.top, &mut order);
     for name in order {
         let module = &design.modules[name];
-        match fpga.then(|| behavioural_multiplier(module)).flatten() {
+        match fpga.then(|| behavioural_multiplier(module).or_else(|| behavioural_adder(module))).flatten() {
             Some(text) => out.push_str(&text),
             None => emit_module(&mut out, module),
         }

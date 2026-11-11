@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Segmented } from "../components/controls";
+import { Icon } from "../components/icons";
+import { useT } from "../i18n";
 import { scheduleDesign, type Schedule, type ScheduledStage } from "../engine";
 import { formatNumber } from "../format";
 import { useDesign } from "../store";
 import { matchingPreset } from "../params";
-import { useSimulator, type Numeric, type WeightFormat } from "./simulatorStore";
+import { chipDraftDepth, loadSignature, useSimulator } from "./simulatorStore";
+import { sameModel } from "./sameModel";
 
 const KIND_LABEL: Record<ScheduledStage["kind"], string> = {
   matvec: "Matriz × vector",
@@ -18,21 +21,6 @@ const KIND_CLASS: Record<ScheduledStage["kind"], string> = {
   embedding: "tl-embedding",
   link: "tl-link",
 };
-
-/** The weight format of the current design, as the engine expects it. */
-function designFormat(p: Record<string, unknown>): WeightFormat {
-  const coding = String(p.weight_coding);
-  const grouped = coding === "affine" || coding === "float";
-  return {
-    coding,
-    bits: Number(p.weight_bits),
-    exponent_bits: Number(p.weight_exponent_bits),
-    bias: p.weight_bias === true,
-    group_size: grouped ? Number(p.group_size) : 0,
-    fine_scale: p.weight_fine_scale === true,
-    keep_source: coding === "affine" && p.use_model_mix === true,
-  };
-}
 
 function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
   const dies = Math.max(...schedule.stages.map((s) => s.die)) + 1;
@@ -83,24 +71,20 @@ function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
   );
 }
 
-type Profile = "fast" | "arithmetic" | "flow" | "custom";
+type Profile = "die" | "chip" | "custom";
 
-const PROFILES: Record<Exclude<Profile, "custom">, { numeric: Numeric; useGpu: boolean; firmware: boolean; samplerUnit: boolean; firmwareTokenizer: boolean; transactionLoad: boolean }> = {
-  fast: { numeric: "float", useGpu: true, firmware: false, samplerUnit: false, firmwareTokenizer: false, transactionLoad: false },
-  arithmetic: { numeric: "exact", useGpu: true, firmware: false, samplerUnit: false, firmwareTokenizer: false, transactionLoad: false },
-  flow: { numeric: "exact", useGpu: true, firmware: true, samplerUnit: true, firmwareTokenizer: true, transactionLoad: true },
+const PROFILES: Record<Exclude<Profile, "custom">, { firmware: boolean; samplerUnit: boolean; firmwareTokenizer: boolean; transactionLoad: boolean }> = {
+  die: { firmware: false, samplerUnit: false, firmwareTokenizer: false, transactionLoad: false },
+  chip: { firmware: true, samplerUnit: true, firmwareTokenizer: true, transactionLoad: true },
 };
 
-const NUMERIC_NAME: Record<Numeric, string> = { float: "Coma flotante", fixed: "Exponente por vector", exact: "Enteros exactos" };
-
-const loadedNumeric = (s: { numeric: Numeric; numericLoaded: Numeric | null }) => s.numericLoaded ?? s.numeric;
-
-function profileOf(s: { numeric: Numeric; useGpu: boolean; firmware: boolean; samplerUnit: boolean; firmwareTokenizer: boolean; transactionLoad: boolean }): Profile {
-  const same = (p: (typeof PROFILES)[keyof typeof PROFILES]) => p.numeric === s.numeric && p.useGpu === s.useGpu && p.firmware === s.firmware && p.samplerUnit === s.samplerUnit && p.firmwareTokenizer === s.firmwareTokenizer && p.transactionLoad === s.transactionLoad;
+function profileOf(s: { firmware: boolean; samplerUnit: boolean; firmwareTokenizer: boolean; transactionLoad: boolean }): Profile {
+  const same = (p: (typeof PROFILES)[keyof typeof PROFILES]) => p.firmware === s.firmware && p.samplerUnit === s.samplerUnit && p.firmwareTokenizer === s.firmwareTokenizer && p.transactionLoad === s.transactionLoad;
   return (Object.keys(PROFILES) as (keyof typeof PROFILES)[]).find((k) => same(PROFILES[k])) ?? "custom";
 }
 
 export function SimulatorView() {
+  const t = useT();
   const model = useDesign((s) => s.model);
   const params = useDesign((s) => s.params);
   const output = useSimulator((s) => s.output);
@@ -112,12 +96,14 @@ export function SimulatorView() {
   const draw = useSimulator((s) => s.draw && makesImages);
   const drawing = useSimulator((s) => s.drawing);
   const picture = useSimulator((s) => s.picture);
+  const ending = useSimulator((s) => s.ending);
   const imageReport = useSimulator((s) => s.imageReport);
   const set = useSimulator((s) => s.set);
   const generate = useSimulator((s) => s.generate);
   const stop = useSimulator((s) => s.stop);
   const running = useSimulator((s) => s.running);
-  const loaded = useSimulator((s) => s.loaded);
+  // What the engine holds counts only if it is this design's model, built for its formats.
+  const loaded = useSimulator((s) => s.loaded !== null && s.loadedSignature === loadSignature(s.path, params) && s.models.some((m) => m.path === s.path && m.name === s.loaded && model !== null && (m.path === model.path || sameModel(model.config, m.config))));
   const phase = useSimulator((s) => s.phase);
   const prefilled = useSimulator((s) => s.prefilled);
   const promptTokens = useSimulator((s) => s.promptTokens);
@@ -142,7 +128,12 @@ export function SimulatorView() {
               <img src={picture.data} width={picture.side} height={picture.side} alt={`Imagen generada: ${prompt}`} />
               <figcaption>{picture.side} × {picture.side} px, en {formatNumber(picture.seconds)} s</figcaption>
             </figure>
-          ) : output ? <p>{output}</p> : <p className="placeholder">{loaded ? (draw ? "La imagen aparecerá aquí." : "La respuesta del modelo aparecerá aquí.") : "Carga un modelo en el panel de la derecha para empezar."}</p>}
+          ) : output ? <p>{output}</p> : <p className="placeholder">{loaded ? (draw ? "La imagen aparecerá aquí." : "La respuesta del modelo aparecerá aquí.") : "Carga el chip en el panel de la derecha para simularlo: con el modelo y la aritmética del diseño."}</p>}
+          {!running && ending && !draw && (
+            <p className="note-warning">
+              {ending === "loop" ? "El modelo empezó a repetirse sin escribir su fin de turno y el chip lo detuvo, como hace su firmware." : ending === "context" ? "Se llenó el contexto del chip: no recuerda más tokens. Sube el contexto en el diseño para respuestas más largas." : "El modelo no escribió su fin de turno: se detuvo al llegar al límite de tokens."}
+            </p>
+          )}
           {running && drawing && (
             <p className="placeholder">
               {drawing.decoding ? "El decodificador convierte los tokens en píxeles…" : `El modelo escribe la imagen: ${drawing.done} de ${drawing.total} tokens visuales (${formatNumber(drawing.seconds)} s)`}
@@ -166,7 +157,10 @@ export function SimulatorView() {
           </figure>
         )}
         {makesImages && (
-          <Segmented label="Qué hace el modelo" value={draw ? "draw" : "answer"} options={[["answer", "Responder"], ["draw", "Dibujar"]]} onChange={(mode) => set({ draw: mode === "draw" })} />
+          <>
+            <Segmented label="Qué hace el modelo" value={draw ? "draw" : "answer"} options={[["answer", t("Responder")], ["draw", t("Dibujar")]]} onChange={(mode) => set({ draw: mode === "draw" })} />
+            {draw && <p className="muted-text">El dibujo aún se calcula en coma flotante: el chip no lleva todavía la cabeza de generación de imágenes ni el decodificador.</p>}
+          </>
         )}
         <div className="composer">
           <label className={readsImages ? "pill attach" : "pill attach disabled"} title={readsImages ? "Adjuntar una imagen: el codificador del modelo la convierte en tokens que se leen antes de la pregunta" : current?.images?.note ?? "Este modelo no lee imágenes"}>
@@ -224,6 +218,7 @@ async function readImage(file: File): Promise<{ width: number; height: number; r
 }
 
 export function SimulatorPanel() {
+  const t = useT();
   const state = useSimulator();
   const params = useDesign((s) => s.params);
   const formatLabel = matchingPreset(params) ?? "personalizado";
@@ -239,7 +234,15 @@ export function SimulatorPanel() {
 
   const mean = state.seconds.length ? state.seconds.reduce((a, b) => a + b, 0) / state.seconds.length : 0;
   const chipRate = report?.metrics.find((m) => m.id === "tok_s")?.value ?? 0;
-  const selected = state.models.find((m) => m.path === state.path);
+  // Only weights of the very model the chip is designed for can run on it.
+  const design = useDesign((s) => s.model);
+  const candidates = useMemo(() => (design ? state.models.filter((m) => m.path === design.path || sameModel(design.config, m.config)) : []), [design, state.models]);
+  const selected = candidates.find((m) => m.path === state.path);
+  useEffect(() => {
+    if (!selected && candidates.length > 0) set({ path: candidates[0].path });
+  }, [selected, candidates, set]);
+  const stale = state.loaded !== null && state.loadedSignature !== null && state.loadedSignature !== loadSignature(state.path, params);
+  const draftDepth = chipDraftDepth(params);
 
   if (state.online === false) {
     return (
@@ -261,101 +264,86 @@ export function SimulatorPanel() {
       <h2 className="detail-title">Simulador</h2>
       <p className="detail-sub">Ejecuta el microprograma con pesos reales.</p>
 
-      <h3>Modelo</h3>
+      <h3>{t("El chip que se simula")}</h3>
       <div className="inset padded form">
-        <label>
-          Pesos
-          <select value={state.path} onChange={(e) => set({ path: e.target.value })}>
-            {state.models.map((m) => (
-              <option key={m.path} value={m.path} disabled={!m.supported}>
-                {m.name}{m.supported ? "" : " (no simulable)"}
-              </option>
-            ))}
-          </select>
-        </label>
-        {selected && <p className="muted-text">{selected.architecture} · {formatNumber(selected.size_gb)} GB</p>}
-        <button className="link-button" onClick={() => setView("modelos")}>Añadir o descargar modelos…</button>
-        <Segmented
-          label="Aritmética"
-          value={state.numeric}
-          options={[["float", "Coma flotante"], ["fixed", "Exponente por vector"], ["exact", "Enteros exactos"]]}
-          onChange={(numeric) => set({ numeric })}
-        />
-        {state.numeric === "exact" && (
-          <div className="fixed-grid">
-            <label>
-              Bits de vector
-              <input type="text" inputMode="numeric" value={state.activationBits} onChange={(e) => set({ activationBits: Number(e.target.value) || 0 })} />
-            </label>
-          </div>
-        )}
-        {state.numeric === "fixed" && (
-          <div className="fixed-grid">
-            {([
-              ["Activación, bits", "activationBits"],
-              ["Estado, bits", "stateBits"],
-              ["Tablas, bits", "tableBits"],
-            ] as const).map(([label, key]) => (
-              <label key={label + key}>
-                {label}
-                <input type="text" inputMode="numeric" value={state[key]} onChange={(e) => set({ [key]: Number(e.target.value) || 0 })} />
+        <p className="sim-model">
+          <strong>{design?.name ?? "Sin modelo"}</strong>
+          <span className="muted-text">El modelo del diseño, con su aritmética: enteros de {String(params.activation_bits)} bits y pesos {formatLabel}.</span>
+        </p>
+        {candidates.length === 0 ? (
+          <>
+            <p className="muted-text">No hay pesos de este modelo en el equipo, así que el chip no se puede simular todavía.</p>
+            <button className="link-button" onClick={() => setView("modelos")}>
+              Descargar sus pesos…
+            </button>
+          </>
+        ) : (
+          <>
+            {candidates.length > 1 && (
+              <label>
+                Pesos de este modelo
+                <select value={state.path} onChange={(e) => set({ path: e.target.value })}>
+                  {candidates.map((m) => (
+                    <option key={m.path} value={m.path} disabled={!m.supported}>
+                      {m.name}
+                      {m.supported ? "" : " (no simulable)"}
+                    </option>
+                  ))}
+                </select>
               </label>
-            ))}
-          </div>
+            )}
+            {selected && (
+              <p className="muted-text">
+                {selected.name} · {selected.architecture} · {formatNumber(selected.size_gb)} GB
+              </p>
+            )}
+            <label className="check">
+              <input type="checkbox" checked={state.useGpu} onChange={(e) => set({ useGpu: e.target.checked })} />
+              {t("Acelerar con la GPU")}
+            </label>
+            <button className="pill primary-pill" disabled={state.loading || !selected?.supported} onClick={() => void load()}>
+              {t(state.loading ? "Cargando…" : state.loaded ? "Recargar" : "Cargar el chip")}
+            </button>
+            {stale && <p className="note-warning">El diseño cambió desde que se cargó: recarga para simular el chip actual.</p>}
+            {state.loaded && <p className="muted-text">Cargado: {state.loaded} · {state.accelerator ?? "CPU"}</p>}
+          </>
         )}
-        <label className="check">
-          <input type="checkbox" checked={state.useDesignFormat} onChange={(e) => set({ useDesignFormat: e.target.checked, designFormat: designFormat(params) })} />
-          Convertir los pesos al formato del chip ({formatLabel})
-        </label>
-        <label className="check">
-          <input type="checkbox" checked={state.useGpu} onChange={(e) => set({ useGpu: e.target.checked })} />
-          Acelerar con la GPU
-        </label>
-        <button className="pill primary-pill" disabled={state.loading || !state.path} onClick={() => { set({ designFormat: designFormat(params) }); void load(); }}>
-          {state.loading ? "Cargando…" : state.loaded ? "Recargar" : "Cargar modelo"}
-        </button>
-        {state.loaded && <p className="muted-text">Cargado: {state.loaded} · {state.accelerator ?? "CPU"}</p>}
       </div>
 
-      <h3>Qué se simula</h3>
+      <h3>{t("Qué se simula")}</h3>
       <div className="inset padded form">
         <Segmented
           label="Perfil"
           value={profileOf(state)}
-          options={[["fast", "Rápida"], ["arithmetic", "Aritmética real"], ["flow", "Flujo real"], ["custom", "A medida"]]}
+          options={[["die", t("El die")], ["chip", t("El chip completo")], ["custom", t("A medida")]]}
           onChange={(profile) => {
             if (profile !== "custom") set(PROFILES[profile]);
           }}
         />
-        <label className="check">
-          <input type="checkbox" checked={state.firmware} onChange={(e) => set({ firmware: e.target.checked })} />
-          CPU y firmware del chip
-        </label>
-        <p className="muted-text">El firmware real corre instrucción a instrucción y gobierna el die por sus registros.</p>
-        <label className="check">
-          <input type="checkbox" checked={state.samplerUnit || state.firmware} disabled={state.firmware} onChange={(e) => set({ samplerUnit: e.target.checked })} />
-          Unidad de muestreo del chip
-        </label>
-        <p className="muted-text">Elige cada token con la misma lógica que el circuito, top-k incluido. Con la CPU siempre se usa.</p>
-        <label className="check">
-          <input type="checkbox" checked={state.firmware && state.firmwareTokenizer} disabled={!state.firmware} onChange={(e) => set({ firmwareTokenizer: e.target.checked })} />
-          Tokenizador en el firmware
-        </label>
-        <label className="check">
-          <input type="checkbox" checked={state.transactionLoad} onChange={(e) => set({ transactionLoad: e.target.checked })} />
-          Comprobar la carga de la imagen
-        </label>
-        <p className="muted-text">Al cargar, recorre todos los bloques como el controlador real, verifica su CRC y cuenta los ciclos. Hay que recargar el modelo.</p>
-        <p className="muted-text">El firmware convierte el texto en tokens y los tokens en bytes, y se compara con la biblioteca de referencia.</p>
+        {(
+          [
+            ["firmware", "CPU y firmware del chip", "El firmware real corre instrucción a instrucción y gobierna el die por sus registros.", state.firmware, false],
+            ["samplerUnit", "Unidad de muestreo del chip", "Elige cada token con la misma lógica que el circuito, top-k incluido. Con la CPU siempre se usa.", state.samplerUnit || state.firmware, state.firmware],
+            ["firmwareTokenizer", "Tokenizador en el firmware", "El firmware convierte el texto en tokens y los tokens en bytes, y se compara con la biblioteca de referencia.", state.firmware && state.firmwareTokenizer, !state.firmware],
+            ["transactionLoad", "Comprobar la carga de la imagen", "Al cargar, recorre todos los bloques como el controlador real, verifica su CRC y cuenta los ciclos. Hay que recargar el chip.", state.transactionLoad, false],
+          ] as const
+        ).map(([key, label, help, checked, disabled]) => (
+          <label className="check" key={key} title={help}>
+            <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => set({ [key]: e.target.checked })} />
+            {t(label)}
+            <span className="hint-icon" aria-label={help}>
+              <Icon name="info" size={13} />
+            </span>
+          </label>
+        ))}
         <dl className="metrics">
-          <div><dt>Núcleo de inferencia</dt><dd>{NUMERIC_NAME[state.numeric]}{state.useGpu ? " · GPU" : ""}</dd></div>
+          <div><dt>Aritmética</dt><dd>Enteros de {String(params.activation_bits)} bits, la del chip</dd></div>
           <div><dt>Tokenizador</dt><dd>{state.firmware && state.firmwareTokenizer ? "En el firmware" : "Fuera del chip"}</dd></div>
           <div><dt>Carga de pesos</dt><dd>{params.weight_backend === "rom" ? "Grabados en el chip (ROM)" : state.transactionLoad ? "Por transacciones" : "Directa del checkpoint"}</dd></div>
         </dl>
-        {state.numeric !== loadedNumeric(state) && state.loaded && <p className="muted-text">Recarga el modelo para aplicar la aritmética elegida.</p>}
       </div>
 
-      <h3>Generación</h3>
+      <h3>{t("Generación")}</h3>
       <div className="inset padded form">
         <label>
           Tokens máximos
@@ -375,13 +363,10 @@ export function SimulatorPanel() {
             <input type="text" inputMode="numeric" value={state.thinkBudget} placeholder="Sin límite" onChange={(e) => set({ thinkBudget: e.target.value.replace(/[^0-9]/g, "") })} />
           </label>
         )}
-        <label>
-          Medir cabeza MTP (profundidad, 0 para desactivar)
-          <input type="text" inputMode="numeric" value={state.mtpDepth} onChange={(e) => set({ mtpDepth: Math.min(3, Number(e.target.value) || 0) })} />
-        </label>
+        <p className="muted-text">{draftDepth > 0 ? `La cabeza MTP del diseño adivina ${draftDepth} tokens y se miden sus aciertos.` : "El diseño no lleva cabeza MTP."}</p>
       </div>
 
-      <h3>Medidas</h3>
+      <h3>{t("Medidas")}</h3>
       <dl className="inset metrics">
         <div><dt>Fase</dt><dd>{state.phase || "—"}</dd></div>
         <div><dt>Tokens generados</dt><dd>{state.tokens}</dd></div>

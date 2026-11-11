@@ -25,6 +25,7 @@ export type Overlay = "funcion" | "capa" | "actividad" | "energia" | "ancho" | "
 export type SidebarTab = "parametros" | "optimizaciones";
 export type View = "plano" | "funcionamiento" | "esquematico" | "simulador" | "explorador" | "modelos" | "numerico" | "parametros";
 export type Appearance = "auto" | "light" | "dark";
+import { readLanguage, writeLanguage, type Language } from "./i18n";
 
 export interface SavedDesign {
   name: string;
@@ -53,6 +54,7 @@ interface DesignState {
   overlay: Overlay;
   view: View;
   appearance: Appearance;
+  language: Language;
   sidebarTab: SidebarTab;
   help: string | null;
   /** The parameter the documentation shows first. */
@@ -61,10 +63,12 @@ interface DesignState {
 
   bootstrap: () => void;
   setParam: (key: string, value: unknown) => void;
+  /** Several parameters at once, as one step to undo. */
+  setParams: (patch: Record<string, unknown>) => void;
   resetParam: (key: string) => void;
   toggleOptimization: (id: string) => void;
   selectModel: (id: string) => void;
-  addModel: (name: string, config: string) => void;
+  addModel: (name: string, config: string, path?: string) => void;
   reset: () => void;
   undo: () => void;
   redo: () => void;
@@ -80,6 +84,7 @@ interface DesignState {
   setOverlay: (o: Overlay) => void;
   setView: (v: View) => void;
   setAppearance: (a: Appearance) => void;
+  setLanguage: (l: Language) => void;
   setSidebarTab: (t: SidebarTab) => void;
   setHelp: (text: string | null) => void;
   openDocs: (key: string) => void;
@@ -208,6 +213,7 @@ export const useDesign = create<DesignState>((set, get) => {
     overlay: "funcion",
     view: "plano",
     appearance: "auto",
+    language: readLanguage(),
     sidebarTab: "parametros",
     help: null,
     docsFocus: null,
@@ -236,6 +242,7 @@ export const useDesign = create<DesignState>((set, get) => {
     },
 
     setParam: (key, value) => commit({ ...get().params, [key]: value }, key),
+    setParams: (patch) => commit({ ...get().params, ...patch }, ""),
 
     resetParam(key) {
       commit({ ...get().params, [key]: get().defaults[key] }, "");
@@ -252,8 +259,8 @@ export const useDesign = create<DesignState>((set, get) => {
       set({ model, selection: null, ...run(model, get().params) });
     },
 
-    addModel(name, config) {
-      const model = { id: `archivo:${name}`, name, config };
+    addModel(name, config, path) {
+      const model = { id: `archivo:${name}`, name, config, ...(path ? { path } : {}) };
       const added = [...get().models.filter((m) => m.id !== model.id), model];
       writeAddedModels(added);
       set({
@@ -331,6 +338,10 @@ export const useDesign = create<DesignState>((set, get) => {
         // The choice still applies to this session.
       }
       set({ appearance });
+    },
+    setLanguage(language) {
+      writeLanguage(language);
+      set({ language });
     },
     setSidebarTab: (sidebarTab) => set({ sidebarTab }),
     setHelp: (help) => set({ help }),

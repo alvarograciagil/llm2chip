@@ -6,6 +6,9 @@ use tokenizers::Tokenizer;
 
 const QWEN_STOP: [u32; 2] = [248046, 248044];
 
+/// The system prompt Janus's processor puts before every conversation.
+const JANUS_SYSTEM: &str = "You are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.";
+
 pub struct PromptStyle {
     /// The checkpoint's own Jinja template, when it publishes one.
     template: Option<String>,
@@ -13,6 +16,8 @@ pub struct PromptStyle {
     eos: String,
     /// Qwen3.5 is framed here, with its reasoning block closed or left open.
     chatml_thinking: bool,
+    /// Janus frames a picture between its own tokens, after a system prompt of its own.
+    janus: bool,
     pub stop: Vec<u32>,
     /// The tokens that open and close the model's reasoning, if its tokenizer has them.
     pub think: Option<(u32, u32)>,
@@ -77,7 +82,7 @@ fn ids_of(value: &Value) -> Vec<u32> {
 impl PromptStyle {
     pub fn read(dir: &Path, family: &str, tokenizer: &Tokenizer) -> Self {
         if family == "qwen3_5" {
-            return Self { template: None, bos: String::new(), eos: String::new(), chatml_thinking: true, stop: QWEN_STOP.to_vec(), think: think_tokens(tokenizer) };
+            return Self { template: None, bos: String::new(), eos: String::new(), chatml_thinking: true, janus: false, stop: QWEN_STOP.to_vec(), think: think_tokens(tokenizer) };
         }
         let settings = read_json(&dir.join("tokenizer_config.json"));
         let template = std::fs::read_to_string(dir.join("chat_template.jinja")).ok().or_else(|| settings["chat_template"].as_str().map(String::from));
@@ -90,12 +95,17 @@ impl PromptStyle {
         if stop.is_empty() {
             stop.extend(tokenizer.token_to_id(&eos));
         }
-        Self { template, bos, eos, chatml_thinking: false, stop, think: think_tokens(tokenizer) }
+        let janus = read_json(&dir.join("config.json"))["model_type"].as_str() == Some("janus");
+        Self { template, bos, eos, chatml_thinking: false, janus, stop, think: think_tokens(tokenizer) }
     }
 
     /// The text with an image before the question, which the chip reads as one
     /// `<|image_pad|>` that its tokens replace.
     pub fn render_with_image(&self, prompt: &str, thinking: bool) -> Result<String, String> {
+        if self.janus {
+            // Janus's own framing; the one placeholder becomes as many vectors as the picture has patches.
+            return Ok(format!("{}{JANUS_SYSTEM}\n\n<|User|>: <begin_of_image><image_placeholder><end_of_image>\n{prompt}\n\n<|Assistant|>:", self.bos));
+        }
         if !self.chatml_thinking {
             return Err("este modelo no lee imágenes".into());
         }
@@ -133,13 +143,13 @@ mod tests {
 
     #[test]
     fn an_image_goes_before_the_question_as_one_placeholder() {
-        let qwen = PromptStyle { template: None, bos: String::new(), eos: String::new(), chatml_thinking: true, stop: vec![], think: None };
+        let qwen = PromptStyle { template: None, bos: String::new(), eos: String::new(), chatml_thinking: true, janus: false, stop: vec![], think: None };
         assert_eq!(qwen.render_with_image("¿Qué es?", false).unwrap(), "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>¿Qué es?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
         assert!(style(None, vec![2]).render_with_image("hola", false).is_err());
     }
 
     fn style(template: Option<&str>, stop: Vec<u32>) -> PromptStyle {
-        PromptStyle { template: template.map(String::from), bos: "<s>".into(), eos: "</s>".into(), chatml_thinking: false, stop, think: None }
+        PromptStyle { template: template.map(String::from), bos: "<s>".into(), eos: "</s>".into(), chatml_thinking: false, janus: false, stop, think: None }
     }
 
     #[test]

@@ -1054,3 +1054,78 @@ impl<'a> Tokenizer<'a> {
         }
     }
 }
+
+/// Notices when generated text is going round in circles: the same run of tokens, up to
+/// `LOOP_PERIOD` long, said again right after itself (see `repeats_for`). A model
+/// that never writes its end token would otherwise repeat itself until its limit; the
+/// chip stops there instead, and the simulator applies the very same rule.
+pub const LOOP_PERIOD: usize = 16;
+const LOOP_WINDOW: usize = LOOP_PERIOD * 2;
+
+/// How many times in a row a run of `period` tokens must appear to count as a loop: a
+/// phrase twice is already one, short runs need more to tell them from ordinary text.
+fn repeats_for(period: usize) -> usize {
+    match period {
+        1 => 8,
+        2 => 3,
+        _ => 2,
+    }
+}
+
+#[derive(Clone)]
+pub struct LoopWatch {
+    last: [u32; LOOP_WINDOW],
+    seen: usize,
+}
+
+impl Default for LoopWatch {
+    fn default() -> Self {
+        Self { last: [0; LOOP_WINDOW], seen: 0 }
+    }
+}
+
+impl LoopWatch {
+    /// Takes the next token and says whether the text has just started looping.
+    pub fn push(&mut self, token: u32) -> bool {
+        self.last[self.seen % LOOP_WINDOW] = token;
+        self.seen += 1;
+        let back = |k: usize| self.last[(self.seen - 1 - k) % LOOP_WINDOW];
+        (1..=LOOP_PERIOD).any(|period| {
+            let span = period * repeats_for(period);
+            // A phrase that is itself a shorter one repeated is judged as that one.
+            let shorter = || (1..period).any(|d| period % d == 0 && (d..period).all(|k| back(k) == back(k - d)));
+            span <= self.seen && span <= LOOP_WINDOW && !shorter() && (period..span).all(|k| back(k) == back(k - period))
+        })
+    }
+}
+
+#[cfg(test)]
+mod loop_tests {
+    extern crate std;
+    use super::LoopWatch;
+    use std::vec::Vec;
+
+    fn first_alarm(tokens: &[u32]) -> Option<usize> {
+        let mut watch = LoopWatch::default();
+        tokens.iter().position(|t| watch.push(*t))
+    }
+
+    #[test]
+    fn a_phrase_said_again_stops_at_the_second_time() {
+        // «París.» as three tokens, said again and again: it stops once it has said it twice.
+        let text: Vec<u32> = [5, 6, 7].repeat(6);
+        assert_eq!(first_alarm(&text), Some(5));
+        // A whole sentence too.
+        let sentence: Vec<u32> = (10..22).collect();
+        assert_eq!(first_alarm(&sentence.repeat(3)), Some(23));
+    }
+
+    #[test]
+    fn ordinary_text_and_short_repeats_go_on() {
+        let text: Vec<u32> = (0..200).map(|i| (i * 7 + i / 5) % 50).collect();
+        assert_eq!(first_alarm(&text), None);
+        assert_eq!(first_alarm(&[1, 1, 1, 2, 2, 2, 3, 3, 3]), None, "tres iguales no es un bucle");
+        assert_eq!(first_alarm(&[4, 5, 4, 5, 6]), None, "dos fichas dos veces tampoco");
+        assert_eq!(first_alarm(&[9; 8]), Some(7), "ocho veces la misma ficha sí");
+    }
+}

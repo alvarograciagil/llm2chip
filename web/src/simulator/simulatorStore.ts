@@ -16,6 +16,36 @@ export interface ServerModel {
 
 export type Numeric = "float" | "fixed" | "exact";
 
+/** The integer formats of the design, as the engine takes them. */
+export function chipNumeric(p: Record<string, unknown>) {
+  return { activation_bits: Number(p.activation_bits), state_bits: Number(p.delta_state_bits), table_bits: Number(p.function_table_bits) };
+}
+
+/** The weight format of the design, as the engine expects it. */
+export function chipFormat(p: Record<string, unknown>): WeightFormat {
+  const coding = String(p.weight_coding);
+  const grouped = coding === "affine" || coding === "float";
+  return {
+    coding,
+    bits: Number(p.weight_bits),
+    exponent_bits: Number(p.weight_exponent_bits),
+    bias: p.weight_bias === true,
+    group_size: grouped ? Number(p.group_size) : 0,
+    fine_scale: p.weight_fine_scale === true,
+    keep_source: coding === "affine" && p.use_model_mix === true,
+  };
+}
+
+/** What a load depends on: the weights and the design's formats. */
+export function loadSignature(path: string, p: Record<string, unknown>): string {
+  return JSON.stringify([path, chipNumeric(p), chipFormat(p)]);
+}
+
+/** How deep the design's draft head guesses, or 0 without one. */
+export function chipDraftDepth(p: Record<string, unknown>): number {
+  return p.mtp_enabled === true ? Math.min(3, Number(p.mtp_depth) || 0) : 0;
+}
+
 export interface WeightFormat {
   coding: string;
   bits: number;
@@ -50,6 +80,8 @@ interface SimulatorState {
   samplerUnit: boolean;
   firmwareTokenizer: boolean;
   transactionLoad: boolean;
+  /** What the loaded engine was built for: a different one means the design changed since. */
+  loadedSignature: string | null;
   loadReport: { segments: number; words: number; cycles: number; seconds: number; created: boolean; crc_errors: string[] } | null;
   chip: { cycles: number; dieCycles: number; tokenizerMatch: boolean | null } | null;
   acceptance: { hits: number[]; tries: number[] };
@@ -71,6 +103,8 @@ interface SimulatorState {
   running: boolean;
   phase: string;
   error: string | null;
+  /** Why the last answer ended, when it was not the model's own end token. */
+  ending: "limit" | "loop" | "context" | null;
   promptTokens: number;
   prefilled: number;
   tokens: number;
@@ -111,6 +145,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   samplerUnit: false,
   firmwareTokenizer: false,
   transactionLoad: false,
+  loadedSignature: null,
   loadReport: null,
   chip: null,
   acceptance: { hits: [], tries: [] },
@@ -127,6 +162,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   running: false,
   phase: "",
   error: null,
+  ending: null,
   promptTokens: 0,
   prefilled: 0,
   tokens: 0,
@@ -150,34 +186,39 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   set: (patch) => set(patch),
 
   async load() {
-    const { path, numeric, activationBits, stateBits, tableBits, useDesignFormat, designFormat, useGpu, transactionLoad } = get();
+    const { path, useGpu, transactionLoad } = get();
     set({ loading: true, error: null });
+    // The simulator runs the chip being designed: its integer arithmetic and its weight format.
+    const params = useDesign.getState().params;
     const body = {
       path,
-      numeric: numeric !== "float" ? { activation_bits: activationBits, state_bits: stateBits, table_bits: tableBits } : null,
-      exact: numeric === "exact",
-      format: useDesignFormat ? designFormat : null,
+      numeric: chipNumeric(params),
+      exact: true,
+      format: chipFormat(params),
       gpu: useGpu,
       transaction: transactionLoad,
     };
+    const signature = loadSignature(path, params);
     try {
       const response = await fetch("/api/load", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       if (!response.ok) throw new Error(await message(response));
       const { loaded, accelerator, load_report: loadReport } = await response.json();
-      set({ loaded, accelerator, loadReport: loadReport ?? null, loading: false, numericLoaded: numeric });
+      set({ loaded, accelerator, loadReport: loadReport ?? null, loading: false, numericLoaded: "exact", loadedSignature: signature });
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e), loading: false });
     }
   },
 
   generate() {
-    const { prompt, maxTokens, temperature, topK, mtpDepth, thinking, thinkBudget, firmware, samplerUnit, firmwareTokenizer, image, draw } = get();
+    const { prompt, maxTokens, temperature, topK, thinking, thinkBudget, firmware, samplerUnit, firmwareTokenizer, image, draw } = get();
+    // The draft head is part of the chip only when the design has one.
+    const mtpDepth = chipDraftDepth(useDesign.getState().params);
     const budget = thinkBudget.trim() === "" ? null : Math.max(0, Math.floor(Number(thinkBudget) || 0));
     const metric = (id: string) => useDesign.getState().report?.metrics.find((m) => m.id === id)?.value ?? 0;
     const rate = metric("tok_s");
     const fidelity = { firmware, sampler_unit: samplerUnit || firmware, cycles_per_token: rate > 0 ? (metric("freq_ghz") * 1e9) / rate : 0, sampler_lanes: useDesign.getState().params.sampler_lanes, tokenizer: firmware && firmwareTokenizer, context_tokens: useDesign.getState().params.context_tokens };
     socket?.close();
-    set({ drawing: null, picture: draw ? null : get().picture, chip: null, output: "", running: true, error: null, phase: "Conectando", tokens: 0, prefilled: 0, promptTokens: 0, seconds: [], saturated: 0, acceptance: { hits: [], tries: [] } });
+    set({ ending: null, drawing: null, picture: draw ? null : get().picture, chip: null, output: "", running: true, error: null, phase: "Conectando", tokens: 0, prefilled: 0, promptTokens: 0, seconds: [], saturated: 0, acceptance: { hits: [], tries: [] } });
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${location.host}/api/generate`);
     socket = ws;
@@ -204,7 +245,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
         }));
       }
       if (data.type === "done") {
-        set({ phase: "Terminado", running: false, chip: data.chip ? { cycles: data.chip.cycles, dieCycles: data.chip.die_cycles, tokenizerMatch: data.chip.tokenizer_match ?? null } : null });
+        set({ phase: "Terminado", running: false, ending: ["limit", "loop", "context"].includes(data.reason) ? data.reason : null, chip: data.chip ? { cycles: data.chip.cycles, dieCycles: data.chip.die_cycles, tokenizerMatch: data.chip.tokenizer_match ?? null } : null });
         ws.close();
       }
       if (data.type === "error") {

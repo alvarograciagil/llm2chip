@@ -366,10 +366,51 @@ button {
 
 /* Split view */
 .split {
+  position: relative;
   display: grid;
   flex: 1;
-  grid-template-columns: 292px minmax(0, 1fr) 312px;
+  grid-template-columns: var(--left-column, 292px) minmax(0, 1fr) var(--right-column, 312px);
   min-height: 0;
+}
+
+/* The edges of the side columns, wide enough to grab, invisible until hovered. */
+.column-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 5;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.column-resizer.left {
+  left: calc(var(--left-column, 292px) - 4px);
+}
+
+.column-resizer.right {
+  right: calc(var(--right-column, 312px) - 4px);
+}
+
+.column-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.column-resizer:hover::after,
+body.resizing .column-resizer::after {
+  background: var(--accent);
+}
+
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .sidebar,
@@ -1069,6 +1110,10 @@ button.link-row {
 @media (max-width: 1080px) {
   .split {
     grid-template-columns: 260px minmax(0, 1fr);
+  }
+
+  .column-resizer {
+    display: none;
   }
 
   .inspector {
@@ -2848,4 +2893,101 @@ button.model-toggle {
   .board-card {
     grid-template-columns: 1fr;
   }
+}
+
+.note-warning {
+  margin: 10px 0 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--orange-bg);
+  color: var(--orange);
+  font-size: 12px;
+}
+
+.issue-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.sim-model {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+}
+
+/* The view switcher: an icon and a name, only the icon where the window is narrow. */
+.segmented.views button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+}
+
+.icon {
+  flex: none;
+}
+
+@media (max-width: 1320px) {
+  .segmented.views .view-label {
+    display: none;
+  }
+
+  .segmented.views button.on .view-label {
+    display: inline;
+  }
+}
+
+@media (max-width: 980px) {
+  .segmented.views button.on .view-label {
+    display: none;
+  }
+}
+
+/* An explanation behind a small icon, read on hover, instead of a paragraph. */
+.hint-icon {
+  display: inline-flex;
+  margin-left: 4px;
+  color: var(--label-3);
+  vertical-align: -2px;
+}
+
+label:hover > .hint-icon {
+  color: var(--label-2);
+}
+
+.issue-glyph {
+  display: flex;
+  padding-top: 1px;
+}
+
+.issue.error .issue-glyph {
+  color: var(--red);
+}
+
+.issue.aviso .issue-glyph {
+  color: var(--orange);
+}
+
+.icon-select.language span {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.die-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--label-2);
+}
+
+.die-size input {
+  width: 52px;
+  padding: 2px 5px;
+  border: 0.5px solid var(--separator);
+  border-radius: 5px;
+  background: var(--group);
+  color: var(--label);
+  text-align: right;
 }

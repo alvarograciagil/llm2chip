@@ -88,6 +88,8 @@ impl LoadInterface {
 #[serde(default)]
 pub struct ChipParams {
     pub node: String,
+    /// With an FPGA node, the board the design is built for: see `fpga::boards`.
+    pub fpga_board: String,
 
     pub max_params_g: f64,
     pub context_tokens: u64,
@@ -176,6 +178,7 @@ impl Default for ChipParams {
     fn default() -> Self {
         Self {
             node: "n6".into(),
+            fpga_board: String::new(),
             max_params_g: 35.0,
             context_tokens: 8192,
             mtp_enabled: false,

@@ -2,8 +2,22 @@ import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useDesign, type Appearance } from "../store";
 import { datasheet } from "../datasheet";
 import { download } from "../download";
-import { IconButton, Segmented } from "./controls";
+import { IconButton } from "./controls";
 import { ProjectWizard } from "../wizard/ProjectWizard";
+import { Icon } from "./icons";
+import { useT, type Language } from "../i18n";
+import type { View } from "../store";
+
+const VIEWS: [View, string][] = [
+  ["plano", "Plano"],
+  ["funcionamiento", "Funcionamiento"],
+  ["esquematico", "Esquemático"],
+  ["simulador", "Simulador"],
+  ["explorador", "Explorador"],
+  ["numerico", "Numérico"],
+  ["modelos", "Modelos"],
+  ["parametros", "Parámetros"],
+];
 
 const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round" } as const;
 
@@ -111,7 +125,23 @@ function AppearanceMenu() {
   );
 }
 
+function LanguageMenu() {
+  const language = useDesign((s) => s.language);
+  const setLanguage = useDesign((s) => s.setLanguage);
+  const t = useT();
+  return (
+    <label className="icon-select language" title={t("Idioma")}>
+      <span aria-hidden="true">{language.toUpperCase()}</span>
+      <select aria-label={t("Idioma")} value={language} onChange={(e) => setLanguage(e.target.value as Language)}>
+        <option value="es">Español</option>
+        <option value="en">English</option>
+      </select>
+    </label>
+  );
+}
+
 export function Toolbar() {
+  const t = useT();
   const undo = useDesign((s) => s.undo);
   const redo = useDesign((s) => s.redo);
   const canUndo = useDesign((s) => s.past.length > 0);
@@ -133,44 +163,38 @@ export function Toolbar() {
     <header className="toolbar">
       <div className="toolbar-side">
         <strong className="app-name">llm2chip</strong>
-        <IconButton label="Nuevo proyecto" onClick={() => setCreating(true)}>
+        <IconButton label={t("Nuevo proyecto")} onClick={() => setCreating(true)}>
           <path d="M10 4.5v11M4.5 10h11" {...stroke} />
         </IconButton>
         <DesignMenu />
         {creating && <ProjectWizard onClose={() => setCreating(false)} />}
       </div>
-      <Segmented
-        label="Vista"
-        value={view}
-        options={[
-          ["plano", "Plano"],
-          ["funcionamiento", "Funcionamiento"],
-          ["esquematico", "Esquemático"],
-          ["simulador", "Simulador"],
-          ["explorador", "Explorador"],
-          ["numerico", "Numérico"],
-          ["modelos", "Modelos"],
-          ["parametros", "Parámetros"],
-        ]}
-        onChange={setView}
-      />
+      <div className="segmented views" role="radiogroup" aria-label={t("Vista")}>
+        {VIEWS.map(([id, label]) => (
+          <button key={id} role="radio" aria-checked={view === id} aria-label={t(label)} title={t(label)} className={view === id ? "on" : ""} onClick={() => setView(id)}>
+            <Icon name={id} />
+            <span className="view-label">{t(label)}</span>
+          </button>
+        ))}
+      </div>
       <div className="toolbar-side end">
-        <IconButton label="Exportar hoja de datos" onClick={exportDatasheet}>
+        <IconButton label={t("Exportar hoja de datos")} onClick={exportDatasheet}>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2h6l3 3v9H4zM10 2v3h3M6 8.5h5M6 11h5" {...stroke} /></svg>
         </IconButton>
-        <IconButton label="Deshacer" disabled={!canUndo} onClick={undo}>
+        <IconButton label={t("Deshacer")} disabled={!canUndo} onClick={undo}>
           <path d="M7.5 5 4 8.5 7.5 12M4.5 8.5H12a4 4 0 0 1 0 8h-1.5" {...stroke} />
         </IconButton>
-        <IconButton label="Rehacer" disabled={!canRedo} onClick={redo}>
+        <IconButton label={t("Rehacer")} disabled={!canRedo} onClick={redo}>
           <path d="M12.5 5 16 8.5 12.5 12M15.5 8.5H8a4 4 0 0 0 0 8h1.5" {...stroke} />
         </IconButton>
         <AppearanceMenu />
+        <LanguageMenu />
         <button className={baseline ? "pill on" : "pill"} onClick={baseline ? clearBaseline : pinBaseline}>
-          {baseline ? "Quitar" : "Fijar"}<span className="wide-label">{baseline ? " referencia" : " como referencia"}</span>
+          {t(baseline ? "Quitar" : "Fijar")}<span className="wide-label">{t(baseline ? " referencia" : " como referencia")}</span>
         </button>
         <div className="anchor">
           <button className="pill" onClick={() => setSaving(!saving)}>
-            Guardar
+            {t("Guardar")}
           </button>
           {saving && <SavePopover onClose={() => setSaving(false)} />}
         </div>

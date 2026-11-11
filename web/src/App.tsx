@@ -4,6 +4,7 @@ import { FloorplanView } from "./components/FloorplanView";
 import { Inspector } from "./components/Inspector";
 import { Sidebar } from "./components/Sidebar";
 import { Toolbar } from "./components/Toolbar";
+import { ColumnResizers } from "./components/ColumnResizer";
 import { CalibrationPanel, ExplorerView } from "./explorer/ExplorerView";
 import { SimulatorPanel, SimulatorView } from "./simulator/SimulatorView";
 import { SchematicPanel } from "./schematic/SchematicPanel";
@@ -46,6 +47,7 @@ export function App() {
     <div className="window">
       <Toolbar />
       <main className="split">
+        <ColumnResizers />
         <Sidebar />
         {view === "plano" && <FloorplanView />}
         {view === "plano" && <Inspector />}

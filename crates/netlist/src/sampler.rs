@@ -57,6 +57,10 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
     let table_value = b.wire("table_value", 16);
     let (read_address, write_enable);
     {
+        // The probability of each candidate comes from one product a cycle: a tree in gates,
+        // and in an FPGA a multiplier block.
+        let factor_width = (bits + 1).max(SUM_BITS);
+        let probability_tree = gen.tree_multiplier(crate::multiplier::MultiplierKind::Wallace, factor_width as u32 + 1, 17, 1);
         let mut l = Logic { b: &mut b, next: 0 };
         l.b.group("Control");
         let streaming = l.fresh();
@@ -213,19 +217,19 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
             let inverted: Vec<Bit> = right.iter().map(|x| l.not(*x)).collect();
             l.adder(&left, &inverted, Bit::One).0
         };
-        let factor_width = (bits + 1).max(SUM_BITS);
         let sum = l.fresh_bus(SUM_BITS);
         let rng = l.fresh_bus(32);
         let wide_delta: Vec<Bit> = delta.iter().copied().chain(std::iter::repeat_n(Bit::Zero, factor_width - delta.len())).collect();
         let wide_sum: Vec<Bit> = sum.iter().copied().chain(std::iter::repeat_n(Bit::Zero, factor_width - SUM_BITS)).collect();
         let left_factor = l.mux_bus(scale, &wide_delta, &wide_sum);
         let right_factor = l.mux_bus(scale, &inverse, &rng[16..32]);
+        // Both factors are unsigned: a zero above each makes the signed product the same.
         let width = factor_width + 16;
-        let mut product = constant(0, width);
-        for (shift, select) in right_factor.iter().enumerate() {
-            let partial: Vec<Bit> = std::iter::repeat_n(Bit::Zero, shift).chain(left_factor.iter().map(|v| l.and(*v, *select))).chain(std::iter::repeat_n(Bit::Zero, 16 - shift)).collect();
-            product = l.adder(&product, &partial, Bit::Zero).0;
-        }
+        let full = l.fresh_bus(width + 2);
+        let weight: Vec<Bit> = left_factor.iter().copied().chain([Bit::Zero]).collect();
+        let x: Vec<Bit> = right_factor.iter().copied().chain([Bit::Zero]).collect();
+        l.b.inst("probability_multiplier", &probability_tree, &[("weight", weight), ("x", x), ("product", full.clone())]);
+        let product = full[..width].to_vec();
         let shifted_index = &product[INVERSE_FRACTION as usize..];
         let overflow = l.any(&shifted_index[TABLE_BITS as usize..]);
         let saturated: Vec<Bit> = shifted_index[..TABLE_BITS as usize].iter().map(|v| l.or(*v, overflow)).collect();

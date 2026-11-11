@@ -113,4 +113,10 @@ impl Runner for ExactEngine {
         self.logits = ExactEngine::draft(self, token, want_logits)?.unwrap_or_default();
         Ok(want_logits.then_some(self.logits.as_slice()))
     }
+    fn step_embedding(&mut self, embedding: &[f32], positions: [u64; 3], want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
+        let started = std::time::Instant::now();
+        self.logits = ExactEngine::step_embedding(self, embedding, positions, want_logits)?.unwrap_or_default();
+        let stats = StepStats { seconds: started.elapsed().as_secs_f64(), saturated: 0 };
+        Ok((want_logits.then_some(self.logits.as_slice()), stats))
+    }
 }
