@@ -113,7 +113,7 @@ pub struct ModelGraph {
 
 /// The `model_type`s a circuit can be estimated for.
 pub fn designable_family(model_type: &str) -> bool {
-    matches!(model_type, "qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text" | "deepseek_v3") || llama::FAMILIES.contains(&model_type)
+    matches!(model_type, "qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text" | "deepseek_v3" | "janus") || llama::FAMILIES.contains(&model_type)
 }
 
 /// Families estimated from their shape alone: what sets them apart is not modelled.
@@ -141,6 +141,9 @@ impl ModelGraph {
         match model_type {
             Some("qwen3_5") | Some("qwen3_5_text") | Some("qwen3_5_moe") | Some("qwen3_5_moe_text") => qwen3_5::build(name, &config),
             Some("deepseek_v3") => deepseek::build(name, &config),
+            // Janus's language model is the Llama in its text configuration; its image
+            // decoder is not part of the chip.
+            Some("janus") => Self::from_config_json(name, &config["text_config"].to_string()),
             Some(family) if llama::FAMILIES.contains(&family) => llama::build_hf(name, family, &config),
             Some(other) => Err(ModelError(format!(
                 "la arquitectura «{other}» todavía no está soportada"

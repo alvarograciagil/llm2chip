@@ -120,6 +120,8 @@ pub struct CellTensor {
     pub exponent: i64,
     cells: usize,
     bits: u32,
+    /// The first row of the whole matrix that this chip holds, when chips share it by rows.
+    first_row: usize,
 }
 
 impl CellTensor {
@@ -137,7 +139,7 @@ impl CellTensor {
     /// One row in the bytes of the image: its codes, then each group's scale and bias.
     pub fn encoded_row(&self, weights: &Weights, row: usize) -> Result<Vec<u8>, String> {
         let matrix = weights.matrix(&self.name)?;
-        let (codes, factors) = matrix.cell_row(row, self.cols, self.exponent, self.bits)?;
+        let (codes, factors) = matrix.cell_row(self.first_row + row, self.cols, self.exponent, self.bits)?;
         let code_bits = matrix.cell_code_bits(self.cols, self.bits);
         let mut bytes = Vec::with_capacity(self.row_bytes(weights)?);
         match code_bits {
@@ -182,6 +184,8 @@ struct CellEntry {
     exponent: i64,
     /// Its rows follow those of the entry before, in the same passes of the cells.
     chained: bool,
+    /// The first row of the whole matrix that this chip holds, when chips share it by rows.
+    first_row: usize,
 }
 
 /// Entries that share passes of the cells, with where each one's rows start and how many
@@ -360,6 +364,18 @@ pub struct Layout {
     /// The most tokens and positions the routines can see.
     tokens: u32,
     positions: u32,
+    /// This chip's place among those that share every product by rows, and the products
+    /// they share: the others every chip computes whole.
+    shard: Option<Shard>,
+    by_rows: HashSet<String>,
+}
+
+/// One of `chips` chips that share each product by rows, in a ring: chip `index` holds
+/// rows from `index * rows / chips` of every matrix it shares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shard {
+    pub index: u32,
+    pub chips: u32,
 }
 
 impl Layout {
@@ -470,7 +486,7 @@ impl Layout {
                         chains.insert(name.clone(), vec![(name.clone(), *dst)]);
                         leader_of.insert(name.clone(), name.clone());
                     }
-                    cell_plan.push(CellEntry { block, name, rows, cols, group, groups, quant, packing, exponent, chained });
+                    cell_plan.push(CellEntry { block, name, rows, cols, group, groups, quant, packing, exponent, chained, first_row: 0 });
                 }
             }
             previous = Some(&inst.op);
@@ -620,7 +636,7 @@ impl Layout {
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
         }
-        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), tokens: program.vocab as u32, positions: chip_tokens.unwrap_or(1) as u32 })
+        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), tokens: program.vocab as u32, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new() })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -741,6 +757,14 @@ impl Layout {
         (bases, bits)
     }
 
+    /// The registers that reach furthest, for looking into a layout.
+    pub fn longest_registers(&self, count: usize) -> Vec<(u32, u32)> {
+        let mut list: Vec<(u32, u32)> = self.extents.borrow().iter().map(|(r, e)| (*r, *e)).collect();
+        list.sort_by_key(|(_, e)| std::cmp::Reverse(*e));
+        list.truncate(count);
+        list
+    }
+
     /// Words of vector memory each unit needs for the routines assembled so far.
     pub fn vector_words_used(&self) -> u64 {
         self.register_layout().1
@@ -793,6 +817,7 @@ impl Layout {
         let mut asm = Assembly::new(&self.config);
         asm.in_cells = self.in_cells.clone();
         asm.key_capacity = self.key_capacity;
+        asm.ring = self.shard.map_or(1, |s| s.chips);
         asm
     }
 
@@ -835,7 +860,7 @@ impl Layout {
 
     /// Every matrix in the cells, in the order they hold them.
     pub fn cell_tensors(&self) -> Vec<CellTensor> {
-        self.cell_plan.iter().map(|e| CellTensor { name: e.name.clone(), rows: e.rows, cols: e.cols, block: e.block, exponent: e.exponent, cells: self.config.cells as usize, bits: self.config.cell.activation_bits }).collect()
+        self.cell_plan.iter().map(|e| CellTensor { name: e.name.clone(), rows: e.rows, cols: e.cols, block: e.block, exponent: e.exponent, cells: self.config.cells as usize, bits: self.config.cell.activation_bits, first_row: e.first_row }).collect()
     }
 
     pub fn cell_depths(&self) -> (u64, u64) {
@@ -867,7 +892,7 @@ impl Layout {
                     match owner {
                         Some((p, start)) => {
                             let matrix = weights.matrix(&p.name)?;
-                            let (w, f) = matrix.cell_row(b * p.block + row - start, p.cols, p.exponent, self.config.cell.activation_bits)?;
+                            let (w, f) = matrix.cell_row(p.first_row + b * p.block + row - start, p.cols, p.exponent, self.config.cell.activation_bits)?;
                             let count = p.cols.div_ceil(p.quant);
                             let shared = |q: usize| if f.len() == count { f.get(q).copied() } else { (q < count).then(|| f[0]) };
                             factors.extend(quant_groups.clone().map(|q| shared(q).unwrap_or((0, 0))));
@@ -900,6 +925,39 @@ impl Layout {
         let dropped: HashSet<u32> = self.weights.iter().filter(|(name, _)| !used.contains(*name)).map(|(_, reg)| *reg).collect();
         self.setup.initial.retain(|(register, _), _| !dropped.contains(register));
         self.cell_plan.retain(|e| used.contains(&e.name));
+        self.in_cells = place_in_cells(&self.cell_plan, self.config.cells as usize, 1 << self.config.features.cluster_bits, 1 << self.config.features.lane_bits).0;
+    }
+
+    /// Makes this the layout of chip `shard.index` of a ring that shares every product by
+    /// rows: each keeps an equal slice of each matrix that only plain products use, and
+    /// whose rows split into whole blocks; the chips then pass the slices around. All the
+    /// rest, from the attention to the states, every chip computes whole.
+    pub fn share_rows(&mut self, program: &Program, shard: Shard) {
+        let chips = shard.chips as usize;
+        let lanes = 1usize << self.config.features.lane_bits;
+        let mut plain: HashSet<String> = HashSet::new();
+        let mut other: HashSet<String> = HashSet::new();
+        for inst in all_ops(program) {
+            for (name, ..) in matrices_of(program, &inst.op) {
+                if matches!(inst.op, Op::Matvec { .. }) { &mut plain } else { &mut other }.insert(name);
+            }
+        }
+        let fits = |e: &CellEntry| plain.contains(&e.name) && !other.contains(&e.name) && e.block == e.rows && e.rows.is_multiple_of(chips * lanes);
+        // Products that run in one pass of the cells are shared alike, or not at all.
+        let mut start = 0;
+        while start < self.cell_plan.len() {
+            let end = (start + 1..self.cell_plan.len()).find(|i| !self.cell_plan[*i].chained).unwrap_or(self.cell_plan.len());
+            if self.cell_plan[start..end].iter().all(fits) {
+                for e in &mut self.cell_plan[start..end] {
+                    e.rows /= chips;
+                    e.block = e.rows;
+                    e.first_row = shard.index as usize * e.rows;
+                    self.by_rows.insert(e.name.clone());
+                }
+            }
+            start = end;
+        }
+        self.shard = Some(shard);
         self.in_cells = place_in_cells(&self.cell_plan, self.config.cells as usize, 1 << self.config.features.cluster_bits, 1 << self.config.features.lane_bits).0;
     }
 
@@ -1073,6 +1131,20 @@ impl Layout {
                 let len = program.buffers[*dst] as u32;
                 ops.copy_row(table, self.weights[table], token, len, self.reg(*dst));
                 ops.normalize(self.reg(*dst), len.into());
+            }
+            Op::Matvec { matrix, src, dst } if self.by_rows.contains(matrix) => {
+                let Shard { index, chips } = self.shard.expect("reparto por filas");
+                let share = |buffer: usize| program.buffers[buffer] as u32 / chips;
+                if let Some(chain) = self.chains.get(matrix) {
+                    let parts: Vec<(u32, u32, u32, u32)> = chain.iter().map(|(name, dst)| (self.weights[name], self.reg(*dst), share(*dst), index * share(*dst))).collect();
+                    ops.matvecs_rows(matrix, &parts, self.reg(*src));
+                    for (_, dst) in chain {
+                        ops.all_gather(self.reg(*dst), share(*dst), index);
+                    }
+                } else if !self.followers.contains(matrix) {
+                    ops.matvec_rows(matrix, self.weights[matrix], self.reg(*src), self.reg(*dst), share(*dst), index * share(*dst));
+                    ops.all_gather(self.reg(*dst), share(*dst), index);
+                }
             }
             Op::Matvec { matrix, src, dst } => {
                 let (rows, cols) = (program.buffers[*dst] as u32, program.buffers[*src] as u32);

@@ -40,6 +40,17 @@ export const EXTRA_DOCS: DocSection[] = [
     ],
   },
   {
+    id: "reparto",
+    title: "Reparto entre chips",
+    intro:
+      "Cuando el modelo no cabe en un chip, o se quiere más velocidad, hay tres formas de repartirlo. Se elige con «Reparto entre chips» y, en el mixto, «Chips por grupo».",
+    entries: [
+      { name: "Por capas, en cadena", text: "Cada chip guarda un tramo de capas seguidas. Para cada token, el primero hace sus capas y pasa el vector oculto (unos miles de valores) al segundo, y así hasta el último, que lo devuelve al primero para los logits. Ventajas: poca comunicación, que tolera enlaces lentos por la placa; sin sincronización dentro de una capa; cada chip guarda solo los pesos y la caché de sus capas; al leer un prompt todos trabajan a la vez, cada uno en un token. Inconveniente: generando para un solo usuario solo trabaja un chip cada vez, así que más chips dan más memoria, no más velocidad. El generador de puertas lo implementa y lo prueba en puertas con dos chips sobre un enlace ruidoso." },
+      { name: "Por tensor, todos a la vez", text: "Cada chip guarda una parte de cada matriz y de cada grupo de cabezas, y todos calculan cada capa a la vez. Tras la atención y tras la MLP de cada capa suman sus resultados parciales en anillo: 2·(N−1) pasos, cada uno con una parte N-ésima del vector. Ventaja: con un usuario la velocidad crece casi con el número de chips. Inconvenientes: muchas sincronizaciones por token, que exigen enlaces rápidos y de poca latencia, en la práctica dentro del mismo encapsulado; un prompt no se lee en cadena. El estimador modela la variante más eficiente, que reparte también las cabezas de atención. El generador de puertas implementa hoy una variante más sencilla, «por filas»: cada chip guarda una franja igual de filas de cada matriz y, tras cada producto, los chips se pasan sus franjas en anillo hasta que todos tienen el vector entero. Antes de estrechar cada producto acuerdan el desplazamiento por el enlace (dos palabras por chip), así que el resultado es idéntico bit a bit al de un solo chip; la prueba en puertas lo comprueba con dos chips y enlaces ruidosos. La atención, DeltaNet y las normas las calcula entera cada chip: los pesos se reparten, pero la caché KV y el estado se repiten en todos, y se mueve más por el enlace que en la variante eficiente." },
+      { name: "Mixto", text: "Grupos de chips que comparten cada capa en tensor, unidos en cadena. Es lo que usan los sistemas grandes: cada grupo dentro de un encapsulado, con UCIe, y los grupos por la placa. Con un grupo de 1 chip es el reparto por capas; con todos en un grupo, el reparto por tensor. El estimador lo modela; el generador de puertas aún no: una imagen de arranque pedida en modo mixto se genera por capas." },
+    ],
+  },
+  {
     id: "dimensionado",
     title: "Dimensionado",
     intro:

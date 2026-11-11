@@ -272,6 +272,27 @@ impl Engine {
         self.run_token(0, positions, want_logits)
     }
 
+    /// Runs a token, or a vector in its place, up to the product that makes the logits,
+    /// and gives the vector that product would take: the last hidden state, normalised.
+    /// Heads other than the text's read it, such as an image generator's.
+    pub fn step_hidden(&mut self, token: u32, embedding: Option<&[f32]>) -> Result<Vec<f32>, String> {
+        let last = self.program.ops.len() - 1;
+        let Op::Matvec { src, dst, .. } = self.program.ops[last].op else {
+            return Err("el modelo no termina en el producto de los logits".into());
+        };
+        debug_assert_eq!(dst, self.program.logits);
+        self.input = embedding.map(<[f32]>::to_vec);
+        let position = (self.position as i64 + self.rope_offset) as u64;
+        self.rope_position = position;
+        self.rope_positions = [position; 3];
+        for index in 0..last {
+            let op = self.program.ops[index].op.clone();
+            self.run_op(&op, token)?;
+        }
+        self.position += 1;
+        Ok(self.buffers[src].clone())
+    }
+
     /// Rotary frequencies follow three positions, `section` of them each, interleaved.
     pub fn set_mrope(&mut self, section: [usize; 3]) {
         self.mrope_section = Some(section);

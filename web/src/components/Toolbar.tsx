@@ -3,6 +3,7 @@ import { useDesign, type Appearance } from "../store";
 import { datasheet } from "../datasheet";
 import { download } from "../download";
 import { IconButton, Segmented } from "./controls";
+import { ProjectWizard } from "../wizard/ProjectWizard";
 
 const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round" } as const;
 
@@ -121,6 +122,7 @@ export function Toolbar() {
   const pinBaseline = useDesign((s) => s.pinBaseline);
   const clearBaseline = useDesign((s) => s.clearBaseline);
   const [saving, setSaving] = useState(false);
+  const [creating, setCreating] = useState(false);
   const exportDatasheet = () => {
     const { report, designName, model, params } = useDesign.getState();
     if (!report || !model) return;
@@ -131,7 +133,11 @@ export function Toolbar() {
     <header className="toolbar">
       <div className="toolbar-side">
         <strong className="app-name">llm2chip</strong>
+        <IconButton label="Nuevo proyecto" onClick={() => setCreating(true)}>
+          <path d="M10 4.5v11M4.5 10h11" {...stroke} />
+        </IconButton>
         <DesignMenu />
+        {creating && <ProjectWizard onClose={() => setCreating(false)} />}
       </div>
       <Segmented
         label="Vista"

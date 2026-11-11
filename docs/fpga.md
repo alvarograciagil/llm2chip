@@ -35,19 +35,58 @@ Sin `--dsp`, en Xilinx hacen falta unas 110 600 LUT6 y ningún DSP: los multipli
 
 ## Placas
 
-| Placa | FPGA | Lógica y memoria | Precio aproximado | ¿Cabe? |
-|---|---|---|---|---|
-| Sipeed Tang Mega 138K Pro | Gowin GW5AST-138 | 138 K LUT4, 340 BSRAM (6,1 Mbit), 298 DSP, 1 GB DDR3 | ~200 $ (dock) | Sí: lógica al 35 %, memoria al 56 % |
-| ALINX AX7202 / AX7A200B | Xilinx XC7A200T | 134 K LUT6, 365 BRAM36, 740 DSP | 400-700 $ | Sí, con mucho margen |
-| Digilent Nexys Video | Xilinx XC7A200T | igual | ~500 € | Sí |
-| Digilent Arty A7-100T | Xilinx XC7A100T | 63 K LUT6, 135 BRAM36, 240 DSP | ~250 $ | Sí: LUT al 72 %, BRAM al 67 % |
-| Sipeed Tang Primer 25K | Gowin GW5A-25 | 23 K LUT4, 56 BSRAM | ~35 $ | No |
+El asistente de proyecto («+» en la barra, «Una FPGA») tiene estas placas y dice, para cada modelo, si cabe en la memoria del chip, si sus pesos tienen que ir a la memoria de la placa o si no cabe. Precios orientativos de noviembre de 2026; cambian según tienda y región.
 
-Recomendación: la **Tang Mega 138K Pro**. Cabe con margen en lógica y memoria, cuesta unos 200 $ y deja sitio para modelos algo mayores. La **Arty A7-100T** también cabe; una placa con **XC7A200T** da más margen con herramientas de Xilinx.
+| Placa | FPGA | Lógica | Memoria en el chip | DSP | Memoria en la placa | Precio |
+|---|---|---|---|---|---|---|
+| Sipeed Tang Primer 25K | Gowin GW5A-25 | 23 K LUT4 | 1 Mbit | 28 | — | ~35 $ |
+| Sipeed Tang Mega 60K Dock | Gowin GW5AT-60 | 60 K LUT4 | 2,1 Mbit | 118 | 256 MB DDR3 | ~90 $ |
+| Sipeed Tang Mega 138K Dock | Gowin GW5AST-138 | 138 K LUT4 | 6,1 Mbit | 298 | DDR3 | ~130 $ |
+| Radiona ULX3S 85F | Lattice ECP5-85F | 84 K LUT4 | 3,7 Mbit | 156 | 32 MB SDRAM | ~130-150 $ |
+| Terasic Atum A3 Nano | Altera Agilex 3 | 135 K LE | 8,3 Mbit | 368 | 64 MB SDRAM | 180-245 $ |
+| Sipeed Tang Mega 138K Pro | Gowin GW5AST-138 | 138 K LUT4 | 6,1 Mbit | 298 | 1 GB DDR3 | ~195 $ |
+| TUL PYNQ-Z2 | Zynq XC7Z020 | 53 K LUT6 | 4,9 Mbit | 220 | 512 MB DDR3 | 200-260 $ |
+| Terasic DE10-Nano | Cyclone V SE | 110 K LE | 5,6 Mbit | 112 | 1 GB DDR3 | ~225 $ |
+| **AMD Kria KV260** | Zynq UltraScale+ K26 | 117 K LUT6 | **23,1 Mbit** (BRAM + UltraRAM) | 1 248 | **4 GB DDR4, 64 bits** | ~249 $ |
+| Digilent Arty A7-100T | XC7A100T | 63 K LUT6 | 4,9 Mbit | 240 | 256 MB DDR3 | ~250 $ |
+| Digilent Zybo Z7-20 | Zynq XC7Z020 | 53 K LUT6 | 4,9 Mbit | 220 | 1 GB DDR3 | ~300 $ |
+| AMD Kria KR260 | Zynq UltraScale+ K26 | 117 K LUT6 | 23,1 Mbit | 1 248 | 4 GB DDR4 | ~349 $ |
+| ALINX AX7202 | XC7A200T | 134 K LUT6 | 13,1 Mbit | 740 | 1 GB DDR3 | 400-500 $ |
+| Digilent Nexys Video | XC7A200T | 134 K LUT6 | 13,1 Mbit | 740 | 512 MB DDR3 | ~500 € |
+| Digilent Genesys 2 | Kintex-7 XC7K325T | 204 K LUT6 | 16 Mbit | 840 | 1 GB DDR3 | ~1 000 $ |
+| AMD Alveo U250 | UltraScale+ XCU250 | 1 728 K LUT6 | 432 Mbit | 12 288 | 64 GB DDR4 | ~9 000 $ |
+
+### Recomendación por unos 200 $: Kria KV260
+
+Por unos 50 $ más que la Tang Mega 138K Pro, la **KV260** tiene casi cuatro veces más memoria dentro del chip (23,1 Mbit frente a 6,1), cuatro veces más multiplicadores y 4 GB de DDR4 de 64 bits, varias veces más rápida que la DDR3 de las placas baratas.
+
+- **stories260K cabe entero dentro del chip** en todas las variantes medidas (8,8-12,4 Mbit), y sobra sitio para más carriles. En la Tang Mega no cabe dentro: sus pesos tendrían que ir a la DDR3.
+- La lógica básica del chip ocupa alrededor del 39 % de sus LUT.
+- Con los pesos en la DDR4 caben modelos de cientos de millones de parámetros, como stories110M o SmolLM2-135M, a la velocidad que dé la memoria.
+- Se programa con Vivado. Conviene confirmar antes de comprar que la edición gratuita de la versión que uses incluye el K26.
+
+Si el límite de 200 $ es estricto, la mejor opción es la **Tang Mega 138K Pro**: cabe la lógica con margen, pero stories260K necesita llevar los pesos a su DDR3, o bien aplicar los ahorros de memoria pendientes (tabla de funciones compartida y embedding en las celdas). La **Atum A3 Nano** tiene más memoria dentro del chip (8,3 Mbit), pero su memoria externa es una SDRAM de 64 MB, lenta.
+
+Fuentes: [Kria KV260](https://www.amd.com/en/products/system-on-modules/kria/k26/kv260-vision-starter-kit.html), [renovación de la KV260 en 2025](https://www.amd.com/en/blogs/2025/kria-kv260-vision-ai-starter-kit-refresh.html), [Tang Mega 138K Pro](https://en.wiki.sipeed.com/hardware/en/tang/tang-mega-138k/mega-138k-pro.html), [Tang Mega 138K Dock](https://www.cnx-software.com/2024/06/28/sipeed-tang-mega-138k-dock-is-a-lower-cost-gowin-gw5ast-fpga-risc-v-development-board/), [Atum A3 Nano](https://www.cnx-software.com/2025/05/30/atum-a3-nano-development-board-combines-agilex-3-fpga-and-usb-blaster-iii-programmer/), [PYNQ-Z2](https://www.dfrobot.com/product-1838.html), [Genesys 2](https://www.digikey.in/en/product-highlight/d/digilent/genesys-2-kintex-7-fpga-development-board), [ALINX AX7202](https://botland.store/fpga-boards-and-kits/29031-ax7202-fpga-development-board-amd-artix-7-xc7a200t-5904422389024.html).
 
 ## Velocidad esperada
 
-El die gasta 11 103 ciclos por token generado con el modelo de juguete (medido en su microprograma, en la última posición del contexto); con el firmware, unos 12 000-13 000. Sin colocar y rutar aún, el reloj en una GW5A rondaría 25-50 MHz: unos 2 000-4 000 tok/s, sin valor práctico más allá de validar que el chip funciona. Con stories260K y las mismas 8 celdas serían unos 50 000-80 000 ciclos por token, unos 300-1 000 tok/s.
+El die gasta 11 103 ciclos por token generado con el modelo de juguete (medido en su microprograma, en la última posición del contexto); con el firmware, unos 12 000-13 000. Sin colocar y rutar aún, el reloj en una GW5A rondaría 25-50 MHz: unos 2 000-4 000 tok/s, sin valor práctico más allá de validar que el chip funciona.
+
+### Con un modelo que escribe cuentos: stories260K
+
+[stories260K](https://huggingface.co/karpathy/tinyllamas) es un Llama de 260 000 parámetros (5 capas, ancho 64, vocabulario de 512) que escribe cuentos cortos en inglés. `tools/convert/llama2c.py` convierte su `.bin` y su tokenizador a una carpeta de Hugging Face, en float32 o con `--affine 8` en el formato afín de MLX (8 bits, escala y sesgo por grupo), que es el que lleva el chip.
+
+`cargo run --release -p sim --example fpga -- chip.v --dsp --model ~/.llm2chip/models/stories260K-q8 --context 64 --cells C --lanes L` dimensiona el chip para ese modelo y cuenta los ciclos del microprograma en la última posición del contexto:
+
+| Celdas × carriles | Ciclos por token | tok/s a 25-50 MHz | Memoria |
+|---|---|---|---|
+| 8 × 1 | 211 500 | 120-240 | 8,8 Mbit |
+| 8 × 4 | 104 800 | 240-480 | 10,4 Mbit |
+| 16 × 4 | 87 500 | 290-570 | 10,4 Mbit |
+| 32 × 8 | 52 700 | 470-950 | 12,4 Mbit |
+
+Ninguna variante cabe en los 6,1 Mbit de la Tang Mega 138K; todas caben en una **XC7A200T** (13,1 Mbit de BRAM) y en la **Kria KV260** (23,1 Mbit). Ahorros pendientes para bajar de 6 Mbit: una sola tabla de funciones compartida entre carriles (0,5 Mbit por carril) y el embedding guardado en las celdas en vez de en registros (2 Mbit).
 
 ## Pasos para la prueba
 

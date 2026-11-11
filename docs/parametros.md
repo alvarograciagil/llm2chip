@@ -86,6 +86,18 @@ En cuántos dies se reparte el modelo. Con 0 se elige el mínimo con el que cada
 
 *De 0 a 32.*
 
+### Reparto entre chips (`chip_split`)
+
+Cómo se reparten el modelo varios chips. Por capas: cada chip guarda unas capas enteras y pasa el vector oculto al siguiente; poca comunicación, pero con un solo usuario trabaja un chip cada vez. Por tensor: cada chip guarda una parte de todas las capas y todos calculan cada capa a la vez; mucho más rápido para un usuario, pero suman sus resultados dos veces por capa y necesitan enlaces rápidos, dentro del encapsulado. Mixto: grupos de chips en tensor unidos en cadena, para que cada grupo quepa en un encapsulado.
+
+*Opciones: Por capas, en cadena, Por tensor, todos a la vez, Mixto: grupos en tensor, en cadena.*
+
+### Chips por grupo (`tensor_group`)
+
+En el reparto mixto, cuántos chips comparten cada capa. Los grupos se unen en cadena. Con 1 es el reparto por capas; con todos los chips, por tensor. Conviene que un grupo quepa en un encapsulado, unido por UCIe.
+
+*De 1 a 32.*
+
 ### Área máxima por die (`die_max_mm2`)
 
 Área máxima de cada die. El límite físico es la retícula del escáner (26 × 33 mm, unos 858 mm²). Los dies grandes rinden menos por oblea, así que a veces conviene un límite menor.
@@ -393,6 +405,22 @@ Cada palabra viaja con número de secuencia y código corrector; el receptor tie
 ### Enlace ancho
 
 Con varios chips, el enlace tiene un carril propio por cada carril vectorial, cada uno con su secuencia, su corrección de errores y su cola, como los carriles de UCIe: un bloque entero cruza en un ciclo. El vector oculto pasa de un chip al siguiente en decenas de ciclos en lugar de miles. Se genera solo si el microprograma envía bloques.
+
+## Reparto entre chips
+
+Cuando el modelo no cabe en un chip, o se quiere más velocidad, hay tres formas de repartirlo. Se elige con «Reparto entre chips» y, en el mixto, «Chips por grupo».
+
+### Por capas, en cadena
+
+Cada chip guarda un tramo de capas seguidas. Para cada token, el primero hace sus capas y pasa el vector oculto (unos miles de valores) al segundo, y así hasta el último, que lo devuelve al primero para los logits. Ventajas: poca comunicación, que tolera enlaces lentos por la placa; sin sincronización dentro de una capa; cada chip guarda solo los pesos y la caché de sus capas; al leer un prompt todos trabajan a la vez, cada uno en un token. Inconveniente: generando para un solo usuario solo trabaja un chip cada vez, así que más chips dan más memoria, no más velocidad. El generador de puertas lo implementa y lo prueba en puertas con dos chips sobre un enlace ruidoso.
+
+### Por tensor, todos a la vez
+
+Cada chip guarda una parte de cada matriz y de cada grupo de cabezas, y todos calculan cada capa a la vez. Tras la atención y tras la MLP de cada capa suman sus resultados parciales en anillo: 2·(N−1) pasos, cada uno con una parte N-ésima del vector. Ventaja: con un usuario la velocidad crece casi con el número de chips. Inconvenientes: muchas sincronizaciones por token, que exigen enlaces rápidos y de poca latencia, en la práctica dentro del mismo encapsulado; un prompt no se lee en cadena. El estimador modela la variante más eficiente, que reparte también las cabezas de atención. El generador de puertas implementa hoy una variante más sencilla, «por filas»: cada chip guarda una franja igual de filas de cada matriz y, tras cada producto, los chips se pasan sus franjas en anillo hasta que todos tienen el vector entero. Antes de estrechar cada producto acuerdan el desplazamiento por el enlace (dos palabras por chip), así que el resultado es idéntico bit a bit al de un solo chip; la prueba en puertas lo comprueba con dos chips y enlaces ruidosos. La atención, DeltaNet y las normas las calcula entera cada chip: los pesos se reparten, pero la caché KV y el estado se repiten en todos, y se mueve más por el enlace que en la variante eficiente.
+
+### Mixto
+
+Grupos de chips que comparten cada capa en tensor, unidos en cadena. Es lo que usan los sistemas grandes: cada grupo dentro de un encapsulado, con UCIe, y los grupos por la placa. Con un grupo de 1 chip es el reparto por capas; con todos en un grupo, el reparto por tensor. El estimador lo modela; el generador de puertas aún no: una imagen de arranque pedida en modo mixto se genera por capas.
 
 ## Dimensionado
 

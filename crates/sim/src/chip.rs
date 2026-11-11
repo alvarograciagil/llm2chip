@@ -176,15 +176,32 @@ impl DieEngine for RunnerEngine<'_> {
     }
 }
 
+/// How several chips share the model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sharing {
+    /// Each chip runs a run of whole layers and passes the hidden vector down the chain.
+    #[default]
+    Layers,
+    /// Every chip holds a slice of the rows of each matrix and they all work on every
+    /// product at once, passing their slices around the ring.
+    Rows,
+}
+
 /// What each chip takes from the image when the model is shared among `chips` of them.
-pub fn plan_parts(program: &Program, dir: &Path, config: DieConfig, chip_tokens: usize, setup: &GenerationSetup, chips: usize) -> Result<Vec<ChipPart>, String> {
+pub fn plan_parts(program: &Program, dir: &Path, config: DieConfig, chip_tokens: usize, setup: &GenerationSetup, chips: usize, sharing: Sharing) -> Result<Vec<ChipPart>, String> {
     let plan = crate::lower::chip_plan(program, &Weights::open(dir)?, chips, chip_tokens, config.cell.activation_bits)?;
     (0..chips)
         .map(|chip| {
             let weights = Weights::open(dir)?;
             let mut layout = Layout::with_cells(program, &weights, config, chip_tokens)?;
-            layout.keep_weights_of(program, &plan, chip);
-            let code = layout.die_microprogram(program, &plan, chip)?;
+            let code = if sharing == Sharing::Rows && chips > 1 {
+                layout.share_rows(program, crate::lower::Shard { index: chip as u32, chips: chips as u32 });
+                layout.microprogram(program)?
+            } else {
+                layout.keep_weights_of(program, &plan, chip);
+                layout.die_microprogram(program, &plan, chip)?
+            };
             let mut segments = image_segments(&config, &code, &layout);
             segments.extend(cell_segments(&config, &layout, &weights)?);
             Ok(ChipPart { info: chip_info(&config, &code, layout.logits_register(program), program.vocab as u32, setup), segments })
@@ -216,9 +233,12 @@ pub fn register_table(config: &DieConfig, layout: &Layout) -> Vec<u32> {
     bases.iter().map(|(base, shift)| base | shift << bits).collect()
 }
 
-/// The same die with a vector memory just as large as the layout's routines need.
+/// The same die with memories just as large as the layout needs: the vector memory its
+/// routines reach, and as many scales and biases in each cell as it has groups.
 pub fn compact_die(config: DieConfig, layout: &Layout) -> DieConfig {
-    DieConfig { features: config.features.with_vector_bits(layout.register_bases().1), ..config }
+    let groups = layout.cell_depths().1.max(2);
+    let factor_bits = u64::BITS - (groups - 1).leading_zeros();
+    DieConfig { features: config.features.with_vector_bits(layout.register_bases().1).with_factor_bits(factor_bits), ..config }
 }
 
 pub fn image_segments(config: &DieConfig, code: &Microprogram, layout: &Layout) -> Vec<Segment> {

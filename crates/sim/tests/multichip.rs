@@ -7,7 +7,7 @@ use netlist::rv32::Rv32Iss;
 use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
 use netlist::soc::{FirmwareImage, SocBus, SocConfig};
 use netlist::{Design, DieConfig, Simulator};
-use sim::chip::{plan_parts, VmEngine};
+use sim::chip::{plan_parts, Sharing, VmEngine};
 use sim::lower::Layout;
 use sim::Weights;
 use std::collections::VecDeque;
@@ -174,7 +174,7 @@ struct Setup {
     die: DieConfig,
 }
 
-fn setup(name: &str, firmware: &FirmwareImage, die: DieConfig) -> Setup {
+fn setup(name: &str, firmware: &FirmwareImage, die: DieConfig, sharing: Sharing) -> Setup {
     let dir = std::env::temp_dir().join(format!("llm2chip-board-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     make_checkpoint(&dir);
@@ -182,7 +182,7 @@ fn setup(name: &str, firmware: &FirmwareImage, die: DieConfig) -> Setup {
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let tables = tiny_tokenizer();
     let generation = GenerationSetup { max_new: 1, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
-    let plans: Vec<_> = [1, 2].iter().map(|chips| plan_parts(&program, &dir, die, CHIP_TOKENS, &generation, *chips).unwrap()).collect();
+    let plans: Vec<_> = [1, 2].iter().map(|chips| plan_parts(&program, &dir, die, CHIP_TOKENS, &generation, *chips, sharing).unwrap()).collect();
     let image = build_plan_image(&firmware.program, &firmware.data, &tables.to_words(), &plans).unwrap();
     Setup { design: chip_design(config), image, dir, config, die }
 }
@@ -191,7 +191,23 @@ fn setup(name: &str, firmware: &FirmwareImage, die: DieConfig) -> Setup {
 #[cfg_attr(debug_assertions, ignore = "dos chips completos en puertas: solo con optimizaciones")]
 fn the_same_image_adapts_to_one_or_two_chips() {
     let Some(firmware) = build_firmware() else { return };
-    two_chips_say_what_one_says(&firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, "two");
+    two_chips_say_what_one_says(&firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, "two", Sharing::Layers);
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "dos chips completos en puertas: solo con optimizaciones")]
+fn two_chips_that_share_every_product_by_rows_say_what_one_says() {
+    let Some(firmware) = build_firmware() else { return };
+    two_chips_say_what_one_says(&firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, "rows", Sharing::Rows);
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "dos chips completos en puertas: solo con optimizaciones")]
+fn chips_sharing_rows_over_a_wide_link_say_what_one_says() {
+    let Some(firmware) = build_firmware() else { return };
+    let base = cell_die_config();
+    let die = DieConfig { cells: 4, microcode_bits: 15, features: base.features.with_lane_bits(2).with_wide_link(true), ..base };
+    two_chips_say_what_one_says(&firmware, die, "rows-wide", Sharing::Rows);
 }
 
 #[test]
@@ -200,13 +216,13 @@ fn a_wide_link_moves_blocks_between_two_chips_and_keeps_the_text() {
     let Some(firmware) = build_firmware() else { return };
     let base = cell_die_config();
     let die = DieConfig { cells: 4, microcode_bits: 15, features: base.features.with_lane_bits(2).with_wide_link(true), ..base };
-    two_chips_say_what_one_says(&firmware, die, "wide");
+    two_chips_say_what_one_says(&firmware, die, "wide", Sharing::Layers);
 }
 
 /// Two chips on a noisy board say the same as one at instruction level, with the very
 /// same image, and their links count every error they correct or have repeated.
-fn two_chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &str) {
-    let setup = setup(name, firmware, die);
+fn two_chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &str, sharing: Sharing) {
+    let setup = setup(name, firmware, die, sharing);
     let input = b"hoy\0";
     let program = compile_qwen3_5(CONFIG).unwrap();
 
@@ -258,7 +274,7 @@ fn two_chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &
 #[cfg_attr(debug_assertions, ignore = "tres chips completos en puertas: solo con optimizaciones")]
 fn a_number_of_chips_the_image_does_not_cover_is_reported() {
     let Some(firmware) = build_firmware() else { return };
-    let setup = setup("three", &firmware, DieConfig { microcode_bits: 15, ..cell_die_config() });
+    let setup = setup("three", &firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, Sharing::Layers);
     let mut board = Board::new(&setup.design, 3, &setup.image, b"hoy\0", 1);
     board.run(2_000_000);
     assert_eq!(String::from_utf8_lossy(&board.output), "N");

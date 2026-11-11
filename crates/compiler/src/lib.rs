@@ -343,7 +343,7 @@ fn emit_layer_tail(e: &mut Emit, s: &Shape, prefix: &str, x: Buf, mixed: Buf) ->
 }
 
 /// The checkpoints `compile_model` can turn into a program, by `model_type`.
-pub const SIMULATED_FAMILIES: [&str; 12] = ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "llama", "mistral", "qwen2", "qwen3", "gemma", "gemma2", "gemma3_text", "deepseek_v3"];
+pub const SIMULATED_FAMILIES: [&str; 13] = ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "llama", "mistral", "qwen2", "qwen3", "gemma", "gemma2", "gemma3_text", "deepseek_v3", "janus"];
 
 /// Compiles any supported checkpoint from its `config.json`.
 pub fn compile_model(config: &str) -> Result<Program, String> {
@@ -355,6 +355,8 @@ pub fn compile_model(config: &str) -> Result<Program, String> {
         Some("qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text") => compile_qwen3_5(config),
         Some("llama" | "mistral" | "qwen2" | "qwen3" | "gemma" | "gemma2" | "gemma3_text") => compile_llama(&value),
         Some("deepseek_v3") => compile_deepseek(&value),
+        // Janus writes text and images with the Llama in its text configuration.
+        Some("janus") => compile_model(&value["text_config"].to_string()),
         Some(other) => Err(format!("no hay compilador para la arquitectura «{other}»")),
         None => Err("el config no indica model_type".into()),
     }

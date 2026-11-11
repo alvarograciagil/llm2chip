@@ -322,6 +322,22 @@ pub trait BlockOps: Sized {
     }
     /// Copies one row of an embedding-like matrix into `dst`.
     fn copy_row(&mut self, name: &str, matrix: u32, row: Self::N, cols: u32, dst: u32);
+    /// The `rows` rows of a product that this chip of a ring holds, into `dst` from
+    /// `offset`. Only a die with cells shares products among chips.
+    fn matvec_rows(&mut self, name: &str, matrix: u32, src: u32, dst: u32, rows: u32, offset: u32) {
+        let _ = (matrix, src, dst, rows, offset);
+        unimplemented!("{name}: solo un die con celdas reparte los productos entre chips")
+    }
+    /// Like `matvec_rows` for products run in one pass: `(matrix, dst, rows, offset)`.
+    fn matvecs_rows(&mut self, first: &str, parts: &[(u32, u32, u32, u32)], src: u32) {
+        let _ = (parts, src);
+        unimplemented!("{first}: solo un die con celdas reparte los productos entre chips")
+    }
+    /// Gives every chip of the ring the blocks of `reg` the others made.
+    fn all_gather(&mut self, reg: u32, block: u32, index: u32) {
+        let _ = (reg, block, index);
+        unimplemented!("solo un die con celdas reparte los productos entre chips")
+    }
     /// True only when an implementation can prove `reg[index]` is zero and may skip work.
     fn known_zero(&self, _reg: u32, _index: Self::N) -> bool {
         false
@@ -778,22 +794,23 @@ impl Reach<'_> {
         }
     }
 
-    fn alu(&mut self, ranges: &VarRanges, s: &Alu<Expr>) {
+    /// `columns` is how many columns a write to the key store steps through: the die
+    /// moves on a column, `1 << key_shift` places, for each element it writes.
+    fn alu(&mut self, ranges: &VarRanges, s: &Alu<Expr>, columns: u32) {
         let span = |whole: bool| if s.vector && !whole { self.lanes } else { 1 };
         let (span_a, span_b, span_dst) = (span(s.broadcast_a), span(s.broadcast_b), span(false));
         let window = |on: bool| on.then_some(s.window);
         self.touch(ranges, s.a, span_a, window(s.window_a));
         self.touch(ranges, s.b, span_b, window(s.window_b));
-        // A write that counts in columns of the key store moves `key_shift` bits up.
-        let dst = if s.write_spread { (s.dst.0, s.dst.1 * (1 << self.key_shift)) } else { s.dst };
-        self.touch(ranges, dst, span_dst, window(s.window_dst));
+        let reach = if s.write_spread { span_dst.max(1) + (columns.saturating_sub(1) << self.key_shift) } else { span_dst };
+        self.touch(ranges, s.dst, reach, window(s.window_dst));
     }
 
     fn steps(&mut self, steps: &[Step], ranges: &mut VarRanges) {
         let lanes = self.lanes;
         for step in steps {
             match step {
-                Step::One(s) => self.alu(ranges, s),
+                Step::One(s) => self.alu(ranges, s, 1),
                 Step::Repeat { variable, count, body } => {
                     let last = ranges.largest_of(*count).saturating_sub(1);
                     ranges.loops.insert(*variable, last);
@@ -804,7 +821,7 @@ impl Reach<'_> {
                     let count = ranges.largest_of(*count);
                     let last = if *in_elements { count.div_ceil(lanes) } else { count }.saturating_sub(1);
                     ranges.loops.insert(*variable, last);
-                    self.alu(ranges, body);
+                    self.alu(ranges, body, count);
                 }
                 Step::Clustered { vars, assignments, body, .. } => {
                     for (i, variable) in vars.iter().enumerate() {
@@ -940,7 +957,15 @@ pub struct Assembly {
     pub key_capacity: Option<u32>,
     /// Matrices the cells hold. Any other is computed from the vector registers.
     pub in_cells: HashMap<String, CellMatrix>,
+    /// How many chips around the ring share each product by rows: their narrowing has to
+    /// agree on the shifts, which each would otherwise take from its own rows alone.
+    pub ring: u32,
+    across_chips: bool,
 }
+
+/// Words a chip sends before it takes as many: each link holds twice as many in its queue,
+/// so chips that all send at once never wait on one another.
+const EXCHANGE_CHUNK: u32 = 4;
 
 impl Assembly {
     /// The units whose values count together inside the current loop.
@@ -969,7 +994,15 @@ impl Assembly {
         count.dst = self.sc(0);
         // Units sharing a head look at all their parts, so they all shift alike.
         count.reduce_group = self.group_bits();
-        if self.shifts_now {
+        if self.across_chips {
+            // The chips agree on the smallest count, as the maximum of its negation.
+            self.push(count);
+            self.immediate(0, self.sc(1));
+            self.binary(OP_SUB, self.sc(1), self.sc(0), self.sc(2));
+            self.ring_max(self.sc(2), self.sc(3));
+            self.binary(OP_SUB, self.sc(1), self.sc(2), self.sc(0));
+            self.load_shifts(None, None, Some(self.sc(0)));
+        } else if self.shifts_now {
             // The count goes into the left shifter as it is written.
             (count.load_shift_left, count.shift_now) = (true, true);
             self.shift_zero[2] = false;
@@ -1014,6 +1047,9 @@ impl Assembly {
         self.push(count);
         self.immediate(accumulator_bits(self.bits) as i64 - self.bits as i64, self.sc(1));
         self.binary(OP_SUB, self.sc(1), self.sc(0), self.sc(2));
+        if self.across_chips {
+            self.ring_max(self.sc(2), self.sc(3));
+        }
         self.immediate(0, self.sc(3));
         if self.shifts_now {
             // The shift goes into the wide shifter as it is written.
@@ -1060,7 +1096,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, across_chips: false }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1345,6 +1381,78 @@ impl Assembly {
         } else {
             self.each(len, |s, i| s.receive_place((reg, i)));
         }
+    }
+
+    /// The largest `value` among the chips of the ring, in every one of them: each passes
+    /// on the largest it has seen, and after one turn less than there are chips, all have it.
+    fn ring_max(&mut self, value: At<Expr>, spare: At<Expr>) {
+        for _ in 1..self.ring {
+            self.send_place(value);
+            self.receive_place(spare);
+            self.binary(OP_MAX, value, spare, value);
+        }
+    }
+
+    /// The rows of a product this chip holds, `rows` of them written into `dst` from
+    /// `offset`, narrowed with the same shifts as the whole product on one chip.
+    fn ring_matvec_rows(&mut self, name: &str, matrix: u32, src: u32, dst: u32, rows: u32, offset: u32) {
+        let place = *self.in_cells.get(name).unwrap_or_else(|| panic!("{name} se reparte por filas y debe estar en las celdas"));
+        self.cell_matvec(place, 0.into(), src, rows);
+        self.across_chips = true;
+        self.narrow_part_at(matrix, src, dst, 0.into(), offset.into(), rows.into());
+        self.across_chips = false;
+    }
+
+    /// Several products of one vector that run in a single pass of the cells, each part
+    /// with the rows this chip holds: `(matrix, dst, rows, offset in dst)`.
+    fn ring_matvecs_rows(&mut self, first: &str, parts: &[(u32, u32, u32, u32)], src: u32) {
+        let place = *self.in_cells.get(first).unwrap_or_else(|| panic!("{first} se reparte por filas y debe estar en las celdas"));
+        let rows: Vec<u32> = parts.iter().map(|p| p.2).collect();
+        let (starts, total) = chained_rows(&rows, 1 << self.lane_bits);
+        self.cell_matvec(place, 0.into(), src, total);
+        self.across_chips = true;
+        for (&(matrix, dst, rows, offset), start) in parts.iter().zip(starts) {
+            self.narrow_part_at(matrix, src, dst, start.into(), offset.into(), rows.into());
+        }
+        self.across_chips = false;
+    }
+
+    /// Every chip of the ring made `block` elements of `reg`, the one at `index` those from
+    /// `index * block`: after a turn less than there are chips, each has them all. In each
+    /// turn a chip passes on the block it received in the turn before.
+    fn ring_all_gather(&mut self, reg: u32, block: u32, index: u32) {
+        let chips = self.ring;
+        for turn in 0..chips - 1 {
+            let sent = (index + chips - turn) % chips;
+            let received = (index + 2 * chips - turn - 1) % chips;
+            self.exchange(reg, sent * block, received * block, block);
+        }
+    }
+
+    /// Sends `len` elements of `reg` from `sent` to the next chip while it takes as many
+    /// from the chip before into `received`, a few at a time each way.
+    fn exchange(&mut self, reg: u32, sent: u32, received: u32, len: u32) {
+        self.clear_shifts();
+        let unit = if self.wide_link { 1 << self.lane_bits } else { 1 };
+        assert!(len.is_multiple_of(unit), "los bloques que se reparten los chips ocupan bloques enteros del enlace");
+        let words = len / unit;
+        let chunk = EXCHANGE_CHUNK.min(words);
+        let pass = |s: &mut Self, first: Expr, count: u32| {
+            for k in 0..count {
+                let at = first + Expr::from(k * unit);
+                let mut word = alu(OP_MOV);
+                (word.a, word.write, word.link_send, word.vector) = ((reg, at + Expr::from(sent)), false, true, unit > 1);
+                s.push(word);
+            }
+            for k in 0..count {
+                let at = first + Expr::from(k * unit);
+                let mut word = alu(OP_LINK);
+                (word.dst, word.vector) = ((reg, at + Expr::from(received)), unit > 1);
+                s.push(word);
+            }
+        };
+        self.each((words / chunk).into(), |s, c| pass(s, c * (chunk * unit), chunk));
+        pass(self, Expr::from(words / chunk * chunk * unit), words % chunk);
     }
 
     /// Tells the next chip that this one has finished.
@@ -2224,6 +2332,18 @@ impl BlockOps for Assembly {
 
     fn copy_row(&mut self, _name: &str, matrix: u32, row: Expr, cols: u32, dst: u32) {
         self.copy_part(matrix, row * cols, dst, 0.into(), cols.into());
+    }
+
+    fn matvec_rows(&mut self, name: &str, matrix: u32, src: u32, dst: u32, rows: u32, offset: u32) {
+        self.ring_matvec_rows(name, matrix, src, dst, rows, offset);
+    }
+
+    fn matvecs_rows(&mut self, first: &str, parts: &[(u32, u32, u32, u32)], src: u32) {
+        self.ring_matvecs_rows(first, parts, src);
+    }
+
+    fn all_gather(&mut self, reg: u32, block: u32, index: u32) {
+        self.ring_all_gather(reg, block, index);
     }
 }
 

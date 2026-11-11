@@ -6,7 +6,8 @@
 //! share grows with its lanes, each level of the network that joins the units costs every
 //! unit once more, and each cell costs the same wherever it is.
 
-use crate::lower::{chip_plan, Layout, ENTRY_LOGITS, ENTRY_TOKEN};
+pub use crate::chip::Sharing;
+use crate::lower::{chip_plan, Layout, Shard, ENTRY_LOGITS, ENTRY_TOKEN};
 use crate::Weights;
 use compiler::Program;
 use netlist::{die_design, DieConfig, Microprogram};
@@ -126,11 +127,12 @@ pub struct Target {
     pub lane_bits: std::ops::RangeInclusive<u32>,
     pub cluster_bits: std::ops::RangeInclusive<u32>,
     pub cell_bits: std::ops::RangeInclusive<u32>,
+    pub sharing: Sharing,
 }
 
-/// Each chip's microprogram when the model's layers are shared among `chips` of them.
-pub fn chip_programs(program: &Program, weights: &Weights, die: DieConfig, context: u32, chips: u32) -> Result<Vec<Microprogram>, String> {
-    Ok(built(program, weights, die, context, chips)?.programs)
+/// Each chip's microprogram when the model is shared among `chips` of them.
+pub fn chip_programs(program: &Program, weights: &Weights, die: DieConfig, context: u32, chips: u32, sharing: Sharing) -> Result<Vec<Microprogram>, String> {
+    Ok(built(program, weights, die, context, chips, sharing)?.programs)
 }
 
 /// What the chips of a set run and the memory each needs.
@@ -142,19 +144,25 @@ pub struct Built {
     pub vector_words: u64,
 }
 
-/// Each chip's microprogram and the memory it needs, with the layers cut among the chips
-/// so the one with most memory has as little as can be.
-pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32, chips: u32) -> Result<Built, String> {
+/// Each chip's microprogram and the memory it needs. By layers, they are cut among the
+/// chips so the one with most memory has as little as can be; by rows, every chip holds
+/// an equal slice of each matrix.
+pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32, chips: u32, sharing: Sharing) -> Result<Built, String> {
     let plan = chip_plan(program, weights, chips as usize, context as usize, die.cell.activation_bits)?;
     let (mut cell_bits, mut vector) = (0, 0);
     let codes = (0..plan.len())
         .map(|chip| {
             let mut layout = Layout::for_image(program, weights, die, context as usize)?;
-            layout.keep_weights_of(program, &plan, chip);
+            let by_rows = sharing == Sharing::Rows && chips > 1;
+            if by_rows {
+                layout.share_rows(program, Shard { index: chip as u32, chips });
+            } else {
+                layout.keep_weights_of(program, &plan, chip);
+            }
             let (depth, groups) = layout.cell_depths();
             // The depth counts words, each as wide as the cell's weights.
             cell_bits = cell_bits.max(depth * die.cell.weight_bits as u64 + groups * 2 * die.scale_bits as u64);
-            let code = layout.die_microprogram(program, &plan, chip)?;
+            let code = if by_rows { layout.microprogram(program)? } else { layout.die_microprogram(program, &plan, chip)? };
             // The words its own routines reach, as the compact vector memory holds them.
             vector = vector.max(layout.vector_words_used());
             Ok(code)
@@ -197,8 +205,21 @@ pub struct Timing {
     pub prompt_cycles: u64,
 }
 
-pub fn timing(codes: &[Microprogram], die: DieConfig, context: u32, prompt: u32, stride: u32) -> Timing {
+pub fn timing(codes: &[Microprogram], die: DieConfig, context: u32, prompt: u32, stride: u32, sharing: Sharing) -> Timing {
     let token = |position: u32| -> Vec<u64> { codes.iter().map(|code| code.cycles(&die, ENTRY_TOKEN, 1, position)).collect() };
+    if sharing == Sharing::Rows {
+        // The chips all work on the same token at once, waiting for one another at each
+        // exchange: a token takes what the slowest does.
+        let both = |position: u32| codes.iter().map(|code| code.cycles(&die, ENTRY_TOKEN, 1, position) + code.cycles(&die, ENTRY_LOGITS, 1, position)).max().unwrap_or(0);
+        let slowest = |position: u32| token(position).into_iter().max().unwrap_or(0) as f64;
+        let (mut total, mut from) = (0.0, 0);
+        while from + 1 < prompt {
+            let to = (from + stride.max(1)).min(prompt - 1);
+            total += (slowest(from) + slowest(to - 1)) / 2.0 * (to - from) as f64;
+            from = to;
+        }
+        return Timing { token_cycles: both(context - 1), prompt_cycles: total.round() as u64 + both(prompt.max(1) - 1) };
+    }
     // The chips make the logits together: the last sends the first what it needs.
     let logits = |position: u32| codes.iter().map(|code| code.cycles(&die, ENTRY_LOGITS, 1, position)).max().unwrap_or(0);
     let token_cycles = token(context - 1).iter().sum::<u64>() + logits(context - 1);
@@ -222,8 +243,8 @@ pub fn die_of(base: DieConfig, context: u32, (cluster_bits, lane_bits, cell_bits
 /// One set of chips, measured: its own microprograms, its clock and its silicon.
 fn evaluate(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs, target: &Target, (chips, cluster_bits, lane_bits, cell_bits): (u32, u32, u32, u32)) -> Option<Candidate> {
     let die = die_of(base, target.context, (cluster_bits, lane_bits, cell_bits));
-    let Built { programs: codes, cell_bits: bits, vector_words } = built(program, weights, die, target.context, chips).ok()?;
-    let timing = timing(&codes, die, target.context, target.prompt, 256);
+    let Built { programs: codes, cell_bits: bits, vector_words } = built(program, weights, die, target.context, chips, target.sharing).ok()?;
+    let timing = timing(&codes, die, target.context, target.prompt, 256, target.sharing);
     let clock = target.clock_hz.min(costs.clock_hz(cluster_bits, lane_bits, target.process.full_adder_ns));
     let cycles = timing.token_cycles;
     let gates = costs.gates(cluster_bits, lane_bits, cell_bits);

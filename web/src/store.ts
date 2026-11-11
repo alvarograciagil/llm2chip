@@ -70,6 +70,8 @@ interface DesignState {
   redo: () => void;
   applyPreset: (id: string) => void;
   saveDesign: (name: string) => void;
+  /** Starts a design from a model and the parameters the wizard chose, and keeps it. */
+  createProject: (name: string, model: string, params: Partial<ChipParams>) => void;
   loadDesign: (name: string) => void;
   deleteDesign: (name: string) => void;
   pinBaseline: () => void;
@@ -283,6 +285,12 @@ export const useDesign = create<DesignState>((set, get) => {
       if (!preset) return;
       const model = get().models.find((m) => m.id === preset.model) ?? get().model;
       commit({ ...get().defaults, ...preset.params } as ChipParams, "", { model, selection: null, designName: preset.name });
+    },
+
+    createProject(name, modelId, params) {
+      const model = get().models.find((m) => m.id === modelId) ?? get().model;
+      commit({ ...get().defaults, ...params } as ChipParams, "", { model, selection: null, designName: name, view: "plano" });
+      get().saveDesign(name);
     },
 
     saveDesign(name) {

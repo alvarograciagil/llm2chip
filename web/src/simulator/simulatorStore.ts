@@ -58,6 +58,12 @@ interface SimulatorState {
   image: { width: number; height: number; rgb: number[]; preview: string } | null;
   /** What the encoder made of the picture in the last run. */
   imageReport: { patches: number; tokens: number; seconds: number } | null;
+  /** Draw a picture of the prompt instead of answering it, with a model that draws. */
+  draw: boolean;
+  /** How far the drawing has gone: image tokens written, and whether it is decoding. */
+  drawing: { done: number; total: number; seconds: number; decoding: boolean } | null;
+  /** The last picture drawn, ready for an <img>. */
+  picture: { data: string; side: number; seconds: number } | null;
   maxTokens: number;
   temperature: number;
   topK: number;
@@ -111,6 +117,9 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   prompt: "¿Cuál es la capital de Francia? Responde en una frase.",
   image: null,
   imageReport: null,
+  draw: false,
+  drawing: null,
+  picture: null,
   maxTokens: 64,
   temperature: 0,
   topK: 20,
@@ -162,22 +171,25 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   },
 
   generate() {
-    const { prompt, maxTokens, temperature, topK, mtpDepth, thinking, thinkBudget, firmware, samplerUnit, firmwareTokenizer, image } = get();
+    const { prompt, maxTokens, temperature, topK, mtpDepth, thinking, thinkBudget, firmware, samplerUnit, firmwareTokenizer, image, draw } = get();
     const budget = thinkBudget.trim() === "" ? null : Math.max(0, Math.floor(Number(thinkBudget) || 0));
     const metric = (id: string) => useDesign.getState().report?.metrics.find((m) => m.id === id)?.value ?? 0;
     const rate = metric("tok_s");
     const fidelity = { firmware, sampler_unit: samplerUnit || firmware, cycles_per_token: rate > 0 ? (metric("freq_ghz") * 1e9) / rate : 0, sampler_lanes: useDesign.getState().params.sampler_lanes, tokenizer: firmware && firmwareTokenizer, context_tokens: useDesign.getState().params.context_tokens };
     socket?.close();
-    set({ chip: null, output: "", running: true, error: null, phase: "Conectando", tokens: 0, prefilled: 0, promptTokens: 0, seconds: [], saturated: 0, acceptance: { hits: [], tries: [] } });
+    set({ drawing: null, picture: draw ? null : get().picture, chip: null, output: "", running: true, error: null, phase: "Conectando", tokens: 0, prefilled: 0, promptTokens: 0, seconds: [], saturated: 0, acceptance: { hits: [], tries: [] } });
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${location.host}/api/generate`);
     socket = ws;
-    ws.onopen = () => ws.send(JSON.stringify({ prompt, max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, mtp_depth: mtpDepth, fidelity, image: image && { width: image.width, height: image.height, rgb: image.rgb } }));
+    ws.onopen = () => ws.send(JSON.stringify({ prompt, max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, mtp_depth: mtpDepth, fidelity, image: image && { width: image.width, height: image.height, rgb: image.rgb }, draw }));
     ws.onerror = () => set({ error: "Se perdió la conexión con el motor.", running: false });
     ws.onclose = () => set({ running: false });
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === "image") set({ imageReport: { patches: data.patches, tokens: data.tokens, seconds: data.seconds } });
+      if (data.type === "drawing") set((s) => ({ phase: "Dibujando", drawing: { done: data.done, total: data.total, seconds: data.seconds, decoding: false }, pulse: s.pulse + 1 }));
+      if (data.type === "decoding") set((s) => ({ phase: "Decodificando la imagen", drawing: s.drawing && { ...s.drawing, decoding: true } }));
+      if (data.type === "picture") set({ picture: { data: data.data, side: data.side, seconds: data.seconds } });
       if (data.type === "start") set({ promptTokens: data.prompt_tokens, phase: "Leyendo el prompt" });
       if (data.type === "prefill") set((s) => ({ prefilled: data.done, saturated: s.saturated, pulse: s.pulse + 1 }));
       if (data.type === "token") {

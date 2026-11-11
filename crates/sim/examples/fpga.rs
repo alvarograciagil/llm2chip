@@ -1,13 +1,12 @@
-//! The whole chip for the small model of the tests, in Verilog, to synthesise for an FPGA:
-//! the RISC-V controller, the die with only the logic its microprogram uses, and the
-//! sampling unit.
+//! The whole chip, in Verilog, to synthesise for an FPGA: the RISC-V controller, the die
+//! with only the logic its microprogram uses, and the sampling unit.
 //!
-//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp]`
+//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR] [--context N] [--cells N] [--lanes N]`
 //!
 //! With `--dsp`, each one-cycle multiplier is written as a signed product so the FPGA
-//! tools put it in their multiplier blocks.
-//!
-//! The die is the one `the_chip_sized_for_an_fpga_says_the_same_in_gates` runs.
+//! tools put it in their multiplier blocks. Without `--model`, the chip is the one
+//! `the_chip_sized_for_an_fpga_says_the_same_in_gates` runs for the test model; with it,
+//! a chip of the same shape sized for that model's weights and `--context` tokens.
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -17,34 +16,91 @@ use compiler::compile_qwen3_5;
 use netlist::chip::{chip_design, ChipConfig};
 use netlist::sampler::SamplerConfig;
 use netlist::soc::SocConfig;
-use netlist::{to_verilog, to_verilog_for_fpga, DieConfig, DieFeatures};
+use netlist::{to_verilog, to_verilog_for_fpga, CellConfig, Design, DieConfig, DieFeatures, InstKind, Prim};
 use sim::lower::Layout;
 use sim::Weights;
+use std::collections::HashMap;
+use std::path::Path;
+
+/// Bits of every memory in the design, by kind, counting each instance of each module.
+fn memory_bits(design: &Design) -> HashMap<&'static str, u64> {
+    fn walk(design: &Design, module: &str, times: u64, out: &mut HashMap<&'static str, u64>) {
+        for inst in &design.modules[module].instances {
+            match &inst.kind {
+                InstKind::Module(child) => walk(design, child, times, out),
+                InstKind::Prim(Prim::Sram { addr_bits, width }) | InstKind::Prim(Prim::Ram2p { addr_bits, width }) | InstKind::Prim(Prim::Rom { addr_bits, width }) => {
+                    let kind = match inst.name.as_str() {
+                        n if n.starts_with("weight") || n.contains("scale_mem") || n.contains("bias_mem") => "pesos y factores",
+                        n if n.starts_with("vectors") || n.starts_with("wide_memory") => "memoria vectorial",
+                        n if n.starts_with("microcode") => "microcódigo",
+                        _ => "CPU, tablas y resto",
+                    };
+                    *out.entry(kind).or_default() += times * (1u64 << addr_bits) * *width as u64;
+                }
+                InstKind::Prim(_) => {}
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    walk(design, &design.top, 1, &mut out);
+    out
+}
+
+fn bits_for(count: u64) -> u32 {
+    (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1)
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out = args.get(1).expect("archivo de salida");
-    let dir = std::env::temp_dir().join(format!("llm2chip-fpga-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    make_checkpoint(&dir);
-    let program = compile_qwen3_5(CONFIG).unwrap();
-    let trial = fpga_die_config();
-    let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), trial, 8).unwrap();
+    let option = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let test_dir = std::env::temp_dir().join(format!("llm2chip-fpga-{}", std::process::id()));
+    let (program, weights, trial, context) = match option("--model") {
+        Some(dir) => {
+            let dir = Path::new(&dir);
+            let program = compiler::compile_model(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+            let weights = Weights::open(dir).unwrap();
+            let context: usize = option("--context").map_or(128, |n| n.parse().unwrap());
+            let cells: u32 = option("--cells").map_or(8, |n| n.parse().unwrap());
+            let lane_bits = option("--lanes").map_or(0, |n| n.parse::<u32>().unwrap().max(1).ilog2());
+            // Room for everything first, then just the bits the layout needs.
+            let base = fpga_die_config();
+            let roomy = DieConfig { cells, reg_bits: 12, index_bits: 20, cell: CellConfig { addr_bits: 20, ..base.cell }, features: base.features.with_key_shift(bits_for(context as u64)).with_lane_bits(lane_bits), ..base };
+            let layout = Layout::with_cells(&program, &weights, roomy, context).unwrap();
+            let (depth, groups) = layout.cell_depths();
+            let (code_bits, _) = layout.cell_shape(&weights).unwrap();
+            let addr_bits = bits_for(depth.max(2 * groups));
+            let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1).max(context as u64 * 512)).max(addr_bits);
+            let trial = DieConfig { reg_bits: bits_for(layout.registers_used() as u64 + 2), index_bits, cell: CellConfig { weight_bits: code_bits.max(2), addr_bits, ..roomy.cell }, ..roomy };
+            (program, weights, trial, context)
+        }
+        None => {
+            std::fs::create_dir_all(&test_dir).unwrap();
+            make_checkpoint(&test_dir);
+            (compile_qwen3_5(CONFIG).unwrap(), Weights::open(&test_dir).unwrap(), fpga_die_config(), 8)
+        }
+    };
+    let layout = Layout::with_cells(&program, &weights, trial, context).unwrap();
     let code = layout.microprogram(&program).unwrap();
+    eprintln!("registros más largos: {:?}", layout.longest_registers(6));
     let (depth, groups) = layout.cell_depths();
     eprintln!("{} registros, {} palabras de pesos y {} grupos de factores por celda", layout.registers_used(), depth, groups);
     // Only what this microprogram uses.
     let features = DieFeatures::of(&code).with_lane_bits(trial.features.lane_bits).with_cluster_bits(trial.features.cluster_bits).with_key_shift(trial.features.key_shift);
     let die = sim::chip::compact_die(DieConfig { features, ..trial }, &layout);
     eprintln!("memoria vectorial compacta de 2^{} palabras, frente a 2^{} sin tabla", die.features.vector_bits, die.reg_bits + die.index_bits);
-    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: bits_for(program.vocab as u64).max(4), entries: 4, lanes: 1 } };
     let design = chip_design(config);
     eprintln!("{:.0} equivalentes NAND2, microprograma de {} palabras", design.gate_equivalents(), code.words.len());
+    let mut memories: Vec<_> = memory_bits(&design).into_iter().collect();
+    memories.sort();
+    let total: u64 = memories.iter().map(|(_, bits)| bits).sum();
+    eprintln!("memoria: {:.2} Mbit ({})", total as f64 / 1e6, memories.iter().map(|(kind, bits)| format!("{kind} {:.2}", *bits as f64 / 1e6)).collect::<Vec<_>>().join(", "));
     // The die's cycles for one generated token at the last position, with its logits.
-    let last = 7;
+    let last = context as u32 - 1;
     let token = code.cycles(&die, sim::lower::ENTRY_TOKEN, 1, last) + code.cycles(&die, sim::lower::ENTRY_LOGITS, 1, last);
-    eprintln!("{token} ciclos del die por token generado");
+    eprintln!("{token} ciclos del die por token generado en la posición {last}");
     let text = if args.iter().any(|a| a == "--dsp") { to_verilog_for_fpga(&design) } else { to_verilog(&design) };
     std::fs::write(out, text).unwrap();
-    std::fs::remove_dir_all(dir).ok();
+    std::fs::remove_dir_all(test_dir).ok();
 }

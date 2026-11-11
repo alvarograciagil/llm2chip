@@ -54,11 +54,14 @@ pub struct DieFeatures {
     /// log2 of the words of vector memory, when each register takes only the words it
     /// uses: a table gives each its base. Zero gives every register `1 << index_bits`.
     pub vector_bits: u32,
+    /// log2 of the groups whose scale and bias each cell keeps, when fewer than its
+    /// weights; zero sizes those memories like the weights'.
+    pub factor_bits: u32,
 }
 
 impl Default for DieFeatures {
     fn default() -> Self {
-        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0 }
+        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0 }
     }
 }
 
@@ -82,6 +85,12 @@ impl DieFeatures {
     /// The same die with `1 << bits` words of vector memory, handed out by a table.
     pub fn with_vector_bits(mut self, bits: u32) -> Self {
         self.vector_bits = bits;
+        self
+    }
+
+    /// The same die with room for `1 << bits` groups of scale and bias in each cell.
+    pub fn with_factor_bits(mut self, bits: u32) -> Self {
+        self.factor_bits = bits;
         self
     }
 
@@ -144,7 +153,7 @@ impl DieFeatures {
     /// Exactly what this microprogram needs.
     pub fn of(code: &Microprogram) -> Self {
         // Additions are also how the comparator and the sequencer's own results are made.
-        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0 };
+        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0 };
         let mut highest_x = 0;
         for word in &code.words {
             features.ops |= 1 << word.op;
@@ -170,7 +179,7 @@ impl DieFeatures {
     pub fn union(self, other: Self) -> Self {
         let mut widths = self.widths;
         widths.iter_mut().zip(other.widths).for_each(|(a, b)| *a = (*a).max(b));
-        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link, vector_bits: self.vector_bits.max(other.vector_bits) }
+        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link, vector_bits: self.vector_bits.max(other.vector_bits), factor_bits: self.factor_bits.max(other.factor_bits) }
     }
 
     fn uses(&self, op: u32) -> bool {
@@ -925,20 +934,28 @@ impl Gen {
         }
         let scale = b.wire("scale", s);
         let bias = b.wire("bias", s);
+        // Groups are far fewer than weights: the memories of the factors take only the
+        // address bits they need.
+        let factor_bits = match c.features.factor_bits {
+            0 => cfg.addr_bits,
+            bits => bits.min(cfg.addr_bits),
+        };
+        let read_addr = read_addr[..factor_bits as usize].to_vec();
         match &p.load {
             Some(load) => {
                 // Host addresses are 2·group for the scale and 2·group + 1 for the bias.
                 let mut write_addr: Vec<Bit> = load.load_addr[1..].to_vec();
                 write_addr.push(Bit::Zero);
+                write_addr.truncate(factor_bits as usize);
                 let write_bias = b.wire("write_bias", 1)[0];
                 b.and_to(load.write_scale, load.load_addr[0], write_bias);
                 let write_scale_only = and_not(&mut b, load.write_scale, load.load_addr[0], "write_scale_only");
-                b.ram2p("scale_mem", cfg.addr_bits, s, &[("raddr", read_addr.clone()), ("waddr", write_addr.clone()), ("we", vec![write_scale_only]), ("wdata", load.load_data[..s as usize].to_vec()), ("rdata", scale.clone())]);
-                b.ram2p("bias_mem", cfg.addr_bits, s, &[("raddr", read_addr), ("waddr", write_addr), ("we", vec![write_bias]), ("wdata", load.load_data[..s as usize].to_vec()), ("rdata", bias.clone())]);
+                b.ram2p("scale_mem", factor_bits, s, &[("raddr", read_addr.clone()), ("waddr", write_addr.clone()), ("we", vec![write_scale_only]), ("wdata", load.load_data[..s as usize].to_vec()), ("rdata", scale.clone())]);
+                b.ram2p("bias_mem", factor_bits, s, &[("raddr", read_addr), ("waddr", write_addr), ("we", vec![write_bias]), ("wdata", load.load_data[..s as usize].to_vec()), ("rdata", bias.clone())]);
             }
             None => {
-                b.rom("scale_mem", cfg.addr_bits, s, &[("addr", read_addr.clone()), ("rdata", scale.clone())]);
-                b.rom("bias_mem", cfg.addr_bits, s, &[("addr", read_addr), ("rdata", bias.clone())]);
+                b.rom("scale_mem", factor_bits, s, &[("addr", read_addr.clone()), ("rdata", scale.clone())]);
+                b.rom("bias_mem", factor_bits, s, &[("addr", read_addr), ("rdata", bias.clone())]);
             }
         }
 

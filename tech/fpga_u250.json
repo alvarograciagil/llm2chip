@@ -1,6 +1,6 @@
 {
   "id": "fpga_u250",
-  "label": "AMD Alveo U250 (equivalente, sin calibrar)",
+  "label": "FPGA (a escala de una Alveo U250, sin calibrar)",
   "sram_cell_um2": 0.5,
   "sram_periphery_k": 5.0,
   "rom_mbit_mm2": 2.0,

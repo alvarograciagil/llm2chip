@@ -27,7 +27,7 @@ fn main() {
     let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 36, mac_stages: 1, adder_stages: 1, addr_bits: 24, coding: Default::default(), exponent_bits: 0, multiplier: MultiplierKind::Booth, fixed_weights: false, ecc: false, skip_zeros: false };
     let base = DieConfig { cells: 1, cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_factor_steps(8) };
     let costs = Costs::measure(base);
-    let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: std::env::var("CHIPS").unwrap_or("8,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect(), clock_hz: 5e9, process: N6, context, lane_bits: 6..=7, cluster_bits: 5..=11, cell_bits: 13..=24 };
+    let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: std::env::var("CHIPS").unwrap_or("8,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect(), clock_hz: 5e9, process: N6, context, lane_bits: 6..=7, cluster_bits: 5..=11, cell_bits: 13..=24, sharing: sim::sizing::Sharing::Layers };
     let points = frontier(&program, &weights, base, &costs, &target);
     let first = points.first().copied();
     for c in &points {

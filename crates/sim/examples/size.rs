@@ -39,7 +39,7 @@ fn main() {
     println!("puertas: fijo {:.0}, unidad {:.0} + {:.0}/carril, nivel {:.0} + {:.0}/carril, celda {:.0}", costs.fixed, costs.unit, costs.lane, costs.level, costs.level_lane, costs.cell);
     println!("camino crítico: {:.1} sumadores completos con una unidad, {:.1} con cuatro, + {:.1} por cada doble de carriles y + {:.1} por cada doble de unidades más", costs.path, costs.path_four_units, costs.path_lane_bit, costs.path_unit_bit);
     // N6: the delay of a full adder in that process.
-    let target = Target { tokens_per_second: wanted, prompt_seconds: first_ms / 1e3, prompt, chips: std::env::var("CHIPS").unwrap_or("8,10,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect(), clock_hz: ghz * 1e9, process: N6, context, lane_bits: 6..=7, cluster_bits: 5..=11, cell_bits: 13..=25 };
+    let target = Target { tokens_per_second: wanted, prompt_seconds: first_ms / 1e3, prompt, chips: std::env::var("CHIPS").unwrap_or("8,10,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect(), clock_hz: ghz * 1e9, process: N6, context, lane_bits: 6..=7, cluster_bits: 5..=11, cell_bits: 13..=25, sharing: sim::sizing::Sharing::Layers };
     let found = search(&program, &weights, base, &costs, &target);
     if found.is_empty() {
         println!("ningún conjunto de chips del rango alcanza {wanted} tok/s y el primer token en {first_ms} ms");

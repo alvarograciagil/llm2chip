@@ -2473,3 +2473,379 @@ button.model-toggle {
 .pill.attach.disabled input {
   cursor: default;
 }
+
+.picture {
+  margin: 0;
+}
+
+.picture img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+  border: 0.5px solid var(--separator);
+}
+
+.picture figcaption {
+  margin-top: 6px;
+  color: var(--label-2);
+  font-size: 12px;
+}
+
+/* The new-project wizard: a sheet over the window. */
+.wizard-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.wizard {
+  display: flex;
+  flex-direction: column;
+  width: min(720px, 100%);
+  max-height: min(680px, calc(100vh - 32px));
+  border-radius: 12px;
+  background: var(--group-solid);
+  box-shadow: var(--shadow);
+  outline: none;
+}
+
+.wizard header {
+  padding: 18px 22px 8px;
+}
+
+.wizard h2 {
+  margin: 2px 0 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.wizard-steps {
+  color: var(--label-2);
+  font-size: 11px;
+}
+
+.wizard-body {
+  flex: 1;
+  overflow: auto;
+  padding: 8px 22px 16px;
+}
+
+.wizard footer {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 22px;
+  border-top: 0.5px solid var(--separator);
+}
+
+.wizard footer span {
+  flex: 1;
+}
+
+.wizard footer button {
+  padding: 4px 14px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--control);
+  color: var(--label);
+}
+
+.wizard footer button.primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.wizard footer button:disabled {
+  opacity: 0.45;
+}
+
+.wizard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.wizard-choice {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+  padding: 12px 14px;
+  border: 0.5px solid var(--separator);
+  border-radius: 10px;
+  background: var(--group);
+  color: var(--label);
+  text-align: left;
+}
+
+.wizard-choice.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.wizard-choice p {
+  margin: 0;
+  color: var(--label-2);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.wizard-choice small {
+  color: var(--label-2);
+}
+
+.wizard-questions {
+  display: grid;
+  gap: 14px;
+}
+
+.wizard-question {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.wizard-question > div {
+  flex: 1 1 240px;
+}
+
+.wizard-question p {
+  margin: 2px 0 0;
+  color: var(--label-2);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.wizard-question select {
+  padding: 3px 6px;
+  border-radius: 6px;
+  max-width: 220px;
+}
+
+.wizard-models {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wizard-models button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 12px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0.5px solid var(--separator);
+  border-radius: 8px;
+  background: var(--group);
+  color: var(--label);
+  text-align: left;
+}
+
+.wizard-models button.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.wizard-models button:disabled {
+  opacity: 0.6;
+}
+
+.wizard-model-name {
+  font-weight: 600;
+}
+
+.wizard-model-name em {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 500;
+}
+
+.wizard-model-size,
+.wizard-model-speed {
+  color: var(--label-2);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.wizard-model-note {
+  color: var(--label-2);
+  font-size: 12px;
+}
+
+.wizard-model-note.bad {
+  color: var(--red);
+}
+
+.wizard-summary dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0;
+}
+
+.wizard-summary dt {
+  color: var(--label-2);
+}
+
+.wizard-summary dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.wizard-problems {
+  margin: 12px 0 0;
+  padding: 8px 12px 8px 26px;
+  border-radius: 8px;
+  background: var(--red-bg);
+  color: var(--red);
+  font-size: 12px;
+}
+
+.wizard-hint,
+.wizard-empty {
+  color: var(--label-2);
+  font-size: 12px;
+}
+
+.wizard-name {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  color: var(--label-2);
+}
+
+.wizard-name input {
+  padding: 5px 8px;
+  border: 0.5px solid var(--separator);
+  border-radius: 6px;
+  background: var(--group);
+  color: var(--label);
+}
+
+
+.board-menus {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.board-menus label {
+  display: grid;
+  flex: 1 1 200px;
+  gap: 4px;
+  color: var(--label-2);
+  font-size: 12px;
+}
+
+.board-menus select {
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+
+.board-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 18px;
+  padding: 14px;
+  border: 0.5px solid var(--separator);
+  border-radius: 10px;
+  background: var(--group);
+}
+
+.board-photo {
+  display: grid;
+  place-items: center;
+  min-height: 180px;
+  border-radius: 8px;
+  background: var(--canvas);
+  overflow: hidden;
+}
+
+.board-photo img {
+  width: 100%;
+  height: 100%;
+  max-height: 260px;
+  object-fit: contain;
+}
+
+.board-specs h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.board-specs dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+
+.board-specs dt {
+  color: var(--label-2);
+}
+
+.board-specs dd {
+  margin: 0;
+}
+
+.board-specs a {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.board-drawing {
+  width: 100%;
+  max-height: 220px;
+}
+
+.board-drawing .pcb {
+  fill: #1f5c3a;
+}
+
+.board-drawing .hole {
+  fill: var(--canvas);
+}
+
+.board-drawing .fpga {
+  fill: #2b2b2e;
+  stroke: #9a9aa0;
+}
+
+.board-drawing .chip {
+  fill: #3a3a3e;
+}
+
+.board-drawing .header {
+  fill: #c9a227;
+}
+
+.board-drawing text {
+  text-anchor: middle;
+  fill: #f2f2f2;
+  font-size: 13px;
+}
+
+.board-drawing .sub {
+  font-size: 10px;
+  fill: #cfe8d8;
+}
+
+@media (max-width: 560px) {
+  .board-card {
+    grid-template-columns: 1fr;
+  }
+}

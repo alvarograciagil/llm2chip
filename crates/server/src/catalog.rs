@@ -83,14 +83,16 @@ pub fn image_ability(dir: &Path, config: &Value) -> ImageAbility {
     // Models that draw emit image tokens a decoder turns into pixels: Janus describes its
     // generator apart, Chameleon and Emu3 a VQ model.
     let draws = ["gen_vision_config", "gen_head_config", "gen_aligner_config", "vq_config", "vqmodel_config"].iter().any(|key| config.get(key).is_some());
-    let note = if draws {
+    // Janus draws with a decoder the simulator runs.
+    let makes = sim::janus::JanusConfig::read(dir).ok().flatten().is_some();
+    let note = if draws && !makes {
         Some("El modelo genera imágenes, pero el simulador aún no tiene su decodificador de imagen.".into())
     } else if config.get("vision_config").is_some() && !reads {
         Some("El modelo lee imágenes con un codificador que el simulador aún no reproduce.".into())
     } else {
         None
     };
-    ImageAbility { reads, makes: false, note }
+    ImageAbility { reads, makes, note }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -404,8 +406,10 @@ mod image_tests {
         assert!(qwen.reads && qwen.note.is_none());
         let other = ability(r#"{"model_type":"llava","vision_config":{"depth":2}}"#);
         assert!(!other.reads && other.note.unwrap().contains("codificador"));
-        let janus = ability(r#"{"model_type":"multi_modality","gen_vision_config":{}}"#);
-        assert!(!janus.makes && janus.note.unwrap().contains("genera imágenes"));
+        let other = ability(r#"{"model_type":"multi_modality","gen_vision_config":{}}"#);
+        assert!(!other.makes && other.note.unwrap().contains("genera imágenes"));
+        let janus = ability(r#"{"model_type":"janus","vq_config":{"num_patches":24}}"#);
+        assert!(janus.makes && janus.note.is_none());
         std::fs::remove_dir_all(dir).ok();
     }
 }

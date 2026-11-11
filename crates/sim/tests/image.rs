@@ -71,7 +71,7 @@ mod chip_image {
     fn an_image_holds_every_chip_count_and_each_cells_weights() {
         let dir = fixture("whole");
         let out = dir.join("modelo.chipimg");
-        let request = ImageRequest { chips: vec![1, 2], context_tokens: 64, cells: 3, activation_bits: 16, lane_bits: 0, cluster_bits: 0, add_special: false, stop: vec![2] };
+        let request = ImageRequest { chips: vec![1, 2], context_tokens: 64, cells: 3, activation_bits: 16, lane_bits: 0, cluster_bits: 0, add_special: false, stop: vec![2], sharing: Default::default() };
         let (done, total, cancel) = (AtomicU64::new(0), AtomicU64::new(0), AtomicBool::new(false));
         let report = write_chip_image(&dir, &firmware(), &request, &out, &done, &total, &cancel).unwrap();
         assert_eq!(report.chips, [1, 2]);
@@ -110,10 +110,44 @@ mod chip_image {
     }
 
     #[test]
+    fn chips_that_share_rows_each_read_their_slice_of_every_cell() {
+        let dir = fixture("rows");
+        let out = dir.join("filas.chipimg");
+        let request = ImageRequest { chips: vec![1, 2], context_tokens: 64, cells: 3, activation_bits: 16, lane_bits: 0, cluster_bits: 0, add_special: false, stop: vec![2], sharing: sim::chip::Sharing::Rows };
+        let (done, total, cancel) = (AtomicU64::new(0), AtomicU64::new(0), AtomicBool::new(false));
+        write_chip_image(&dir, &firmware(), &request, &out, &done, &total, &cancel).unwrap();
+        let mut image = ChipImage::open(&out).unwrap();
+        assert_eq!(image.manifest.sharing, sim::chip::Sharing::Rows);
+
+        let weights = sim::Weights::open(&dir).unwrap();
+        let matrix = weights.matrix("lm_head").unwrap();
+        let cols = *weights.shape("lm_head.weight").unwrap().last().unwrap();
+        let exponent = matrix.exponent(cols);
+        let row_bytes = 2 * cols + 8 * matrix.cell_groups(cols).1;
+        let slice = matrix.rows() / 2;
+        let mut seen = Vec::new();
+        for chip in 0..2 {
+            for cell in 0..3 {
+                let bytes = image.cell_weights_shared("lm_head", cell as u64, chip as u64, 2).unwrap();
+                for (k, row) in bytes.chunks(row_bytes).enumerate() {
+                    // Each chip spreads its slice over its cells as one chip spreads the whole.
+                    let global = chip * slice + cell + 3 * k;
+                    let codes: Vec<i64> = row[..2 * cols].chunks(2).map(|b| i64::from(i16::from_le_bytes([b[0], b[1]]))).collect();
+                    assert_eq!(codes, matrix.cell_row(global, cols, exponent, 16).unwrap().0, "fila {global} en el chip {chip}");
+                    seen.push(global);
+                }
+            }
+        }
+        seen.sort();
+        assert_eq!(seen, (0..2 * slice).collect::<Vec<_>>(), "cada fila, en un solo chip");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn damage_to_the_file_is_found() {
         let dir = fixture("damage");
         let out = dir.join("danada.chipimg");
-        let request = ImageRequest { chips: vec![1], context_tokens: 64, cells: 2, activation_bits: 16, lane_bits: 0, cluster_bits: 0, add_special: false, stop: vec![] };
+        let request = ImageRequest { chips: vec![1], context_tokens: 64, cells: 2, activation_bits: 16, lane_bits: 0, cluster_bits: 0, add_special: false, stop: vec![], sharing: Default::default() };
         let (done, total, cancel) = (AtomicU64::new(0), AtomicU64::new(0), AtomicBool::new(false));
         write_chip_image(&dir, &firmware(), &request, &out, &done, &total, &cancel).unwrap();
         let offset = ChipImage::open(&out).unwrap().manifest.tensors[0].offset as usize;

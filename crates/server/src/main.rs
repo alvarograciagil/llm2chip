@@ -54,6 +54,8 @@ struct Loaded {
     prompt: PromptStyle,
     /// The image encoder, opened the first time an image arrives.
     vision: Option<sim::vision::VisionTower>,
+    /// The image generator, opened the first time a picture is asked for.
+    painter: Option<sim::janus::Janus>,
 }
 
 #[derive(Clone)]
@@ -272,7 +274,7 @@ fn run_speed(catalog: &Catalog, request: SpeedRequest) -> Result<serde_json::Val
     let program = compile_model(&entry.config)?;
     let weights = Weights::open(&dir)?;
     let context = request.context_tokens.max(1);
-    let image = ImageRequest { chips: vec![1], context_tokens: context, cells: request.cells.max(1), activation_bits: request.activation_bits.clamp(8, 24), lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special: false, stop: Vec::new() };
+    let image = ImageRequest { sharing: Default::default(), chips: vec![1], context_tokens: context, cells: request.cells.max(1), activation_bits: request.activation_bits.clamp(8, 24), lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special: false, stop: Vec::new() };
     let die = fitted_die(&program, &weights, &image)?;
     let layout = Layout::for_image(&program, &weights, die, context as usize)?;
     let mut totals: Vec<(String, u64, u32)> = Vec::new();
@@ -320,6 +322,9 @@ struct ImageJob {
 struct ImageStart {
     path: String,
     chips: Vec<usize>,
+    /// How the chips share the model: by layers or by rows of every matrix.
+    #[serde(default)]
+    sharing: sim::chip::Sharing,
     context_tokens: u64,
     cells: usize,
     activation_bits: u32,
@@ -373,7 +378,7 @@ async fn image_start(State(app): State<App>, Json(request): Json<ImageStart>) ->
             let out = home().join(".llm2chip/images").join(format!("{}.chipimg", entry.name.replace('/', "--")));
             // A chip's image has one framing of the text: with its template, nothing is added.
             let add_special = prompt.render("", false)?.1;
-            let image = ImageRequest { chips: request.chips, context_tokens: request.context_tokens.max(1), cells: request.cells.max(1), activation_bits: request.activation_bits, lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special, stop: prompt.stop.clone() };
+            let image = ImageRequest { chips: request.chips, context_tokens: request.context_tokens.max(1), cells: request.cells.max(1), activation_bits: request.activation_bits, lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special, stop: prompt.stop.clone(), sharing: request.sharing };
             let report = write_chip_image(&dir, &firmware, &image, &out, &job.done, &job.total, &job.cancel)?;
             Ok(serde_json::json!({ "path": out.to_string_lossy(), "bytes": report.bytes, "chips": report.chips, "tensors": report.tensors, "boot_words": report.boot_words, "seconds": report.seconds }))
         });
@@ -446,7 +451,7 @@ fn load_model(catalog: &Catalog, request: LoadRequest) -> Result<Loaded, String>
     } else {
         Box::new(Engine::new(program, weights, mode)?)
     };
-    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator, dir: dir.to_path_buf(), firmware_tables: None, load_report, prompt, vision: None })
+    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator, dir: dir.to_path_buf(), firmware_tables: None, load_report, prompt, vision: None, painter: None })
 }
 
 async fn load(State(app): State<App>, Json(request): Json<LoadRequest>) -> Response {
@@ -478,6 +483,9 @@ struct GenerateRequest {
     /// A picture the question is about, as RGB pixels row by row.
     #[serde(default)]
     image: Option<ImageInput>,
+    /// Draw a picture of the prompt instead of answering it, with a model that draws.
+    #[serde(default)]
+    draw: bool,
     /// Also runs the draft head and reports how often it guessed right.
     #[serde(default)]
     mtp_depth: usize,
@@ -722,10 +730,78 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
     Ok(())
 }
 
+/// Base64, for a picture sent inside a message.
+fn base64(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | (*b as u32) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() { DIGITS[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
+/// An uncompressed 24-bit BMP, which browsers show as it is.
+fn bmp(rgb: &[u8], side: usize) -> Vec<u8> {
+    let row = (side * 3).next_multiple_of(4);
+    let mut out = Vec::with_capacity(54 + row * side);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&((54 + row * side) as u32).to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&54u32.to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(side as i32).to_le_bytes());
+    out.extend_from_slice(&(-(side as i32)).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&24u16.to_le_bytes());
+    out.extend_from_slice(&[0; 24]);
+    for y in 0..side {
+        for p in rgb[y * side * 3..(y + 1) * side * 3].chunks(3) {
+            out.extend_from_slice(&[p[2], p[1], p[0]]);
+        }
+        out.resize(out.len() + row - side * 3, 0);
+    }
+    out
+}
+
+/// Draws the prompt with the loaded model's image generator: its language model writes
+/// the codebook tokens, then its decoder turns them into pixels.
+fn run_drawing(loaded: &mut Loaded, request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    if loaded.painter.is_none() {
+        loaded.painter = Some(sim::janus::Janus::open(&loaded.dir)?.ok_or("este modelo no genera imágenes")?);
+    }
+    let painter = loaded.painter.as_ref().unwrap();
+    let text = format!("<|User|>: {}\n\n<|Assistant|>:", request.prompt);
+    let mut ids = vec![painter.config.bos];
+    ids.extend(loaded.tokenizer.encode(text.as_str(), false).map_err(|e| e.to_string())?.get_ids());
+    ids.push(painter.config.begin_image);
+    let _ = sender.blocking_send(serde_json::json!({ "type": "start", "prompt_tokens": ids.len() }));
+    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
+    let started = std::time::Instant::now();
+    let tokens = painter.draw(&ids, request.temperature.max(0.0), seed, |done, total| {
+        let _ = sender.blocking_send(serde_json::json!({ "type": "drawing", "done": done, "total": total, "seconds": started.elapsed().as_secs_f64() }));
+    })?;
+    if cancelled.load(Relaxed) {
+        return Ok(());
+    }
+    let _ = sender.blocking_send(serde_json::json!({ "type": "decoding" }));
+    let rgb = painter.decode(&tokens)?;
+    let side = painter.config.side();
+    let _ = sender.blocking_send(serde_json::json!({ "type": "picture", "side": side, "tokens": tokens.len(), "seconds": started.elapsed().as_secs_f64(), "data": format!("data:image/bmp;base64,{}", base64(&bmp(&rgb, side))) }));
+    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": tokens.len() }));
+    Ok(())
+}
+
 fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> {
     use std::sync::atomic::Ordering::Relaxed;
     let mut guard = app.loaded.lock().unwrap();
     let loaded = guard.as_mut().ok_or("carga un modelo primero")?;
+    if request.draw {
+        return run_drawing(loaded, &request, sender, cancelled);
+    }
     let (text, add_special) = match request.image {
         Some(_) => (loaded.prompt.render_with_image(&request.prompt, request.thinking)?, false),
         None => loaded.prompt.render(&request.prompt, request.thinking)?,
@@ -939,4 +1015,19 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", PORT)).await.expect("el puerto 7878 está ocupado");
     println!("llm2chip en http://127.0.0.1:{PORT}");
     axum::serve(listener, routes).await.expect("el servidor ha fallado");
+}
+
+#[cfg(test)]
+mod picture_tests {
+    use super::*;
+
+    #[test]
+    fn a_picture_travels_as_base64_of_a_bmp() {
+        assert_eq!([base64(b"Man"), base64(b"Ma"), base64(b"M"), base64(b"")], ["TWFu", "TWE=", "TQ==", ""]);
+        let image = bmp(&[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255], 2);
+        assert_eq!(&image[..2], b"BM");
+        assert_eq!(image.len(), 54 + 8 * 2);
+        // Blue, green, red: the first pixel is red.
+        assert_eq!(&image[54..57], &[0, 0, 255]);
+    }
 }

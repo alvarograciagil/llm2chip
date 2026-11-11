@@ -108,6 +108,10 @@ export function SimulatorView() {
   const image = useSimulator((s) => s.image);
   const current = useSimulator((s) => s.models.find((m) => m.name === s.loaded));
   const readsImages = current?.images?.reads ?? false;
+  const makesImages = current?.images?.makes ?? false;
+  const draw = useSimulator((s) => s.draw && makesImages);
+  const drawing = useSimulator((s) => s.drawing);
+  const picture = useSimulator((s) => s.picture);
   const imageReport = useSimulator((s) => s.imageReport);
   const set = useSimulator((s) => s.set);
   const generate = useSimulator((s) => s.generate);
@@ -133,7 +137,17 @@ export function SimulatorView() {
     <section className="stage sim-stage">
       <div className="sim-column">
         <div className="transcript" aria-live="polite">
-          {output ? <p>{output}</p> : <p className="placeholder">{loaded ? "La respuesta del modelo aparecerá aquí." : "Carga un modelo en el panel de la derecha para empezar."}</p>}
+          {picture && draw ? (
+            <figure className="picture">
+              <img src={picture.data} width={picture.side} height={picture.side} alt={`Imagen generada: ${prompt}`} />
+              <figcaption>{picture.side} × {picture.side} px, en {formatNumber(picture.seconds)} s</figcaption>
+            </figure>
+          ) : output ? <p>{output}</p> : <p className="placeholder">{loaded ? (draw ? "La imagen aparecerá aquí." : "La respuesta del modelo aparecerá aquí.") : "Carga un modelo en el panel de la derecha para empezar."}</p>}
+          {running && drawing && (
+            <p className="placeholder">
+              {drawing.decoding ? "El decodificador convierte los tokens en píxeles…" : `El modelo escribe la imagen: ${drawing.done} de ${drawing.total} tokens visuales (${formatNumber(drawing.seconds)} s)`}
+            </p>
+          )}
           {running && phase === "Leyendo el prompt" && <p className="placeholder">Leyendo el prompt: {prefilled} de {promptTokens} tokens</p>}
         </div>
         {error && (
@@ -150,6 +164,9 @@ export function SimulatorView() {
               <button className="link inline" onClick={() => set({ image: null, imageReport: null })}>Quitar</button>
             </figcaption>
           </figure>
+        )}
+        {makesImages && (
+          <Segmented label="Qué hace el modelo" value={draw ? "draw" : "answer"} options={[["answer", "Responder"], ["draw", "Dibujar"]]} onChange={(mode) => set({ draw: mode === "draw" })} />
         )}
         <div className="composer">
           <label className={readsImages ? "pill attach" : "pill attach disabled"} title={readsImages ? "Adjuntar una imagen: el codificador del modelo la convierte en tokens que se leen antes de la pregunta" : current?.images?.note ?? "Este modelo no lee imágenes"}>

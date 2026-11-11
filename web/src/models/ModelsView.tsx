@@ -34,7 +34,9 @@ function LocalList() {
   const makeImage = (m: ServerModel) => {
     const { params, report } = useDesign.getState();
     const dies = Math.max(1, Math.round(report?.dies ?? 1));
-    void startImage(m.path, Array.from({ length: dies }, (_, i) => i + 1), Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits), Number(params.vector_lanes_per_die), Number(params.vector_units_per_die));
+    // The gates share by tensor as rows of every matrix; the mixed split is not generated yet.
+    const sharing = params.chip_split === "tensor" ? "rows" : "layers";
+    void startImage(m.path, Array.from({ length: dies }, (_, i) => i + 1), Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits), Number(params.vector_lanes_per_die), Number(params.vector_units_per_die), sharing);
   };
   const measureSpeed = useModels((s) => s.measureSpeed);
   const measuring = useModels((s) => s.measuring);

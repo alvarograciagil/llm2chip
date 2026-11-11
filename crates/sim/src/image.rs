@@ -1,7 +1,7 @@
 //! The model part of the chip image. The weights stay in the checkpoint; the manifest
 //! records how each tensor is loaded and its checksum, as the real image would.
 
-use crate::chip::image_segments;
+use crate::chip::{image_segments, Sharing};
 use crate::lower::Layout;
 use crate::tokenizer::TokenizerTables;
 use crate::weights::Weights;
@@ -125,6 +125,9 @@ pub struct ImageRequest {
     pub cluster_bits: u32,
     pub add_special: bool,
     pub stop: Vec<u32>,
+    /// How the chips share the model when there are several.
+    #[serde(default)]
+    pub sharing: Sharing,
 }
 
 /// One tensor in the file, written cell by cell: rows `c`, `c + cells`, … for cell `c`.
@@ -151,6 +154,8 @@ pub struct ImageManifest {
     pub boot_words: u64,
     pub boot_crc: u32,
     pub tensors: Vec<ImageTensor>,
+    #[serde(default)]
+    pub sharing: Sharing,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -199,8 +204,13 @@ fn boot_plans(program: &Program, weights: &Weights, die: DieConfig, request: &Im
         let parts = (0..*chips)
             .map(|chip| {
                 let mut layout = Layout::for_image(program, weights, die, tokens)?;
-                layout.keep_weights_of(program, &plan, chip);
-                let code = layout.die_microprogram(program, &plan, chip)?;
+                let code = if request.sharing == Sharing::Rows && *chips > 1 {
+                    layout.share_rows(program, crate::lower::Shard { index: chip as u32, chips: *chips as u32 });
+                    layout.microprogram(program)?
+                } else {
+                    layout.keep_weights_of(program, &plan, chip);
+                    layout.die_microprogram(program, &plan, chip)?
+                };
                 Ok::<_, String>((layout, code))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -273,7 +283,7 @@ pub fn write_chip_image(dir: &Path, firmware: &FirmwareImage, request: &ImageReq
     total.store(payload + boot_bytes.len() as u64, Relaxed);
 
     // Offsets depend on the manifest's own length, so it reserves its final size first.
-    let mut manifest = ImageManifest { version: VERSION, chips: request.chips.clone(), cells, boot_offset: 0, boot_words: boot.len() as u64, boot_crc: crc32fast::hash(&boot_bytes), tensors: Vec::new() };
+    let mut manifest = ImageManifest { version: VERSION, chips: request.chips.clone(), cells, boot_offset: 0, boot_words: boot.len() as u64, boot_crc: crc32fast::hash(&boot_bytes), tensors: Vec::new(), sharing: request.sharing };
     manifest.tensors = entries.clone();
     manifest.tensors.iter_mut().for_each(|t| {
         t.offset = u64::MAX;
@@ -407,6 +417,34 @@ impl ChipImage {
         let before: u64 = (0..cell).map(|c| blocks * rows_of_cell(block, spread, c)).sum();
         self.file.seek(SeekFrom::Start(entry.offset + before * row_bytes)).map_err(io)?;
         let mut bytes = vec![0u8; (blocks * rows_of_cell(block, spread, cell) * row_bytes) as usize];
+        self.file.read_exact(&mut bytes).map_err(io)?;
+        Ok(bytes)
+    }
+
+    /// What one cell of chip `index` of `chips` stores of a tensor when the chips share it
+    /// by rows: each takes an equal slice and spreads it over its cells as one chip spreads
+    /// the whole, so a cell's rows lie together among those the image keeps for one cell.
+    pub fn cell_weights_shared(&mut self, name: &str, cell: u64, index: u64, chips: u64) -> Result<Vec<u8>, String> {
+        let entry = self.manifest.tensors.iter().find(|t| t.name == name).ok_or_else(|| format!("{name} no está en la imagen"))?.clone();
+        if entry.block > 0 && entry.block != entry.rows {
+            return Err(format!("{name} se usa por bloques y no se reparte por filas"));
+        }
+        let rows = entry.rows.max(1);
+        let slice = rows / chips;
+        let (whole, part) = (self.manifest.cells.min(rows), self.manifest.cells.min(slice));
+        if cell >= part {
+            return Ok(Vec::new());
+        }
+        let count = rows_of_cell(slice, part, cell);
+        let first = index * slice + cell;
+        if count > 1 && whole != part {
+            return Err(format!("{name}: cada chip tiene menos filas que celdas y la imagen no las agrupa así"));
+        }
+        let (bucket, at) = (first % whole, first / whole);
+        let row_bytes = entry.bytes / rows;
+        let before: u64 = (0..bucket).map(|c| rows_of_cell(rows, whole, c)).sum::<u64>() + at;
+        self.file.seek(SeekFrom::Start(entry.offset + before * row_bytes)).map_err(io)?;
+        let mut bytes = vec![0u8; (count * row_bytes) as usize];
         self.file.read_exact(&mut bytes).map_err(io)?;
         Ok(bytes)
     }

@@ -195,12 +195,12 @@ fn gelu_tanh(v: f32) -> f32 {
 }
 
 fn gelu(v: f32) -> f32 {
-    0.5 * v * (1.0 + libm_erf(v / std::f32::consts::SQRT_2))
+    0.5 * v * (1.0 + erf(v / std::f32::consts::SQRT_2))
 }
 
 /// The error function, to float precision (Abramowitz and Stegun 7.1.26 is not enough
 /// near zero, so this sums its series there).
-fn libm_erf(x: f32) -> f32 {
+pub(crate) fn erf(x: f32) -> f32 {
     let x = x as f64;
     let result = if x.abs() < 2.0 {
         let (mut term, mut sum, mut n) = (x, x, 0.0);
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn the_error_function_matches_known_values() {
         for (x, expected) in [(0.0f32, 0.0f32), (0.5, 0.520_499_9), (1.0, 0.842_700_8), (2.5, 0.999_593), (-1.0, -0.842_700_8)] {
-            assert!((libm_erf(x) - expected).abs() < 1e-6, "{x}: {}", libm_erf(x));
+            assert!((erf(x) - expected).abs() < 1e-6, "{x}: {}", erf(x));
         }
     }
 

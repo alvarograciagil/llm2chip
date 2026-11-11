@@ -43,6 +43,20 @@ pub enum KvBackend {
     ExternalDdr,
 }
 
+/// How the chips share the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChipSplit {
+    /// Each chip runs a run of whole layers and passes the hidden vector on: one chip
+    /// works at a time on a single user's token.
+    Layers,
+    /// Every chip holds a share of every layer and they all work on each layer at once,
+    /// adding their partial results over the links twice a layer.
+    Tensor,
+    /// Groups of `tensor_group` chips share each layer, and the groups run in a chain.
+    Mixed,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkKind {
@@ -146,6 +160,9 @@ pub struct ChipParams {
     pub ddr_capacity_gb: f64,
 
     pub link: LinkKind,
+    pub chip_split: ChipSplit,
+    /// Chips that share each layer when the split is mixed.
+    pub tensor_group: u32,
     pub load_interface: LoadInterface,
 
     pub optimizations: BTreeSet<String>,
@@ -207,6 +224,8 @@ impl Default for ChipParams {
             ddr_gbps: 77.0,
             ddr_capacity_gb: 64.0,
             link: LinkKind::Auto,
+            chip_split: ChipSplit::Layers,
+            tensor_group: 2,
             load_interface: LoadInterface::Nvme,
             optimizations: BTreeSet::new(),
         }
@@ -214,6 +233,15 @@ impl Default for ChipParams {
 }
 
 impl ChipParams {
+    /// Chips that share each layer, out of `dies`.
+    pub fn tensor_chips(&self, dies: u32) -> u32 {
+        match self.chip_split {
+            ChipSplit::Layers => 1,
+            ChipSplit::Tensor => dies.max(1),
+            ChipSplit::Mixed => self.tensor_group.clamp(1, dies.max(1)),
+        }
+    }
+
     pub fn has(&self, optimization: &str) -> bool {
         self.optimizations.contains(optimization)
     }

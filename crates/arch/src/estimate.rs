@@ -634,7 +634,7 @@ fn driven_by(id: &str) -> &'static [&'static str] {
         "kv_sram" => &["context_tokens", "kv_bits", "kv_backend"],
         "delta_state" => &["delta_state_bits"],
         "mtp_rollback" => &["mtp_enabled", "mtp_depth", "delta_state_bits"],
-        "links" => &["link", "link_words", "dies"],
+        "links" => &["link", "link_words", "dies", "chip_split", "tensor_group"],
         "hbm_phy" => &["hbm_stacks"],
         _ => &[],
     }
@@ -1030,11 +1030,33 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             field: Some("link"),
         });
     }
-    // Each die passes on the hidden vector, `link_words` activations a cycle, after the
+    // Chips that share each layer, and stages in a chain: by layers each chip is a stage
+    // of its own, by tensor all of them are one group.
+    let group = p.tensor_chips(dies);
+    let stages = dies.div_ceil(group).max(1);
+    let g = group as f64;
+    // A group splits every matrix and every head among its chips: each does its share
+    // of the products and of the attention and delta rule.
+    let (weight_cycles, vector_cycles) = (weight_cycles / g, vector_cycles / g);
+    // Its chips add their partial results twice a layer, round a ring: 2·(g − 1) steps,
+    // each moving a g-th of the hidden vector and paying a hop.
+    let hop_cycles = UCIE_HOP_NS * freq;
+    let share = model.hidden_size as f64 / g / p.link_words.max(1) as f64;
+    let tensor_cycles = if group > 1 { model.num_layers as f64 * 2.0 * 2.0 * (g - 1.0) * (hop_cycles + share) } else { 0.0 };
+    // Each stage passes on the hidden vector, `link_words` activations a cycle, after the
     // hops' own delay.
     let transfer = model.hidden_size as f64 / p.link_words.max(1) as f64;
-    let link_cycles = if dies > 1 { plan.delay_ns() * freq + (dies - 1) as f64 * transfer } else { 0.0 };
+    let chain_share = if dies > 1 { (stages - 1) as f64 / (dies - 1) as f64 } else { 0.0 };
+    let link_cycles = if stages > 1 { plan.delay_ns() * freq * chain_share + (stages - 1) as f64 * transfer } else { 0.0 } + tensor_cycles;
     let total_cycles = weight_cycles + vector_cycles + latency_cycles + link_cycles;
+    if group > 1 && plan.packages > 1 && group > dies.div_ceil(plan.packages) {
+        violations.push(Violation {
+            severity: Severity::Aviso,
+            message: format!("Los grupos de {group} chips que comparten cada capa no caben en un encapsulado: sus sumas cruzarían la placa, mucho más lenta."),
+            fix: "Usa grupos más pequeños (reparto mixto) o dies menores para que cada grupo quepa en un encapsulado.".into(),
+            field: Some("tensor_group"),
+        });
+    }
     let compute_time = total_cycles / (freq * 1e9);
 
     let read_bytes = totals.weights * store.bits_per_read_weight / 8.0;
@@ -1061,7 +1083,8 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     let sampling = sampling_cycles(p, model);
     let token_time = (compute_time + sampling / (freq * 1e9)).max(memory_time);
     let stream_rate = 1.0 / token_time;
-    let prefill_rate = (d / compute_time).min(1.0 / memory_time.max(1e-12));
+    // Reading a prompt, every stage of the chain works on a token of its own at once.
+    let prefill_rate = (stages as f64 / compute_time).min(1.0 / memory_time.max(1e-12));
 
     // Speculative rounds fill the idle dies: drafts are checked in one pipelined pass.
     let (effective_rate, tokens_per_round) = if depth > 0 {
@@ -1242,12 +1265,31 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::params::ChipSplit;
     use std::time::Instant;
 
     const QWEN: &str = include_str!("../../../models/qwen3.8-27b.json");
 
     fn qwen() -> ModelGraph {
         ModelGraph::from_config_json("qwen", QWEN).unwrap()
+    }
+
+    #[test]
+    fn sharing_each_layer_among_the_chips_makes_one_user_faster() {
+        let model = qwen();
+        let speed = |chip_split, tensor_group| {
+            let p = ChipParams { dies: 8, link: LinkKind::Ucie, link_words: 128, chip_split, tensor_group, ..Default::default() };
+            let report = estimate(&model, &p).unwrap();
+            (report.metric("tok_s_base").unwrap(), report.metric("prefill_tok_s").unwrap())
+        };
+        let (layers, layers_prompt) = speed(ChipSplit::Layers, 1);
+        let (mixed, _) = speed(ChipSplit::Mixed, 4);
+        let (tensor, tensor_prompt) = speed(ChipSplit::Tensor, 1);
+        assert!(layers < mixed && mixed < tensor, "{layers} {mixed} {tensor}");
+        assert!(tensor > 3.0 * layers, "{layers} {tensor}");
+        // A chain reads a prompt with every stage busy; a single group has one stage.
+        assert!(layers_prompt / layers > tensor_prompt / tensor);
+        assert_eq!(speed(ChipSplit::Mixed, 1).0, layers);
     }
 
     #[test]
