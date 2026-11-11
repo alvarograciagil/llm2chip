@@ -2,6 +2,7 @@ import { fpgaBoards, type BlockArea, type Confidence, type DiePlan, type Metric,
 import { formatNumber } from "../format";
 import { Icon } from "./icons";
 import { useT } from "../i18n";
+import { LayoutPanel } from "../layout/LayoutPanel";
 import { fieldLabel } from "../params";
 import { useDesign, type Selection } from "../store";
 
@@ -127,6 +128,8 @@ function Summary({ report }: { report: Report }) {
           ))}
         </div>
       )}
+
+      <LayoutPanel report={report} />
 
       {!onBoard && <h3>{t("Reparto del área por die")}</h3>}
       <div className="inset" hidden={onBoard}>

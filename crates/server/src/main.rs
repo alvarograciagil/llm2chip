@@ -2,6 +2,7 @@
 
 mod catalog;
 mod hub;
+mod layout;
 mod prompt;
 
 use axum::{
@@ -66,6 +67,7 @@ struct App {
     catalog: Arc<Catalog>,
     hub: Arc<Hub>,
     image: Arc<Mutex<Option<Arc<ImageJob>>>>,
+    layout: Arc<Mutex<Option<Arc<layout::LayoutJob>>>>,
 }
 
 fn home() -> PathBuf {
@@ -344,6 +346,34 @@ async fn image_status(State(app): State<App>) -> Response {
         None => serde_json::json!({ "state": "writing", "name": name, "done": done, "total": total }),
         Some(Ok(report)) => serde_json::json!({ "state": "done", "name": name, "report": report }),
         Some(Err(message)) => serde_json::json!({ "state": "error", "name": name, "error": message }),
+    })
+    .into_response()
+}
+
+/// Starts a real layout of the design's compute cell with OpenROAD, one at a time.
+async fn layout_start(State(app): State<App>, Json(request): Json<layout::LayoutRequest>) -> Response {
+    let running = app.layout.lock().unwrap().as_ref().is_some_and(|job| job.outcome.lock().unwrap().is_none());
+    if running {
+        return (StatusCode::CONFLICT, "ya hay un layout en marcha").into_response();
+    }
+    let job = Arc::new(layout::LayoutJob::default());
+    *app.layout.lock().unwrap() = Some(job.clone());
+    tokio::task::spawn_blocking(move || {
+        let outcome = layout::run(&request, &job, &home());
+        *job.outcome.lock().unwrap() = Some(outcome);
+    });
+    StatusCode::ACCEPTED.into_response()
+}
+
+async fn layout_status(State(app): State<App>) -> Response {
+    let job = app.layout.lock().unwrap().clone();
+    let Some(job) = job else { return Json(serde_json::json!({ "state": "idle" })).into_response() };
+    let outcome = job.outcome.lock().unwrap().clone();
+    let phase = job.phase.lock().unwrap().clone();
+    Json(match outcome {
+        None => serde_json::json!({ "state": "running", "phase": phase }),
+        Some(Ok(result)) => serde_json::json!({ "state": "done", "result": result }),
+        Some(Err(message)) => serde_json::json!({ "state": "error", "error": message }),
     })
     .into_response()
 }
@@ -1049,7 +1079,7 @@ fn session_token() -> String {
 
 #[tokio::main]
 async fn main() {
-    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)) };
+    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)), layout: Arc::new(Mutex::new(None)) };
     let routes = Router::new()
         .route("/api/models", get(models))
         .route("/api/status", get(status))
@@ -1063,6 +1093,7 @@ async fn main() {
         .route("/api/speed", post(speed))
         .route("/api/image", get(image_status).post(image_start))
         .route("/api/image/cancel", post(image_cancel))
+        .route("/api/layout", get(layout_status).post(layout_start))
         .route("/api/hf/token", put(hub_set_token).get(hub_token).delete(hub_clear_token))
         .route("/api/load", post(load))
         .route("/api/generate", get(generate_socket))

@@ -39,8 +39,15 @@ Con esa medida, la tecnología `sky130` del estimador toma:
 
 Las memorias siguen siendo una estimación: las macros abiertas de SRAM para SkyWater 130 (OpenRAM) ocupan unos 23 µm² por bit en 8 Kbit, y el modelo usa esa cifra para los bloques pequeños.
 
+## Desde la aplicación
+
+Con el destino «Chip propio» en SkyWater 130, GF180 o ASAP7, el inspector tiene el apartado **Layout real de la celda**. «Hacer el layout» toma la celda que el generador eligió para el diseño (codificación, bits, multiplicador y etapas), la pasa por OpenROAD en segundo plano y muestra la imagen del layout con su área, frecuencia máxima, potencia, número de celdas y violaciones de reglas, al lado de lo que estimaba el modelo. El trabajo queda en `~/.llm2chip/asic/`.
+
+«Usar las cifras medidas» guarda en el diseño el área y la frecuencia medidas (`measured_cell`, `measured_cell_um2`, `measured_cell_fmax_ghz`). El estimador las usa en lugar de las suyas solo para esa misma celda en ese mismo proceso: si cambian el circuito o el proceso, vuelve a la estimación. Las memorias, la red de activaciones y el resto del die siguen estimándose.
+
+Primera medida desde la aplicación (stories260K, Booth con 3 etapas de multiplicador y 2 de suma, SkyWater 130): 10 471 µm² y 264 MHz, frente a 14 955 µm² y 200 MHz estimados, con 3,98 mW y 0 violaciones. Por eso el tope de frecuencia de `sky130` sube de 0,2 a 0,35 GHz.
+
 ## Lo siguiente
 
 - El die completo, con sus memorias como macros de SRAM en vez de biestables.
-- Lanzarlo desde la aplicación para el destino «Chip propio», con el layout y sus cifras a la vista.
 - Calibrar el resto de tecnologías del mismo modo.

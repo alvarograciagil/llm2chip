@@ -301,10 +301,24 @@ struct Multiplier {
     cycle_factor: f64,
 }
 
+/// The name of a compute cell, as a measured layout refers to it: coding, weight and
+/// activation bits, multiplier and stages.
+pub fn cell_key(config: &CellConfig) -> String {
+    let name = |v: serde_json::Value| v.as_str().unwrap_or("").to_string();
+    format!("{}-{}-{}-{}-{}-{}", name(serde_json::json!(config.coding)), config.weight_bits, config.activation_bits, name(serde_json::json!(config.multiplier)), config.mac_stages, config.adder_stages)
+}
+
+/// The measured layout of this very cell on this process, if the design carries one: the
+/// key is `node:cell_key`, so a change of circuit or process drops back to the estimate.
+fn measured(p: &ChipParams, config: &CellConfig) -> Option<(f64, f64)> {
+    (p.measured_cell_um2 > 0.0 && p.measured_cell == format!("{}:{}", p.node, cell_key(config))).then_some((p.measured_cell_um2, p.measured_cell_fmax_ghz))
+}
+
 fn weight_multiplier(tech: &TechNode, p: &ChipParams, widest: u32, cell_bits: f64) -> Multiplier {
     let switching = switching_per_mac(CellConfig { weight_bits: widest, ..p.cell_config(5) }, zero_fraction(widest));
     let addr_bits = (cell_bits / widest as f64).max(2.0).log2().ceil() as u32;
-    let cell_logic = netlist_cell_um2(tech, p, widest, addr_bits);
+    // A cell laid out with OpenROAD counts what it measured instead.
+    let cell_logic = measured(p, &CellConfig { weight_bits: widest, ..p.cell_config(addr_bits) }).map_or_else(|| netlist_cell_um2(tech, p, widest, addr_bits), |(area, _)| area);
     let accumulator_bits = p.effective_accumulator() as f64;
     let accumulator = accumulator_bits * (tech.fa_um2 + tech.ff_um2);
     let mut area = (cell_logic - accumulator).max(0.0);
@@ -758,7 +772,7 @@ const BROADCAST_MM: f64 = 0.5;
 /// Every way of building this cell that the generator can offer, each one measured.
 fn candidates_for(tech: &TechNode, p: &ChipParams, weight_bits: u32, cell_bits: f64) -> Rc<Vec<Candidate>> {
     let addr_bits = (cell_bits / weight_bits as f64).max(2.0).log2().ceil() as u32;
-    let key = format!("{}|{weight_bits}|{}|{}|{:?}|{}|{}|{:?}|{:?}|{addr_bits}|{}", p.node, p.activation_bits, p.accumulator_bits, p.weight_coding, p.weight_exponent_bits, p.noc_stages, p.weight_backend, p.optimizations, p.scale_bits);
+    let key = format!("{}|{weight_bits}|{}|{}|{:?}|{}|{}|{:?}|{:?}|{addr_bits}|{}|{}|{}|{}", p.node, p.activation_bits, p.accumulator_bits, p.weight_coding, p.weight_exponent_bits, p.noc_stages, p.weight_backend, p.optimizations, p.scale_bits, p.measured_cell, p.measured_cell_um2, p.measured_cell_fmax_ghz);
     if let Some(found) = CANDIDATES.with(|c| c.borrow().get(&key).cloned()) {
         return found;
     }
@@ -781,9 +795,9 @@ fn candidates_for(tech: &TechNode, p: &ChipParams, weight_bits: u32, cell_bits: 
                     if is_multiples && cell.significand_bits() > MAX_MULTIPLES_BITS {
                         continue;
                     }
-                    let measured = weight_multiplier(tech, &q, weight_bits, cell_bits);
+                    let mult = weight_multiplier(tech, &q, weight_bits, cell_bits);
                     let Ok(sim) = Simulator::new(&cell_design(cell)) else { continue };
-                    let logic_ns = sim.critical_path(GATE_DELAYS) * tech.fa_delay_ns * measured.delay_factor;
+                    let logic_ns = sim.critical_path(GATE_DELAYS) * tech.fa_delay_ns * mult.delay_factor;
                     // A wider broadcast costs registers on the way to the cell and energy on its wires.
                     let bits = cell.broadcast_bits() as f64;
                     list.push(Candidate {
@@ -791,9 +805,12 @@ fn candidates_for(tech: &TechNode, p: &ChipParams, weight_bits: u32, cell_bits: 
                         mac_stages,
                         adder_stages,
                         skip_zeros,
-                        area_um2: measured.area_um2 + bits * tech.ff_um2 * p.noc_stages.max(1) as f64 * 4.0,
-                        energy_pj: measured.energy_pj + bits * tech.e_wire_pj_bit_mm * BROADCAST_MM,
-                        fmax_ghz: tech.fmax_ghz.min(1.0 / (logic_ns + tech.ff_overhead_ns)),
+                        area_um2: mult.area_um2 + bits * tech.ff_um2 * p.noc_stages.max(1) as f64 * 4.0,
+                        energy_pj: mult.energy_pj + bits * tech.e_wire_pj_bit_mm * BROADCAST_MM,
+                        fmax_ghz: match measured(&q, &cell) {
+                            Some((_, ghz)) if ghz > 0.0 => ghz,
+                            _ => tech.fmax_ghz.min(1.0 / (logic_ns + tech.ff_overhead_ns)),
+                        },
                     });
                 }
             }
@@ -1013,7 +1030,10 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     // Static timing on the generated gates, already cut by its pipeline stages.
     let path = Simulator::new(&cell_design(cell)).map_err(|e| e.0)?.critical_path(GATE_DELAYS);
     let logic_ns = path * tech.fa_delay_ns * mult.delay_factor;
-    let fmax = tech.fmax_ghz.min(1.0 / (logic_ns + tech.ff_overhead_ns));
+    let fmax = match measured(p, &cell) {
+        Some((_, ghz)) if ghz > 0.0 => ghz,
+        _ => tech.fmax_ghz.min(1.0 / (logic_ns + tech.ff_overhead_ns)),
+    };
     let freq = p.freq_ghz.min(fmax);
     if p.freq_ghz > fmax {
         violations.push(Violation {
@@ -1510,6 +1530,24 @@ mod tests {
         assert_eq!(report.dies, 1);
         assert!(report.violations.iter().all(|v| v.severity != Severity::Error));
         assert!(rate > 2.0 && rate < 7.0, "{rate}");
+    }
+
+    #[test]
+    fn a_measured_cell_replaces_the_estimate_only_for_that_cell_and_process() {
+        let stories = ModelGraph::from_config_json("s", include_str!("../../../models/stories260k.json")).unwrap();
+        let p = ChipParams { node: "sky130".into(), max_params_g: 0.00026, use_model_mix: false, group_size: 0, weight_bits: 8, context_tokens: 256, ..Default::default() };
+        let estimated = estimate(&stories, &p).unwrap().decisions[0].clone();
+        let chosen = with_choice(&p, estimated.multiplier, estimated.mac_stages, estimated.adder_stages, estimated.skip_zeros);
+        let key = format!("sky130:{}", cell_key(&CellConfig { weight_bits: estimated.weight_bits, ..chosen.cell_config(1) }));
+        let measured = ChipParams { measured_cell: key, measured_cell_um2: 100.0, measured_cell_fmax_ghz: 0.33, ..p.clone() };
+        // The measured cell is smaller than any estimate, so the generator keeps it.
+        let laid_out = estimate(&stories, &measured).unwrap().decisions[0].clone();
+        assert_eq!((laid_out.multiplier, laid_out.mac_stages, laid_out.adder_stages), (estimated.multiplier, estimated.mac_stages, estimated.adder_stages));
+        assert!(laid_out.area_um2 < estimated.area_um2, "{laid_out:?} {estimated:?}");
+        assert!((laid_out.fmax_ghz - 0.33).abs() < 1e-9, "{laid_out:?}");
+        // On another process it is not what was measured.
+        let elsewhere = estimate(&stories, &ChipParams { node: "gf180".into(), ..measured }).unwrap().decisions[0].clone();
+        assert!((elsewhere.fmax_ghz - 0.33).abs() > 1e-9, "{elsewhere:?}");
     }
 
     #[test]

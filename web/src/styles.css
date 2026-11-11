@@ -2991,3 +2991,24 @@ label:hover > .hint-icon {
   color: var(--label);
   text-align: right;
 }
+
+.layout-path {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  font-size: 11px;
+}
+
+.note-ok {
+  margin: 10px 0 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--green) 14%, transparent);
+}
+
+.layout-image {
+  display: block;
+  max-width: 100%;
+  width: 100%;
+  border-radius: 8px;
+  background: #000;
+}

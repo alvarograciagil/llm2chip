@@ -71,7 +71,21 @@ Fuentes: [Kria KV260](https://www.amd.com/en/products/system-on-modules/kria/k26
 
 ## Velocidad esperada
 
-El die gasta 11 103 ciclos por token generado con el modelo de juguete (medido en su microprograma, en la última posición del contexto); con el firmware, unos 12 000-13 000. Sin colocar y rutar aún, el reloj en una GW5A rondaría 25-50 MHz: unos 2 000-4 000 tok/s, sin valor práctico más allá de validar que el chip funciona.
+El die gasta 11 103 ciclos por token generado con el modelo de juguete (medido en su microprograma, en la última posición del contexto); con el firmware, unos 12 000-13 000.
+
+### Reloj medido colocando y rutando
+
+Con OSS CAD Suite (Yosys y nextpnr) el chip de juguete se coloca y se ruta en una Lattice ECP5-85F (encapsulado CABGA756, que tiene pines para todos sus puertos):
+
+| Versión del Verilog para FPGA | Frecuencia máxima | LUT4 | Bloques de memoria | Multiplicadores |
+|---|---|---|---|---|
+| Productos en DSP, el resto en puertas | 15,4 MHz (estimada tras colocar) | 45 391 | 190 DP16KD | 89 |
+| Además, los sumadores como sumas (cadenas de acarreo) y el microcódigo con diccionario | 18,2 MHz | 44 748 | 142 DP16KD | 89 |
+| Además, el multiplicador del muestreo en un bloque DSP | **20,4 MHz** | 43 084 | 142 DP16KD | 91 |
+
+El camino crítico era la unidad de muestreo: un multiplicador de desplazamiento y suma de 16 filas, en un ciclo, que alimentaba la dirección de la tabla exponencial. Ahora está en las celdas del die: lectura del sesgo, producto por la escala y acumulador en un mismo ciclo, el siguiente objetivo. Es la familia más lenta de las del catálogo; en una Xilinx serie 7 o UltraScale+ el mismo circuito debería ir bastante más rápido.
+
+Con 20 MHz, el modelo de juguete daría unos 1 600-1 800 tok/s, sin valor práctico más allá de validar que el chip funciona.
 
 ### Con un modelo que escribe cuentos: stories260K
 

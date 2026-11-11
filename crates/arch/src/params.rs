@@ -90,6 +90,11 @@ pub struct ChipParams {
     pub node: String,
     /// With an FPGA node, the board the design is built for: see `fpga::boards`.
     pub fpga_board: String,
+    /// A compute cell laid out with OpenROAD: which one (`cell_key`), and its measured area
+    /// and clock, used instead of the estimates for that same cell.
+    pub measured_cell: String,
+    pub measured_cell_um2: f64,
+    pub measured_cell_fmax_ghz: f64,
 
     pub max_params_g: f64,
     pub context_tokens: u64,
@@ -179,6 +184,9 @@ impl Default for ChipParams {
         Self {
             node: "n6".into(),
             fpga_board: String::new(),
+            measured_cell: String::new(),
+            measured_cell_um2: 0.0,
+            measured_cell_fmax_ghz: 0.0,
             max_params_g: 35.0,
             context_tokens: 8192,
             mtp_enabled: false,

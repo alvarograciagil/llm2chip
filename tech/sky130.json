@@ -8,7 +8,7 @@
   "ff_um2": 20.0192,
   "fa_delay_ns": 0.49,
   "ff_overhead_ns": 0.6,
-  "fmax_ghz": 0.2,
+  "fmax_ghz": 0.35,
   "e_fa_pj": 0.3,
   "e_sram_fj_bit": 1500.0,
   "e_wire_pj_bit_mm": 0.8,
