@@ -40,11 +40,12 @@ impl TechNode {
     }
 }
 
-const SOURCES: [&str; 6] = [
+const SOURCES: [&str; 7] = [
     include_str!("../../../tech/n6.json"),
     include_str!("../../../tech/n5.json"),
     include_str!("../../../tech/n3.json"),
     include_str!("../../../tech/asap7.json"),
+    include_str!("../../../tech/sky130.json"),
     include_str!("../../../tech/gf180.json"),
     include_str!("../../../tech/fpga_u250.json"),
 ];

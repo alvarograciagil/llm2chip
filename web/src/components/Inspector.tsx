@@ -133,7 +133,7 @@ function Summary({ report }: { report: Report }) {
         {blocks.map((b) => (
           <button className="area-row" key={b.id} onClick={() => setSelection(ARRAY_IDS.includes(b.id) ? { kind: "array", die: 0 } : { kind: "block", die: 0, id: b.id })}>
             <i className={`swatch cat-${b.category}`} aria-hidden="true" />
-            <span className="area-name">{b.label}</span>
+            <span className="area-name">{t(b.label)}</span>
             <span className="area-value">{formatNumber(b.per_die_mm2)} mm²</span>
             <span className="area-track" aria-hidden="true">
               <span style={{ width: `${Math.max(0.6, (b.per_die_mm2 / largest) * 100)}%` }} />
@@ -209,9 +209,10 @@ function layersText(die: DiePlan) {
 }
 
 function BlockDetail({ block, report }: { block: BlockArea; report: Report }) {
+  const t = useT();
   const reveal = useDesign((s) => s.reveal);
   return (
-    <Detail title={block.label} subtitle={CATEGORY_LABEL[block.category]}>
+    <Detail title={t(block.label)} subtitle={t(CATEGORY_LABEL[block.category])}>
       <p className="prose">{block.what}</p>
       <Facts
         facts={[
@@ -242,6 +243,7 @@ function BlockDetail({ block, report }: { block: BlockArea; report: Report }) {
 }
 
 function SelectionDetail({ selection, report }: { selection: NonNullable<Selection>; report: Report }) {
+  const t = useT();
   const setSelection = useDesign((s) => s.setSelection);
   const die = report.floorplan.dies[selection.die] ?? report.floorplan.dies[0];
   const arrayBlocks = report.blocks.filter((b) => ARRAY_IDS.includes(b.id));
@@ -273,7 +275,7 @@ function SelectionDetail({ selection, report }: { selection: NonNullable<Selecti
           {arrayBlocks.map((b) => (
             <button className="area-row plain-row" key={b.id} onClick={() => setSelection({ kind: "block", die: die.index, id: b.id })}>
               <i className={`swatch cat-${b.category}`} aria-hidden="true" />
-              <span className="area-name">{b.label}</span>
+              <span className="area-name">{t(b.label)}</span>
               <span className="area-value">{formatNumber(b.per_die_mm2)} mm²</span>
             </button>
           ))}

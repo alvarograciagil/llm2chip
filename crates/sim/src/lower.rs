@@ -14,8 +14,9 @@ use std::ops::Range;
 const STATE_EXPONENT: i64 = 6;
 /// Expert outputs are small; a coarser exponent would leave them only a few bits.
 const EXPERT_EXPONENT: i64 = 2;
-/// Ones kept when the layout is not for a chip with a known context.
-const ONES_LENGTH: usize = 512;
+/// Ones kept when the layout is not for a chip with a known context: attention adds up
+/// as many tokens as there are ones, so this is the longest text such a layout can read.
+const ONES_LENGTH: usize = 1 << 17;
 const TEMPORARIES: usize = 64;
 const PARTS: usize = 128;
 

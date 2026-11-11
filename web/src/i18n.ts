@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import { useDesign } from "./store";
 
 export type Language = "es" | "en";
@@ -205,6 +206,47 @@ const EN: Record<string, string> = {
   Chips: "Chips",
   "Sin límite": "No limit",
   "Número de chips": "Number of chips",
+  // Metrics the engine reports
+  "Ancho de banda de pesos necesario": "Weight bandwidth needed",
+  "Caché KV": "KV cache",
+  "Capacidad de pesos del chip": "Chip weight capacity",
+  "Ciclos por token": "Cycles per token",
+  Encapsulados: "Packages",
+  "Energía por token": "Energy per token",
+  "Estado de DeltaNet y convolución": "DeltaNet and convolution state",
+  "Frecuencia efectiva": "Effective frequency",
+  "Imagen de 512×512": "512×512 image",
+  "KV por token de contexto": "KV per context token",
+  "Lectura de prompt": "Prompt reading",
+  "Memoria de pesos por celda": "Weight memory per cell",
+  "Muestreo por token": "Sampling per token",
+  "Multiplicadores de pesos en total": "Weight multipliers in total",
+  "Parámetros del modelo cargado": "Parameters of the loaded model",
+  "Pesos del modelo en memoria": "Model weights in memory",
+  "Pesos leídos por token": "Weights read per token",
+  "Sin especulación": "Without speculation",
+  "Tiempo de carga de la imagen": "Image load time",
+  "Tráfico entre dies": "Traffic between dies",
+  "Área por die": "Area per die",
+  // Blocks of a die
+  "Celdas: memoria de pesos": "Cells: weight memory",
+  "Celdas: corrección ECC": "Cells: ECC",
+  "Celdas: multiplicadores": "Cells: multipliers",
+  "Tablas de pesos": "Weight tables",
+  "Escala y sesgo por grupo": "Scale and bias per group",
+  "Búferes de activación": "Activation buffers",
+  "Caché KV de atención": "Attention KV cache",
+  "Estado de DeltaNet": "DeltaNet state",
+  "MTP: copia de estado": "MTP: state copy",
+  "Unidad de muestreo": "Sampling unit",
+  "Tablas del tokenizador": "Tokenizer tables",
+  "Memoria de la CPU": "CPU memory",
+  "Secuenciador y microprograma": "Sequencer and microcode",
+  "CPU de control y carga": "Control and load CPU",
+  "Enlaces entre dies": "Die-to-die links",
+  "Controlador de DRAM": "DRAM controller",
+  "PHY de HBM4": "HBM4 PHY",
+  "Reloj, alimentación y test": "Clock, power and test",
   // Floorplan
   Función: "Function",
   Capa: "Layer",
@@ -228,7 +270,7 @@ export function translate(language: Language, text: string): string {
 /** A translator for the interface's current language, redrawn when it changes. */
 export function useT(): (text: string) => string {
   const language = useDesign((s) => s.language);
-  return (text: string) => translate(language, text);
+  return useCallback((text: string) => translate(language, text), [language]);
 }
 
 const LANGUAGE_KEY = "llm2chip.language";

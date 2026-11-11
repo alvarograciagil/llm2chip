@@ -1,6 +1,6 @@
 import { download } from "../download";
 import { floorplanDef, floorplanSvg } from "../floorplanExport";
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { Rect, Report } from "../engine";
 import { formatNumber } from "../format";
 import { useDesign, type Overlay, type Selection } from "../store";
@@ -97,7 +97,9 @@ function Breadcrumb({ selection, onSystem, onDie }: { selection: Selection; onSy
 
 export function FloorplanView() {
   const t = useT();
-  const report = useDesign((s) => s.report);
+  const designed = useDesign((s) => s.report);
+  // The canvas draws each block's name in the interface's language.
+  const report = useMemo(() => designed && { ...designed, blocks: designed.blocks.map((b) => ({ ...b, label: t(b.label) })) }, [designed, t]);
   const overlay = useDesign((s) => s.overlay);
   const setOverlay = useDesign((s) => s.setOverlay);
   const selection = useDesign((s) => s.selection);
