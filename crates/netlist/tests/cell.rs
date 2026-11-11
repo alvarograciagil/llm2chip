@@ -258,3 +258,19 @@ fn vhdl_export_computes_the_same_result() {
     run(&["-r", "testbench"]);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn an_fpga_gets_its_multipliers_as_products_it_can_map() {
+    use netlist::multiplier::MultiplierKind;
+    for (kind, name) in [(MultiplierKind::Array, "multiplier_8x16_s1"), (MultiplierKind::Wallace, "wallace_multiplier_8x16_s1"), (MultiplierKind::Booth, "booth_multiplier_8x16_s1")] {
+        let c = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 2, coding: WeightCoding::Fixed, exponent_bits: 0, multiplier: kind, fixed_weights: false, ecc: false, skip_zeros: false };
+        let design = cell_design(c);
+        let structural = to_verilog(&design);
+        let fpga = netlist::to_verilog_for_fpga(&design);
+        assert!(structural.contains(&format!("module {name} (")), "{kind:?}");
+        let body = fpga.split(&format!("module {name} (")).nth(1).unwrap().split("endmodule").next().unwrap();
+        assert!(body.contains("assign product = $signed(weight) * $signed(x);"), "{kind:?}: {body}");
+        // Everything else stays gate for gate.
+        assert_eq!(fpga.matches("module ").count(), structural.matches("module ").count());
+    }
+}

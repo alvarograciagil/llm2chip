@@ -390,6 +390,10 @@ Logits que compara por ciclo y candidatos que guarda (el mayor top-k). Elige el 
 
 Cada palabra viaja con número de secuencia y código corrector; el receptor tiene una cola y pide repeticiones, así que la placa puede retrasar palabras sin romper nada.
 
+### Enlace ancho
+
+Con varios chips, el enlace tiene un carril propio por cada carril vectorial, cada uno con su secuencia, su corrección de errores y su cola, como los carriles de UCIe: un bloque entero cruza en un ciclo. El vector oculto pasa de un chip al siguiente en decenas de ciclos en lugar de miles. Se genera solo si el microprograma envía bloques.
+
 ## Dimensionado
 
 La búsqueda prueba formas de die (celdas, carriles, unidades, número de chips), genera para cada una su microprograma real y cuenta sus ciclos en la última posición del contexto, así que los tok/s salen del circuito y están garantizados con el contexto lleno.

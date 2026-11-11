@@ -211,9 +211,10 @@ pub fn timing(codes: &[Microprogram], die: DieConfig, context: u32, prompt: u32,
     Timing { token_cycles, prompt_cycles: total.round() as u64 + logits(prompt.max(1) - 1) }
 }
 
-/// The die a candidate stands for.
+/// The die a candidate stands for. Its link to the next chip carries a block of lanes a
+/// cycle, so a boundary between chips costs a few dozen cycles rather than thousands.
 pub fn die_of(base: DieConfig, context: u32, (cluster_bits, lane_bits, cell_bits): (u32, u32, u32)) -> DieConfig {
-    DieConfig { cells: 1 << cell_bits, features: base.features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits).with_key_shift(context.next_power_of_two().trailing_zeros()), ..base }
+    DieConfig { cells: 1 << cell_bits, features: base.features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits).with_key_shift(context.next_power_of_two().trailing_zeros()).with_wide_link(true), ..base }
 }
 
 /// One set of chips, measured: its own microprograms, its clock and its silicon.

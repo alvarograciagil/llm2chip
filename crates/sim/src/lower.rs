@@ -14,7 +14,7 @@ use std::ops::Range;
 const STATE_EXPONENT: i64 = 6;
 /// Expert outputs are small; a coarser exponent would leave them only a few bits.
 const EXPERT_EXPONENT: i64 = 2;
-/// Added to every squared norm, as the reference model does.
+/// Ones kept when the layout is not for a chip with a known context.
 const ONES_LENGTH: usize = 512;
 const TEMPORARIES: usize = 64;
 const PARTS: usize = 128;
@@ -555,8 +555,11 @@ impl Layout {
             .map(|heads| (0..heads).map(|_| state_register(0, &mut setup)).collect())
             .collect();
 
+        // Attention adds its weights over every token with the ones, and a mixture over
+        // every expert: as many ones as either.
+        let experts = all_ops(program).filter_map(|i| if let Op::Moe { experts, .. } | Op::SigmoidMoe { experts, .. } = i.op { Some(experts) } else { None }).max().unwrap_or(0);
         let ones = alloc(1);
-        setup.load_vector(ones, &[1.0; ONES_LENGTH]);
+        setup.load_vector(ones, &vec![1.0; chip_tokens.unwrap_or(ONES_LENGTH).max(experts).max(1)]);
         let minus_one = alloc(1);
         setup.load_vector(minus_one, &[-1.0]);
         let epsilon = alloc(1);

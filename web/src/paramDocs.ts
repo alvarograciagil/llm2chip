@@ -36,6 +36,7 @@ export const EXTRA_DOCS: DocSection[] = [
       { name: "CPU de control", text: "Un RISC-V RV32IM con su memoria de programa y datos: arranca el chip, carga la imagen con CRC, tokeniza, gobierna el die por sus registros, muestrea y aplica la lista de parada y el presupuesto de razonamiento." },
       { name: "Unidad de muestreo", text: "Logits que compara por ciclo y candidatos que guarda (el mayor top-k). Elige el token con temperatura usando una tabla de exponenciales." },
       { name: "Enlace entre chips", text: "Cada palabra viaja con número de secuencia y código corrector; el receptor tiene una cola y pide repeticiones, así que la placa puede retrasar palabras sin romper nada." },
+      { name: "Enlace ancho", text: "Con varios chips, el enlace tiene un carril propio por cada carril vectorial, cada uno con su secuencia, su corrección de errores y su cola, como los carriles de UCIe: un bloque entero cruza en un ciclo. El vector oculto pasa de un chip al siguiente en decenas de ciclos en lugar de miles. Se genera solo si el microprograma envía bloques." },
     ],
   },
   {

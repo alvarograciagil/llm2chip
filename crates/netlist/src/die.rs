@@ -48,11 +48,14 @@ pub struct DieFeatures {
     /// Cycles a cell takes to apply a group's scale and bias, a few bits of each a cycle,
     /// while it adds up the next group: one is a whole multiplier for each, all at once.
     pub factor_steps: u32,
+    /// The link to the next chip has a lane of its own for each vector lane, so a whole
+    /// block crosses in one cycle.
+    pub wide_link: bool,
 }
 
 impl Default for DieFeatures {
     fn default() -> Self {
-        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1 }
+        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false }
     }
 }
 
@@ -65,6 +68,17 @@ impl DieFeatures {
     pub fn with_factor_steps(mut self, steps: u32) -> Self {
         self.factor_steps = steps.max(1);
         self
+    }
+
+    /// The same die with a link lane for each vector lane.
+    pub fn with_wide_link(mut self, wide: bool) -> Self {
+        self.wide_link = wide;
+        self
+    }
+
+    /// Lanes of the link to the next chip.
+    pub fn link_lanes(&self) -> usize {
+        if self.wide_link { 1 << self.lane_bits } else { 1 }
     }
 
     /// The same die with room for `1 << key_shift` tokens in each column of keys.
@@ -121,10 +135,12 @@ impl DieFeatures {
     /// Exactly what this microprogram needs.
     pub fn of(code: &Microprogram) -> Self {
         // Additions are also how the comparator and the sequencer's own results are made.
-        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1 };
+        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false };
         let mut highest_x = 0;
         for word in &code.words {
             features.ops |= 1 << word.op;
+            // Blocks that go to or come from the link need a link lane per vector lane.
+            features.wide_link |= word.vector && (word.link_send || word.op == OP_LINK);
             for (width, value) in features.widths.iter_mut().zip(word.field_values()) {
                 *width = (*width).max((u128::BITS - value.leading_zeros()) as u8);
             }
@@ -145,7 +161,7 @@ impl DieFeatures {
     pub fn union(self, other: Self) -> Self {
         let mut widths = self.widths;
         widths.iter_mut().zip(other.widths).for_each(|(a, b)| *a = (*a).max(b));
-        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps) }
+        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link }
     }
 
     fn uses(&self, op: u32) -> bool {
@@ -629,6 +645,36 @@ fn and_not(b: &mut Builder, enable: Bit, value: Bit, name: &str) -> Bit {
     y
 }
 
+/// The pins of one lane of the link to the neighbouring chips.
+struct LinkPins {
+    tx_valid: Vec<Bit>,
+    tx_bits: Vec<Bit>,
+    tx_ready: Vec<Bit>,
+    rx_valid: Vec<Bit>,
+    rx_bits: Vec<Bit>,
+    rx_ready: Vec<Bit>,
+    tx_ack: Vec<Bit>,
+    rx_ack: Vec<Bit>,
+}
+
+impl LinkPins {
+    /// The pins of a lane named `prefix`, for words of `width` bits.
+    fn new(b: &mut Builder, prefix: &str, width: u32) -> Self {
+        let bits = crate::link::wire_bits(width);
+        let ack = crate::link::ACK_BITS as u32;
+        Self {
+            tx_valid: b.output(&format!("{prefix}_tx_valid"), 1),
+            tx_bits: b.output(&format!("{prefix}_tx_bits"), bits),
+            tx_ready: b.input(&format!("{prefix}_tx_ready"), 1),
+            rx_valid: b.input(&format!("{prefix}_rx_valid"), 1),
+            rx_bits: b.input(&format!("{prefix}_rx_bits"), bits),
+            rx_ready: b.output(&format!("{prefix}_rx_ready"), 1),
+            tx_ack: b.input(&format!("{prefix}_tx_ack"), ack),
+            rx_ack: b.output(&format!("{prefix}_rx_ack"), ack),
+        }
+    }
+}
+
 /// Loadable counter: `clear` wins, then `advance` increments.
 /// The bits a count up to `value` needs.
 fn bits_for(value: u32) -> u32 {
@@ -1035,10 +1081,16 @@ impl Gen {
         let link_tx_ack = b.input("link_tx_ack", crate::link::ACK_BITS as u32);
         let link_rx_ack = b.output("link_rx_ack", crate::link::ACK_BITS as u32);
         let link_rx_stall = b.input("link_rx_stall", 1);
-        let link_corrected = b.output("link_corrected", 1);
-        let link_failed = b.output("link_failed", 1);
+        // One of each for every lane of the link, so the board can count them all.
+        let link_corrected = b.output("link_corrected", c.features.link_lanes() as u32);
+        let link_failed = b.output("link_failed", c.features.link_lanes() as u32);
         let link_in = b.wire("link_in", a);
         let link_stall = b.wire("link_stall", 1)[0];
+        // A wide link has a lane of its own for each further vector lane, with its pins.
+        let link_lanes = c.features.link_lanes();
+        let extra_link: Vec<LinkPins> = (1..link_lanes).map(|k| LinkPins::new(&mut b, &format!("link{k}"), a)).collect();
+        let link_lane_in: Vec<Vec<Bit>> = (1..link_lanes).map(|k| b.wire(&format!("link_in{k}"), a)).collect();
+        let link_lane_out: Vec<Vec<Bit>> = (1..link_lanes).map(|k| b.wire(&format!("link_out{k}"), a)).collect();
 
         // --- Sequencer ---
         b.group("Secuenciador");
@@ -1977,7 +2029,8 @@ impl Gen {
                 let mut leaves = vec![zero_leaf.clone(); 16];
                 leaves[OP_ADD as usize] = sum.clone();
                     let wide_out = self.rounded_right(&mut b, &name("wide_right"), &wide_banks[lane][fraction..], &wide_shift, a as usize);
-            for (op, leaf) in [(OP_MUL, shifted), (OP_FUNCTION, table), (OP_SUB, sum), (OP_MOV, lane_a), (OP_SHIFT_LEFT, saturated), (OP_WIDE_OUT, wide_out)] {
+            let link_leaf = link_lane_in.get(lane - 1).cloned().unwrap_or_else(|| zero_leaf.clone());
+            for (op, leaf) in [(OP_MUL, shifted), (OP_FUNCTION, table), (OP_SUB, sum), (OP_MOV, lane_a), (OP_SHIFT_LEFT, saturated), (OP_WIDE_OUT, wide_out), (OP_LINK, link_leaf)] {
                     if c.features.uses(op) {
                         leaves[op as usize] = leaf;
                     }
@@ -2000,6 +2053,11 @@ impl Gen {
 
             if cluster == 0 {
                 first_unit = Some(write_data);
+                for (from, to) in lane_results[1..].iter().zip(&link_lane_out) {
+                    for (bit, out) in from.iter().zip(to) {
+                        b.or_to(*bit, Bit::Zero, *out);
+                    }
+                }
             }
             unit_ports.push((read_a, index_a));
         }
@@ -2117,26 +2175,48 @@ impl Gen {
             l.b.or_to(pop, Bit::Zero, link_pop);
         }
         if has_link {
-            b.inst("link", &endpoint, &[
-                ("tx_send", vec![link_send]),
-                ("tx_data", write_data),
-                ("tx_can_send", vec![can_send]),
-                ("pin_tx_valid", link_tx_valid),
-                ("pin_tx_bits", link_tx_bits),
-                ("pin_tx_ready", link_tx_ready),
-                ("pin_rx_valid", link_rx_valid),
-                ("pin_rx_bits", link_rx_bits),
-                ("pin_rx_ready", link_rx_ready),
-                ("pin_tx_ack", link_tx_ack),
-                ("pin_rx_ack", link_rx_ack.clone()),
-                ("pin_rx_stall", link_rx_stall),
-                ("core_stall", vec![Bit::Zero]),
-                ("rx_pop", vec![link_pop]),
-                ("rx_data", link_in),
-                ("rx_has_data", vec![has_data]),
-                ("corrected", link_corrected),
-                ("failed", link_failed),
-            ]);
+            // Every lane of the link sends and takes a word together: a block goes when all
+            // can send, and is taken when all have one.
+            let lanes_in = std::iter::once(LinkPins { tx_valid: link_tx_valid, tx_bits: link_tx_bits, tx_ready: link_tx_ready, rx_valid: link_rx_valid, rx_bits: link_rx_bits, rx_ready: link_rx_ready, tx_ack: link_tx_ack, rx_ack: link_rx_ack.clone() }).chain(extra_link);
+            let data_out = std::iter::once(write_data).chain(link_lane_out);
+            let data_in = std::iter::once(link_in).chain(link_lane_in);
+            let (mut sendable, mut ready, mut corrected, mut failed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for (k, ((pins, out), into)) in lanes_in.zip(data_out).zip(data_in).enumerate() {
+                let name = if k == 0 { "link".to_string() } else { format!("link{k}") };
+                let (lane_can, lane_has, lane_corrected, lane_failed) = (b.wire(&format!("{name}_can_send"), 1)[0], b.wire(&format!("{name}_has_data"), 1)[0], b.wire(&format!("{name}_corrected"), 1)[0], b.wire(&format!("{name}_failed"), 1)[0]);
+                b.inst(&name, &endpoint, &[
+                    ("tx_send", vec![link_send]),
+                    ("tx_data", out),
+                    ("tx_can_send", vec![lane_can]),
+                    ("pin_tx_valid", pins.tx_valid),
+                    ("pin_tx_bits", pins.tx_bits),
+                    ("pin_tx_ready", pins.tx_ready),
+                    ("pin_rx_valid", pins.rx_valid),
+                    ("pin_rx_bits", pins.rx_bits),
+                    ("pin_rx_ready", pins.rx_ready),
+                    ("pin_tx_ack", pins.tx_ack),
+                    ("pin_rx_ack", pins.rx_ack),
+                    ("pin_rx_stall", link_rx_stall.clone()),
+                    ("core_stall", vec![Bit::Zero]),
+                    ("rx_pop", vec![link_pop]),
+                    ("rx_data", into),
+                    ("rx_has_data", vec![lane_has]),
+                    ("corrected", vec![lane_corrected]),
+                    ("failed", vec![lane_failed]),
+                ]);
+                sendable.push(lane_can);
+                ready.push(lane_has);
+                corrected.push(lane_corrected);
+                failed.push(lane_failed);
+            }
+            let mut l = Logic { b: &mut b, next: 21_000 };
+            let (all_can, all_have) = (l.all(&sendable), l.all(&ready));
+            l.b.or_to(all_can, Bit::Zero, can_send);
+            l.b.or_to(all_have, Bit::Zero, has_data);
+            for (lane, (fixed, lost)) in corrected.iter().zip(&failed).enumerate() {
+                l.b.or_to(*fixed, Bit::Zero, link_corrected[lane]);
+                l.b.or_to(*lost, Bit::Zero, link_failed[lane]);
+            }
         } else {
             // A die that never talks to a neighbour has no endpoint at all.
             b.or_to(Bit::One, Bit::Zero, can_send);
@@ -2363,7 +2443,8 @@ impl Gen {
             let mut pins = std::collections::HashMap::new();
             for port in &template.ports {
                 let width = template.nets[port.net].width;
-                let on_ring = ["link_tx_valid", "link_tx_bits", "link_tx_ready", "link_tx_ack", "link_rx_valid", "link_rx_bits", "link_rx_ready", "link_rx_ack"].contains(&port.name.as_str());
+                let pin = port.name.split_once('_').map_or("", |(_, pin)| pin);
+                let on_ring = port.name.starts_with("link") && ["tx_valid", "tx_bits", "tx_ready", "tx_ack", "rx_valid", "rx_bits", "rx_ready", "rx_ack"].contains(&pin);
                 let bits = if on_ring {
                     b.wire(&format!("d{d}_{}", port.name), width)
                 } else if port.dir == crate::Dir::Input {
@@ -2382,25 +2463,29 @@ impl Gen {
 
             b.group("Enlaces");
             let target = (d + 1) % dies as usize;
-            let mut data = wires[d]["link_tx_bits"].clone();
-            let mut valid = wires[d]["link_tx_valid"][0];
-            let mut ready = wires[target]["link_rx_ready"][0];
-            for stage in 0..link_stages {
-                let q = b.wire(&format!("link{d}_stage{stage}"), bits);
-                b.inst(&format!("link{d}_reg{stage}"), &reg, &[("d", data), ("q", q.clone())]);
-                data = q;
-                let (next_valid, next_ready) = (b.wire(&format!("link{d}_valid{stage}"), 1)[0], b.wire(&format!("link{d}_ready{stage}"), 1)[0]);
-                b.dff_to(valid, next_valid);
-                b.dff_to(ready, next_ready);
-                (valid, ready) = (next_valid, next_ready);
-            }
-            for (i, bit) in data.iter().enumerate() {
-                b.xor_to(*bit, Bit::Zero, wires[target]["link_rx_bits"][i]);
-            }
-            b.xor_to(valid, Bit::Zero, wires[target]["link_rx_valid"][0]);
-            b.xor_to(ready, Bit::Zero, wires[d]["link_tx_ready"][0]);
-            for (from, to) in wires[target]["link_rx_ack"].iter().zip(&wires[d]["link_tx_ack"]) {
-                b.xor_to(*from, Bit::Zero, *to);
+            for lane in 0..c.features.link_lanes() {
+                let p = if lane == 0 { "link".to_string() } else { format!("link{lane}") };
+                let pin = |name: &str| format!("{p}_{name}");
+                let mut data = wires[d][&pin("tx_bits")].clone();
+                let mut valid = wires[d][&pin("tx_valid")][0];
+                let mut ready = wires[target][&pin("rx_ready")][0];
+                for stage in 0..link_stages {
+                    let q = b.wire(&format!("link{d}_{lane}_stage{stage}"), bits);
+                    b.inst(&format!("link{d}_{lane}_reg{stage}"), &reg, &[("d", data), ("q", q.clone())]);
+                    data = q;
+                    let (next_valid, next_ready) = (b.wire(&format!("link{d}_{lane}_valid{stage}"), 1)[0], b.wire(&format!("link{d}_{lane}_ready{stage}"), 1)[0]);
+                    b.dff_to(valid, next_valid);
+                    b.dff_to(ready, next_ready);
+                    (valid, ready) = (next_valid, next_ready);
+                }
+                for (i, bit) in data.iter().enumerate() {
+                    b.xor_to(*bit, Bit::Zero, wires[target][&pin("rx_bits")][i]);
+                }
+                b.xor_to(valid, Bit::Zero, wires[target][&pin("rx_valid")][0]);
+                b.xor_to(ready, Bit::Zero, wires[d][&pin("tx_ready")][0]);
+                for (from, to) in wires[target][&pin("rx_ack")].iter().zip(&wires[d][&pin("tx_ack")]) {
+                    b.xor_to(*from, Bit::Zero, *to);
+                }
             }
         }
         self.add(b.finish())

@@ -776,6 +776,8 @@ fn alu(op: u32) -> Alu<Expr> {
 pub struct Assembly {
     pub steps: Vec<Step>,
     pub initial: HashMap<Place, i64>,
+    /// The link to the next chip carries a block of lanes a cycle.
+    wide_link: bool,
     bits: u32,
     index_bits: u32,
     exponents: u32,
@@ -939,7 +941,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
+        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new() }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1194,17 +1196,36 @@ impl Assembly {
         self.push(s);
     }
 
-    /// Sends a register's exponent and its first `len` values to the next chip.
+    /// Sends a register's exponent and its first `len` values to the next chip: a block
+    /// of lanes a cycle over a wide link.
     pub fn send(&mut self, reg: u32, len: Expr) {
         self.clear_shifts();
         self.send_place(self.exponent(reg));
-        self.each(len, |s, i| s.send_place((reg, i)));
+        if self.wide_link {
+            self.elements(len, &[0.into()], true, |s, i, vector| {
+                s.send_place((reg, i));
+                if let Some(Step::One(word)) = s.steps.last_mut() {
+                    word.vector = vector;
+                }
+            });
+        } else {
+            self.each(len, |s, i| s.send_place((reg, i)));
+        }
     }
 
-    /// Fills a register with what `send` delivered.
+    /// Fills a register with what `send` delivered, in the same pieces.
     pub fn receive(&mut self, reg: u32, len: Expr) {
         self.receive_place(self.exponent(reg));
-        self.each(len, |s, i| s.receive_place((reg, i)));
+        if self.wide_link {
+            self.elements(len, &[0.into()], true, |s, i, vector| {
+                s.receive_place((reg, i));
+                if let Some(Step::One(word)) = s.steps.last_mut() {
+                    word.vector = vector;
+                }
+            });
+        } else {
+            self.each(len, |s, i| s.receive_place((reg, i)));
+        }
     }
 
     /// Tells the next chip that this one has finished.

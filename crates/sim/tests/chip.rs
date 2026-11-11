@@ -11,7 +11,7 @@ use netlist::Simulator;
 use sim::chip::{cell_segments, image_segments, VmEngine};
 use sim::lower::Layout;
 use sim::Weights;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod common;
@@ -79,16 +79,15 @@ fn run_gates(design: &netlist::Design, image: &[u32], input: &[u8], limit: u64) 
     panic!("el firmware no terminó en {limit} ciclos");
 }
 
-#[test]
-#[cfg_attr(debug_assertions, ignore = "solo tiene sentido con optimizaciones: son cientos de miles de ciclos")]
-fn text_goes_through_the_whole_chip_in_gates() {
-    let Some(firmware) = build_firmware() else { return };
-    let dir = std::env::temp_dir().join(format!("llm2chip-chip-{}", std::process::id()));
+/// Runs the whole chip in gates on the test model and checks it says what the
+/// instruction-level simulation says, in as many cycles.
+fn whole_chip_in_gates(die: netlist::DieConfig, tag: &str) -> (Simulator, u64, Layout, PathBuf) {
+    let firmware = build_firmware().expect("firmware");
+    let dir = std::env::temp_dir().join(format!("llm2chip-chip-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     make_checkpoint(&dir);
     let program = compile_qwen3_5(CONFIG).unwrap();
 
-    let die = netlist::DieConfig { microcode_bits: 15, ..cell_die_config() };
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
     let code = layout.microprogram(&program).unwrap();
@@ -118,17 +117,39 @@ fn text_goes_through_the_whole_chip_in_gates() {
 
     let design = chip_design(config);
     let start = std::time::Instant::now();
-    let (output, cycles, mut sim) = run_gates(&design, &image, input, cpu.cycle + 4096);
+    let (output, cycles, sim) = run_gates(&design, &image, input, cpu.cycle + 4096);
     eprintln!("puertas: {cycles} ciclos en {:.1} s, salida {:?}", start.elapsed().as_secs_f64(), String::from_utf8_lossy(&output));
     assert_eq!(String::from_utf8_lossy(&output), String::from_utf8_lossy(&expected));
     assert_eq!(cycles, cpu.cycle, "ciclos");
+    (sim, bus.peripheral.die_busy, layout, dir)
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "solo tiene sentido con optimizaciones: son cientos de miles de ciclos")]
+fn the_chip_sized_for_an_fpga_says_the_same_in_gates() {
+    if build_firmware().is_none() {
+        return;
+    }
+    let (_, _, _, dir) = whole_chip_in_gates(fpga_die_config(), "fpga");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "solo tiene sentido con optimizaciones: son cientos de miles de ciclos")]
+fn text_goes_through_the_whole_chip_in_gates() {
+    if build_firmware().is_none() {
+        return;
+    }
+    let die = netlist::DieConfig { microcode_bits: 15, ..cell_die_config() };
+    let (mut sim, die_busy, layout, dir) = whole_chip_in_gates(die, "full");
+    let checkpoint = Weights::open(&dir).unwrap();
     let debug = |sim: &mut Simulator, what: u64| {
         sim.set("debug_select", what).unwrap();
         sim.settle();
         sim.get("debug_value").unwrap()
     };
     assert_eq!(debug(&mut sim, DEBUG_CYCLES), sim.cycle() - 1, "contador de ciclos");
-    assert_eq!(debug(&mut sim, DEBUG_DIE_BUSY), bus.peripheral.die_busy, "ciclos del die");
+    assert_eq!(debug(&mut sim, DEBUG_DIE_BUSY), die_busy, "ciclos del die");
     assert!(debug(&mut sim, DEBUG_SAMPLER_BUSY) > 0);
     assert!(debug(&mut sim, DEBUG_CPU_PC) > 0);
     let (codes, _) = layout.cell_contents(&checkpoint, 0).unwrap();

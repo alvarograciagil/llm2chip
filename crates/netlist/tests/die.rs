@@ -198,3 +198,72 @@ fn a_microcode_word_reads_back_as_what_it_does() {
     let bits: String = halt.encode_words(&c).iter().rev().map(|w| format!("{w:032b}")).collect();
     assert!(describe_word(&decode_word(&bits[bits.len() - netlist::word_bits(&c) as usize..], &c)).starts_with("Fin de la rutina"));
 }
+
+#[test]
+fn a_wide_link_carries_a_whole_block_in_one_word() {
+    use netlist::block::Alu;
+    use netlist::die::{OP_LINK, OP_MOV};
+    use netlist::{package_design, DieProgram};
+
+    // Four lanes and a link lane for each: one send moves four values. The die keeps only
+    // the fields its two programs use, as a real one would.
+    let general = DieConfig { cells: 4, features: netlist::DieFeatures::default().with_lane_bits(2), ..config() };
+    let programs = |c: DieConfig| {
+        let mut sender = DieProgram::new(c);
+        let mut send = Alu::new(OP_MOV);
+        (send.a, send.link_send, send.write, send.vector) = ((1, 0), true, false, true);
+        sender.alu(&send);
+        let mut receiver = DieProgram::new(c);
+        let mut receive = Alu::new(OP_LINK);
+        (receive.dst, receive.vector) = ((2, 0), true);
+        receiver.alu(&receive);
+        (sender.finish_program(), receiver.finish_program())
+    };
+    let (p0, p1) = programs(general);
+    let features = netlist::DieFeatures::of(&p0).union(netlist::DieFeatures::of(&p1)).with_lane_bits(2);
+    assert!(features.wide_link, "un bloque por el enlace pide un carril de enlace por carril");
+    let c = DieConfig { features, ..general };
+    let (code0, code1) = (p0.words, p1.words);
+    let design = package_design(c, 2, 1);
+    let mut sim = Simulator::new(&design).unwrap();
+
+    for die in 0..2 {
+        sim.set(&format!("d{die}_start"), 1).unwrap();
+    }
+    sim.tick();
+    let values = [111i64, -222, 333, -444];
+    for (die, code) in [&code0, &code1].iter().enumerate() {
+        let name = |pin: &str| format!("d{die}_{pin}");
+        sim.set(&name("load_code"), 1).unwrap();
+        for (i, word) in code.iter().enumerate() {
+            sim.set(&name("code_addr"), i as u64).unwrap();
+            sim.set_wide(&name("code_data"), word.encode(&c)).unwrap();
+            sim.tick();
+        }
+        sim.set(&name("load_code"), 0).unwrap();
+    }
+    sim.set("d0_load_vec", 1).unwrap();
+    for (i, v) in values.iter().enumerate() {
+        sim.set("d0_vec_addr", 1u64 << c.index_bits | i as u64).unwrap();
+        sim.set("d0_vec_data", *v as u64 & 0xFFFF).unwrap();
+        sim.tick();
+    }
+    sim.set("d0_load_vec", 0).unwrap();
+    sim.tick();
+    sim.set("d0_start", 0).unwrap();
+    sim.set("d1_start", 0).unwrap();
+    let mut cycles = 0;
+    while sim.get("d0_halted").unwrap() == 0 || sim.get("d1_halted").unwrap() == 0 {
+        sim.tick();
+        cycles += 1;
+        assert!(cycles < 2000);
+    }
+    let got: Vec<i64> = (0..4)
+        .map(|i| {
+            sim.set("d1_vec_addr", 2u64 << c.index_bits | i).unwrap();
+            sim.tick();
+            sim.get("d1_vec_out").unwrap() as i16 as i64
+        })
+        .collect();
+    assert_eq!(got, values);
+}

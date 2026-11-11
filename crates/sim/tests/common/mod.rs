@@ -44,6 +44,14 @@ pub fn cell_die_config() -> DieConfig {
     DieConfig { cell: CellConfig { accumulator_bits: 40, addr_bits: 12, ..base.cell }, scale_bits: 21, index_bits: 12, features: base.features.with_key_shift(4), ..base }
 }
 
+/// The smallest die that runs the test model with eight cells, whose memories fit in
+/// an FPGA's block RAM: 2^9 registers of 2^7 words and 2^13 words of microcode.
+#[allow(dead_code)]
+pub fn fpga_die_config() -> DieConfig {
+    let base = cell_die_config();
+    DieConfig { cells: 8, cell: CellConfig { addr_bits: 8, ..base.cell }, index_bits: 7, microcode_bits: 13, ..base }
+}
+
 pub struct Rng(pub u64);
 
 impl Rng {

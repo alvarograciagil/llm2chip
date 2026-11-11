@@ -167,6 +167,36 @@ fn emit_module(out: &mut String, m: &Module) {
 
 /// The whole design as one Verilog file, children before their parents.
 pub fn to_verilog(design: &Design) -> String {
+    write_design(design, false)
+}
+
+/// The same design for an FPGA: each multiplier that finishes in one cycle is written as a
+/// signed product, which the tools map onto the device's multiplier blocks. Every kind of
+/// multiplier the generator builds computes exactly that product.
+pub fn to_verilog_for_fpga(design: &Design) -> String {
+    write_design(design, true)
+}
+
+/// A one-cycle multiplier, `weight × x` with both signed, written so tools infer it.
+fn behavioural_multiplier(m: &Module) -> Option<String> {
+    let name = m.name.strip_prefix("wallace_").or_else(|| m.name.strip_prefix("booth_")).unwrap_or(&m.name);
+    let shape = name.strip_prefix("multiplier_")?.strip_suffix("_s1")?;
+    let (weight, x) = shape.split_once('x')?;
+    let (weight, x): (u32, u32) = (weight.parse().ok()?, x.parse().ok()?);
+    let mut ports: Vec<&str> = m.ports.iter().map(|p| p.name.as_str()).filter(|p| *p != "clk").collect();
+    ports.sort_unstable();
+    (ports == ["product", "weight", "x"]).then(|| {
+        format!(
+            "module {} (\n  input clk,\n  input [{}:0] weight,\n  input [{}:0] x,\n  output [{}:0] product\n);\n  assign product = $signed(weight) * $signed(x);\nendmodule\n\n",
+            m.name,
+            weight - 1,
+            x - 1,
+            weight + x - 1
+        )
+    })
+}
+
+fn write_design(design: &Design, fpga: bool) -> String {
     let mut out = String::from("// Generado por llm2chip.\n\n");
     out.push_str(LIBRARY);
     out.push('\n');
@@ -185,7 +215,11 @@ pub fn to_verilog(design: &Design) -> String {
     let mut order = Vec::new();
     visit(design, &design.top, &mut order);
     for name in order {
-        emit_module(&mut out, &design.modules[name]);
+        let module = &design.modules[name];
+        match fpga.then(|| behavioural_multiplier(module)).flatten() {
+            Some(text) => out.push_str(&text),
+            None => emit_module(&mut out, module),
+        }
     }
     out
 }

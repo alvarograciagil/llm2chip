@@ -85,6 +85,23 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     let link_tx_ack = b.input("link_tx_ack", crate::link::ACK_BITS as u32);
     let link_rx_ack = b.output("link_rx_ack", crate::link::ACK_BITS as u32);
     let link_rx_stall = b.input("link_rx_stall", 1);
+    // A wide link's further lanes go straight from the die to pins of the same names.
+    let ack = crate::link::ACK_BITS as u32;
+    let extra_link: Vec<(String, Vec<Bit>)> = (1..c.die.features.link_lanes())
+        .flat_map(|k| {
+            let p = format!("link{k}");
+            [
+                (format!("{p}_tx_valid"), b.output(&format!("{p}_tx_valid"), 1)),
+                (format!("{p}_tx_bits"), b.output(&format!("{p}_tx_bits"), data_bits)),
+                (format!("{p}_tx_ready"), b.input(&format!("{p}_tx_ready"), 1)),
+                (format!("{p}_rx_valid"), b.input(&format!("{p}_rx_valid"), 1)),
+                (format!("{p}_rx_bits"), b.input(&format!("{p}_rx_bits"), data_bits)),
+                (format!("{p}_rx_ready"), b.output(&format!("{p}_rx_ready"), 1)),
+                (format!("{p}_tx_ack"), b.input(&format!("{p}_tx_ack"), ack)),
+                (format!("{p}_rx_ack"), b.output(&format!("{p}_rx_ack"), ack)),
+            ]
+        })
+        .collect();
     let chain_tx_valid = b.output("chain_tx_valid", 1);
     let chain_tx_bits = b.output("chain_tx_bits", control_bits);
     let chain_tx_ready = b.input("chain_tx_ready", 1);
@@ -159,7 +176,8 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     let vector_out = b.wire("vector_out", activation as u32);
     let sampler_done = b.wire("sampler_done", 1);
     let sampler_token = b.wire("sampler_token", c.sampler.index_bits);
-    let (link_corrected, link_failed) = (b.wire("link_corrected", 1)[0], b.wire("link_failed", 1)[0]);
+    let link_lanes = c.die.features.link_lanes() as u32;
+    let (link_corrected, link_failed) = (b.wire("link_corrected", link_lanes), b.wire("link_failed", link_lanes));
     let (chain_corrected, chain_failed) = (b.wire("chain_corrected", 1)[0], b.wire("chain_failed", 1)[0]);
     let (chain_can_send, chain_has_data) = (b.wire("chain_can_send", 1), b.wire("chain_has_data", 1));
     let chain_word = b.wire("chain_word", 32);
@@ -309,8 +327,8 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
             ("link_tx_ack", link_tx_ack),
             ("link_rx_ack", link_rx_ack),
             ("link_rx_stall", link_rx_stall),
-            ("link_corrected", vec![link_corrected]),
-            ("link_failed", vec![link_failed]),
+            ("link_corrected", link_corrected.clone()),
+            ("link_failed", link_failed.clone()),
         ]);
         sampler_pins.extend([
             ("start", vec![sample_start]),
@@ -344,14 +362,17 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
                 q
             })
             .collect();
-        let any_corrected = l.or(link_corrected, chain_corrected);
-        let any_failed = l.or(link_failed, chain_failed);
-        let link_counters: Vec<Vec<Bit>> = [any_corrected, any_failed]
+        // Every lane of the link and the command chain may report in the same cycle: each
+        // counter adds them all.
+        let link_counters: Vec<Vec<Bit>> = [(link_corrected, chain_corrected), (link_failed, chain_failed)]
             .into_iter()
-            .map(|event| {
+            .map(|(lanes, chain)| {
                 let q = l.fresh_bus(32);
-                let mut carry = event;
-                let stepped: Vec<Bit> = q.iter().map(|bit| { let out = l.xor(*bit, carry); carry = l.and(*bit, carry); out }).collect();
+                // Wide enough for every lane at once: the sum wraps at its operands' width.
+                let events: Vec<Vec<Bit>> = lanes.iter().chain([&chain]).map(|bit| (0..8).map(|i| if i == 0 { *bit } else { Bit::Zero }).collect()).collect();
+                let count = l.sum_many(events);
+                let addend: Vec<Bit> = (0..32).map(|i| count.get(i).copied().unwrap_or(Bit::Zero)).collect();
+                let stepped = l.adder(&q, &addend, Bit::Zero).0;
                 let cleared = constant(0, 32);
                 let next = l.mux_bus(external_reset, &stepped, &cleared);
                 l.connect_flops(&next, &q);
@@ -419,6 +440,7 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
         ("failed", vec![chain_failed]),
     ]);
     b.group("Die de inferencia");
+    die_pins.extend(extra_link.iter().map(|(name, bits)| (name.as_str(), bits.clone())));
     b.inst("die", &die, &die_pins);
     b.group("Unidad de muestreo");
     b.inst("sampler", &sample, &sampler_pins);

@@ -172,7 +172,7 @@ pub fn fitted_die(program: &Program, weights: &Weights, request: &ImageRequest) 
     // Every unit needs the same number of cells, in whole blocks of lanes.
     let share = 1usize << (request.lane_bits + request.cluster_bits);
     let rounded_cells = (request.cells.max(1) / share).max(1) as u32 * share as u32;
-    let trial = DieConfig { cells: rounded_cells, cell, scale_bits: 16, reg_bits: 16, index_bits: 16, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_lane_bits(request.lane_bits).with_cluster_bits(request.cluster_bits).with_key_shift(bits_for(request.context_tokens.max(2)).max(request.lane_bits)) };
+    let trial = DieConfig { cells: rounded_cells, cell, scale_bits: 16, reg_bits: 16, index_bits: 16, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_lane_bits(request.lane_bits).with_cluster_bits(request.cluster_bits).with_key_shift(bits_for(request.context_tokens.max(2)).max(request.lane_bits)).with_wide_link(true) };
     let tokens = request.context_tokens.max(1);
     let longest_store = program.kv_slots.iter().map(|s| (s.heads * s.head_dim) as u64 * tokens).max().unwrap_or(0);
     let longest_buffer = program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1);
