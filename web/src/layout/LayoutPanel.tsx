@@ -27,7 +27,7 @@ const cellKey = (request: LayoutRequest) => `${request.node}:${request.cell_key}
 const sameCell = (a: LayoutRequest, b: LayoutRequest) => cellKey(a) === cellKey(b);
 
 /** A real layout of the design's compute cell with OpenROAD, measured against the estimate. */
-export function LayoutPanel({ report }: { report: Report }) {
+export function LayoutPanel({ report, allowed }: { report: Report; allowed: boolean | null }) {
   const t = useT();
   const params = useDesign((s) => s.params);
   const setParams = useDesign((s) => s.setParams);
@@ -52,7 +52,8 @@ export function LayoutPanel({ report }: { report: Report }) {
         ) : (
           <>
             <p className="muted-text">{t("La celda que el die repite miles de veces, con el circuito elegido para este diseño, colocada y rutada con OpenROAD en")} {open}.</p>
-            <button className="pill primary-pill" disabled={layout.state === "running" || !request} onClick={() => request && void layout.start(request)}>
+            {allowed === false && <p className="note-warning">{t("El diseño no se puede fabricar en este proceso tal como está: ajústalo con «Viabilidad» antes de hacer el layout.")}</p>}
+            <button className="pill primary-pill" disabled={layout.state === "running" || !request || allowed !== true} onClick={() => request && void layout.start(request)}>
               {layout.state === "running" ? `${t(layout.phase)}… ${layout.seconds} s` : result ? t("Repetir el layout") : t("Hacer el layout")}
             </button>
             {layout.state === "error" && <p className="note-warning">{layout.error}</p>}

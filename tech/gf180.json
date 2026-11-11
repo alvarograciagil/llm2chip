@@ -1,6 +1,8 @@
 {
-  "sram_cell_um2": 20.0,
-  "sram_periphery_k": 5.0,
+  "sram_cell_um2": 17.6,
+  "sram_macro_max_kbit": 4,
+  "open_pdk": true,
+  "sram_periphery_k": 3.79,
   "rom_mbit_mm2": 0.5,
   "fa_um2": 84.672,
   "ff_um2": 79.0272,

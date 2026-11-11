@@ -3018,3 +3018,65 @@ label:hover > .hint-icon {
   font-size: 11px;
   color: var(--label-2);
 }
+
+.feasibility-verdict {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+
+.feasibility.ok .feasibility-verdict {
+  color: var(--green);
+}
+
+.feasibility.blocked .feasibility-verdict,
+.feasibility.partial .feasibility-verdict {
+  color: var(--orange);
+}
+
+.feasibility[aria-busy="true"] {
+  opacity: 0.6;
+}
+
+.feasibility-reasons {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
+.feasibility-reasons li + li {
+  margin-top: 4px;
+}
+
+.feasibility-heading {
+  margin: 12px 0 6px;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.suggestion {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--group);
+  font-size: 12px;
+}
+
+.suggestion ul {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.suggestion .risk {
+  color: var(--label-2);
+}
+
+.suggestion-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  color: var(--label-2);
+}

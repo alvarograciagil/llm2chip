@@ -1,5 +1,7 @@
 {
   "sram_cell_um2": 0.026,
+  "open_pdk": true,
+  "fabricable": false,
   "sram_periphery_k": 5.0,
   "rom_mbit_mm2": 46.0,
   "fa_um2": 0.2041,

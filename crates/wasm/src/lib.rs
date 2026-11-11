@@ -82,6 +82,14 @@ pub fn estimate_design(name: &str, config: &str, params: &str) -> Result<String,
     to_js(&report)
 }
 
+/// Whether the design can be built, and the changes that make it so: see `arch::feasibility`.
+#[wasm_bindgen]
+pub fn advise_design(name: &str, config: &str, params: &str, search: bool) -> Result<String, JsError> {
+    let model = ModelGraph::from_config_json(name, config).map_err(|e| JsError::new(&e.0))?;
+    let params: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&format!("parámetros inválidos: {e}")))?;
+    to_js(&arch::feasibility::advise(&model, &params, search).map_err(|e| JsError::new(&e))?)
+}
+
 fn cell_config(config: &str, params: &str) -> Result<CellConfig, JsError> {
     let model = ModelGraph::from_config_json("modelo", config).map_err(|e| JsError::new(&e.0))?;
     let p: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&e.to_string()))?;

@@ -47,6 +47,7 @@ const ICONS = {
     </>
   ),
   warning: <path d="M10 3.5 17.5 16.5h-15zM10 8.5v3.5M10 14v.2" {...line} />,
+  check: <path d="M4.5 10.5 8.5 14.5 15.5 6" {...line} />,
   chip: (
     <>
       <rect x="5" y="5" width="10" height="10" rx="1.5" {...line} />

@@ -70,7 +70,21 @@ El reloj queda a menos del 12 % en las quince celdas. El área queda entre el 62
 
 Las celdas cuyo reloj objetivo no se alcanza terminan con unas decenas de violaciones de reglas en el rutado detallado; las que lo alcanzan, con ninguna. El área y la frecuencia no cambian por ello.
 
-Las memorias siguen siendo una estimación: las macros abiertas de SRAM para SkyWater 130 (OpenRAM) ocupan unos 23 µm² por bit en 8 Kbit, y el modelo usa esa cifra para los bloques pequeños.
+## Memorias
+
+Las memorias son macros de SRAM, y en los procesos abiertos solo existen pequeñas. Las de SkyWater 130 que trae OpenROAD (`sky130_sram_1rw1r_*`, de OpenRAM) llegan a 32 Kbit y ocupan 35,5 µm² por bit en 5 Kbit, 25,6 en 16 Kbit y 22,0 en 32 Kbit; el modelo las reproduce con 13,17 µm² por bit y periferia 3,79, y una memoria mayor se construye con varias de 32 Kbit. GF180 usa las de GlobalFoundries, de 4 Kbit y unos 51 µm² por bit. Antes el modelo suponía macros de cualquier tamaño, con densidades 5 veces mejores que las reales.
+
+## Viabilidad antes del layout
+
+Antes de hacer ningún layout, el inspector dice si el diseño se puede fabricar en el proceso elegido (`arch::feasibility`):
+
+- **Qué lo impide**, con cifras: cuánto necesita cada die frente a lo que admite el proceso, y los tres bloques que más ocupan; los errores del estimador; y, para el layout, si el proceso tiene PDK abierto y si las memorias que usa el diseño existen en él (solo SRAM).
+- **Cómo hacerlo viable**: prueba cambios de parámetros (repartir en más chips, dimensionar para el modelo, contexto nativo, menos bits de peso o de caché KV, menos multiplicadores o carriles, tablas de función más pequeñas, todo el die del proceso, otro proceso abierto que se fabrique) y solo ofrece los que, estimados de nuevo, pasan la comprobación. Si ninguno basta solo, busca una combinación cambio a cambio, y después otra con el menor número de chips sin aceptar pérdidas grandes de calidad. Cada propuesta indica sus chips, su área, sus tok/s y lo que arriesga.
+- **Qué significa el número de chips**: cuántos encapsulados y placas hacen falta (unos 16 encapsulados por placa para chips grandes, 64 para chips pequeños de lanzadera), el tiempo que cada token pasa en los enlaces, y que en una lanzadera abierta cada die distinto ocupa una plaza propia.
+
+El botón de layout queda desactivado mientras el diseño no sea viable.
+
+Ejemplo: stories260K en SkyWater 130 no cabe en un die de 10 mm² (la memoria de pesos sola ocupa más de 45 mm²). La propuesta con menos chips lo reparte en 42 dies de 10 mm² con contexto de 512 tokens y caché KV de 8 bits.
 
 ## Desde la aplicación
 

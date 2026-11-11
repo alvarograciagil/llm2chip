@@ -3,6 +3,8 @@ import { formatNumber } from "../format";
 import { Icon } from "./icons";
 import { useT } from "../i18n";
 import { LayoutPanel } from "../layout/LayoutPanel";
+import { FeasibilityPanel } from "../feasibility/FeasibilityPanel";
+import { useAdvice } from "../feasibility/useAdvice";
 import { fieldLabel } from "../params";
 import { useDesign, type Selection } from "../store";
 
@@ -69,6 +71,9 @@ function Summary({ report }: { report: Report }) {
   const headline = (onBoard ? BOARD_HEADLINE : HEADLINE).map((id) => report.metrics.find((m) => m.id === id)).filter((m): m is Metric => !!m);
   const blocks = [...report.blocks].sort((a, b) => b.per_die_mm2 - a.per_die_mm2);
   const largest = blocks[0]?.per_die_mm2 ?? 1;
+  const model = useDesign((s) => s.model);
+  const params = useDesign((s) => s.params);
+  const { advice, checking, searching } = useAdvice(model, params, !onBoard);
 
   return (
     <>
@@ -85,6 +90,8 @@ function Summary({ report }: { report: Report }) {
         ))}
       </div>
       {baseline && <p className="note">Comparando con «{baseline.name}».</p>}
+
+      {!onBoard && <FeasibilityPanel advice={advice} checking={checking} searching={searching} />}
 
       {report.decisions.length > 0 && (
         <>
@@ -129,7 +136,7 @@ function Summary({ report }: { report: Report }) {
         </div>
       )}
 
-      <LayoutPanel report={report} />
+      <LayoutPanel report={report} allowed={checking ? null : (advice?.verdict.layout ?? null)} />
 
       {!onBoard && <h3>{t("Reparto del área por die")}</h3>}
       <div className="inset" hidden={onBoard}>
