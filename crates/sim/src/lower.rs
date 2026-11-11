@@ -368,6 +368,19 @@ pub struct Layout {
     /// they share: the others every chip computes whole.
     shard: Option<Shard>,
     by_rows: HashSet<String>,
+    /// The lookup table that stays in the image, its register and its row length: the
+    /// register holds only the row the firmware brought in for this token.
+    outside: Option<OutsideTable>,
+}
+
+/// A lookup table the firmware reads from the image a row at a time.
+#[derive(Clone, Debug)]
+pub struct OutsideTable {
+    pub name: String,
+    pub register: u32,
+    pub cols: u32,
+    /// Every row, one after another, as mantissas with the register's exponent.
+    pub mantissas: Vec<i64>,
 }
 
 /// One of `chips` chips that share each product by rows, in a ring: chip `index` holds
@@ -636,7 +649,7 @@ impl Layout {
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
         }
-        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), tokens: program.vocab as u32, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new() })
+        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), tokens: program.vocab as u32, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside: None })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -746,6 +759,12 @@ impl Layout {
         let mut ranges = VarRanges::new(self.tokens, self.positions);
         let lanes = 1u32 << self.config.features.lane_bits;
         register_extents(steps, &mut ranges, lanes, self.config.features.key_shift, &mut self.extents.borrow_mut(), &mut self.windows.borrow_mut());
+    }
+
+    /// How many elements of the wide memory the routines assembled so far reach: the steps
+    /// that read it name it as register 0, which no buffer takes.
+    pub fn wide_reach(&self) -> u32 {
+        self.extents.borrow().get(&0).copied().unwrap_or(0)
     }
 
     /// Where each register starts in a compact vector memory with the step of the loops
@@ -961,6 +980,36 @@ impl Layout {
         self.in_cells = place_in_cells(&self.cell_plan, self.config.cells as usize, 1 << self.config.features.cluster_bits, 1 << self.config.features.lane_bits).0;
     }
 
+    /// Leaves the embedding table in the image instead of in the vector memory: before each
+    /// token the firmware loads that token's row into the table's register, which then
+    /// holds one row. Only one table can stay outside; with none, or with more than one,
+    /// nothing changes. Returns whether the table went out.
+    pub fn table_outside(&mut self, program: &Program) -> bool {
+        if self.lookup_tables.len() != 1 {
+            return false;
+        }
+        let name = self.lookup_tables.iter().next().cloned().expect("una tabla");
+        let Some(cols) = all_ops(program).find_map(|inst| match &inst.op {
+            Op::EmbRead { table, dst } if *table == name => Some(program.buffers[*dst] as u32),
+            _ => None,
+        }) else {
+            return false;
+        };
+        let register = self.weights[&name];
+        let rows = program.vocab as u32;
+        // A chip without this table's part of the model has nothing of it to leave out.
+        if !self.setup.initial.contains_key(&(register, 0)) {
+            return false;
+        }
+        let mantissas = (0..rows * cols).map(|i| self.setup.initial.remove(&(register, i)).unwrap_or(0)).collect();
+        self.outside = Some(OutsideTable { name, register, cols, mantissas });
+        true
+    }
+
+    pub fn outside_table(&self) -> Option<&OutsideTable> {
+        self.outside.as_ref()
+    }
+
     /// Runs one routine of the microprogram directly, at software speed.
     pub fn run_routine<O: BlockOps>(&self, ops: &mut O, program: &Program, routine: usize, token: O::N, position: O::N) -> Result<(), String> {
         match routine {
@@ -1129,7 +1178,9 @@ impl Layout {
         match op {
             Op::EmbRead { table, dst } => {
                 let len = program.buffers[*dst] as u32;
-                ops.copy_row(table, self.weights[table], token, len, self.reg(*dst));
+                // A table left in the image holds just this token's row, put there by the firmware.
+                let row = if self.outside.as_ref().is_some_and(|t| t.name == *table) { 0.into() } else { token };
+                ops.copy_row(table, self.weights[table], row, len, self.reg(*dst));
                 ops.normalize(self.reg(*dst), len.into());
             }
             Op::Matvec { matrix, src, dst } if self.by_rows.contains(matrix) => {

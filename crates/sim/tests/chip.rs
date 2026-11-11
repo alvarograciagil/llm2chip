@@ -82,16 +82,26 @@ fn run_gates(design: &netlist::Design, image: &[u32], input: &[u8], limit: u64) 
 /// Runs the whole chip in gates on the test model and checks it says what the
 /// instruction-level simulation says, in as many cycles.
 fn whole_chip_in_gates(die: netlist::DieConfig, tag: &str) -> (Simulator, u64, Layout, PathBuf) {
+    chip_in_gates(die, tag, false)
+}
+
+/// The same, choosing whether the embedding table stays in the image.
+fn chip_in_gates(die: netlist::DieConfig, tag: &str, table_outside: bool) -> (Simulator, u64, Layout, PathBuf) {
     let firmware = build_firmware().expect("firmware");
     let dir = std::env::temp_dir().join(format!("llm2chip-chip-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     make_checkpoint(&dir);
     let program = compile_qwen3_5(CONFIG).unwrap();
 
-    let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
+    let mut layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
+    if table_outside {
+        assert!(layout.table_outside(&program), "el modelo de prueba tiene una tabla de embedding");
+    }
     let code = layout.microprogram(&program).unwrap();
-    // Each register takes only the vector memory its routines reach.
-    let die = sim::chip::compact_die(die, &layout);
+    // Each register takes only the vector memory its routines reach, and the microcode
+    // keeps each distinct word once.
+    let die = sim::chip::with_code_dictionary(sim::chip::compact_die(die, &layout), &code);
+    eprintln!("diccionario de microcódigo: 2^{} palabras", die.features.dictionary_bits);
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     let info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
@@ -115,7 +125,9 @@ fn whole_chip_in_gates(die: netlist::DieConfig, tag: &str) -> (Simulator, u64, L
     }
     let expected = bus.tx.clone();
     eprintln!("simulador de instrucciones: {} ciclos, salida {:?}", cpu.cycle, String::from_utf8_lossy(&expected));
-    assert_eq!(expected.iter().filter(|b| **b == b'.').count(), segments.len(), "todos los segmentos deben cargar bien");
+    // A table that stays in the image is not loaded at boot.
+    let at_boot = segments.iter().filter(|s| s.target != netlist::image::Target::RuntimeTable).count();
+    assert_eq!(expected.iter().filter(|b| **b == b'.').count(), at_boot, "todos los segmentos deben cargar bien");
 
     let design = chip_design(config);
     let start = std::time::Instant::now();
@@ -133,6 +145,19 @@ fn the_chip_sized_for_an_fpga_says_the_same_in_gates() {
         return;
     }
     let (_, _, _, dir) = whole_chip_in_gates(fpga_die_config(), "fpga");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "solo tiene sentido con optimizaciones: son cientos de miles de ciclos")]
+fn the_embedding_can_stay_in_the_image_and_come_a_row_at_a_time() {
+    if build_firmware().is_none() {
+        return;
+    }
+    let (_, _, layout, dir) = chip_in_gates(fpga_die_config(), "fila", true);
+    // The register keeps one row: the vector memory no longer holds the whole table.
+    let table = layout.outside_table().expect("tabla fuera");
+    assert_eq!(table.mantissas.len(), 8 * table.cols as usize);
     std::fs::remove_dir_all(&dir).ok();
 }
 

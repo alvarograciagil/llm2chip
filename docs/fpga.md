@@ -15,7 +15,7 @@ Es exactamente el circuito de la prueba `the_chip_sized_for_an_fpga_says_the_sam
 | Recurso | Cantidad |
 |---|---|
 | Lógica | ≈ 468 000 equivalentes NAND2 |
-| Memoria | 2,7 Mbit: microcódigo 1,3; CPU 0,8; tablas de función 0,5; banco vectorial 0,07, con la tabla de registros que da a cada uno solo lo que usa (sin ella serían 2,1) |
+| Memoria | 1,95 Mbit: CPU 0,8; tablas de función 0,5; microcódigo 0,5 (con diccionario; 1,3 sin él); banco vectorial 0,07, con la tabla de registros que da a cada uno solo lo que usa (sin ella serían 2,1) |
 | Reloj | El camino crítico ronda 24 retardos de sumador completo: en una FPGA de gama baja, entre 20 y 50 MHz |
 
 ## Síntesis medida con Yosys
@@ -60,12 +60,12 @@ El asistente de proyecto («+» en la barra, «Una FPGA») tiene estas placas y 
 
 Por unos 50 $ más que la Tang Mega 138K Pro, la **KV260** tiene casi cuatro veces más memoria dentro del chip (23,1 Mbit frente a 6,1), cuatro veces más multiplicadores y 4 GB de DDR4 de 64 bits, varias veces más rápida que la DDR3 de las placas baratas.
 
-- **stories260K cabe entero dentro del chip** en todas las variantes medidas (8,8-12,4 Mbit), y sobra sitio para más carriles. En la Tang Mega no cabe dentro: sus pesos tendrían que ir a la DDR3.
+- **stories260K cabe entero dentro del chip** en todas las variantes medidas (5,4-9,0 Mbit), con sitio para más carriles y celdas. En la Tang Mega solo cabe la variante más pequeña, la de un carril.
 - La lógica básica del chip ocupa alrededor del 39 % de sus LUT.
 - Con los pesos en la DDR4 caben modelos de cientos de millones de parámetros, como stories110M o SmolLM2-135M, a la velocidad que dé la memoria.
 - Se programa con Vivado. Conviene confirmar antes de comprar que la edición gratuita de la versión que uses incluye el K26.
 
-Si el límite de 200 $ es estricto, la mejor opción es la **Tang Mega 138K Pro**: cabe la lógica con margen, pero stories260K necesita llevar los pesos a su DDR3, o bien aplicar los ahorros de memoria pendientes (tabla de funciones compartida y embedding en las celdas). La **Atum A3 Nano** tiene más memoria dentro del chip (8,3 Mbit), pero su memoria externa es una SDRAM de 64 MB, lenta.
+Si el límite de 200 $ es estricto, la mejor opción es la **Tang Mega 138K Pro**: cabe la lógica con margen y, con las optimizaciones de memoria, stories260K de un carril entra en su memoria interna (5,37 de 6,1 Mbit, a falta de cómo empaquete los bloques la herramienta de Gowin). La **Atum A3 Nano** tiene más memoria dentro del chip (8,3 Mbit), pero su memoria externa es una SDRAM de 64 MB, lenta.
 
 Fuentes: [Kria KV260](https://www.amd.com/en/products/system-on-modules/kria/k26/kv260-vision-starter-kit.html), [renovación de la KV260 en 2025](https://www.amd.com/en/blogs/2025/kria-kv260-vision-ai-starter-kit-refresh.html), [Tang Mega 138K Pro](https://en.wiki.sipeed.com/hardware/en/tang/tang-mega-138k/mega-138k-pro.html), [Tang Mega 138K Dock](https://www.cnx-software.com/2024/06/28/sipeed-tang-mega-138k-dock-is-a-lower-cost-gowin-gw5ast-fpga-risc-v-development-board/), [Atum A3 Nano](https://www.cnx-software.com/2025/05/30/atum-a3-nano-development-board-combines-agilex-3-fpga-and-usb-blaster-iii-programmer/), [PYNQ-Z2](https://www.dfrobot.com/product-1838.html), [Genesys 2](https://www.digikey.in/en/product-highlight/d/digilent/genesys-2-kintex-7-fpga-development-board), [ALINX AX7202](https://botland.store/fpga-boards-and-kits/29031-ax7202-fpga-development-board-amd-artix-7-xc7a200t-5904422389024.html).
 
@@ -77,16 +77,28 @@ El die gasta 11 103 ciclos por token generado con el modelo de juguete (medido e
 
 [stories260K](https://huggingface.co/karpathy/tinyllamas) es un Llama de 260 000 parámetros (5 capas, ancho 64, vocabulario de 512) que escribe cuentos cortos en inglés. `tools/convert/llama2c.py` convierte su `.bin` y su tokenizador a una carpeta de Hugging Face, en float32 o con `--affine 8` en el formato afín de MLX (8 bits, escala y sesgo por grupo), que es el que lleva el chip.
 
-`cargo run --release -p sim --example fpga -- chip.v --dsp --model ~/.llm2chip/models/stories260K-q8 --context 64 --cells C --lanes L` dimensiona el chip para ese modelo y cuenta los ciclos del microprograma en la última posición del contexto:
+`cargo run --release -p sim --example fpga -- chip.v --dsp --model ~/.llm2chip/models/stories260K-q8 --context 64 --cells C --lanes L --memories` dimensiona el chip para ese modelo, cuenta los ciclos del microprograma en la última posición del contexto y desglosa la memoria:
 
 | Celdas × carriles | Ciclos por token | tok/s a 25-50 MHz | Memoria |
 |---|---|---|---|
-| 8 × 1 | 211 500 | 120-240 | 8,8 Mbit |
-| 8 × 4 | 104 800 | 240-480 | 10,4 Mbit |
-| 16 × 4 | 87 500 | 290-570 | 10,4 Mbit |
-| 32 × 8 | 52 700 | 470-950 | 12,4 Mbit |
+| 8 × 1 | 211 500 | 120-240 | 5,37 Mbit |
+| 8 × 4 | 104 800 | 240-480 | 7,33 Mbit |
+| 16 × 4 | 87 500 | 290-570 | 7,33 Mbit |
+| 32 × 8 | 52 700 | 470-950 | 9,04 Mbit |
 
-Ninguna variante cabe en los 6,1 Mbit de la Tang Mega 138K; todas caben en una **XC7A200T** (13,1 Mbit de BRAM) y en la **Kria KV260** (23,1 Mbit). Ahorros pendientes para bajar de 6 Mbit: una sola tabla de funciones compartida entre carriles (0,5 Mbit por carril) y el embedding guardado en las celdas en vez de en registros (2 Mbit).
+La variante de 8 × 1 cabe en los 6,1 Mbit de la Tang Mega 138K; todas caben en una XC7A200T (13,1 Mbit) y en la Kria KV260 (23,1 Mbit). Con más carriles crece sobre todo la tabla de funciones, una por carril.
+
+### Optimizaciones de memoria
+
+Antes de ellas, la variante de 8 × 1 necesitaba unos 10,2 Mbit. Ninguna cambia un solo ciclo, y las pruebas en puertas comprueban que el chip escribe lo mismo, en los mismos ciclos, que el simulador de instrucciones.
+
+| Cambio | Ahorro en 8 × 1 |
+|---|---|
+| **El embedding se queda en la imagen.** La tabla no ocupa la memoria vectorial: antes de cada token, el firmware trae su fila con el mismo cargador del arranque y la deja en un registro de una fila. La memoria vectorial pasa de 2^16 a 2^15 palabras. | ~1 Mbit |
+| **Memoria ancha a medida.** Las sumas de las celdas solo necesitan tantas entradas como filas tiene una pasada o una suma, no tantas como un registro: 2^9 entradas en vez de 2^15. | 1,7 Mbit |
+| **Microcódigo con diccionario.** De 9 813 palabras solo 2 018 son distintas, porque cada capa repite casi el mismo código. Cada palabra distinta se guarda una vez y, por cada PC, un índice que dice dónde están la siguiente palabra y el destino de su salto, así que el diccionario se lee en el mismo ciclo que una memoria normal y no se pierde ninguno. | 2,1 Mbit |
+
+`--table-inside` y `--no-dictionary` desactivan la primera y la tercera para comparar.
 
 ## Pasos para la prueba
 

@@ -60,7 +60,11 @@ const INFO_ENTRIES: usize = 17;
 const INFO_THINK_OPEN: usize = 18;
 const INFO_THINK_CLOSE: usize = 19;
 const INFO_THINK_BUDGET: usize = 20;
-const INFO_PARAMETERS: usize = 21;
+const INFO_TABLE_SOURCE: usize = 21;
+const INFO_TABLE_ADDRESS: usize = 22;
+const INFO_TABLE_COLS: usize = 23;
+const INFO_PARAMETERS: usize = 24;
+const TARGET_VECTOR: u32 = 3;
 
 /// The tokenizer's tables, which the image builder leaves after the segment table.
 const TOKENIZER: *const u32 = 0x1000_8000 as *const u32;
@@ -209,8 +213,29 @@ fn chain_receive() -> u32 {
     peripheral_read(REG_CHAIN_DATA)
 }
 
+/// Brings the token's row of the lookup table that stays in the image, if there is one,
+/// into the register the die reads it from.
+fn load_row(token: u32) {
+    let cols = info(INFO_TABLE_COLS);
+    if cols == 0 {
+        return;
+    }
+    let fields = [info(INFO_TABLE_SOURCE).wrapping_add(token.wrapping_mul(cols)), TARGET_VECTOR, 0, info(INFO_TABLE_ADDRESS), cols, 1];
+    unsafe {
+        for (register, value) in fields.iter().enumerate() {
+            write_volatile(LOADER.add(register), *value);
+        }
+        write_volatile(LOADER.add(LOADER_START), 1);
+        while read_volatile(LOADER.add(LOADER_BUSY)) != 0 {}
+    }
+}
+
 /// Starts one routine of this chip's die, without waiting for it.
 fn start_die(routine: u32, token: u32, position: u32) {
+    // Only these routines read a token's row of the table.
+    if routine == ROUTINE_TOKEN || routine == ROUTINE_DRAFT {
+        load_row(token);
+    }
     for p in 0..info(INFO_PARAMETER_COUNT) as usize {
         let at = INFO_PARAMETERS + 7 * p;
         let window = info(at + 6);

@@ -1,12 +1,14 @@
 //! The whole chip, in Verilog, to synthesise for an FPGA: the RISC-V controller, the die
 //! with only the logic its microprogram uses, and the sampling unit.
 //!
-//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR] [--context N] [--cells N] [--lanes N]`
+//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR] [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary]`
 //!
 //! With `--dsp`, each one-cycle multiplier is written as a signed product so the FPGA
 //! tools put it in their multiplier blocks. Without `--model`, the chip is the one
 //! `the_chip_sized_for_an_fpga_says_the_same_in_gates` runs for the test model; with it,
-//! a chip of the same shape sized for that model's weights and `--context` tokens.
+//! a chip of the same shape sized for that model's weights and `--context` tokens. The
+//! embedding table stays in the image, and the firmware brings each token's row; with
+//! `--table-inside` it goes into the vector memory instead.
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -21,6 +23,27 @@ use sim::lower::Layout;
 use sim::Weights;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// Each memory of the design by its instance name: how many there are, their words and width.
+fn memory_list(design: &Design) -> Vec<(String, u64, u32, u32)> {
+    fn walk(design: &Design, module: &str, times: u64, out: &mut HashMap<(String, u32, u32), u64>) {
+        for inst in &design.modules[module].instances {
+            match &inst.kind {
+                InstKind::Module(child) => walk(design, child, times, out),
+                InstKind::Prim(Prim::Sram { addr_bits, width }) | InstKind::Prim(Prim::Ram2p { addr_bits, width }) | InstKind::Prim(Prim::Rom { addr_bits, width }) => {
+                    let name = inst.name.trim_end_matches(|c: char| c.is_ascii_digit()).to_string();
+                    *out.entry((name, *addr_bits, *width)).or_default() += times;
+                }
+                InstKind::Prim(_) => {}
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    walk(design, &design.top, 1, &mut out);
+    let mut list: Vec<_> = out.into_iter().map(|((name, addr, width), count)| (name, count, addr, width)).collect();
+    list.sort_by_key(|(_, count, addr, width)| std::cmp::Reverse(count * (1u64 << addr) * *width as u64));
+    list
+}
 
 /// Bits of every memory in the design, by kind, counting each instance of each module.
 fn memory_bits(design: &Design) -> HashMap<&'static str, u64> {
@@ -80,14 +103,20 @@ fn main() {
             (compile_qwen3_5(CONFIG).unwrap(), Weights::open(&test_dir).unwrap(), fpga_die_config(), 8)
         }
     };
-    let layout = Layout::with_cells(&program, &weights, trial, context).unwrap();
+    let mut layout = Layout::with_cells(&program, &weights, trial, context).unwrap();
+    if !args.iter().any(|a| a == "--table-inside") && layout.table_outside(&program) {
+        eprintln!("la tabla de embedding se queda en la imagen");
+    }
     let code = layout.microprogram(&program).unwrap();
     eprintln!("registros más largos: {:?}", layout.longest_registers(6));
     let (depth, groups) = layout.cell_depths();
     eprintln!("{} registros, {} palabras de pesos y {} grupos de factores por celda", layout.registers_used(), depth, groups);
     // Only what this microprogram uses.
     let features = DieFeatures::of(&code).with_lane_bits(trial.features.lane_bits).with_cluster_bits(trial.features.cluster_bits).with_key_shift(trial.features.key_shift);
-    let die = sim::chip::compact_die(DieConfig { features, ..trial }, &layout);
+    let die = sim::chip::compact_die(DieConfig { features, microcode_bits: bits_for(code.words.len() as u64), ..trial }, &layout);
+    let die = if args.iter().any(|a| a == "--no-dictionary") { die } else { sim::chip::with_code_dictionary(die, &code) };
+    let distinct: std::collections::HashSet<_> = code.words.iter().map(|w| format!("{w:?}")).collect();
+    eprintln!("microprograma: {} palabras, {} distintas", code.words.len(), distinct.len());
     eprintln!("memoria vectorial compacta de 2^{} palabras, frente a 2^{} sin tabla", die.features.vector_bits, die.reg_bits + die.index_bits);
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: bits_for(program.vocab as u64).max(4), entries: 4, lanes: 1 } };
     let design = chip_design(config);
@@ -96,6 +125,11 @@ fn main() {
     memories.sort();
     let total: u64 = memories.iter().map(|(_, bits)| bits).sum();
     eprintln!("memoria: {:.2} Mbit ({})", total as f64 / 1e6, memories.iter().map(|(kind, bits)| format!("{kind} {:.2}", *bits as f64 / 1e6)).collect::<Vec<_>>().join(", "));
+    if args.iter().any(|a| a == "--memories") {
+        for (name, count, addr, width) in memory_list(&design) {
+            eprintln!("  {count} × {name}: 2^{addr} × {width} bits = {:.3} Mbit", (count * (1u64 << addr) * width as u64) as f64 / 1e6);
+        }
+    }
     // The die's cycles for one generated token at the last position, with its logits.
     let last = context as u32 - 1;
     let token = code.cycles(&die, sim::lower::ENTRY_TOKEN, 1, last) + code.cycles(&die, sim::lower::ENTRY_LOGITS, 1, last);

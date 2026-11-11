@@ -287,6 +287,13 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
         let load_vec = load_to(&mut l, crate::image::Target::Vector);
         let load_fn = load_to(&mut l, crate::image::Target::Function);
         let table_write = load_to(&mut l, crate::image::Target::SamplerTable);
+        // A microcode kept as a dictionary has its index memory, and each entry its number.
+        let dictionary = c.die.features.dictionary_bits as usize;
+        if dictionary > 0 {
+            let load_index = load_to(&mut l, crate::image::Target::MicrocodeIndex);
+            let shift = crate::die::ENTRY_INDEX_SHIFT as usize;
+            die_pins.extend([("load_index", vec![load_index]), ("entry_index", bus_wdata[shift..shift + dictionary].to_vec())]);
+        }
         // Where each register starts in a compact vector memory, one entry a register.
         if c.die.features.vector_bits > 0 {
             let load_base = load_to(&mut l, crate::image::Target::RegisterBase);
@@ -523,7 +530,9 @@ impl<E: DieEngine> Peripheral for ChipModel<E> {
         match register {
             0..=31 => self.parameters[register as usize] = value,
             REG_ENTRY => {
-                let routine = self.code.entries.iter().position(|e| *e == value).expect("rutina desconocida");
+                // Above the PC may come the entry's number in a microcode dictionary.
+                let pc = value & ((1 << crate::die::ENTRY_INDEX_SHIFT) - 1);
+                let routine = self.code.entries.iter().position(|e| *e == value || *e == pc).expect("rutina desconocida");
                 let (token, position) = self.token_and_position();
                 self.engine.run(routine, token, position);
                 let cycles = self.engine.cycles(routine, token, position);
@@ -581,7 +590,13 @@ pub const INFO_ENTRIES: usize = 17;
 pub const INFO_THINK_OPEN: usize = 18;
 pub const INFO_THINK_CLOSE: usize = 19;
 pub const INFO_THINK_BUDGET: usize = 20;
-pub const INFO_PARAMETERS: usize = 21;
+/// A lookup table the firmware brings in from the image one row at a time, before each
+/// routine that reads a token's row: where it is in the image, the register its row goes
+/// to, and how many elements a row has. With no such table the count is zero.
+pub const INFO_TABLE_SOURCE: usize = 21;
+pub const INFO_TABLE_ADDRESS: usize = 22;
+pub const INFO_TABLE_COLS: usize = 23;
+pub const INFO_PARAMETERS: usize = 24;
 pub const REG_DRAFT_RESULT: u32 = 48;
 pub const INFO_PARAMETER_SLOTS: usize = 16;
 
@@ -638,6 +653,12 @@ pub fn chip_info(c: &DieConfig, code: &Microprogram, logits_register: u32, vocab
     info[INFO_DRAFT_DEPTH] = setup.draft_depth;
     info[INFO_DRAFT_LOGITS] = setup.draft_logits;
     info[INFO_ENTRIES] = info.len() as u32;
-    info.extend_from_slice(&code.entries);
+    if c.features.dictionary_bits > 0 {
+        assert!(c.microcode_bits <= crate::die::ENTRY_INDEX_SHIFT, "con diccionario, el microcódigo no puede pasar de 2^16 palabras");
+        let (_, index) = crate::die::code_dictionary(code, c);
+        info.extend(code.entries.iter().map(|pc| pc | index.get(*pc as usize).copied().unwrap_or(0) << crate::die::ENTRY_INDEX_SHIFT));
+    } else {
+        info.extend_from_slice(&code.entries);
+    }
     info
 }

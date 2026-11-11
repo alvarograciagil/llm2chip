@@ -54,8 +54,9 @@ export const FPGA_BOARDS: FpgaBoard[] = [
 
 /** The smallest chip the generator makes, measured with Yosys: CPU, die and sampler. */
 export const BASE_LOGIC_K = { LUT4: 48.3, LUT6: 45.9, LE: 48.3 };
-/** Microcode, CPU memory and function tables of that chip, which any model adds to. */
-export const BASE_MEMORY_MBIT = 2.7;
+/** Microcode, CPU memory and function tables of that chip, which any model adds to, with
+ * its microcode kept as a dictionary and the embedding left in the image. */
+export const BASE_MEMORY_MBIT = 1.95;
 
 /** The makers, in the order the menu shows them. */
 export const FPGA_MAKERS: string[] = [...new Set([...FPGA_BOARDS].sort((a, b) => a.maker.localeCompare(b.maker)).map((b) => b.maker))];

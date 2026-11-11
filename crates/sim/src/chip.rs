@@ -233,18 +233,44 @@ pub fn register_table(config: &DieConfig, layout: &Layout) -> Vec<u32> {
     bases.iter().map(|(base, shift)| base | shift << bits).collect()
 }
 
+/// The same die with its microcode kept as a dictionary of distinct words when that takes
+/// less memory than the words one after another.
+pub fn with_code_dictionary(config: DieConfig, code: &Microprogram) -> DieConfig {
+    let (words, _) = netlist::die::code_dictionary(code, &config);
+    let bits = u32::BITS - (words.len().max(2) as u32 - 1).leading_zeros();
+    let width = word_bits(&config) as u64;
+    let plain = (1u64 << config.microcode_bits) * width;
+    let kept = (1u64 << bits) * width + (1u64 << config.microcode_bits) * 2 * bits as u64;
+    if config.microcode_bits > netlist::die::ENTRY_INDEX_SHIFT || kept >= plain {
+        return config;
+    }
+    DieConfig { features: config.features.with_dictionary_bits(bits), ..config }
+}
+
 /// The same die with memories just as large as the layout needs: the vector memory its
-/// routines reach, and as many scales and biases in each cell as it has groups.
+/// routines reach, as many scales and biases in each cell as it has groups, and the wide
+/// memory as many rows as its sums reach.
 pub fn compact_die(config: DieConfig, layout: &Layout) -> DieConfig {
     let groups = layout.cell_depths().1.max(2);
     let factor_bits = u64::BITS - (groups - 1).leading_zeros();
-    DieConfig { features: config.features.with_vector_bits(layout.register_bases().1).with_factor_bits(factor_bits), ..config }
+    // The cells drain a whole pass at a time, so the wide memory holds whole passes.
+    let wide = layout.wide_reach().next_multiple_of(config.cells.max(1 << config.features.lane_bits)).max(2);
+    let wide_bits = u32::BITS - (wide - 1).leading_zeros();
+    DieConfig { features: config.features.with_vector_bits(layout.register_bases().1).with_factor_bits(factor_bits).with_wide_bits(wide_bits), ..config }
 }
 
 pub fn image_segments(config: &DieConfig, code: &Microprogram, layout: &Layout) -> Vec<Segment> {
     let mask = |value: i64| value as u32 & ((1u64 << config.cell.activation_bits) - 1) as u32;
     let beats = word_bits(config).div_ceil(32);
-    let mut segments = vec![Segment { target: Target::Microcode, unit: 0, address: 0, beats, words: code.words.iter().flat_map(|w| w.encode_words(config)).collect() }];
+    let dictionary = config.features.dictionary_bits;
+    let mut segments = if dictionary > 0 {
+        // Each distinct word once, then for each PC where its successors are among them.
+        let (words, index) = netlist::die::code_dictionary(code, config);
+        let links = netlist::die::dictionary_links(code, &index, dictionary);
+        vec![Segment { target: Target::Microcode, unit: 0, address: 0, beats, words: words.concat() }, Segment { target: Target::MicrocodeIndex, unit: 0, address: 0, beats: 1, words: links }]
+    } else {
+        vec![Segment { target: Target::Microcode, unit: 0, address: 0, beats, words: code.words.iter().flat_map(|w| w.encode_words(config)).collect() }]
+    };
     // A compact vector memory needs every register's place before anything goes into it.
     if config.features.vector_bits > 0 {
         segments.push(Segment { target: Target::RegisterBase, unit: 0, address: 0, beats: 1, words: register_table(config, layout) });
@@ -265,6 +291,9 @@ pub fn image_segments(config: &DieConfig, code: &Microprogram, layout: &Layout) 
     }
     segments.extend(run);
     segments.push(Segment { target: Target::Function, unit: 0, address: 0, beats: 1, words: tables(config).iter().map(|v| mask(*v)).collect() });
+    if let Some(table) = layout.outside_table() {
+        segments.push(Segment { target: Target::RuntimeTable, unit: table.cols, address: table.register << config.index_bits, beats: 1, words: table.mantissas.iter().map(|v| mask(*v)).collect() });
+    }
     segments.push(Segment { target: Target::SamplerTable, unit: 0, address: 0, beats: 1, words: exponential_table() });
     segments
 }

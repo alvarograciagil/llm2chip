@@ -57,11 +57,17 @@ pub struct DieFeatures {
     /// log2 of the groups whose scale and bias each cell keeps, when fewer than its
     /// weights; zero sizes those memories like the weights'.
     pub factor_bits: u32,
+    /// log2 of the elements the wide memory holds: the most rows of a pass of the cells
+    /// or of a sum, which is far less than a register. Zero sizes it like the registers.
+    pub wide_bits: u32,
+    /// log2 of the distinct words of a microcode kept once each: the program is then a
+    /// list of numbers into that dictionary. Zero keeps every word as it comes.
+    pub dictionary_bits: u32,
 }
 
 impl Default for DieFeatures {
     fn default() -> Self {
-        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0 }
+        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0 }
     }
 }
 
@@ -91,6 +97,16 @@ impl DieFeatures {
     /// The same die with room for `1 << bits` groups of scale and bias in each cell.
     pub fn with_factor_bits(mut self, bits: u32) -> Self {
         self.factor_bits = bits;
+        self
+    }
+
+    pub fn with_wide_bits(mut self, bits: u32) -> Self {
+        self.wide_bits = bits;
+        self
+    }
+
+    pub fn with_dictionary_bits(mut self, bits: u32) -> Self {
+        self.dictionary_bits = bits;
         self
     }
 
@@ -153,7 +169,7 @@ impl DieFeatures {
     /// Exactly what this microprogram needs.
     pub fn of(code: &Microprogram) -> Self {
         // Additions are also how the comparator and the sequencer's own results are made.
-        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0 };
+        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0 };
         let mut highest_x = 0;
         for word in &code.words {
             features.ops |= 1 << word.op;
@@ -179,7 +195,7 @@ impl DieFeatures {
     pub fn union(self, other: Self) -> Self {
         let mut widths = self.widths;
         widths.iter_mut().zip(other.widths).for_each(|(a, b)| *a = (*a).max(b));
-        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link, vector_bits: self.vector_bits.max(other.vector_bits), factor_bits: self.factor_bits.max(other.factor_bits) }
+        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link, vector_bits: self.vector_bits.max(other.vector_bits), factor_bits: self.factor_bits.max(other.factor_bits), wide_bits: self.wide_bits.max(other.wide_bits), dictionary_bits: self.dictionary_bits.max(other.dictionary_bits) }
     }
 
     fn uses(&self, op: u32) -> bool {
@@ -1127,10 +1143,30 @@ impl Gen {
         let pc = b.wire("pc", c.microcode_bits);
         let pc_next = b.wire("pc_next", c.microcode_bits);
         let code = b.wire("code", word);
+        // With a dictionary, the memory at the PC holds where the next word and the branch
+        // target are in it, so the dictionary is read on the same cycle as a plain memory.
+        let dictionary = c.features.dictionary_bits;
+        let (code_read, code_bits, code_write) = if dictionary > 0 {
+            (b.wire("dictionary_next", dictionary), dictionary, code_addr[..dictionary as usize].to_vec())
+        } else {
+            (pc_next.clone(), c.microcode_bits, code_addr.clone())
+        };
         // Words wider than one memory macro are split across several side by side.
         for (part, (stored, written)) in code.chunks(64).zip(code_data.chunks(64)).enumerate() {
-            b.ram2p(&format!("microcode_{part}"), c.microcode_bits, stored.len() as u32, &[("raddr", pc_next.clone()), ("waddr", code_addr.clone()), ("we", vec![load_code]), ("wdata", written.to_vec()), ("rdata", stored.to_vec())]);
+            b.ram2p(&format!("microcode_{part}"), code_bits, stored.len() as u32, &[("raddr", code_read.clone()), ("waddr", code_write.clone()), ("we", vec![load_code]), ("wdata", written.to_vec()), ("rdata", stored.to_vec())]);
         }
+        let dictionary_ports = (dictionary > 0).then(|| {
+            let load_index = b.input("load_index", 1)[0];
+            let entry_index = b.input("entry_index", dictionary);
+            let following = b.wire("index_next", dictionary);
+            let jump = b.wire("index_target", dictionary);
+            let read: Vec<Bit> = following.iter().chain(&jump).copied().collect();
+            b.ram2p("microcode_index", c.microcode_bits, 2 * dictionary, &[("raddr", pc_next.clone()), ("waddr", code_addr.clone()), ("we", vec![load_index]), ("wdata", code_data[..2 * dictionary as usize].to_vec()), ("rdata", read)]);
+            let current = b.wire("index_current", dictionary);
+            let held = self.register(dictionary);
+            b.inst("index_reg", &held, &[("d", code_read.clone()), ("q", current.clone())]);
+            (entry_index, following, jump, current)
+        });
 
         let mut fields: BTreeMap<&str, Vec<Bit>> = BTreeMap::new();
         let mut offset = 0usize;
@@ -1473,6 +1509,15 @@ impl Gen {
                 if cluster == 0 {
                     for (from, to) in chosen.iter().zip(&pc_next) {
                         l.b.or_to(*from, Bit::Zero, *to);
+                    }
+                    // The dictionary follows the PC: the same word, the next, the target or an entry.
+                    if let Some((entry_index, following, jump, current)) = &dictionary_ports {
+                        let moved = l.mux_bus(word_done, current, following);
+                        let jumped = l.mux_bus(taken, &moved, jump);
+                        let picked = l.mux_bus(start, &jumped, entry_index);
+                        for (from, to) in picked.iter().zip(&code_read) {
+                            l.b.or_to(*from, Bit::Zero, *to);
+                        }
                     }
                 }
             }
@@ -1955,7 +2000,9 @@ impl Gen {
                     };
                     let name = if lanes == 1 { "wide_memory".to_string() } else { format!("wide_memory{lane}") };
                     let read = l.b.wire(&format!("{name}_data"), wide_bits);
-                    l.b.ram2p(&name, c.index_bits - lane_bits as u32, wide_bits, &[("raddr", wide_raddr[lane_bits..].to_vec()), ("waddr", index_w[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data), ("rdata", read.clone())]);
+                    // Only as many rows as a pass or a sum reaches: the higher index bits stay unused.
+                    let top = if c.features.wide_bits > 0 { c.features.wide_bits.clamp(lane_bits as u32 + 1, c.index_bits) as usize } else { c.index_bits as usize };
+                    l.b.ram2p(&name, (top - lane_bits) as u32, wide_bits, &[("raddr", wide_raddr[lane_bits..top].to_vec()), ("waddr", index_w[lane_bits..top].to_vec()), ("we", vec![write]), ("wdata", data), ("rdata", read.clone())]);
                     for (from, to) in read.iter().zip(&unit_wide[cluster][lane]) {
                         l.b.or_to(*from, Bit::Zero, *to);
                     }
@@ -2691,6 +2738,36 @@ impl Parameter {
         self.token.wrapping_mul(token).wrapping_add(self.position.wrapping_mul(position)).wrapping_add(self.constant).wrapping_add(windowed)
     }
 }
+
+/// The distinct words of a microprogram, each encoded once in the order they first appear,
+/// and each PC's word as a number into them.
+pub fn code_dictionary(code: &Microprogram, c: &DieConfig) -> (Vec<Vec<u32>>, Vec<u32>) {
+    let mut words: Vec<Vec<u32>> = Vec::new();
+    let mut seen: HashMap<Vec<u32>, u32> = HashMap::new();
+    let index = code
+        .words
+        .iter()
+        .map(|w| {
+            let encoded = w.encode_words(c);
+            *seen.entry(encoded.clone()).or_insert_with(|| {
+                words.push(encoded);
+                words.len() as u32 - 1
+            })
+        })
+        .collect();
+    (words, index)
+}
+
+/// For each PC, where the following word and the word its branch goes to are in the
+/// dictionary, packed as the index memory keeps them: following low, target high.
+pub fn dictionary_links(code: &Microprogram, index: &[u32], bits: u32) -> Vec<u32> {
+    let at = |pc: usize| index.get(pc).copied().unwrap_or(0);
+    code.words.iter().enumerate().map(|(pc, w)| at(pc + 1) | if w.branch { at(w.target as usize) << bits } else { 0 }).collect()
+}
+
+/// Where the dictionary number of each entry goes in the word the firmware writes to start
+/// a routine, above the PC.
+pub const ENTRY_INDEX_SHIFT: u32 = 16;
 
 /// Microcode loaded once, with the entry points and parameters that drive it.
 #[derive(Clone, Debug, Serialize)]
