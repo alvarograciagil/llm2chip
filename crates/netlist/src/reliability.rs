@@ -93,8 +93,9 @@ pub fn decode(data: u128, stored: u32, data_bits: u32) -> Decoded {
     }
 }
 
+/// As a tree: a chain of XORs over a whole word would be the longest path of the cell.
 fn parity_of(l: &mut Logic, bits: &[Bit]) -> Bit {
-    bits.iter().copied().reduce(|a, b| l.xor(a, b)).unwrap_or(Bit::Zero)
+    l.parity(bits)
 }
 
 /// The Hamming check bits of `data`, as gates.
@@ -218,7 +219,9 @@ impl Gen {
                 let differs = l.xor(*a, *c);
                 l.not(differs)
             }).collect();
-            let in_lane = same_lane.iter().fold(l.and(marked, odd), |all, bit| l.and(all, *bit));
+            let mut lane_terms = same_lane.clone();
+            lane_terms.extend([marked, odd]);
+            let in_lane = l.all(&lane_terms);
             let leaves: Vec<Vec<Bit>> = data.chunks(weight_bits as usize).map(|lane| lane.to_vec()).collect();
             let raw = l.select(&lane_now, &leaves);
             for (bit, value) in raw.iter().enumerate() {
@@ -228,21 +231,36 @@ impl Gen {
                 l.b.or_to(out, Bit::Zero, weight[bit]);
             }
             // A lone set bit is an error in the check bits themselves, which harms nothing.
-            let (mut one, mut two) = (Bit::Zero, Bit::Zero);
-            for bit in &syndrome {
-                let both = l.and(one, *bit);
-                two = l.or(two, both);
-                one = l.or(one, *bit);
+            // Whether at least one and at least two syndrome bits are set, joined pairwise
+            // in a tree: (a₁, b₁) with (a₂, b₂) is (a₁ ∨ a₂, b₁ ∨ b₂ ∨ (a₁ ∧ a₂)).
+            let mut level: Vec<(Bit, Bit)> = syndrome.iter().map(|bit| (*bit, Bit::Zero)).collect();
+            while level.len() > 1 {
+                level = level
+                    .chunks(2)
+                    .map(|pair| match pair {
+                        [(a1, b1), (a2, b2)] => {
+                            let one = l.or(*a1, *a2);
+                            let both = l.and(*a1, *a2);
+                            let more = l.or(*b1, *b2);
+                            (one, l.or(more, both))
+                        }
+                        [single] => *single,
+                        _ => unreachable!(),
+                    })
+                    .collect();
             }
+            let (one, two) = level.first().copied().unwrap_or((Bit::Zero, Bit::Zero));
             let single_check = {
                 let not_two = l.not(two);
                 l.and(one, not_two)
             };
-            let in_range = (weight_bits..1 << bit_bits).fold(Bit::One, |all, unused| {
-                let bad = l.equals(&syndrome[..bit_bits as usize], unused);
-                let fine = l.not(bad);
-                l.and(all, fine)
-            });
+            let fine: Vec<Bit> = (weight_bits..1 << bit_bits)
+                .map(|unused| {
+                    let bad = l.equals(&syndrome[..bit_bits as usize], unused);
+                    l.not(bad)
+                })
+                .collect();
+            let in_range = l.all(&fine);
             let column = l.and(marked, in_range);
             let known = l.or(column, single_check);
             let even = l.not(odd);

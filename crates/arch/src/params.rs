@@ -60,10 +60,14 @@ pub enum ChipSplit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkKind {
-    /// UCIe inside each package and SerDes between packages, as the area requires.
+    /// UCIe inside each package and SerDes between packages, as the area requires; on an
+    /// open shuttle, the pins.
     Auto,
     Ucie,
     Serdes,
+    /// Plain I/O pins on a board: what chips from an open shuttle, each in its own package,
+    /// have to talk to each other.
+    Pins,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

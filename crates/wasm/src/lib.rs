@@ -90,6 +90,17 @@ pub fn advise_design(name: &str, config: &str, params: &str, search: bool) -> Re
     to_js(&arch::feasibility::advise(&model, &params, search).map_err(|e| JsError::new(&e))?)
 }
 
+/// The parameters that change when the design is sized for this model: see
+/// `arch::feasibility::fit_to_model`.
+#[wasm_bindgen]
+pub fn fit_design(name: &str, config: &str, params: &str) -> Result<String, JsError> {
+    let model = ModelGraph::from_config_json(name, config).map_err(|e| JsError::new(&e.0))?;
+    let params: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&format!("parámetros inválidos: {e}")))?;
+    let fitted = serde_json::to_value(arch::feasibility::fit_to_model(&model, &params).map_err(|e| JsError::new(&e))?)?;
+    let patch: serde_json::Map<String, serde_json::Value> = arch::feasibility::FIT_FIELDS.iter().map(|&f| (f.to_string(), fitted[f].clone())).collect();
+    to_js(&patch)
+}
+
 fn cell_config(config: &str, params: &str) -> Result<CellConfig, JsError> {
     let model = ModelGraph::from_config_json("modelo", config).map_err(|e| JsError::new(&e.0))?;
     let p: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&e.to_string()))?;

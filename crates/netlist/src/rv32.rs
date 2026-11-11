@@ -85,6 +85,11 @@ impl Logic<'_> {
         self.tree(bits, Bit::Zero, Self::or)
     }
 
+    /// The parity of `bits`, as a balanced tree of XORs.
+    pub fn parity(&mut self, bits: &[Bit]) -> Bit {
+        self.tree(bits, Bit::Zero, Self::xor)
+    }
+
     fn tree(&mut self, bits: &[Bit], empty: Bit, join: fn(&mut Self, Bit, Bit) -> Bit) -> Bit {
         let mut level = bits.to_vec();
         if level.is_empty() {

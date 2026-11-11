@@ -4,6 +4,7 @@ import init, {
   builtin_models,
   default_params,
   estimate_design,
+  fit_design,
   fpga_boards,
   optimization_catalog,
   presets,
@@ -254,6 +255,11 @@ export function scheduleDesign(model: ModelSource, params: ChipParams): Schedule
 
 export function sweepDesign(model: ModelSource, params: ChipParams, variants: Record<string, unknown>[]): SweepResult[] {
   return JSON.parse(sweep_design(model.name, model.config, JSON.stringify(params), JSON.stringify(variants)));
+}
+
+/** The parameters that change when the design is sized for this model. */
+export function fitDesign(model: ModelSource, params: ChipParams): Partial<ChipParams> {
+  return JSON.parse(fit_design(model.name, model.config, JSON.stringify(params)));
 }
 
 export function estimateDesign(model: ModelSource, params: ChipParams): Report {

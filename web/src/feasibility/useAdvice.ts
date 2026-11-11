@@ -10,7 +10,10 @@ export interface Change {
 
 export interface Suggestion {
   changes: Change[];
+  /** The design already works; this makes it cheaper to make. */
+  cheaper: boolean;
   dies: number;
+  designs: number;
   die_area_mm2: number;
   tok_s: number;
   layout: boolean;
@@ -22,6 +25,7 @@ export interface Feasibility {
   reasons: string[];
   notes: string[];
   dies: number;
+  designs: number;
   die_area_mm2: number;
   die_limit_mm2: number;
   largest: [string, number][];

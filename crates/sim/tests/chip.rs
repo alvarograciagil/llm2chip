@@ -11,8 +11,7 @@ use netlist::Simulator;
 use sim::chip::{cell_segments, image_segments, VmEngine};
 use sim::lower::Layout;
 use sim::Weights;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
 mod common;
 use common::*;
@@ -20,14 +19,7 @@ use common::*;
 const CHIP_TOKENS: usize = 8;
 
 fn build_firmware() -> Option<FirmwareImage> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../firmware");
-    let built = Command::new("cargo").current_dir(&dir).env_remove("RUSTFLAGS").env_remove("CARGO_ENCODED_RUSTFLAGS").args(["build", "--release"]).output().ok()?;
-    if !built.status.success() {
-        eprintln!("firmware omitido: {}", String::from_utf8_lossy(&built.stderr));
-        return None;
-    }
-    let elf = std::fs::read(dir.join("target/riscv32im-unknown-none-elf/release/firmware")).ok()?;
-    Some(FirmwareImage::from_elf(&elf).unwrap())
+    common::firmware()
 }
 
 fn run_gates(design: &netlist::Design, image: &[u32], input: &[u8], limit: u64) -> (Vec<u8>, u64, Simulator) {

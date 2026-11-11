@@ -4,9 +4,9 @@ use crate::params::{ChipParams, CircuitGoal, DieMode, KvBackend, LinkKind, Weigh
 use crate::tech::{node, TechNode};
 use netlist::format::{switching_per_mac, WeightCoding};
 use netlist::multiplier::MultiplierKind;
-use netlist::{cell_design, shared_unit_design, CellConfig, Design, Simulator, MAX_MULTIPLES_BITS};
+use netlist::{cell_design, shared_unit_design, CellConfig, Simulator, MAX_MULTIPLES_BITS};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use model_ir::{Block, ModelGraph, StageKind, WeightTensor};
 use serde::Serialize;
@@ -253,9 +253,63 @@ fn stage_totals(model: &ModelGraph, p: &ChipParams) -> StageTotals {
     t
 }
 
+/// The cell whose gates set the clock: the real one, with its memory as shallow as can be
+/// while it keeps the same error correction on its read path. The path does not grow with
+/// the depth past that, so cells of any size share one timing.
+pub fn timed_cell(p: &ChipParams, weight_bits: u32, cell_bits: f64) -> CellConfig {
+    let addr_bits = (cell_bits / weight_bits.max(1) as f64).max(2.0).log2().ceil() as u32;
+    let real = CellConfig { weight_bits, ..p.cell_config(addr_bits) };
+    let shallow = if real.has_ecc() { real.ecc_lanes().ilog2() + 1 } else { 1 };
+    CellConfig { addr_bits: shallow, ..real }
+}
+
 /// Logic area of one cell, from the gates its generated netlist actually contains.
 fn netlist_cell_um2(tech: &TechNode, p: &ChipParams, widest: u32, addr_bits: u32) -> f64 {
     cell_logic_um2(tech, CellConfig { weight_bits: widest, ..p.cell_config(addr_bits) })
+}
+
+/// Gate counts of a cell, and of the unit it shares with the die.
+type CellGates = Rc<(BTreeMap<String, u64>, BTreeMap<String, u64>)>;
+
+thread_local! {
+    /// Gate counts and critical paths of generated cells: building their netlists is the
+    /// slow part of an estimate, and the same cells come back on every change of a slider.
+    static CELL_GATES: RefCell<HashMap<String, CellGates>> = RefCell::new(HashMap::new());
+    static CELL_PATHS: RefCell<HashMap<String, Option<f64>>> = RefCell::new(HashMap::new());
+    static CELL_SWITCHING: RefCell<HashMap<String, f64>> = RefCell::new(HashMap::new());
+}
+
+/// Gates that toggle per multiplication, simulated on the cell with random data.
+fn cell_switching(config: CellConfig, zeros: f64) -> f64 {
+    let key = format!("{config:?}{zeros}");
+    if let Some(found) = CELL_SWITCHING.with(|c| c.borrow().get(&key).copied()) {
+        return found;
+    }
+    let switching = switching_per_mac(config, zeros);
+    CELL_SWITCHING.with(|c| c.borrow_mut().insert(key, switching));
+    switching
+}
+
+/// The gates of a cell and of the unit it shares with the die, if any.
+fn cell_gates(config: CellConfig) -> CellGates {
+    let key = format!("{config:?}");
+    if let Some(found) = CELL_GATES.with(|c| c.borrow().get(&key).cloned()) {
+        return found;
+    }
+    let gates = Rc::new((cell_design(config).flat_counts(), shared_unit_design(config).map(|unit| unit.flat_counts()).unwrap_or_default()));
+    CELL_GATES.with(|c| c.borrow_mut().insert(key, gates.clone()));
+    gates
+}
+
+/// The critical path of a cell in full-adder delays, or None if its netlist does not simulate.
+fn cell_path(config: CellConfig) -> Option<f64> {
+    let key = format!("{config:?}");
+    if let Some(found) = CELL_PATHS.with(|c| c.borrow().get(&key).copied()) {
+        return found;
+    }
+    let path = Simulator::new(&cell_design(config)).ok().map(|sim| sim.critical_path(GATE_DELAYS));
+    CELL_PATHS.with(|c| c.borrow_mut().insert(key, path));
+    path
 }
 
 /// The logic of a cell, without its weight memory, after synthesis.
@@ -267,9 +321,8 @@ fn cell_logic_um2(tech: &TechNode, config: CellConfig) -> f64 {
         MultiplierKind::Booth => 0.75,
         MultiplierKind::Multiples => MULTIPLES_SYNTHESIS,
     };
-    let area_of = |design: &Design| -> f64 {
-        design
-            .flat_counts()
+    let area_of = |counts: &BTreeMap<String, u64>| -> f64 {
+        counts
             .iter()
             .map(|(gate, count)| {
                 *count as f64
@@ -285,10 +338,17 @@ fn cell_logic_um2(tech: &TechNode, config: CellConfig) -> f64 {
             })
             .sum()
     };
+    // Floats keep more after synthesis than the integer multipliers that factor came from:
+    // their 8-bit cell measured 0.79 of the others' ratio on all three open processes
+    // (tests/golden/asic.json).
+    let format = if config.coding == WeightCoding::Float { FLOAT_SYNTHESIS } else { 1.0 };
     // The unit of shared multiples is paid once per die, not once per cell.
-    let shared = shared_unit_design(config).map_or(0.0, |unit| area_of(&unit));
-    optimized * (area_of(&cell_design(config)) - shared)
+    let gates = cell_gates(config);
+    optimized * format * (area_of(&gates.0) - area_of(&gates.1))
 }
+
+/// How much more of a float cell survives synthesis than of an integer one.
+const FLOAT_SYNTHESIS: f64 = 1.26;
 
 /// How much of a cell's synthesis shrinks when it uses precomputed multiples.
 const MULTIPLES_SYNTHESIS: f64 = 0.75;
@@ -323,7 +383,7 @@ pub fn laid_out_cell(tech: &TechNode, config: CellConfig) -> (f64, f64) {
 pub fn cell_key(config: &CellConfig) -> String {
     let name = |v: serde_json::Value| v.as_str().unwrap_or("").to_string();
     let c = config;
-    let memory = if c.fixed_weights { "-rom" } else if c.ecc { "-ecc" } else { "" };
+    let memory = if c.fixed_weights { "-rom" } else if c.has_ecc() { "-ecc" } else { "" };
     format!(
         "{}{}-{}x{}-acc{}-{}-{}+{}{memory}{}",
         name(serde_json::json!(c.coding)),
@@ -345,7 +405,7 @@ fn measured(p: &ChipParams, config: &CellConfig) -> Option<(f64, f64)> {
 }
 
 fn weight_multiplier(tech: &TechNode, p: &ChipParams, widest: u32, cell_bits: f64) -> Multiplier {
-    let switching = switching_per_mac(CellConfig { weight_bits: widest, ..p.cell_config(5) }, zero_fraction(widest));
+    let switching = cell_switching(CellConfig { weight_bits: widest, ..p.cell_config(5) }, zero_fraction(widest));
     let addr_bits = (cell_bits / widest as f64).max(2.0).log2().ceil() as u32;
     // A cell laid out with OpenROAD counts what it measured instead.
     let cell_logic = measured(p, &CellConfig { weight_bits: widest, ..p.cell_config(addr_bits) }).map_or_else(|| netlist_cell_um2(tech, p, widest, addr_bits), |(area, _)| area);
@@ -427,6 +487,11 @@ const UCIE_HOP_NS: f64 = 10.0;
 const UCIE_ENDPOINT_GBPS: f64 = 2048.0;
 const SERDES_ENDPOINT_GBPS: f64 = 896.0;
 const SERDES_HOP_NS: f64 = 150.0;
+/// A link over I/O pins: 16 data pins each way at 50 MHz, about what the general-purpose
+/// pads of an open shuttle's harness give, and a hop through two pads, the board and a
+/// synchroniser.
+const PIN_LINK_BITS_PER_NS: f64 = 16.0 * 0.05;
+const PIN_HOP_NS: f64 = 60.0;
 
 /// How a ring of dies is cut into packages, and what each hop travels over.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -434,12 +499,19 @@ pub struct LinkPlan {
     pub packages: u32,
     pub ucie_hops: u32,
     pub serdes_hops: u32,
+    pub pin_hops: u32,
 }
 
 impl LinkPlan {
     pub fn delay_ns(&self) -> f64 {
-        self.ucie_hops as f64 * UCIE_HOP_NS + self.serdes_hops as f64 * SERDES_HOP_NS
+        self.ucie_hops as f64 * UCIE_HOP_NS + self.serdes_hops as f64 * SERDES_HOP_NS + self.pin_hops as f64 * PIN_HOP_NS
     }
+}
+
+/// The link the dies really use: an open shuttle hands each die back in its own package,
+/// with only its I/O pins to reach the others.
+pub fn effective_link(p: &ChipParams, tech: &TechNode) -> LinkKind {
+    if p.link == LinkKind::Auto && tech.open_pdk && tech.fabricable { LinkKind::Pins } else { p.link }
 }
 
 /// Fills each package before opening the next; a ring needs one board hop per package.
@@ -447,10 +519,11 @@ pub fn link_plan(link: LinkKind, dies: u32, die_area_mm2: f64) -> LinkPlan {
     let per_package = ((PACKAGE_MAX_MM2 / die_area_mm2.max(1.0)).floor() as u32).max(1);
     let packages = dies.div_ceil(per_package).max(1);
     match link {
-        LinkKind::Serdes => LinkPlan { packages: dies, ucie_hops: 0, serdes_hops: dies },
-        LinkKind::Ucie => LinkPlan { packages: 1, ucie_hops: dies, serdes_hops: 0 },
-        LinkKind::Auto if packages == 1 => LinkPlan { packages, ucie_hops: dies, serdes_hops: 0 },
-        LinkKind::Auto => LinkPlan { packages, ucie_hops: dies - packages, serdes_hops: packages },
+        LinkKind::Serdes => LinkPlan { packages: dies, ucie_hops: 0, serdes_hops: dies, pin_hops: 0 },
+        LinkKind::Pins => LinkPlan { packages: dies, ucie_hops: 0, serdes_hops: 0, pin_hops: dies },
+        LinkKind::Ucie => LinkPlan { packages: 1, ucie_hops: dies, serdes_hops: 0, pin_hops: 0 },
+        LinkKind::Auto if packages == 1 => LinkPlan { packages, ucie_hops: dies, serdes_hops: 0, pin_hops: 0 },
+        LinkKind::Auto => LinkPlan { packages, ucie_hops: dies - packages, serdes_hops: packages, pin_hops: 0 },
     }
 }
 
@@ -636,7 +709,8 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
         });
     if dies > 1 {
         // Sized for the worst each die can be, since its own area depends on this.
-        let plan = link_plan(p.link, dies, p.die_max_mm2.min(tech.die_max_mm2));
+        // The pads of pin links are already in the die's I/O ring.
+        let plan = link_plan(effective_link(p, tech), dies, p.die_max_mm2.min(tech.die_max_mm2));
         // A wider link takes as many endpoints as its bits per nanosecond need.
         let rate = p.link_words.max(1) as f64 * p.activation_bits as f64 * p.freq_ghz;
         let endpoints = |capacity: f64| (rate / capacity).ceil().max(1.0);
@@ -824,13 +898,13 @@ fn candidates_for(tech: &TechNode, p: &ChipParams, weight_bits: u32, cell_bits: 
                         continue;
                     }
                     let q = with_choice(p, multiplier, mac_stages, adder_stages, skip_zeros);
-                    let cell = CellConfig { weight_bits, ..q.cell_config(1) };
+                    let cell = timed_cell(&q, weight_bits, cell_bits);
                     if is_multiples && cell.significand_bits() > MAX_MULTIPLES_BITS {
                         continue;
                     }
                     let mult = weight_multiplier(tech, &q, weight_bits, cell_bits);
-                    let Ok(sim) = Simulator::new(&cell_design(cell)) else { continue };
-                    let logic_ns = sim.critical_path(GATE_DELAYS) * tech.fa_delay_ns * mult.delay_factor;
+                    let Some(path) = cell_path(cell) else { continue };
+                    let logic_ns = path * tech.fa_delay_ns * mult.delay_factor;
                     // A wider broadcast costs registers on the way to the cell and energy on its wires.
                     let bits = cell.broadcast_bits() as f64;
                     list.push(Candidate {
@@ -891,7 +965,7 @@ fn resolve_circuit(tech: &TechNode, model: &ModelGraph, p: &ChipParams, widest: 
     let mut decisions = Vec::new();
     let mut choose = |weight_bits: u32, share: f64| {
         let choice = pick(&candidates_for(tech, p, weight_bits, cell_bits), target, p.circuit_goal)?;
-        let cell = CellConfig { weight_bits, ..with_choice(p, choice.multiplier, choice.mac_stages, choice.adder_stages, choice.skip_zeros).cell_config(1) };
+        let cell = timed_cell(&with_choice(p, choice.multiplier, choice.mac_stages, choice.adder_stages, choice.skip_zeros), weight_bits, cell_bits);
         decisions.push(CircuitDecision { cell, cell_key: cell_key(&cell), weight_bits, share, multiplier: choice.multiplier, mac_stages: choice.mac_stages, adder_stages: choice.adder_stages, skip_zeros: choice.skip_zeros, area_um2: choice.area_um2, energy_pj: choice.energy_pj, fmax_ghz: choice.fmax_ghz });
         Some(with_choice(p, choice.multiplier, choice.mac_stages, choice.adder_stages, choice.skip_zeros))
     };
@@ -923,12 +997,22 @@ fn estimate_on_silicon(model: &ModelGraph, p: &ChipParams) -> Result<Report, Str
     let mut q = p.clone();
     let mut report = estimate_design(model, &q)?;
     for _ in 0..8 {
-        let ratio = p.target_tok_s / report.metric("tok_s_base").unwrap_or(p.target_tok_s).max(1e-9);
+        let rate = report.metric("tok_s_base").unwrap_or(p.target_tok_s).max(1e-9);
+        let ratio = p.target_tok_s / rate;
         if (ratio - 1.0).abs() < 0.01 {
             break;
         }
-        q.macs_per_die = ((q.macs_per_die as f64 * ratio).ceil() as u64).clamp(1, MAX_MACS_PER_DIE);
-        report = estimate_design(model, &q)?;
+        let mut next = q.clone();
+        next.macs_per_die = ((q.macs_per_die as f64 * ratio).ceil() as u64).clamp(1, MAX_MACS_PER_DIE);
+        let tried = estimate_design(model, &next)?;
+        // More multipliers that give little more speed (links, vectors or memory set it)
+        // are mostly silicon: they must buy at least a third of what they cost.
+        let growth = next.macs_per_die as f64 / q.macs_per_die.max(1) as f64;
+        let gain = tried.metric("tok_s_base").unwrap_or(0.0) / rate;
+        if growth > 1.0 && gain - 1.0 < (growth - 1.0) / 3.0 {
+            break;
+        }
+        (q, report) = (next, tried);
     }
     if report.metric("tok_s_base").unwrap_or(0.0) < p.target_tok_s * 0.97 {
         report.violations.push(Violation {
@@ -1060,9 +1144,9 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     let total_area = die_area * d;
 
     // Timing: each token visits every stage in order, so stage times add up.
-    let cell = CellConfig { weight_bits: store.widest_weight_bits, ..p.cell_config(1) };
+    let cell = timed_cell(p, store.widest_weight_bits, cell_bits_estimate);
     // Static timing on the generated gates, already cut by its pipeline stages.
-    let path = Simulator::new(&cell_design(cell)).map_err(|e| e.0)?.critical_path(GATE_DELAYS);
+    let path = cell_path(cell).ok_or("el circuito de la celda no se puede simular")?;
     let logic_ns = path * tech.fa_delay_ns * mult.delay_factor;
     let fmax = match measured(p, &cell) {
         Some((_, ghz)) if ghz > 0.0 => ghz,
@@ -1085,7 +1169,8 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     let vector_latency = 6.0;
     let vector_cycles = totals.vector_ops / lanes;
     let latency_cycles = totals.matvec_stages * matvec_latency + totals.vector_stages * vector_latency;
-    let plan = link_plan(p.link, dies, die_area);
+    let link = effective_link(p, tech);
+    let plan = link_plan(link, dies, die_area);
     if p.link == LinkKind::Ucie && dies > 1 && total_area > PACKAGE_MAX_MM2 {
         violations.push(Violation {
             severity: Severity::Aviso,
@@ -1104,12 +1189,15 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     let (weight_cycles, vector_cycles) = (weight_cycles / g, vector_cycles / g);
     // Its chips add their partial results twice a layer, round a ring: 2·(g − 1) steps,
     // each moving a g-th of the hidden vector and paying a hop.
-    let hop_cycles = UCIE_HOP_NS * freq;
-    let share = model.hidden_size as f64 / g / p.link_words.max(1) as f64;
+    let pins = link == LinkKind::Pins;
+    let hop_cycles = if pins { PIN_HOP_NS } else { UCIE_HOP_NS } * freq;
+    // Cycles to move this many activations: `link_words` a cycle, or what the pins carry.
+    let moving = |activations: f64| if pins { activations * p.activation_bits as f64 / PIN_LINK_BITS_PER_NS * freq } else { activations / p.link_words.max(1) as f64 };
+    let share = moving(model.hidden_size as f64 / g);
     let tensor_cycles = if group > 1 { model.num_layers as f64 * 2.0 * 2.0 * (g - 1.0) * (hop_cycles + share) } else { 0.0 };
     // Each stage passes on the hidden vector, `link_words` activations a cycle, after the
     // hops' own delay.
-    let transfer = model.hidden_size as f64 / p.link_words.max(1) as f64;
+    let transfer = moving(model.hidden_size as f64);
     let chain_share = if dies > 1 { (stages - 1) as f64 / (dies - 1) as f64 } else { 0.0 };
     let link_cycles = if stages > 1 { plan.delay_ns() * freq * chain_share + (stages - 1) as f64 * transfer } else { 0.0 } + tensor_cycles;
     let total_cycles = weight_cycles + vector_cycles + latency_cycles + link_cycles;
@@ -1250,7 +1338,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             "tokenizer_tables" => (0.0, 0.0, 0.0, format!("{:.0} Mbit para un vocabulario de {} tokens.", model.vocab_size as f64 * TOKENIZER_BITS_PER_TOKEN / 1e6, model.vocab_size)),
             "cpu_memory" => (0.0, 0.0, 0.0, format!("Para prompts de hasta {} tokens.", p.context_tokens)),
             "sampler" => (0.0, 0.0, 0.0, format!("{} carriles de filtro y {} candidatos.", p.sampler_lanes, p.sampler_entries)),
-            "links" => (link_cycles / total_cycles, 0.0, link_bytes, format!("{} enlaces UCIe y {} SerDes, en {} encapsulados.", plan.ucie_hops, plan.serdes_hops, plan.packages)),
+            "links" => (link_cycles / total_cycles, 0.0, link_bytes, if pins { format!("{} enlaces por pines de E/S, uno por encapsulado.", plan.pin_hops) } else { format!("{} enlaces UCIe y {} SerDes, en {} encapsulados.", plan.ucie_hops, plan.serdes_hops, plan.packages) }),
             _ => (0.0, 0.0, 0.0, "Área fija estimada.".into()),
         };
         b.activity = activity.clamp(0.0, 1.0);
@@ -1572,15 +1660,17 @@ mod tests {
         let p = ChipParams { node: "sky130".into(), max_params_g: 0.00026, use_model_mix: false, group_size: 0, weight_bits: 8, context_tokens: 256, ..Default::default() };
         let estimated = estimate(&stories, &p).unwrap().decisions[0].clone();
         let key = format!("sky130:{}", estimated.cell_key);
-        // Anything that changes the gates changes the name; the memory depth does not.
+        // Anything that changes the gates changes the name, error correction included; the
+        // memory's depth does not, once it has the same correction.
+        let deep = CellConfig { addr_bits: 12, ecc: true, ..estimated.cell };
         let other = |change: &dyn Fn(&mut CellConfig)| {
-            let mut cell = estimated.cell;
+            let mut cell = deep;
             change(&mut cell);
             cell_key(&cell)
         };
-        assert_eq!(other(&|c| c.addr_bits += 3), estimated.cell_key);
-        for change in [&(|c: &mut CellConfig| c.skip_zeros = !c.skip_zeros) as &dyn Fn(&mut CellConfig), &|c| c.ecc = !c.ecc, &|c| c.mac_stages += 1, &|c| c.accumulator_bits += 40] {
-            assert_ne!(other(change), estimated.cell_key);
+        assert_eq!(other(&|c| c.addr_bits += 3), cell_key(&deep));
+        for change in [&(|c: &mut CellConfig| c.skip_zeros = !c.skip_zeros) as &dyn Fn(&mut CellConfig), &|c| c.ecc = false, &|c| c.addr_bits = 1, &|c| c.mac_stages += 1, &|c| c.accumulator_bits += 40] {
+            assert_ne!(other(change), cell_key(&deep));
         }
         let measured = ChipParams { measured_cell: key, measured_cell_um2: 100.0, measured_cell_fmax_ghz: 0.5, ..p.clone() };
         // The measured cell is smaller and faster than any estimate, so the generator keeps it.
@@ -1591,6 +1681,20 @@ mod tests {
         // On another process it is not what was measured.
         let elsewhere = estimate(&stories, &ChipParams { node: "gf180".into(), ..measured }).unwrap().decisions[0].clone();
         assert!((elsewhere.fmax_ghz - 0.5).abs() > 1e-9, "{elsewhere:?}");
+    }
+
+    #[test]
+    fn chips_from_an_open_shuttle_talk_over_their_pins() {
+        let stories = ModelGraph::from_config_json("s", include_str!("../../../models/stories260k.json")).unwrap();
+        let p = ChipParams { node: "sky130".into(), max_params_g: 0.0003, macs_per_die: 16, vector_lanes_per_die: 4, use_model_mix: false, group_size: 0, weight_bits: 8, context_tokens: 256, dies: 8, ..Default::default() };
+        let pins = estimate(&stories, &p).unwrap();
+        let serdes = estimate(&stories, &ChipParams { link: LinkKind::Serdes, ..p.clone() }).unwrap();
+        assert!(pins.metric("tok_s").unwrap() < serdes.metric("tok_s").unwrap(), "{} {}", pins.metric("tok_s").unwrap(), serdes.metric("tok_s").unwrap());
+        // A speed the links cannot give does not buy multipliers that would only wait.
+        let hopeless = estimate(&stories, &ChipParams { target_tok_s: 1e6, ..p.clone() }).unwrap();
+        assert!(hopeless.resolved.macs_per_die < 100_000, "{}", hopeless.resolved.macs_per_die);
+        // A process a foundry makes in advanced packages keeps its UCIe.
+        assert_eq!(effective_link(&ChipParams { node: "n6".into(), ..p }, node("n6").unwrap()), LinkKind::Auto);
     }
 
     #[test]
@@ -1622,8 +1726,8 @@ mod tests {
 
     #[test]
     fn links_follow_the_packages_the_area_needs() {
-        assert_eq!(link_plan(LinkKind::Auto, 4, 800.0), LinkPlan { packages: 1, ucie_hops: 4, serdes_hops: 0 });
-        assert_eq!(link_plan(LinkKind::Auto, 12, 800.0), LinkPlan { packages: 3, ucie_hops: 9, serdes_hops: 3 });
+        assert_eq!(link_plan(LinkKind::Auto, 4, 800.0), LinkPlan { packages: 1, ucie_hops: 4, serdes_hops: 0, pin_hops: 0 });
+        assert_eq!(link_plan(LinkKind::Auto, 12, 800.0), LinkPlan { packages: 3, ucie_hops: 9, serdes_hops: 3, pin_hops: 0 });
         assert_eq!(link_plan(LinkKind::Ucie, 12, 800.0).serdes_hops, 0);
     }
 

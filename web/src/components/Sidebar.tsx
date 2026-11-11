@@ -7,6 +7,7 @@ import { dieLimit, fitDie } from "../dieSize";
 import { matchingPreset, PARAM_GROUPS, type Field } from "../params";
 import { useDesign } from "../store";
 import { useT } from "../i18n";
+import { PARAM_HELP_EN } from "../paramHelpEn";
 import { Disclosure, Segmented, Switch } from "./controls";
 
 const LOG_STEPS = 1000;
@@ -86,6 +87,7 @@ function Row({ field, children, below }: { field: Field; children: React.ReactNo
   const fallback = useDesign((s) => s.defaults[field.key]);
   const resetParam = useDesign((s) => s.resetParam);
   const revealed = useDesign((s) => s.revealed);
+  const language = useDesign((s) => s.language);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -93,18 +95,19 @@ function Row({ field, children, below }: { field: Field; children: React.ReactNo
   }, [revealed, field.key]);
 
   const changed = value !== fallback;
+  const help = field.help && (language === "en" ? (PARAM_HELP_EN[field.key] ?? field.help) : field.help);
   return (
     <div
       ref={ref}
       className={revealed?.key === field.key ? "row flash" : "row"}
-      onMouseEnter={() => setHelp(field.help ?? null)}
+      onMouseEnter={() => setHelp(help ?? null)}
       onMouseLeave={() => setHelp(null)}
-      onFocus={() => setHelp(field.help ?? null)}
+      onFocus={() => setHelp(help ?? null)}
     >
       <div className="row-head">
         <span className="row-label">
           {t(field.label)}
-          {field.help && <InfoTip id={`ayuda-${field.key}`} label={t(field.label)} text={field.help} onOpen={() => openDocs(field.key)} />}
+          {help && <InfoTip id={`ayuda-${field.key}`} label={t(field.label)} text={help} onOpen={() => openDocs(field.key)} />}
           {changed && (
             <button className="changed" aria-label={`Restablecer ${t(field.label)}`} title="Restablecer" onClick={() => resetParam(field.key)} />
           )}
@@ -147,7 +150,17 @@ function RangeRow({ field }: { field: RangeField }) {
   );
 }
 
+/** A weight format's name: its numbers stay, its words follow the language. */
+function englishLabel(label: string, t: (text: string) => string): string {
+  return label
+    .replace("Mezcla de 4 y 8 bits (Qwen real)", t("Mezcla de 4 y 8 bits (Qwen real)"))
+    .replace("escala fina", t("escala fina"))
+    .replace(/(\d+) de fracción/, (_, n: string) => `${n} ${t("de fracción")}`)
+    .replace(/(\d+) valores/, (_, n: string) => `${n} ${t("valores")}`);
+}
+
 function PresetRow({ field }: { field: Extract<Field, { kind: "preset" }> }) {
+  const t = useT();
   const params = useDesign((s) => s.params);
   const setParam = useDesign((s) => s.setParam);
   const current = matchingPreset(params) ?? "";
@@ -158,12 +171,12 @@ function PresetRow({ field }: { field: Extract<Field, { kind: "preset" }> }) {
   return (
     <Row field={field}>
       <select aria-label={field.label} value={current} onChange={(e) => choose(e.target.value)}>
-        {current === "" && <option value="">Personalizado</option>}
+        {current === "" && <option value="">{t("Personalizado")}</option>}
         {field.sections.map((section) => (
-          <optgroup key={section.title} label={section.title}>
+          <optgroup key={section.title} label={t(section.title)}>
             {section.presets.map((preset) => (
               <option key={preset.label} value={preset.label}>
-                {preset.label}
+                {englishLabel(preset.label, t)}
               </option>
             ))}
           </optgroup>
@@ -273,7 +286,7 @@ function TargetRows() {
               <select aria-label={t("Proceso")} value={node} onChange={(e) => setParams({ node: e.target.value, ...fitDie(width, height, limitOf(e.target.value)) })}>
                 {silicon.map((n) => (
                   <option key={n.id} value={n.id}>
-                    {n.label}
+                    {t(n.label)}
                   </option>
                 ))}
               </select>

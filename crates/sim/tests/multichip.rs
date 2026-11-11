@@ -11,8 +11,6 @@ use sim::chip::{plan_parts, Sharing, VmEngine};
 use sim::lower::Layout;
 use sim::Weights;
 use std::collections::VecDeque;
-use std::path::Path;
-use std::process::Command;
 
 mod common;
 use common::*;
@@ -21,9 +19,7 @@ const CHIP_TOKENS: usize = 8;
 const WIRE_DELAY: usize = 2;
 
 fn build_firmware() -> Option<FirmwareImage> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../firmware");
-    let built = Command::new("cargo").current_dir(&dir).env_remove("RUSTFLAGS").env_remove("CARGO_ENCODED_RUSTFLAGS").args(["build", "--release"]).output().ok()?;
-    built.status.success().then(|| FirmwareImage::from_elf(&std::fs::read(dir.join("target/riscv32im-unknown-none-elf/release/firmware")).unwrap()).unwrap())
+    common::firmware()
 }
 
 struct Noise(u64);

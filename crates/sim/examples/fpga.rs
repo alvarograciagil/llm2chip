@@ -1,7 +1,7 @@
 //! The whole chip, in Verilog, to synthesise for an FPGA: the RISC-V controller, the die
 //! with only the logic its microprogram uses, and the sampling unit.
 //!
-//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR] [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary]`
+//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR] [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary] [--factor-steps N]`
 //!
 //! With `--dsp`, each one-cycle multiplier is written as a signed product so the FPGA
 //! tools put it in their multiplier blocks. Without `--model`, the chip is the one
@@ -103,6 +103,11 @@ fn main() {
             (compile_qwen3_5(CONFIG).unwrap(), Weights::open(&test_dir).unwrap(), fpga_die_config(), 8)
         }
     };
+    // With `--factor-steps`, scale and bias multiply a few bits a cycle from registers, which
+    // cuts the cell's longest path: factor memory, product and total in one cycle. The
+    // microprogram is laid out for it.
+    let steps: u32 = option("--factor-steps").map_or(trial.features.factor_steps, |n| n.parse().unwrap());
+    let trial = DieConfig { features: trial.features.with_factor_steps(steps), ..trial };
     let mut layout = Layout::with_cells(&program, &weights, trial, context).unwrap();
     if !args.iter().any(|a| a == "--table-inside") && layout.table_outside(&program) {
         eprintln!("la tabla de embedding se queda en la imagen");
@@ -112,7 +117,7 @@ fn main() {
     let (depth, groups) = layout.cell_depths();
     eprintln!("{} registros, {} palabras de pesos y {} grupos de factores por celda", layout.registers_used(), depth, groups);
     // Only what this microprogram uses.
-    let features = DieFeatures::of(&code).with_lane_bits(trial.features.lane_bits).with_cluster_bits(trial.features.cluster_bits).with_key_shift(trial.features.key_shift);
+    let features = DieFeatures::of(&code).with_lane_bits(trial.features.lane_bits).with_cluster_bits(trial.features.cluster_bits).with_key_shift(trial.features.key_shift).with_factor_steps(steps);
     let die = sim::chip::compact_die(DieConfig { features, microcode_bits: bits_for(code.words.len() as u64), ..trial }, &layout);
     let die = if args.iter().any(|a| a == "--no-dictionary") { die } else { sim::chip::with_code_dictionary(die, &code) };
     let distinct: std::collections::HashSet<_> = code.words.iter().map(|w| format!("{w:?}")).collect();

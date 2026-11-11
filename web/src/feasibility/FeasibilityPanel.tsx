@@ -43,7 +43,7 @@ export function FeasibilityPanel({ advice, checking, searching }: { advice: Advi
           <Icon name={v.possible ? "check" : "warning"} size={16} />
           <strong>
             {v.possible
-              ? `${t("Se puede fabricar")}: ${chips(v.dies)} ${t("de")} ${formatNumber(v.die_area_mm2)} mm²`
+              ? `${t("Se puede fabricar")}: ${chips(v.dies)} ${t("de")} ${formatNumber(v.die_area_mm2)} mm²${v.designs > 1 ? `, ${formatNumber(v.designs)} ${t("diseños distintos")}` : ""}`
               : t("Con estos parámetros no se puede fabricar")}
           </strong>
         </p>
@@ -51,31 +51,31 @@ export function FeasibilityPanel({ advice, checking, searching }: { advice: Advi
         {v.reasons.length > 0 && (
           <ul className="feasibility-reasons">
             {v.reasons.map((reason) => (
-              <li key={reason}>{reason}</li>
+              <li key={reason}>{t(reason)}</li>
             ))}
           </ul>
         )}
         {v.notes.map((note) => (
           <p key={note} className="muted-text">
-            {note}
+            {t(note)}
           </p>
         ))}
         {advice.suggestions.length > 0 && (
           <>
-            <p className="feasibility-heading">{t("Cómo hacerlo viable")}</p>
+            <p className="feasibility-heading">{advice.suggestions[0].cheaper ? t("Más barato de fabricar") : t("Cómo hacerlo viable")}</p>
             {advice.suggestions.map((s, i) => (
               <div key={i} className="suggestion">
                 <ul>
                   {s.changes.map((c) => (
                     <li key={c.field}>
-                      {c.label}
-                      {c.risk && <span className="risk"> · {c.risk}</span>}
+                      {t(c.label)}
+                      {c.risk && <span className="risk"> · {t(c.risk)}</span>}
                     </li>
                   ))}
                 </ul>
                 <div className="suggestion-foot">
                   <span>
-                    {chips(s.dies)} {t("de")} {formatNumber(s.die_area_mm2)} mm² · {formatNumber(s.tok_s)} tok/s
+                    {chips(s.dies)} {t("de")} {formatNumber(s.die_area_mm2)} mm²{s.designs < s.dies ? ` · ${s.designs === 1 ? t("un solo diseño") : `${formatNumber(s.designs)} ${t("diseños distintos")}`}` : ""} · {formatNumber(s.tok_s)} tok/s
                   </span>
                   <button className="pill primary-pill" onClick={() => setParams(applyChanges(params, s.changes, nodes))}>
                     {t("Aplicar")}
@@ -85,7 +85,7 @@ export function FeasibilityPanel({ advice, checking, searching }: { advice: Advi
             ))}
           </>
         )}
-        {searching && <p className="muted-text">{t("Buscando qué ajustes lo hacen viable…")}</p>}
+        {searching && !v.layout && <p className="muted-text">{t("Buscando qué ajustes lo hacen viable…")}</p>}
         {!searching && !v.layout && advice.suggestions.length === 0 && !v.possible && (
           <p className="muted-text">{t("Ningún ajuste de los parámetros lo hace viable en este proceso: hace falta un modelo más pequeño o un proceso con dies mayores.")}</p>
         )}

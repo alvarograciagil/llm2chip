@@ -21,8 +21,8 @@ self.onmessage = async (event: MessageEvent<AdviceJob>) => {
   try {
     // The verdict takes one estimate; the search for changes, dozens.
     const verdict = JSON.parse(advise_design(job.name, job.config, job.params, false));
-    postMessage({ id: job.id, advice: verdict, searching: !verdict.verdict.layout });
-    if (verdict.verdict.layout) return;
+    // A design that works is still searched, for a cheaper way to make it.
+    postMessage({ id: job.id, advice: verdict, searching: true });
     await new Promise((resolve) => setTimeout(resolve));
     if (latest !== job.id) return;
     postMessage({ id: job.id, advice: JSON.parse(advise_design(job.name, job.config, job.params, true)), searching: false });

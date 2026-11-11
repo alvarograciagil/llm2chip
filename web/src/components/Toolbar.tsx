@@ -58,6 +58,7 @@ function SavePopover({ onClose }: { onClose: () => void }) {
 }
 
 function DesignMenu() {
+  const t = useT();
   const presets = useDesign((s) => s.presets);
   const saved = useDesign((s) => s.saved);
   const designName = useDesign((s) => s.designName);
@@ -78,10 +79,10 @@ function DesignMenu() {
       </svg>
       <select aria-label="Abrir diseño" value="" onChange={onChange}>
         <option value="" disabled hidden />
-        <optgroup label="Plantillas">
+        <optgroup label={t("Plantillas")}>
           {presets.map((p) => (
             <option key={p.id} value={`p:${p.id}`}>
-              {p.name}
+              {t(p.name)}
             </option>
           ))}
         </optgroup>

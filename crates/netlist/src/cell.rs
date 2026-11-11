@@ -70,7 +70,10 @@ impl CellConfig {
     /// Cycles from presenting an input until the accumulator has absorbed it.
     pub fn latency(&self) -> u32 {
         let table = (self.coding == WeightCoding::Codebook) as u32;
-        1 + table + (self.mac_stages.min(self.significand_bits()).max(1) - 1) + (self.adder_stages.max(1) - 1) + 1
+        // The corrected weight is registered before the multiplier takes it, unless the
+        // multiplier only picks among shared multiples, which is shallow anyway.
+        let correction = (self.has_ecc() && self.multiplier != MultiplierKind::Multiples) as u32;
+        1 + table + correction + (self.mac_stages.min(self.significand_bits()).max(1) - 1) + (self.adder_stages.max(1) - 1) + 1
     }
 
     pub(crate) fn checked(self) -> Self {
@@ -627,6 +630,16 @@ impl Gen {
             }
             None => weight,
         };
+        // Correcting a word is as deep as a multiplier: the corrected weight waits in a
+        // register, and the activation with it, so the correction has a cycle of its own.
+        let weight = if protected && !uses_multiples {
+            let held = b.wire("weight_corrected", w);
+            let weight_reg = self.register(w);
+            b.inst("weight_corrected_reg", &weight_reg, &[("d", weight), ("q", held.clone())]);
+            held
+        } else {
+            weight
+        };
         b.group("Decodificación del formato");
         let decoded = self.decode(&mut b, &c, weight, table_ports);
 
@@ -649,6 +662,16 @@ impl Gen {
             b.dff_to(valid, next);
             valid = next;
             second
+        } else {
+            x_aligned
+        };
+        let x_aligned = if protected && !uses_multiples {
+            let late = b.wire("x_corrected", a);
+            b.inst("x_corrected_reg", &x_reg, &[("d", x_aligned), ("q", late.clone())]);
+            let next = b.wire("valid_corrected", 1)[0];
+            b.dff_to(valid, next);
+            valid = next;
+            late
         } else {
             x_aligned
         };

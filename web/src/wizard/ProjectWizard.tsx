@@ -115,6 +115,7 @@ const WEIGHT_BITS: [number, string][] = [[2, "2 bits"], [3, "3 bits"], [4, "4 bi
 const SPEEDS: [string, string][] = [["100", "100"], ["1000", "1 000"], ["5000", "5 000"], ["20000", "20 000"]];
 
 function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<Answers>) => void }) {
+  const t = useT();
   const nodes = useDesign((s) => s.nodes).filter((n) => !n.id.startsWith("fpga"));
   const { start } = answers;
   return (
@@ -151,7 +152,7 @@ function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<An
             <select aria-label="Proceso" value={answers.node} onChange={(e) => set({ node: e.target.value })}>
               {nodes.map((n) => (
                 <option key={n.id} value={n.id}>
-                  {n.label}
+                  {t(n.label)}
                 </option>
               ))}
             </select>
@@ -299,6 +300,7 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
 }
 
 function Summary({ report, model, board }: { report: Report | null; model: ModelSource | undefined; board: string | null }) {
+  const t = useT();
   if (!report || !model) return <p className="wizard-empty">El estimador no puede con esta combinación. Vuelve atrás y cambia alguna respuesta.</p>;
   const problems = report.violations.filter((v) => v.severity === "error");
   return (
@@ -324,7 +326,7 @@ function Summary({ report, model, board }: { report: Report | null; model: Model
       {problems.length > 0 && (
         <ul className="wizard-problems">
           {problems.slice(0, 3).map((v) => (
-            <li key={v.message}>{v.message}</li>
+            <li key={v.message}>{t(v.message)}</li>
           ))}
         </ul>
       )}

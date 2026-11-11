@@ -89,7 +89,7 @@ export function LayoutPanel({ report, allowed }: { report: Report; allowed: bool
                 <dd>{result.drc_errors}</dd>
               </div>
             </dl>
-            <p className="muted-text">{t("El layout lleva 4 palabras de pesos en biestables para poder probar la celda; en el chip, la memoria de pesos es una macro de SRAM aparte.")}</p>
+            <p className="muted-text">{t("El layout lleva unas pocas palabras de pesos en biestables, las justas para conservar su corrección de errores; en el chip, la memoria de pesos es una macro de SRAM aparte.")}</p>
             {applied ? (
               <>
                 <p className="note-ok">{t("El estimador usa el área y la frecuencia medidas de esta celda.")}</p>

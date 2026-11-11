@@ -314,9 +314,9 @@ Entradas de cada tabla de función, en potencias de dos: 12 son 4.096. Más entr
 
 ### Enlace entre dies (`link`)
 
-UCIe une dies dentro de un mismo encapsulado: rápido (unos 10 ns por salto) y pequeño. SerDes los une por la placa: lento (unos 150 ns) y mayor. En automático se llenan encapsulados y se unen entre sí por SerDes.
+UCIe une dies dentro de un mismo encapsulado: rápido (unos 10 ns por salto) y pequeño. SerDes los une por la placa: lento (unos 150 ns) y mayor. Los pines de E/S son lo único que tienen los chips de una lanzadera abierta, cada uno en su encapsulado: 16 pines por sentido a 50 MHz y unos 60 ns por salto. En automático se llenan encapsulados y se unen entre sí por SerDes, salvo en una lanzadera abierta, que usa los pines.
 
-*Opciones: Automático según encapsulado, UCIe, SerDes en placa.*
+*Opciones: Automático según encapsulado, UCIe, SerDes en placa, Pines de E/S.*
 
 ### Ancho del enlace (`link_words`)
 

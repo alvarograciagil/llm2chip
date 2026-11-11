@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import { useDesign } from "./store";
+import { englishOf } from "./engineText";
 
 export type Language = "es" | "en";
 
@@ -252,6 +253,52 @@ const EN: Record<string, string> = {
   "Repetir el layout": "Lay it out again",
   "El circuito cambió desde este layout.": "The circuit changed since this layout.",
   "Usar las cifras medidas": "Use the measured figures",
+  "Personalizado": "Custom",
+  "escala fina": "fine scale",
+  "de fracción": "fraction",
+  "valores": "values",
+  "Qwen3.8-27B en SRAM": "Qwen3.8-27B in SRAM",
+  "Llama 8B en ROM, tipo HC1": "Llama 8B in ROM, HC1 style",
+  "stories260K a 180 nm": "stories260K at 180 nm",
+  "Qwen3.8-27B en FPGA U250": "Qwen3.8-27B on an FPGA U250",
+  "stories260K en Sipeed Tang Mega 138K Pro": "stories260K on a Sipeed Tang Mega 138K Pro",
+  "activar": "turn on",
+  "desactivar": "turn off",
+  "automático": "automatic",
+  "caché en la memoria de la placa": "cache in the board's memory",
+  "pesos en la memoria de la placa": "weights in the board's memory",
+  "a medida": "to measure",
+  "Pesos de {n} bits": "{n}-bit weights",
+  "etapas": "stages",
+  "salta ceros": "skips zeros",
+  "Derivada del modelo": "Derived from the model",
+  "Calibrada": "Calibrated",
+  "Supuesta, sin calibrar": "Assumed, not calibrated",
+  "del token": "of the token",
+  "Por qué tiene este tamaño": "Why it is this size",
+  "Qué lo cambia": "What changes it",
+  "Cada die ejecuta sus capas y pasa un único vector de activación al siguiente.": "Each die runs its layers and passes a single activation vector to the next.",
+  "Matriz de celdas": "Cell array",
+  "celdas": "cells",
+  "Cada celda guarda un trozo de cada matriz junto a su multiplicador, así que los pesos nunca viajan: solo se mueven las activaciones.": "Each cell keeps a piece of every matrix next to its multiplier, so weights never travel: only activations move.",
+  "Partes": "Parts",
+  "Celda": "Cell",
+  "Todas las celdas son iguales: cambia qué trozo de cada matriz guarda cada una.": "All cells are the same: what changes is which piece of each matrix each keeps.",
+  "Qué guarda": "What it keeps",
+  "capa": "layer",
+  "capas": "layers",
+  "salida de vocabulario": "vocabulary output",
+  "Comparando con": "Comparing with",
+  "Parte del die": "Share of the die",
+  "Ocupado": "Busy",
+  "Datos movidos": "Data moved",
+  "Pesos alojados": "Weights held",
+  "Celdas": "Cells",
+  "Multiplicador y acumulador": "Multiplier and accumulator",
+  "Escala y sesgo": "Scale and bias",
+  "Este proceso no tiene un PDK abierto. Elige SkyWater 130, GF180 o ASAP7 en el destino para hacer el layout con OpenROAD.": "This process has no open PDK. Choose SkyWater 130, GF180 or ASAP7 as the target to lay it out with OpenROAD.",
+  "La celda que el die repite miles de veces, con el circuito elegido para este diseño, colocada y rutada con OpenROAD en": "The cell the die repeats thousands of times, with the circuit chosen for this design, placed and routed with OpenROAD on",
+  "El layout lleva unas pocas palabras de pesos en biestables, las justas para conservar su corrección de errores; en el chip, la memoria de pesos es una macro de SRAM aparte.": "The layout carries a few words of weights in flip-flops, just enough to keep its error correction; on the chip, the weight memory is a separate SRAM macro.",
   Viabilidad: "Feasibility",
   "Comprobando si se puede fabricar…": "Checking whether it can be built…",
   "Se puede fabricar": "It can be built",
@@ -259,6 +306,9 @@ const EN: Record<string, string> = {
   "Y hacer su layout con OpenROAD en este proceso.": "And laid out with OpenROAD on this process.",
   "Cómo hacerlo viable": "How to make it feasible",
   Aplicar: "Apply",
+  "diseños distintos": "distinct designs",
+  "un solo diseño": "a single design",
+  "Más barato de fabricar": "Cheaper to make",
   "Buscando qué ajustes lo hacen viable…": "Looking for changes that make it feasible…",
   "1 chip": "1 chip",
   chips: "chips",
@@ -299,7 +349,8 @@ const DICTIONARIES: Record<Language, Record<string, string>> = { es: {}, en: EN 
 
 /** The text in `language`, or as written when there is no translation yet. */
 export function translate(language: Language, text: string): string {
-  return DICTIONARIES[language][text] ?? text;
+  if (language === "es") return text;
+  return DICTIONARIES[language][text] ?? englishOf(text) ?? text;
 }
 
 /** A translator for the interface's current language, redrawn when it changes. */

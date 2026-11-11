@@ -79,7 +79,7 @@ function Summary({ report }: { report: Report }) {
     <>
       <div className="stats">
         {headline.map((m) => (
-          <div className="stat" key={m.id} title={m.why}>
+          <div className="stat" key={m.id} title={t(m.why)}>
             <span className="stat-value">
               {formatNumber(m.value)}
               {m.unit && <small> {m.unit}</small>}
@@ -89,7 +89,7 @@ function Summary({ report }: { report: Report }) {
           </div>
         ))}
       </div>
-      {baseline && <p className="note">Comparando con «{baseline.name}».</p>}
+      {baseline && <p className="note">{t("Comparando con")} «{baseline.name}».</p>}
 
       {!onBoard && <FeasibilityPanel advice={advice} checking={checking} searching={searching} />}
 
@@ -97,11 +97,11 @@ function Summary({ report }: { report: Report }) {
         <>
           <h3>{t("Circuito elegido para estos parámetros")}</h3>
           <dl className="inset metrics">
-            <div><dt>Multiplicadores por die</dt><dd>{formatNumber(report.macs_per_die)}</dd></div>
+            <div><dt>{t("Multiplicadores por die")}</dt><dd>{formatNumber(report.macs_per_die)}</dd></div>
             {report.decisions.map((d) => (
               <div key={d.weight_bits} title={`${formatNumber(d.area_um2)} µm² y ${formatNumber(d.energy_pj)} pJ por multiplicación, hasta ${formatNumber(d.fmax_ghz)} GHz.`}>
-                <dt>Pesos de {d.weight_bits} bits ({formatNumber(d.share * 100)} %)</dt>
-                <dd>{MULTIPLIER_NAME[d.multiplier]}, {d.mac_stages + d.adder_stages} etapas{d.skip_zeros ? ", salta ceros" : ""}</dd>
+                <dt>{t("Pesos de {n} bits").replace("{n}", String(d.weight_bits))} ({formatNumber(d.share * 100)} %)</dt>
+                <dd>{t(MULTIPLIER_NAME[d.multiplier])}, {d.mac_stages + d.adder_stages} {t("etapas")}{d.skip_zeros ? `, ${t("salta ceros")}` : ""}</dd>
               </div>
             ))}
           </dl>
@@ -116,13 +116,13 @@ function Summary({ report }: { report: Report }) {
                 <Icon name={v.severity === "error" ? "warning" : "info"} size={16} />
               </span>
               <div>
-                <strong>{v.message}</strong>
-                <p>{v.fix}</p>
+                <strong>{t(v.message)}</strong>
+                <p>{t(v.fix)}</p>
                 {v.field && (
                   <div className="issue-actions">
                     {v.value !== undefined && (
                       <button className="link" onClick={() => setParam(v.field!, v.value)}>
-                        {t("Corregir")}: {describeValue(v.field!, v.value)}
+                        {t("Corregir")}: {t(describeValue(v.field!, v.value))}
                       </button>
                     )}
                     <button className="link" onClick={() => reveal(v.field!)}>
@@ -159,9 +159,9 @@ function Summary({ report }: { report: Report }) {
             {report.metrics
               .filter((m) => m.section === section)
               .map((m) => (
-                <div key={m.id} title={m.why}>
+                <div key={m.id} title={t(m.why)}>
                   <dt>
-                    <i className="glyph" aria-label={CONFIDENCE[m.confidence]} title={CONFIDENCE[m.confidence]}>
+                    <i className="glyph" aria-label={t(CONFIDENCE[m.confidence])} title={t(CONFIDENCE[m.confidence])}>
                       {GLYPH[m.confidence]}
                     </i>
                     {t(m.label)}
@@ -198,11 +198,12 @@ function Detail({ title, subtitle, children }: { title: string; subtitle?: strin
 }
 
 function Facts({ facts }: { facts: [string, string][] }) {
+  const t = useT();
   return (
     <dl className="inset metrics">
       {facts.map(([k, v]) => (
         <div key={k}>
-          <dt>{k}</dt>
+          <dt>{t(k)}</dt>
           <dd>{v}</dd>
         </div>
       ))}
@@ -210,11 +211,11 @@ function Facts({ facts }: { facts: [string, string][] }) {
   );
 }
 
-function layersText(die: DiePlan) {
+function layersText(die: DiePlan, t: (text: string) => string) {
   const parts: string[] = [];
   if (die.has_embedding) parts.push("embedding");
-  if (die.first_layer !== null) parts.push(die.first_layer === die.last_layer ? `capa ${die.first_layer}` : `capas ${die.first_layer}–${die.last_layer}`);
-  if (die.has_head) parts.push("salida de vocabulario");
+  if (die.first_layer !== null) parts.push(die.first_layer === die.last_layer ? `${t("capa")} ${die.first_layer}` : `${t("capas")} ${die.first_layer}–${die.last_layer}`);
+  if (die.has_head) parts.push(t("salida de vocabulario"));
   return parts.join(", ");
 }
 
@@ -223,22 +224,22 @@ function BlockDetail({ block, report }: { block: BlockArea; report: Report }) {
   const reveal = useDesign((s) => s.reveal);
   return (
     <Detail title={t(block.label)} subtitle={t(CATEGORY_LABEL[block.category])}>
-      <p className="prose">{block.what}</p>
+      <p className="prose">{t(block.what)}</p>
       <Facts
         facts={[
           ["Área por die", `${formatNumber(block.per_die_mm2)} mm²`],
           ["Área total", `${formatNumber(block.per_die_mm2 * report.dies)} mm²`],
           ["Parte del die", `${formatNumber((block.per_die_mm2 / report.die_area_mm2) * 100)} %`],
-          ["Ocupado", `${formatNumber(block.activity * 100)} % del token`],
+          ["Ocupado", `${formatNumber(block.activity * 100)} % ${t("del token")}`],
           ["Energía", `${formatNumber(block.energy_mj)} mJ/token`],
           ["Datos movidos", `${bytesLabel(block.bytes_token)}/token`],
         ]}
       />
-      <h3>Por qué tiene este tamaño</h3>
-      <p className="prose">{block.why}</p>
+      <h3>{t("Por qué tiene este tamaño")}</h3>
+      <p className="prose">{t(block.why)}</p>
       {block.driven_by.length > 0 && (
         <>
-          <h3>Qué lo cambia</h3>
+          <h3>{t("Qué lo cambia")}</h3>
           <div className="chips">
             {block.driven_by.map((key) => (
               <button key={key} className="chip" onClick={() => reveal(key)}>
@@ -264,8 +265,8 @@ function SelectionDetail({ selection, report }: { selection: NonNullable<Selecti
   }
   if (selection.kind === "die") {
     return (
-      <Detail title={`Die ${die.index}`} subtitle={layersText(die)}>
-        <p className="prose">Cada die ejecuta sus capas y pasa un único vector de activación al siguiente.</p>
+      <Detail title={`Die ${die.index}`} subtitle={layersText(die, t)}>
+        <p className="prose">{t("Cada die ejecuta sus capas y pasa un único vector de activación al siguiente.")}</p>
         <Facts
           facts={[
             ["Área", `${formatNumber(report.die_area_mm2)} mm²`],
@@ -278,9 +279,9 @@ function SelectionDetail({ selection, report }: { selection: NonNullable<Selecti
   }
   if (selection.kind === "array") {
     return (
-      <Detail title="Matriz de celdas" subtitle={`Die ${die.index} · ${formatNumber(die.cells.count)} celdas`}>
-        <p className="prose">Cada celda guarda un trozo de cada matriz junto a su multiplicador, así que los pesos nunca viajan: solo se mueven las activaciones.</p>
-        <h3>Partes</h3>
+      <Detail title={t("Matriz de celdas")} subtitle={`Die ${die.index} · ${formatNumber(die.cells.count)} ${t("celdas")}`}>
+        <p className="prose">{t("Cada celda guarda un trozo de cada matriz junto a su multiplicador, así que los pesos nunca viajan: solo se mueven las activaciones.")}</p>
+        <h3>{t("Partes")}</h3>
         <div className="inset">
           {arrayBlocks.map((b) => (
             <button className="area-row plain-row" key={b.id} onClick={() => setSelection({ kind: "block", die: die.index, id: b.id })}>
@@ -295,8 +296,8 @@ function SelectionDetail({ selection, report }: { selection: NonNullable<Selecti
   }
   const cells = die.cells;
   return (
-    <Detail title={`Celda ${selection.col}, ${selection.row}`} subtitle={`Die ${die.index}`}>
-      <p className="prose">Todas las celdas son iguales: cambia qué trozo de cada matriz guarda cada una.</p>
+    <Detail title={`${t("Celda")} ${selection.col}, ${selection.row}`} subtitle={`Die ${die.index}`}>
+      <p className="prose">{t("Todas las celdas son iguales: cambia qué trozo de cada matriz guarda cada una.")}</p>
       <Facts
         facts={[
           ["Memoria de pesos", `${formatNumber(cells.sram_fraction * 100)} %`],
@@ -305,7 +306,7 @@ function SelectionDetail({ selection, report }: { selection: NonNullable<Selecti
           ["Red de activaciones", `${formatNumber(cells.noc_fraction * 100)} %`],
         ]}
       />
-      <h3>Qué guarda</h3>
+      <h3>{t("Qué guarda")}</h3>
       <dl className="inset metrics scroll">
         {cells.segments.map((s) => (
           <div key={s.label}>

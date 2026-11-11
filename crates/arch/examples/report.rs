@@ -15,12 +15,20 @@ fn main() {
         }
     }
     let p: ChipParams = serde_json::from_value(params).unwrap();
+    let start = std::time::Instant::now();
     let r = estimate(&model, &p).unwrap();
+    let first = start.elapsed();
+    let start = std::time::Instant::now();
+    estimate(&model, &p).unwrap();
+    eprintln!("estimación: {first:?} la primera, {:?} la segunda", start.elapsed());
     for m in &r.metrics { println!("{:<16} {:<40} {:>14.3} {}", m.section, m.label, m.value, m.unit); }
     println!();
     println!("{} dies de {:.2} mm²", r.dies, r.die_area_mm2);
     for b in &r.blocks { println!("{:<36} {:>9.2} mm²", b.label, b.per_die_mm2); }
     for v in &r.violations { println!("{:?}: {}", v.severity, v.message); }
     println!();
-    println!("{}", serde_json::to_string_pretty(&arch::feasibility::advise(&model, &p, true).unwrap()).unwrap());
+    let start = std::time::Instant::now();
+    let advice = arch::feasibility::advise(&model, &p, true).unwrap();
+    eprintln!("búsqueda: {:?}", start.elapsed());
+    println!("{}", serde_json::to_string_pretty(&advice).unwrap());
 }

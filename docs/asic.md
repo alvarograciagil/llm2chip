@@ -70,6 +70,18 @@ El reloj queda a menos del 12 % en las quince celdas. El área queda entre el 62
 
 Las celdas cuyo reloj objetivo no se alcanza terminan con unas decenas de violaciones de reglas en el rutado detallado; las que lo alcanzan, con ninguna. El área y la frecuencia no cambian por ello.
 
+## La corrección de errores en el camino de lectura
+
+Con SRAM, cada celda guarda sus pesos en palabras de unos 64 bits con bits de comprobación, y corrige el peso que lee. El estimador medía el reloj de la celda con una memoria de una sola palabra, sin corrector, y el layout también. Con el corrector, el camino crítico pasaba de unos 8 retardos de sumador completo a 35: una celda de 16 bits en N6 no superaba 0,62 GHz, frente a los más de 2 GHz estimados.
+
+Tres cambios lo arreglan:
+
+- Las paridades, el recuento de bits del síndrome y la comprobación de carril eran cadenas lineales de puertas; ahora son árboles equilibrados, con la misma lógica.
+- El peso corregido se registra antes del multiplicador, y la activación con él: la corrección tiene su propio ciclo, y la latencia de la celda sube en uno. Sin ese registro, la celda sería entre un 35 y un 55 % más lenta.
+- El estimador mide el reloj, y el layout se hace, con la memoria más pequeña que conserva la corrección de la celda real (`timed_cell`). Por encima de ese tamaño el camino ya no crece.
+
+Con todo ello, el camino de la celda con corrección vuelve a 7,4-8,3 retardos, lo mismo que sin ella.
+
 ## Memorias
 
 Las memorias son macros de SRAM, y en los procesos abiertos solo existen pequeñas. Las de SkyWater 130 que trae OpenROAD (`sky130_sram_1rw1r_*`, de OpenRAM) llegan a 32 Kbit y ocupan 35,5 µm² por bit en 5 Kbit, 25,6 en 16 Kbit y 22,0 en 32 Kbit; el modelo las reproduce con 13,17 µm² por bit y periferia 3,79, y una memoria mayor se construye con varias de 32 Kbit. GF180 usa las de GlobalFoundries, de 4 Kbit y unos 51 µm² por bit. Antes el modelo suponía macros de cualquier tamaño, con densidades 5 veces mejores que las reales.
@@ -81,6 +93,11 @@ Antes de hacer ningún layout, el inspector dice si el diseño se puede fabricar
 - **Qué lo impide**, con cifras: cuánto necesita cada die frente a lo que admite el proceso, y los tres bloques que más ocupan; los errores del estimador; y, para el layout, si el proceso tiene PDK abierto y si las memorias que usa el diseño existen en él (solo SRAM).
 - **Cómo hacerlo viable**: prueba cambios de parámetros (repartir en más chips, dimensionar para el modelo, contexto nativo, menos bits de peso o de caché KV, menos multiplicadores o carriles, tablas de función más pequeñas, todo el die del proceso, otro proceso abierto que se fabrique) y solo ofrece los que, estimados de nuevo, pasan la comprobación. Si ninguno basta solo, busca una combinación cambio a cambio, y después otra con el menor número de chips sin aceptar pérdidas grandes de calidad. Cada propuesta indica sus chips, su área, sus tok/s y lo que arriesga.
 - **Qué significa el número de chips**: cuántos encapsulados y placas hacen falta (unos 16 encapsulados por placa para chips grandes, 64 para chips pequeños de lanzadera), el tiempo que cada token pasa en los enlaces, y que en una lanzadera abierta cada die distinto ocupa una plaza propia.
+- **Enlaces de una lanzadera abierta**: cada die llega en su propio encapsulado y solo tiene sus pines de E/S para hablar con los demás. En automático, SkyWater 130 y GF180 usan enlaces por pines (16 pines por sentido a 50 MHz, unos 60 ns por salto), y los tok/s cuentan lo que tarda el vector en cruzarlos.
+
+La búsqueda hace unas cien estimaciones, y tarda menos de dos segundos en nativo: las celdas generadas, sus caminos críticos y su conmutación se guardan, porque se repiten de una estimación a otra.
+
+Al cambiar de modelo, el diseño se dimensiona para él: sus límites (parámetros, capas, ancho, vocabulario) pasan a ser los del modelo, el contexto no supera el nativo, y los multiplicadores, carriles vectoriales y unidades de función siguen la proporción del diseño por defecto, o la velocidad pedida si la hay.
 
 El botón de layout queda desactivado mientras el diseño no sea viable.
 

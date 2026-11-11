@@ -62,8 +62,9 @@ pub fn run(request: &LayoutRequest, job: &LayoutJob, home: &Path) -> Result<serd
         return Err("Docker no está en marcha: ábrelo para hacer layouts con OpenROAD".into());
     }
     set_phase("Generando el Verilog de la celda");
-    // A few words of memory: what is measured is the logic around it.
-    let mut config = CellConfig { addr_bits: 2, mac_stages: request.cell.mac_stages.max(1), adder_stages: request.cell.adder_stages.max(1), ..request.cell };
+    // A few words of memory, what is measured being the logic around it: the fewest that
+    // keep the cell's error correction, which the estimator sends already.
+    let mut config = CellConfig { addr_bits: request.cell.addr_bits.max(2), mac_stages: request.cell.mac_stages.max(1), adder_stages: request.cell.adder_stages.max(1), ..request.cell };
     config.accumulator_bits = config.required_accumulator().max(config.accumulator_bits);
     let design = cell_design(config);
     let top = design.top.clone();

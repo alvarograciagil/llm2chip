@@ -4,6 +4,7 @@ import {
   defaultParams,
   designPresets,
   estimateDesign,
+  fitDesign,
   optimizationCatalog,
   techNodes,
   type ChipParams,
@@ -164,6 +165,15 @@ function writeHash(model: ModelSource | null, params: ChipParams) {
   }, 300);
 }
 
+/** The parameters sized for a model, or none if the engine cannot read it. */
+function fitted(model: ModelSource, params: ChipParams): Partial<ChipParams> {
+  try {
+    return fitDesign(model, params);
+  } catch {
+    return {};
+  }
+}
+
 function run(model: ModelSource | null, params: ChipParams) {
   if (!model) return { report: null, error: null, estimateMs: 0 };
   const start = performance.now();
@@ -256,19 +266,17 @@ export const useDesign = create<DesignState>((set, get) => {
 
     selectModel(id) {
       const model = get().models.find((m) => m.id === id) ?? null;
-      set({ model, selection: null, ...run(model, get().params) });
+      if (!model || model.id === get().model?.id) return;
+      // A design moves to another model sized for it: its limits, context and units.
+      commit({ ...get().params, ...fitted(model, get().params) } as ChipParams, "", { model, selection: null });
     },
 
     addModel(name, config, path) {
       const model = { id: `archivo:${name}`, name, config, ...(path ? { path } : {}) };
       const added = [...get().models.filter((m) => m.id !== model.id), model];
       writeAddedModels(added);
-      set({
-        models: added,
-        model,
-        selection: null,
-        ...run(model, get().params),
-      });
+      set({ models: added });
+      commit({ ...get().params, ...fitted(model, get().params) } as ChipParams, "", { model, selection: null });
     },
 
     reset: () => commit(get().defaults, "", { selection: null, designName: "Sin título" }),

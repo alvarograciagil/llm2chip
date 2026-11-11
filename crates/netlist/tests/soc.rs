@@ -9,15 +9,21 @@ use std::process::Command;
 
 const CONFIG: SocConfig = SocConfig { program_bits: 13, data_bits: 13, fifo_bits: 6 };
 
+/// Built once per test run, so that tests running together do not race on the binary.
 fn build_firmware() -> Option<FirmwareImage> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../firmware");
-    let built = Command::new("cargo").current_dir(&dir).env_remove("RUSTFLAGS").env_remove("CARGO_ENCODED_RUSTFLAGS").args(["build", "--release"]).output().ok()?;
-    if !built.status.success() {
-        eprintln!("firmware omitido: {}", String::from_utf8_lossy(&built.stderr));
-        return None;
-    }
-    let elf = std::fs::read(dir.join("target/riscv32im-unknown-none-elf/release/firmware")).ok()?;
-    Some(FirmwareImage::from_elf(&elf).unwrap())
+    static FIRMWARE: std::sync::OnceLock<Option<FirmwareImage>> = std::sync::OnceLock::new();
+    FIRMWARE
+        .get_or_init(|| {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../firmware");
+            let built = Command::new("cargo").current_dir(&dir).env_remove("RUSTFLAGS").env_remove("CARGO_ENCODED_RUSTFLAGS").args(["build", "--release"]).output().ok()?;
+            if !built.status.success() {
+                eprintln!("firmware omitido: {}", String::from_utf8_lossy(&built.stderr));
+                return None;
+            }
+            let elf = std::fs::read(dir.join("target/riscv32im-unknown-none-elf/release/firmware")).ok()?;
+            Some(FirmwareImage::from_elf(&elf).unwrap())
+        })
+        .clone()
 }
 
 struct GateRun {

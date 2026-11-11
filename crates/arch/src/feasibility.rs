@@ -2,7 +2,7 @@
 //! with the numbers that matter, and which changes of the parameters make it buildable.
 //! Every change offered has been estimated again and passes the same check.
 
-use crate::estimate::{estimate, link_plan, Report, Severity};
+use crate::estimate::{effective_link, estimate, link_plan, Report, Severity};
 use crate::params::{ChipParams, DieMode, KvBackend, WeightBackend};
 use crate::tech::{node, TechNode};
 use model_ir::ModelGraph;
@@ -21,6 +21,8 @@ pub struct Feasibility {
     /// What is worth knowing though it stops nothing.
     pub notes: Vec<String>,
     pub dies: u32,
+    /// Distinct dies to make: each die of its own, or one design repeated.
+    pub designs: u32,
     pub die_area_mm2: f64,
     pub die_limit_mm2: f64,
     /// The largest blocks of each die, to see where the area goes.
@@ -43,7 +45,10 @@ pub struct Change {
 #[derive(Clone, Debug, Serialize)]
 pub struct Suggestion {
     pub changes: Vec<Change>,
+    /// It does not fix anything: the design already works, and this makes it cheaper.
+    pub cheaper: bool,
     pub dies: u32,
+    pub designs: u32,
     pub die_area_mm2: f64,
     pub tok_s: f64,
     pub layout: bool,
@@ -65,6 +70,40 @@ fn memory_name(backend: WeightBackend) -> Option<&'static str> {
     }
 }
 
+/// The parameters `fit_to_model` sets.
+pub const FIT_FIELDS: [&str; 8] = ["max_params_g", "max_layers", "max_hidden_size", "max_vocabulary", "context_tokens", "macs_per_die", "vector_lanes_per_die", "function_units_per_die"];
+
+/// The design sized for this model: the chip's limits are the model's own, the context no
+/// longer than it was trained for, and the units scaled with it. With a speed to reach, the
+/// multipliers are those that reach it; otherwise as many per parameter as the default
+/// design has, which gives about its speed. Vector lanes and function units keep the default
+/// design's proportion to the multipliers. What the person chose otherwise stays.
+pub fn fit_to_model(model: &ModelGraph, p: &ChipParams) -> Result<ChipParams, String> {
+    let mut q = p.clone();
+    let params_g = model.total_params() as f64 / 1e9;
+    // Three significant figures, rounded up, with a little room.
+    let step = 10f64.powf((params_g * 1.02).log10().floor() - 2.0);
+    q.max_params_g = ((params_g * 1.02) / step).ceil() * step;
+    q.max_layers = model.num_layers;
+    q.max_hidden_size = model.hidden_size as u32;
+    q.max_vocabulary = model.vocab_size as u32;
+    // The context the design had, or the default if a smaller model had cut it, up to what
+    // this model was trained for.
+    let context = p.context_tokens.max(ChipParams::default().context_tokens);
+    q.context_tokens = if model.max_context > 0 { context.min(model.max_context) } else { context };
+    let d = ChipParams::default();
+    let macs = if q.target_tok_s > 0.0 {
+        estimate(model, &q)?.resolved.macs_per_die
+    } else {
+        ((d.macs_per_die as f64 * q.max_params_g / d.max_params_g).round() as u64).clamp(16, d.macs_per_die * 4)
+    };
+    let scale = macs as f64 / d.macs_per_die as f64;
+    q.macs_per_die = macs;
+    q.vector_lanes_per_die = ((d.vector_lanes_per_die as f64 * scale).max(1.0).log2().round().exp2() as u64).clamp(4, d.vector_lanes_per_die * 4);
+    q.function_units_per_die = ((d.function_units_per_die as f64 * scale).round() as u32).clamp(1, d.function_units_per_die * 4);
+    Ok(q)
+}
+
 /// Packages a board takes, with their power and cooling: about what an eight- or
 /// sixteen-accelerator server carries.
 pub const BOARD_PACKAGES: u32 = 16;
@@ -83,7 +122,7 @@ fn chip_notes(p: &ChipParams, report: &Report, tech: Option<&TechNode>) -> Vec<S
     if report.dies <= 1 {
         return notes;
     }
-    let plan = link_plan(p.link, report.dies, report.die_area_mm2);
+    let plan = link_plan(tech.map_or(p.link, |t| effective_link(p, t)), report.dies, report.die_area_mm2);
     let crossing = plan.delay_ns() / 1000.0;
     let shuttle = tech.is_some_and(|t| t.open_pdk && t.fabricable);
     if shuttle {
@@ -92,7 +131,7 @@ fn chip_notes(p: &ChipParams, report: &Report, tech: Option<&TechNode>) -> Vec<S
         let boards = report.dies.div_ceil(per_board);
         let where_ = if boards > 1 { format!("{boards} placas unidas por cable") } else { "una placa".into() };
         notes.push(format!(
-            "Una lanzadera abierta entrega cada die en su propio encapsulado: {} chips sobre {where_}, unidos por sus pines de E/S, más lentos que los enlaces que cuenta el estimador.",
+            "Una lanzadera abierta entrega cada die en su propio encapsulado: {} chips sobre {where_}, unidos por sus pines de E/S. Cada token pasa {crossing:.1} µs solo en los saltos, más lo que tarda el vector en cruzar los pines.",
             report.dies
         ));
     } else if plan.packages > BOARD_PACKAGES {
@@ -154,6 +193,7 @@ pub fn judge(p: &ChipParams, report: &Report) -> Feasibility {
         reasons,
         notes,
         dies: report.dies,
+        designs: if p.die_mode == DieMode::Identical { 1 } else { report.dies },
         die_area_mm2: report.die_area_mm2,
         die_limit_mm2: limit,
         largest: blocks,
@@ -207,9 +247,18 @@ fn levers(model: &ModelGraph, p: &ChipParams, tech: &TechNode) -> Vec<Change> {
         add("function_table_bits", bits.into(), format!("Tablas de función de {bits} bits de entrada"), Some("precisión de SiLU, exp y raíz algo menor"));
     }
     // Fewer units per die, down to what a small model needs: each a quarter of the last.
+    // With a speed to reach, the multipliers follow it, so the speed is what changes.
+    if p.target_tok_s > 0.0 {
+        for divisor in [2.0, 4.0, 16.0] {
+            let rate = (p.target_tok_s / divisor).round();
+            if rate >= 1.0 {
+                add("target_tok_s", rate.into(), format!("Velocidad objetivo de {rate} tok/s"), Some("menos tok/s"));
+            }
+        }
+    }
     for divisor in [2, 8, 32, 128, 512, 2048] {
         let macs = p.macs_per_die / divisor;
-        if macs >= 16 {
+        if macs >= 16 && p.target_tok_s <= 0.0 {
             add("macs_per_die", macs.into(), format!("{macs} multiplicadores por die"), Some("menos tok/s"));
         }
         let lanes = p.vector_lanes_per_die / divisor;
@@ -254,7 +303,7 @@ pub fn advise(model: &ModelGraph, p: &ChipParams, search: bool) -> Result<Advice
     let report = estimate(model, p)?;
     let verdict = judge(p, &report);
     let Some(tech) = node(&p.node) else { return Ok(Advice { verdict, suggestions: Vec::new() }) };
-    if !search || verdict.layout || (verdict.possible && !tech.open_pdk) {
+    if !search {
         return Ok(Advice { verdict, suggestions: Vec::new() });
     }
     let goal = |f: &Feasibility| if tech.open_pdk { f.layout } else { f.possible };
@@ -262,23 +311,50 @@ pub fn advise(model: &ModelGraph, p: &ChipParams, search: bool) -> Result<Advice
         let q = apply(p, changes)?;
         let report = estimate(model, &q).ok()?;
         let f = judge(&q, &report);
-        let s = Suggestion { changes: changes.to_vec(), dies: f.dies, die_area_mm2: f.die_area_mm2, tok_s: f.tok_s, layout: f.layout };
+        let s = Suggestion { changes: changes.to_vec(), cheaper: false, dies: f.dies, designs: f.designs, die_area_mm2: f.die_area_mm2, tok_s: f.tok_s, layout: f.layout };
         Some((f, s))
     };
+    // A buildable design of many different dies may be one design made many times instead:
+    // a little more silicon each, far fewer masks or shuttle places.
+    if goal(&verdict) {
+        let mut suggestions = Vec::new();
+        if verdict.designs > 1 {
+            let same = Change { field: "die_mode", value: "identical".into(), label: format!("Todos los dies iguales: un diseño fabricado {} veces", verdict.dies), risk: Some("algo más de área por die".into()) };
+            if let Some((f, mut s)) = try_changes(std::slice::from_ref(&same)).filter(|(f, _)| goal(f)) {
+                s.cheaper = true;
+                s.designs = f.designs;
+                suggestions.push(s);
+            }
+        }
+        return Ok(Advice { verdict, suggestions });
+    }
+    if verdict.possible && !tech.open_pdk {
+        return Ok(Advice { verdict, suggestions: Vec::new() });
+    }
     let options = levers(model, p, tech);
 
-    // One change alone, if any does it: the fastest first.
-    let mut suggestions: Vec<Suggestion> = options.iter().filter_map(|c| try_changes(std::slice::from_ref(c))).filter(|(f, _)| goal(f)).map(|(_, s)| s).collect();
+    // Each change alone. Those that do it are offered as they are, the fastest first.
+    let singles: Vec<(Change, Feasibility, Suggestion)> = options.iter().filter_map(|c| try_changes(std::slice::from_ref(c)).map(|(f, s)| (c.clone(), f, s))).collect();
+    let mut suggestions: Vec<Suggestion> = singles.iter().filter(|(_, f, _)| goal(f)).map(|(_, _, s)| s.clone()).collect();
     suggestions.sort_by(|a, b| b.tok_s.total_cmp(&a.tok_s));
     suggestions.truncate(5);
     if !suggestions.is_empty() {
         return Ok(Advice { verdict, suggestions });
     }
+    // Only the changes that help on their own are worth combining: that keeps the search to
+    // a few dozen estimates.
+    let start = distance(&verdict);
+    let closer = |a: (usize, f64), b: (usize, f64)| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1));
+    let useful: Vec<Change> = singles
+        .iter()
+        .filter(|(_, f, _)| closer(distance(f), start).is_lt() || f.dies < verdict.dies || f.die_area_mm2 < verdict.die_area_mm2 * 0.999)
+        .map(|(c, _, _)| c.clone())
+        .collect();
 
-    // Otherwise a few changes together: each step takes the one that brings it closest.
+    // A few changes together: each step takes the one that brings it closest.
     let mut chosen: Vec<Change> = Vec::new();
     for _ in 0..8 {
-        let best = options
+        let best = useful
             .iter()
             .filter(|c| chosen.iter().all(|d| d.field != c.field))
             .filter_map(|c| {
@@ -286,7 +362,7 @@ pub fn advise(model: &ModelGraph, p: &ChipParams, search: bool) -> Result<Advice
                 changes.push(c.clone());
                 try_changes(&changes).map(|(f, s)| (distance(&f), goal(&f), s))
             })
-            .min_by(|a, b| b.1.cmp(&a.1).then(a.0 .0.cmp(&b.0 .0)).then(a.0 .1.total_cmp(&b.0 .1)).then(b.2.tok_s.total_cmp(&a.2.tok_s)));
+            .min_by(|a, b| b.1.cmp(&a.1).then(closer(a.0, b.0)).then(b.2.tok_s.total_cmp(&a.2.tok_s)));
         let Some((_, reached, s)) = best else { break };
         chosen = s.changes.clone();
         if reached {
@@ -298,7 +374,7 @@ pub fn advise(model: &ModelGraph, p: &ChipParams, search: bool) -> Result<Advice
     if let Some(first) = suggestions.first().cloned() {
         let mut fewest = first.clone();
         for _ in 0..6 {
-            let better = options
+            let better = useful
                 .iter()
                 .filter(|c| fewest.changes.iter().all(|d| d.field != c.field))
                 // Not at any price: a large loss of quality is a choice for the person.
@@ -340,6 +416,22 @@ mod tests {
         let sky = advise(&model, &small("sky130"), true).unwrap();
         assert!(!sky.verdict.possible, "{:?}", sky.verdict);
         assert!(sky.verdict.reasons[0].contains("10 mm²"), "{:?}", sky.verdict.reasons);
+    }
+
+    #[test]
+    fn a_design_moved_to_a_small_model_is_sized_for_it() {
+        let model = stories();
+        let fitted = fit_to_model(&model, &ChipParams { node: "n6".into(), ..Default::default() }).unwrap();
+        assert!(fitted.max_params_g < 0.001 && fitted.max_params_g * 1e9 >= model.total_params() as f64, "{}", fitted.max_params_g);
+        assert!(fitted.context_tokens <= model.max_context);
+        assert!(fitted.vector_lanes_per_die < ChipParams::default().vector_lanes_per_die);
+        let report = estimate(&model, &fitted).unwrap();
+        assert!(report.dies == 1 && report.violations.iter().all(|v| v.severity != Severity::Error), "{} {:?}", report.dies, report.violations);
+        // And back: the large model gets the default design's units, whatever the small one had.
+        let qwen = ModelGraph::from_config_json("qwen", include_str!("../../../models/qwen3.8-27b.json")).unwrap();
+        let back = fit_to_model(&qwen, &fitted).unwrap();
+        let d = ChipParams::default();
+        assert!(back.macs_per_die <= d.macs_per_die && back.macs_per_die * 2 > d.macs_per_die, "{}", back.macs_per_die);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 use netlist::{CellConfig, DieConfig};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
 pub const CONFIG: &str = r#"{
   "model_type": "qwen3_5_text",
@@ -160,3 +161,21 @@ pub fn make_checkpoint(dir: &Path) {
     w.write(&dir.join("model.safetensors"));
 }
 
+
+/// The firmware, built once per test run: tests running at the same time used to start
+/// their own builds, and one could find the binary half-written by another.
+pub fn firmware() -> Option<netlist::soc::FirmwareImage> {
+    static FIRMWARE: OnceLock<Option<netlist::soc::FirmwareImage>> = OnceLock::new();
+    FIRMWARE
+        .get_or_init(|| {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../firmware");
+            let built = std::process::Command::new("cargo").current_dir(&dir).env_remove("RUSTFLAGS").env_remove("CARGO_ENCODED_RUSTFLAGS").args(["build", "--release"]).output().ok()?;
+            if !built.status.success() {
+                eprintln!("firmware omitido: {}", String::from_utf8_lossy(&built.stderr));
+                return None;
+            }
+            let elf = std::fs::read(dir.join("target/riscv32im-unknown-none-elf/release/firmware")).ok()?;
+            Some(netlist::soc::FirmwareImage::from_elf(&elf).expect("ELF del firmware"))
+        })
+        .clone()
+}
