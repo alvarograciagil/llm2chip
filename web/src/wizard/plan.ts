@@ -89,6 +89,8 @@ export function fpgaParams(a: Answers, board: FpgaBoard, outside: boolean): Part
     macs_per_die: Math.max(8, Math.min(board.dsp - 8, 1024)),
     vector_lanes_per_die: board.dsp >= 1000 ? 4 : 1,
     vector_units_per_die: 1,
+    // Scale and bias over two cycles: their product leaves the cell's longest path.
+    factor_steps: 2,
     weight_backend: outside ? "external_ddr" : "sram",
     kv_backend: outside ? "external_ddr" : "sram",
     chip_split: "layers",

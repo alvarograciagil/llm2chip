@@ -319,6 +319,25 @@ fn rope_row(theta: f32, scaling: Option<RopeScaling>, half: usize, position: u32
     table
 }
 
+/// Cosines and sines for a token whose rotary frequencies follow three positions, as M-RoPE
+/// interleaves them: frequency `i` takes the row's if `i % 3 == 1` and the column's if
+/// `i % 3 == 2`, as far as their sections reach, and time's otherwise.
+fn mixed_rope_row(theta: f32, scaling: Option<RopeScaling>, half: usize, positions: [u64; 3], section: [usize; 3]) -> Vec<f64> {
+    let rows: Vec<Vec<f64>> = positions.iter().map(|p| rope_row(theta, scaling, half, *p as u32)).collect();
+    let mut table = rows[0].clone();
+    for i in 0..half {
+        let from = match i % 3 {
+            1 if i < 3 * section[1] => 1,
+            2 if i < 3 * section[2] => 2,
+            _ => 0,
+        };
+        for offset in [0, half, 2 * half] {
+            table[offset + i] = rows[from][offset + i];
+        }
+    }
+    table
+}
+
 /// Where everything lives in the register file, stable across tokens.
 pub struct Layout {
     config: DieConfig,
@@ -362,6 +381,10 @@ pub struct Layout {
     /// their loops step through by number: what a compact vector memory has to hold.
     extents: RefCell<HashMap<u32, u32>>,
     windows: RefCell<HashMap<u32, u32>>,
+    /// Rotations written for particular positions of the cache, in place of the table's: an
+    /// image's tokens under M-RoPE, and the text after it, which goes on from further on.
+    /// The host writes them into the table the chip reads.
+    rotations: RefCell<HashMap<u32, Vec<f64>>>,
     /// The most tokens and positions the routines can see.
     tokens: u32,
     positions: u32,
@@ -650,7 +673,7 @@ impl Layout {
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
         }
-        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), tokens: program.vocab as u32, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside: None })
+        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: program.vocab as u32, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside: None })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -1033,6 +1056,12 @@ impl Layout {
         }
     }
 
+    /// The token's operations before `end`: with the last one left out, the hidden state that
+    /// the logits' product would take.
+    pub fn run_until<O: BlockOps>(&self, ops: &mut O, program: &Program, token: O::N, position: O::N, end: usize) -> Result<(), String> {
+        self.run_range(ops, program, 0..end, token, position, true)
+    }
+
     pub fn run_token<O: BlockOps>(&self, ops: &mut O, program: &Program, token: O::N, position: O::N, want_logits: bool) -> Result<(), String> {
         let limit = if want_logits { program.ops.len() } else { program.logits_from };
         self.run_range(ops, program, 0..limit, token, position, true)
@@ -1058,6 +1087,31 @@ impl Layout {
         self.run_list(ops, program, &draft.ops[..limit], token, position, true)
     }
 
+    /// The rotation of the cache's position `slot`: that of `positions`, three under M-RoPE
+    /// with `section`, or the table's own when they are all `slot`.
+    pub fn place_rotation(&self, program: &Program, slot: u32, positions: [u64; 3], section: Option<[usize; 3]>) -> Result<(), String> {
+        let mut rotations = self.rotations.borrow_mut();
+        if positions == [slot as u64; 3] {
+            rotations.remove(&slot);
+            return Ok(());
+        }
+        if program.local_rope_theta.is_some() {
+            return Err("este modelo tiene dos tablas de rotación y solo se reescribe la principal".into());
+        }
+        let section = match section {
+            Some(section) => section,
+            None if positions[1] == positions[0] && positions[2] == positions[0] => [self.rope_half, 0, 0],
+            None => return Err("tres posiciones distintas sin las secciones de M-RoPE".into()),
+        };
+        rotations.insert(slot, mixed_rope_row(program.rope_theta, program.rope_scaling, self.rope_half, positions, section));
+        Ok(())
+    }
+
+    /// Back to the table's own rotations everywhere.
+    pub fn clear_rotations(&self) {
+        self.rotations.borrow_mut().clear();
+    }
+
     pub fn feed_draft<O: BlockOps>(&self, ops: &mut O, program: &Program, from_main: bool) {
         let Some(draft) = &program.draft else { return };
         let source = if from_main { program.final_hidden } else { draft.hidden_out };
@@ -1069,7 +1123,8 @@ impl Layout {
             return;
         }
         let (theta, scaling, half) = (program.rope_theta, program.rope_scaling, self.rope_half);
-        ops.load_row(self.rope_table[0], position, 3 * half as u32 + 1, self.rope[0], |row| rope_row(theta, scaling, half, row));
+        let rotations = self.rotations.borrow();
+        ops.load_row(self.rope_table[0], position, 3 * half as u32 + 1, self.rope[0], |row| rotations.get(&row).cloned().unwrap_or_else(|| rope_row(theta, scaling, half, row)));
         if let Some(local) = program.local_rope_theta {
             ops.load_row(self.rope_table[1], position, 3 * half as u32 + 1, self.rope[1], |row| rope_row(local, None, half, row));
         }

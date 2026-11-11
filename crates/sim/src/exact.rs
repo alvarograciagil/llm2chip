@@ -32,6 +32,10 @@ pub struct ExactEngine {
     draft_tokens: usize,
     exponents: u32,
     pub(crate) logits: Vec<f32>,
+    /// M-RoPE's sections, for models whose images take three positions.
+    mrope: Option<[usize; 3]>,
+    /// How far the text's rotary positions run ahead of the cache's, after an image.
+    rope_offset: i64,
 }
 
 impl ExactEngine {
@@ -46,7 +50,7 @@ impl ExactEngine {
         let exponents = exponent_register(&config);
         let mut vm = BlockVm::new(&config, layout.registers_used() as usize + 8, Some(weights));
         vm.compute_in_cells();
-        let mut engine = Self { program, layout, bits, vm, position: 0, draft_tokens: 0, exponents, logits: Vec::new() };
+        let mut engine = Self { program, layout, bits, vm, position: 0, draft_tokens: 0, exponents, logits: Vec::new(), mrope: None, rope_offset: 0 };
         engine.reset();
         Ok(engine)
     }
@@ -62,6 +66,18 @@ impl ExactEngine {
         crate::chip::load_initial(&mut self.vm, &self.layout.setup().initial, self.exponents);
         self.position = 0;
         self.draft_tokens = 0;
+        self.rope_offset = 0;
+        self.layout.clear_rotations();
+    }
+
+    /// Rotary frequencies follow three positions, `section` of them each, interleaved.
+    pub fn set_mrope(&mut self, section: [usize; 3]) {
+        self.mrope = Some(section);
+    }
+
+    /// Where the text after an image goes on from: its next token takes `position`.
+    pub fn continue_text_at(&mut self, position: u64) {
+        self.rope_offset = position as i64 - self.position as i64;
     }
 
     pub fn vocabulary(&self) -> usize {
@@ -86,15 +102,10 @@ impl ExactEngine {
     }
 
     /// A vector in place of a token's embedding, such as a picture's: the chip loads it,
-    /// in its own format, where the token's row would go. Only text positions: the three
-    /// positions of M-RoPE are not computed by the chip yet.
+    /// in its own format, where the token's row would go, in the cache's next position, and
+    /// rotates it by its own positions: three under M-RoPE.
     pub fn step_embedding(&mut self, embedding: &[f32], positions: [u64; 3], want_logits: bool) -> Result<Option<Vec<f32>>, String> {
-        if positions[1] != positions[0] || positions[2] != positions[0] {
-            return Err("las imágenes de este modelo usan M-RoPE (tres posiciones), que el chip aún no calcula".into());
-        }
-        if positions[0] != self.position as u64 {
-            return Err("el chip solo coloca cada vector en la posición siguiente".into());
-        }
+        self.layout.place_rotation(&self.program, self.position as u32, positions, self.mrope)?;
         let values: Vec<f64> = embedding.iter().map(|v| *v as f64).collect();
         let (mantissas, exponent) = netlist::block::encode_vector(&values, self.bits);
         self.vm.feed_row(mantissas, exponent);
@@ -103,7 +114,29 @@ impl ExactEngine {
         Ok(want_logits.then(|| self.vm.floats(self.layout.logits_register(&self.program), self.program.vocab)))
     }
 
+    /// Runs a token, or a vector in its place, up to the product that makes the logits, and
+    /// gives the vector that product would take: the last hidden state, normalised. Heads
+    /// other than the text's read it, such as an image generator's.
+    pub fn step_hidden(&mut self, token: u32, embedding: Option<&[f32]>) -> Result<Vec<f32>, String> {
+        let last = self.program.ops.len() - 1;
+        let compiler::Op::Matvec { src, .. } = self.program.ops[last].op else {
+            return Err("el modelo no termina en el producto de los logits".into());
+        };
+        let text = (self.position as i64 + self.rope_offset) as u64;
+        self.layout.place_rotation(&self.program, self.position as u32, [text; 3], self.mrope)?;
+        if let Some(embedding) = embedding {
+            let values: Vec<f64> = embedding.iter().map(|v| *v as f64).collect();
+            let (mantissas, exponent) = netlist::block::encode_vector(&values, self.bits);
+            self.vm.feed_row(mantissas, exponent);
+        }
+        self.layout.run_until(&mut self.vm, &self.program, token, self.position as u32, last)?;
+        self.position += 1;
+        Ok(self.buffer(src))
+    }
+
     pub fn step(&mut self, token: u32, want_logits: bool) -> Result<Option<Vec<f32>>, String> {
+        let text = (self.position as i64 + self.rope_offset) as u64;
+        self.layout.place_rotation(&self.program, self.position as u32, [text; 3], self.mrope)?;
         self.layout.run_token(&mut self.vm, &self.program, token, self.position as u32, want_logits)?;
         self.position += 1;
         Ok(want_logits.then(|| self.vm.floats(self.layout.logits_register(&self.program), self.program.vocab)))

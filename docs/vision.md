@@ -22,6 +22,7 @@ En el modelo de lenguaje, cada token tiene tres posiciones (tiempo, fila, column
 
 - **Referencia en coma flotante** (`crates/sim/src/vision.rs`): preprocesado, codificador completo y fusión, contra los pesos reales.
 - **Modelo de lenguaje con imágenes** (`Engine::step_embedding`, `set_mrope`, `continue_text_at`): los tokens de imagen entran como vectores con sus tres posiciones, y el texto siguiente continúa donde toca.
+- **Con la aritmética del chip** (`ExactEngine`, lo mismo): cada vector se carga en el formato del die donde iría la fila del embedding, y su rotación es una fila propia de la tabla de RoPE para esa posición de la caché, compuesta con las de sus tres posiciones (tiempo, fila y columna) según las secciones de M-RoPE. En el chip, el anfitrión escribe esas filas en la tabla que el die ya lee por posición, igual que trae las filas del embedding; el texto que sigue a la imagen se rota desde su propia posición. Un test lo compara con la coma flotante en un modelo de juguete con toda la cabeza rotada.
 - **Ejemplo** `cargo run --release -p sim --example see -- <modelo> rojo`: dibuja una figura de color, se la enseña al Qwen real y le pregunta de qué color es.
 - **Estimador**: con «Incluir visión», el área cuenta todos los pesos del codificador (bloques, embeddings y fusión) y aparece el tiempo de procesar una imagen de 512×512 en los multiplicadores de un die.
 
@@ -33,7 +34,15 @@ Casi todo se compone con operaciones que el die ya tiene:
 2. **LayerNorm**: la media es una suma con el registro de unos, escalada; después, la misma norma que RMSNorm sobre el vector centrado, y el sesgo.
 3. **Atención bidireccional**: la misma atención del modelo de lenguaje sobre un almacén de claves y valores de la imagen, pero sin máscara causal. Exige recorrer el codificador capa a capa: primero todas las claves y valores de un bloque, después todas las consultas. El firmware lo ordena con dos rutinas por bloque (`VIT_QKV` y `VIT_RESTO`) y un índice de parche, y guarda el estado de cada parche entre bloques en un almacén como el de la caché KV.
 4. **RoPE 2D**: el firmware escribe para cada parche su fila y su columna; las dos tablas de cosenos y senos ya existen para la RoPE del texto.
-5. **M-RoPE en el texto**: la tabla de rotación de cada token se compone con tres filas de la tabla (tiempo, fila, columna) y una máscara fija de qué frecuencia sigue a cuál.
+5. **M-RoPE en el texto**: hecho en la aritmética del chip, con filas de rotación escritas por el anfitrión para las posiciones de la imagen (ver arriba).
 6. **Entrada de imagen**: la rutina de token del modelo de lenguaje acepta como entrada un registro en lugar del embedding, igual que ya acepta la salida de la cabeza MTP.
 
 Lo que falta para hacerlo en puertas es el orden capa a capa del firmware y las rutinas del codificador; la aritmética ya está.
+
+## Dibujar con Janus-Pro
+
+Janus-Pro-1B también genera imágenes: su modelo de lenguaje escribe 576 tokens de un libro de códigos (una rejilla de 24 × 24), guiado lejos de lo que dibujaría sin el texto, y un decodificador convolucional los convierte en píxeles. `cargo run --release -p sim --example draw -- <carpeta> "<descripción>" salida.bmp [temperatura] [semilla]`.
+
+Con `EXACTO=16` (y en la aplicación, con el modelo cargado en la aritmética del chip), las dos copias del modelo de lenguaje, con texto y sin él, corren en la aritmética entera del die: cada token de imagen vuelve a entrar como vector, como los de un codificador de imagen. La cabeza de generación y el alineador, dos capas pequeñas, y el decodificador de píxeles se quedan en coma flotante en el anfitrión.
+
+Con «a red apple on a wooden table», semilla 7 y temperatura 1, la coma flotante tarda 387 s y la aritmética del chip 543 s, y las dos dibujan una manzana roja sobre madera. No son la misma imagen: con temperatura 1, una diferencia mínima en un logit cambia qué token se elige, y desde ahí el dibujo sigue otro camino. Un test comprueba que el estado oculto que lee la cabeza de imagen sale del chip igual que en coma flotante, dentro del 2 %.

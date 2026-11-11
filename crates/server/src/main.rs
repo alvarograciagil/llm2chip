@@ -57,6 +57,8 @@ struct Loaded {
     vision: Option<Seer>,
     /// The image generator, opened the first time a picture is asked for.
     painter: Option<sim::janus::Janus>,
+    /// The bits of the die's arithmetic when the model runs on it, for drawing too.
+    exact_bits: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -476,12 +478,12 @@ fn load_model(catalog: &Catalog, request: LoadRequest) -> Result<Loaded, String>
     };
     let program = compile_model(&config)?;
     let prompt = PromptStyle::read(dir, &program.family, &tokenizer);
-    let engine: Box<dyn Runner> = if exact {
-        Box::new(ExactEngine::new(program, weights, numeric.map_or(16, |n| n.activation_bits.clamp(8, 24)))?)
-    } else {
-        Box::new(Engine::new(program, weights, mode)?)
+    let exact_bits = exact.then(|| numeric.map_or(16, |n| n.activation_bits.clamp(8, 24)));
+    let engine: Box<dyn Runner> = match exact_bits {
+        Some(bits) => Box::new(ExactEngine::new(program, weights, bits)?),
+        None => Box::new(Engine::new(program, weights, mode)?),
     };
-    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator, dir: dir.to_path_buf(), firmware_tables: None, load_report, prompt, vision: None, painter: None })
+    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator, dir: dir.to_path_buf(), firmware_tables: None, load_report, prompt, vision: None, painter: None, exact_bits })
 }
 
 async fn load(State(app): State<App>, Json(request): Json<LoadRequest>) -> Response {
@@ -813,7 +815,7 @@ fn run_drawing(loaded: &mut Loaded, request: &GenerateRequest, sender: &mpsc::Se
     let _ = sender.blocking_send(serde_json::json!({ "type": "start", "prompt_tokens": ids.len() }));
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
     let started = std::time::Instant::now();
-    let tokens = painter.draw(&ids, request.temperature.max(0.0), seed, |done, total| {
+    let tokens = painter.draw(&ids, request.temperature.max(0.0), seed, loaded.exact_bits, |done, total| {
         let _ = sender.blocking_send(serde_json::json!({ "type": "drawing", "done": done, "total": total, "seconds": started.elapsed().as_secs_f64() }));
     })?;
     if cancelled.load(Relaxed) {

@@ -151,6 +151,23 @@ pub struct Janus {
     weights: Weights,
 }
 
+/// A language model that gives its last hidden state instead of logits.
+pub trait HiddenSteps {
+    fn step_hidden(&mut self, token: u32, embedding: Option<&[f32]>) -> Result<Vec<f32>, String>;
+}
+
+impl HiddenSteps for Engine {
+    fn step_hidden(&mut self, token: u32, embedding: Option<&[f32]>) -> Result<Vec<f32>, String> {
+        Engine::step_hidden(self, token, embedding)
+    }
+}
+
+impl HiddenSteps for crate::ExactEngine {
+    fn step_hidden(&mut self, token: u32, embedding: Option<&[f32]>) -> Result<Vec<f32>, String> {
+        crate::ExactEngine::step_hidden(self, token, embedding)
+    }
+}
+
 impl Janus {
     pub fn open(dir: &Path) -> Result<Option<Self>, String> {
         let Some(config) = JanusConfig::read(dir)? else { return Ok(None) };
@@ -161,19 +178,25 @@ impl Janus {
         self.weights.floats(&format!("model.{name}"))
     }
 
-    /// The language model alone, ready to run.
-    fn language_model(&self) -> Result<Engine, String> {
+    /// The language model alone, ready to run: in floating point, or with `exact` the die's
+    /// own integer arithmetic at that many bits.
+    fn language_model(&self, exact: Option<u32>) -> Result<Box<dyn HiddenSteps>, String> {
         let config: Value = serde_json::from_str(&std::fs::read_to_string(self.dir.join("config.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         let program = compiler::compile_model(&config["text_config"].to_string())?;
-        Engine::new(program, Weights::open(&self.dir)?.with_gpu(), Numeric::Float)
+        Ok(match exact {
+            Some(bits) => Box::new(crate::ExactEngine::new(program, Weights::open(&self.dir)?, bits)?),
+            None => Box::new(Engine::new(program, Weights::open(&self.dir)?.with_gpu(), Numeric::Float)?),
+        })
     }
 
     /// Draws `prompt_ids` (the text already framed by the chat template, ending in the
     /// token that opens an image): 576 codebook tokens, guided `guidance` times away from
     /// what the model would draw without the text, sampled at `temperature`.
-    pub fn draw(&self, prompt_ids: &[u32], temperature: f32, seed: u64, mut progress: impl FnMut(usize, usize)) -> Result<Vec<u32>, String> {
+    /// With `exact`, the language model runs in the die's arithmetic; the generation head and
+    /// the aligner, two small layers, stay in floating point on the host.
+    pub fn draw(&self, prompt_ids: &[u32], temperature: f32, seed: u64, exact: Option<u32>, mut progress: impl FnMut(usize, usize)) -> Result<Vec<u32>, String> {
         let c = &self.config;
-        let (mut with_text, mut without) = (self.language_model()?, self.language_model()?);
+        let (mut with_text, mut without) = (self.language_model(exact)?, self.language_model(exact)?);
         // Without the text: only the start and the image's opening token remain.
         let blank: Vec<u32> = prompt_ids.iter().map(|t| if *t == c.bos || *t == c.begin_image { *t } else { c.pad }).collect();
         let (mut hidden, mut empty) = (Vec::new(), Vec::new());

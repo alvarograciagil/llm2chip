@@ -780,3 +780,64 @@ fn heads_in_groups_of_three_run_on_units_a_power_of_two_apart() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn an_image_rotates_by_three_positions_on_the_chip_as_in_float() {
+    // Every dimension rotates, so the row's and column's frequencies show.
+    let config = CONFIG.replace("\"partial_rotary_factor\": 0.25", "\"partial_rotary_factor\": 1.0");
+    let dir = std::env::temp_dir().join(format!("llm2chip-mrope-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let section = [2, 1, 1];
+    let picture: Vec<Vec<f32>> = (0..4).map(|k| (0..8).map(|i| ((i * 7 + k * 3) % 11) as f32 / 11.0 - 0.45).collect()).collect();
+    // Text, a 2×2 picture at time 1 with its rows and columns, then text from position 3.
+    let grid = [[1u64, 1, 1], [1, 1, 2], [1, 2, 1], [1, 2, 2]];
+    let run = |engine: &mut dyn sim::Runner| -> Vec<f32> {
+        engine.set_mrope(section);
+        engine.step(3, false).unwrap();
+        for (vector, positions) in picture.iter().zip(grid) {
+            engine.step_embedding(vector, positions, false).unwrap();
+        }
+        engine.continue_text_at(3);
+        engine.step(5, true).unwrap().0.unwrap().to_vec()
+    };
+    let mut float = Engine::new(compile_qwen3_5(&config).unwrap(), Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
+    let expected = run(&mut float);
+    let mut exact = ExactEngine::new(compile_qwen3_5(&config).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
+    let got = run(&mut exact);
+    let scale = expected.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+    let error = got.iter().zip(&expected).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(error < 0.02 * scale, "{error} sobre {scale}: {got:?} {expected:?}");
+
+    // The same picture as if all its tokens sat at one place gives other logits: the rows
+    // and columns really move them.
+    let mut flat = ExactEngine::new(compile_qwen3_5(&config).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
+    flat.set_mrope(section);
+    flat.step(3, false).unwrap();
+    for (k, vector) in picture.iter().enumerate() {
+        flat.step_embedding(vector, [k as u64 + 1; 3], false).unwrap();
+    }
+    flat.continue_text_at(5);
+    let other = flat.step(5, true).unwrap().unwrap();
+    let moved = other.iter().zip(&got).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(moved > 4.0 * error, "{moved} frente a {error}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn the_hidden_state_an_image_head_reads_comes_from_the_chip_as_in_float() {
+    let dir = std::env::temp_dir().join(format!("llm2chip-hidden-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let input: Vec<f32> = (0..8).map(|i| (i as f32 - 3.5) / 6.0).collect();
+    let mut float = Engine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
+    let mut exact = ExactEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
+    for (token, embedding) in [(3u32, None), (5, None), (0, Some(input.as_slice()))] {
+        let expected = float.step_hidden(token, embedding).unwrap();
+        let got = exact.step_hidden(token, embedding).unwrap();
+        let scale = expected.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let error = got.iter().zip(&expected).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(error < 0.02 * scale, "{error} sobre {scale}: {got:?} {expected:?}");
+    }
+    std::fs::remove_dir_all(dir).ok();
+}

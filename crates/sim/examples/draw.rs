@@ -44,7 +44,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ids.extend(tokenizer.encode(text.as_str(), false).map_err(|e| e.to_string())?.get_ids());
     ids.push(janus.config.begin_image);
     let started = std::time::Instant::now();
-    let tokens = janus.draw(&ids, temperature, seed, |done, total| {
+    // EXACTO=16 draws with the language model in the die's arithmetic at 16 bits.
+    let exact = std::env::var("EXACTO").ok().and_then(|bits| bits.parse().ok());
+    let tokens = janus.draw(&ids, temperature, seed, exact, |done, total| {
         if done % 48 == 0 {
             eprintln!("{done} de {total} tokens de imagen, {:.0} s", started.elapsed().as_secs_f64());
         }

@@ -85,6 +85,12 @@ impl Runner for ExactEngine {
     fn reset(&mut self) {
         ExactEngine::reset(self)
     }
+    fn set_mrope(&mut self, section: [usize; 3]) {
+        ExactEngine::set_mrope(self, section)
+    }
+    fn continue_text_at(&mut self, position: u64) {
+        ExactEngine::continue_text_at(self, position)
+    }
     fn vocabulary(&self) -> usize {
         ExactEngine::vocabulary(self)
     }
