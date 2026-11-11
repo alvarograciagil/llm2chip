@@ -11,6 +11,9 @@ verilog=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 top=$2
 platform=${3:-sky130hd}
 period=${4:-10}
+# ASAP7's libraries count picoseconds; the others, nanoseconds.
+clock=$period
+[ "$platform" = asap7 ] && clock=$(python3 -c "print($period * 1000)")
 out=${5:-$HOME/.llm2chip/asic/$top-$platform}
 mkdir -p "$out"
 cp "$verilog" "$out/design.v"
@@ -25,7 +28,7 @@ export PLACE_DENSITY = 0.60
 CONFIG
 cat > "$out/constraint.sdc" <<SDC
 current_design $top
-set clk_period $period
+set clk_period $clock
 create_clock -name clk -period \$clk_period [get_ports clk]
 set non_clock_inputs [lsearch -inline -all -not -exact [all_inputs] [get_ports clk]]
 set_input_delay [expr \$clk_period * 0.2] -clock clk \$non_clock_inputs

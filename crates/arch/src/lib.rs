@@ -8,7 +8,7 @@ mod optim;
 mod params;
 mod tech;
 
-pub use estimate::{cell_key, link_plan, LinkPlan, FIRMWARE_PROGRAM_BYTES, TOKENIZER_BITS_PER_TOKEN, estimate, resolved_params, BlockArea, CircuitDecision, Category, Confidence, Metric, Report, Severity, Violation};
+pub use estimate::{cell_key, laid_out_cell, link_plan, LinkPlan, FIRMWARE_PROGRAM_BYTES, TOKENIZER_BITS_PER_TOKEN, estimate, resolved_params, BlockArea, CircuitDecision, Category, Confidence, Metric, Report, Severity, Violation};
 pub use floorplan::{CellPlan, CellSegment, DiePlan, Floorplan, MemoryStack, PlacedBlock, Rect};
 pub use optim::{catalog, Maturity, OptInfo, QualityRisk};
 pub use params::{ChipParams, ChipSplit, CircuitGoal, DieMode, KvBackend, LinkKind, LoadInterface, WeightBackend};

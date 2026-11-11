@@ -255,7 +255,11 @@ fn stage_totals(model: &ModelGraph, p: &ChipParams) -> StageTotals {
 
 /// Logic area of one cell, from the gates its generated netlist actually contains.
 fn netlist_cell_um2(tech: &TechNode, p: &ChipParams, widest: u32, addr_bits: u32) -> f64 {
-    let config = CellConfig { weight_bits: widest, ..p.cell_config(addr_bits) };
+    cell_logic_um2(tech, CellConfig { weight_bits: widest, ..p.cell_config(addr_bits) })
+}
+
+/// The logic of a cell, without its weight memory, after synthesis.
+fn cell_logic_um2(tech: &TechNode, config: CellConfig) -> f64 {
     // Yosys and ABC shrink each generated multiplier by a measured factor (tests/golden/synthesis.md).
     let optimized = match config.multiplier {
         MultiplierKind::Array => 0.65,
@@ -301,11 +305,37 @@ struct Multiplier {
     cycle_factor: f64,
 }
 
-/// The name of a compute cell, as a measured layout refers to it: coding, weight and
-/// activation bits, multiplier and stages.
+/// What the estimator expects OpenROAD to measure on a cell laid out on its own, as the
+/// layout flow builds it: its logic, its few words of weights in flip-flops (each bit a
+/// flip-flop with a hold multiplexer, read through a tree of multiplexers), and the clock its
+/// critical path allows, without the process cap.
+pub fn laid_out_cell(tech: &TechNode, config: CellConfig) -> (f64, f64) {
+    let design = cell_design(config);
+    let bits = design.memory_bits() as f64;
+    let words = (1u64 << config.addr_bits) as f64;
+    let memory = bits * (tech.ff_um2 + tech.mux_um2) + bits / words * (words - 1.0) * tech.mux_um2;
+    let path = Simulator::new(&design).map_or(0.0, |sim| sim.critical_path(GATE_DELAYS));
+    (cell_logic_um2(tech, config) + memory, 1.0 / (path * tech.fa_delay_ns + tech.ff_overhead_ns))
+}
+
+/// The name of a compute cell, as a measured layout refers to it: everything that shapes its
+/// gates except the depth of its weight memory, which the layout replaces by a few words.
 pub fn cell_key(config: &CellConfig) -> String {
     let name = |v: serde_json::Value| v.as_str().unwrap_or("").to_string();
-    format!("{}-{}-{}-{}-{}-{}", name(serde_json::json!(config.coding)), config.weight_bits, config.activation_bits, name(serde_json::json!(config.multiplier)), config.mac_stages, config.adder_stages)
+    let c = config;
+    let memory = if c.fixed_weights { "-rom" } else if c.ecc { "-ecc" } else { "" };
+    format!(
+        "{}{}-{}x{}-acc{}-{}-{}+{}{memory}{}",
+        name(serde_json::json!(c.coding)),
+        c.exponent_bits,
+        c.weight_bits,
+        c.activation_bits,
+        c.accumulator_bits.max(c.required_accumulator()),
+        name(serde_json::json!(c.multiplier)),
+        c.mac_stages,
+        c.adder_stages,
+        if c.skip_zeros { "-ceros" } else { "" },
+    )
 }
 
 /// The measured layout of this very cell on this process, if the design carries one: the
@@ -725,6 +755,9 @@ fn check_optimizations(p: &ChipParams, out: &mut Vec<Violation>) {
 /// One internal decision the generator took for these parameters, and what it measured.
 #[derive(Clone, Debug, Serialize)]
 pub struct CircuitDecision {
+    /// The cell itself, as the gate generator builds it, and its name for a measured layout.
+    pub cell: CellConfig,
+    pub cell_key: String,
     pub weight_bits: u32,
     /// Share of the multiplications done with weights of this width.
     pub share: f64,
@@ -858,7 +891,8 @@ fn resolve_circuit(tech: &TechNode, model: &ModelGraph, p: &ChipParams, widest: 
     let mut decisions = Vec::new();
     let mut choose = |weight_bits: u32, share: f64| {
         let choice = pick(&candidates_for(tech, p, weight_bits, cell_bits), target, p.circuit_goal)?;
-        decisions.push(CircuitDecision { weight_bits, share, multiplier: choice.multiplier, mac_stages: choice.mac_stages, adder_stages: choice.adder_stages, skip_zeros: choice.skip_zeros, area_um2: choice.area_um2, energy_pj: choice.energy_pj, fmax_ghz: choice.fmax_ghz });
+        let cell = CellConfig { weight_bits, ..with_choice(p, choice.multiplier, choice.mac_stages, choice.adder_stages, choice.skip_zeros).cell_config(1) };
+        decisions.push(CircuitDecision { cell, cell_key: cell_key(&cell), weight_bits, share, multiplier: choice.multiplier, mac_stages: choice.mac_stages, adder_stages: choice.adder_stages, skip_zeros: choice.skip_zeros, area_um2: choice.area_um2, energy_pj: choice.energy_pj, fmax_ghz: choice.fmax_ghz });
         Some(with_choice(p, choice.multiplier, choice.mac_stages, choice.adder_stages, choice.skip_zeros))
     };
     // Dies that must be interchangeable all need the widest cell.
@@ -1537,17 +1571,26 @@ mod tests {
         let stories = ModelGraph::from_config_json("s", include_str!("../../../models/stories260k.json")).unwrap();
         let p = ChipParams { node: "sky130".into(), max_params_g: 0.00026, use_model_mix: false, group_size: 0, weight_bits: 8, context_tokens: 256, ..Default::default() };
         let estimated = estimate(&stories, &p).unwrap().decisions[0].clone();
-        let chosen = with_choice(&p, estimated.multiplier, estimated.mac_stages, estimated.adder_stages, estimated.skip_zeros);
-        let key = format!("sky130:{}", cell_key(&CellConfig { weight_bits: estimated.weight_bits, ..chosen.cell_config(1) }));
-        let measured = ChipParams { measured_cell: key, measured_cell_um2: 100.0, measured_cell_fmax_ghz: 0.33, ..p.clone() };
-        // The measured cell is smaller than any estimate, so the generator keeps it.
+        let key = format!("sky130:{}", estimated.cell_key);
+        // Anything that changes the gates changes the name; the memory depth does not.
+        let other = |change: &dyn Fn(&mut CellConfig)| {
+            let mut cell = estimated.cell;
+            change(&mut cell);
+            cell_key(&cell)
+        };
+        assert_eq!(other(&|c| c.addr_bits += 3), estimated.cell_key);
+        for change in [&(|c: &mut CellConfig| c.skip_zeros = !c.skip_zeros) as &dyn Fn(&mut CellConfig), &|c| c.ecc = !c.ecc, &|c| c.mac_stages += 1, &|c| c.accumulator_bits += 40] {
+            assert_ne!(other(change), estimated.cell_key);
+        }
+        let measured = ChipParams { measured_cell: key, measured_cell_um2: 100.0, measured_cell_fmax_ghz: 0.5, ..p.clone() };
+        // The measured cell is smaller and faster than any estimate, so the generator keeps it.
         let laid_out = estimate(&stories, &measured).unwrap().decisions[0].clone();
         assert_eq!((laid_out.multiplier, laid_out.mac_stages, laid_out.adder_stages), (estimated.multiplier, estimated.mac_stages, estimated.adder_stages));
         assert!(laid_out.area_um2 < estimated.area_um2, "{laid_out:?} {estimated:?}");
-        assert!((laid_out.fmax_ghz - 0.33).abs() < 1e-9, "{laid_out:?}");
+        assert!((laid_out.fmax_ghz - 0.5).abs() < 1e-9, "{laid_out:?}");
         // On another process it is not what was measured.
         let elsewhere = estimate(&stories, &ChipParams { node: "gf180".into(), ..measured }).unwrap().decisions[0].clone();
-        assert!((elsewhere.fmax_ghz - 0.33).abs() > 1e-9, "{elsewhere:?}");
+        assert!((elsewhere.fmax_ghz - 0.5).abs() > 1e-9, "{elsewhere:?}");
     }
 
     #[test]

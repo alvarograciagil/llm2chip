@@ -105,6 +105,9 @@ export interface Report {
 }
 
 export interface CircuitDecision {
+  /** The cell as the gate generator builds it, and its name for a measured layout. */
+  cell: Record<string, unknown>;
+  cell_key: string;
   weight_bits: number;
   share: number;
   multiplier: "array" | "wallace" | "booth" | "multiples";

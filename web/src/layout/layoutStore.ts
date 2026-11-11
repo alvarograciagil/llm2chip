@@ -17,15 +17,9 @@ export interface LayoutResult {
 /** The cell to lay out, as the design's circuit chose it. */
 export interface LayoutRequest {
   node: string;
-  weight_bits: number;
-  activation_bits: number;
-  accumulator_bits: number;
-  mac_stages: number;
-  adder_stages: number;
-  coding: string;
-  exponent_bits: number;
-  multiplier: string;
-  skip_zeros: boolean;
+  /** Exactly the cell the estimator chose, and its name. */
+  cell: Record<string, unknown>;
+  cell_key: string;
   period_ns: number;
 }
 

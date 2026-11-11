@@ -3,8 +3,6 @@
 //! what a die repeats thousands of times, so its measured area, clock and power are the
 //! numbers that matter most for the estimate.
 
-use netlist::format::WeightCoding;
-use netlist::multiplier::MultiplierKind;
 use netlist::{cell_design, to_verilog, CellConfig};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -16,17 +14,10 @@ use std::sync::Mutex;
 #[derive(Clone, Deserialize)]
 pub struct LayoutRequest {
     pub node: String,
-    pub weight_bits: u32,
-    pub activation_bits: u32,
-    pub accumulator_bits: u32,
-    pub mac_stages: u32,
-    pub adder_stages: u32,
-    pub coding: WeightCoding,
+    /// The cell exactly as the estimator chose it (`CircuitDecision::cell`), and its name.
+    pub cell: CellConfig,
     #[serde(default)]
-    pub exponent_bits: u32,
-    pub multiplier: MultiplierKind,
-    #[serde(default)]
-    pub skip_zeros: bool,
+    pub cell_key: String,
     /// The clock the layout aims for.
     pub period_ns: f64,
 }
@@ -48,6 +39,11 @@ pub fn platform_for(node: &str) -> Option<&'static str> {
     }
 }
 
+/// The platform's unit of time in nanoseconds: ASAP7's libraries count picoseconds.
+pub fn time_unit_ns(platform: &str) -> f64 {
+    if platform == "asap7" { 0.001 } else { 1.0 }
+}
+
 /// What the flow's log says it is doing, in the person's words: it announces each stage
 /// as `Running script.tcl, stage 3_3_place_gp`.
 fn phase_of(line: &str) -> Option<&'static str> {
@@ -66,25 +62,13 @@ pub fn run(request: &LayoutRequest, job: &LayoutJob, home: &Path) -> Result<serd
         return Err("Docker no está en marcha: ábrelo para hacer layouts con OpenROAD".into());
     }
     set_phase("Generando el Verilog de la celda");
-    let mut config = CellConfig {
-        weight_bits: request.weight_bits,
-        activation_bits: request.activation_bits,
-        accumulator_bits: request.accumulator_bits,
-        mac_stages: request.mac_stages.max(1),
-        adder_stages: request.adder_stages.max(1),
-        // A few words of memory: what is measured is the logic around it.
-        addr_bits: 2,
-        coding: request.coding,
-        exponent_bits: request.exponent_bits,
-        multiplier: request.multiplier,
-        fixed_weights: false,
-        ecc: false,
-        skip_zeros: request.skip_zeros,
-    };
+    // A few words of memory: what is measured is the logic around it.
+    let mut config = CellConfig { addr_bits: 2, mac_stages: request.cell.mac_stages.max(1), adder_stages: request.cell.adder_stages.max(1), ..request.cell };
     config.accumulator_bits = config.required_accumulator().max(config.accumulator_bits);
     let design = cell_design(config);
     let top = design.top.clone();
-    let name = format!("{:?}-{}x{}-{}-{}-{}-{platform}-{}", request.coding, request.weight_bits, request.activation_bits, format!("{:?}", request.multiplier).to_lowercase(), request.mac_stages, request.adder_stages, request.period_ns).to_lowercase();
+    let key: String = request.cell_key.chars().filter(|c| c.is_ascii_alphanumeric() || "-+_".contains(*c)).collect();
+    let name = format!("{key}-{platform}-{}", request.period_ns).to_lowercase();
     let dir: PathBuf = home.join(".llm2chip/asic").join(&name);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("design.v"), to_verilog(&design)).map_err(|e| e.to_string())?;
@@ -95,7 +79,7 @@ pub fn run(request: &LayoutRequest, job: &LayoutJob, home: &Path) -> Result<serd
     .map_err(|e| e.to_string())?;
     std::fs::write(
         dir.join("constraint.sdc"),
-        format!("current_design {top}\nset clk_period {}\ncreate_clock -name clk -period $clk_period [get_ports clk]\nset non_clock_inputs [lsearch -inline -all -not -exact [all_inputs] [get_ports clk]]\nset_input_delay [expr $clk_period * 0.2] -clock clk $non_clock_inputs\nset_output_delay [expr $clk_period * 0.2] -clock clk [all_outputs]\n", request.period_ns),
+        format!("current_design {top}\nset clk_period {}\ncreate_clock -name clk -period $clk_period [get_ports clk]\nset non_clock_inputs [lsearch -inline -all -not -exact [all_inputs] [get_ports clk]]\nset_input_delay [expr $clk_period * 0.2] -clock clk $non_clock_inputs\nset_output_delay [expr $clk_period * 0.2] -clock clk [all_outputs]\n", request.period_ns / time_unit_ns(platform)),
     )
     .map_err(|e| e.to_string())?;
 
@@ -150,6 +134,8 @@ mod tests {
         assert_eq!(platform_for("sky130"), Some("sky130hd"));
         assert_eq!(platform_for("gf180"), Some("gf180"));
         assert_eq!(platform_for("n6"), None, "sin PDK abierto");
+        assert_eq!(10.0 / time_unit_ns("asap7"), 10_000.0, "ASAP7 cuenta picosegundos");
+        assert_eq!(time_unit_ns("sky130hd"), 1.0);
     }
 
     #[test]

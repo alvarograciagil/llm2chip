@@ -4,7 +4,7 @@
 use crate::format::WeightCoding;
 use crate::multiplier::MultiplierKind;
 use crate::{Bit, Builder, Design, Module};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// log2 of the most codes a cell's word can hold: four, of a quarter of its width.
@@ -15,7 +15,7 @@ pub fn bits_for_packing(most: u32) -> u32 {
     u32::BITS - most.leading_zeros()
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CellConfig {
     pub weight_bits: u32,
     pub activation_bits: u32,

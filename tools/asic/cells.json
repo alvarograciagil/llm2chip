@@ -1,0 +1,10 @@
+{
+  "platforms": { "sky130hd": 4, "gf180": 6, "asap7": 0.5 },
+  "cells": {
+    "affine8-wallace-1+1": { "weight_bits": 8, "activation_bits": 16, "accumulator_bits": 32, "mac_stages": 1, "adder_stages": 1, "addr_bits": 2, "coding": "affine", "exponent_bits": 0, "multiplier": "wallace", "fixed_weights": false, "ecc": false, "skip_zeros": false },
+    "affine8-booth-3+2": { "weight_bits": 8, "activation_bits": 16, "accumulator_bits": 32, "mac_stages": 3, "adder_stages": 2, "addr_bits": 2, "coding": "affine", "exponent_bits": 0, "multiplier": "booth", "fixed_weights": false, "ecc": false, "skip_zeros": false },
+    "affine8-wallace-3+2": { "weight_bits": 8, "activation_bits": 16, "accumulator_bits": 32, "mac_stages": 3, "adder_stages": 2, "addr_bits": 2, "coding": "affine", "exponent_bits": 0, "multiplier": "wallace", "fixed_weights": false, "ecc": false, "skip_zeros": false },
+    "fixed4-array-2+1": { "weight_bits": 4, "activation_bits": 16, "accumulator_bits": 32, "mac_stages": 2, "adder_stages": 1, "addr_bits": 2, "coding": "fixed", "exponent_bits": 0, "multiplier": "array", "fixed_weights": false, "ecc": false, "skip_zeros": false },
+    "float8-wallace-2+1": { "weight_bits": 8, "activation_bits": 16, "accumulator_bits": 32, "mac_stages": 2, "adder_stages": 1, "addr_bits": 2, "coding": "float", "exponent_bits": 4, "multiplier": "wallace", "fixed_weights": false, "ecc": false, "skip_zeros": false }
+  }
+}

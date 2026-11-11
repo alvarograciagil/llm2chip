@@ -123,6 +123,22 @@ pub struct Design {
 
 impl Design {
     /// Number of each primitive once every instance is expanded.
+    /// Bits of writable memory in the whole hierarchy.
+    pub fn memory_bits(&self) -> u64 {
+        fn walk(design: &Design, module: &str) -> u64 {
+            design.modules[module]
+                .instances
+                .iter()
+                .map(|inst| match &inst.kind {
+                    InstKind::Prim(Prim::Sram { addr_bits, width }) => (*width as u64) << addr_bits,
+                    InstKind::Prim(_) => 0,
+                    InstKind::Module(child) => walk(design, child),
+                })
+                .sum()
+        }
+        walk(self, &self.top)
+    }
+
     pub fn flat_counts(&self) -> BTreeMap<String, u64> {
         fn walk(design: &Design, module: &str, times: u64, out: &mut BTreeMap<String, u64>) {
             for inst in &design.modules[module].instances {

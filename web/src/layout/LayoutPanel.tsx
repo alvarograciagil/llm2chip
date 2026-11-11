@@ -8,34 +8,23 @@ import { useLayout, type LayoutRequest } from "./layoutStore";
 const OPEN_NODES: Record<string, string> = { sky130: "SkyWater 130", gf180: "GF180", asap7: "ASAP7" };
 
 /** The compute cell the design's circuit chose, as the layout flow takes it. */
-function cellRequest(params: Record<string, unknown>, report: Report, node: string): LayoutRequest | null {
+function cellRequest(report: Report, node: string): LayoutRequest | null {
   const decision = report.decisions[0];
   if (!decision) return null;
   return {
     node,
-    weight_bits: decision.weight_bits,
-    activation_bits: Number(params.activation_bits),
-    accumulator_bits: Number(params.accumulator_bits),
-    mac_stages: decision.mac_stages,
-    adder_stages: decision.adder_stages,
-    coding: String(params.weight_coding),
-    exponent_bits: Number(params.weight_exponent_bits) || 0,
-    multiplier: decision.multiplier,
-    skip_zeros: decision.skip_zeros,
+    cell: decision.cell,
+    cell_key: decision.cell_key,
     // Aim at the clock the estimate gives the cell, no faster than the process allows.
     period_ns: Math.max(1, Math.round((1 / Math.max(decision.fmax_ghz, 0.05)) * 10) / 10),
   };
 }
 
 /** How the estimator names a cell on a process, to know a measure belongs to it. */
-function cellKey(request: LayoutRequest): string {
-  const r = request;
-  return `${r.node}:${r.coding}-${r.weight_bits}-${r.activation_bits}-${r.multiplier}-${r.mac_stages}-${r.adder_stages}`;
-}
+const cellKey = (request: LayoutRequest) => `${request.node}:${request.cell_key}`;
 
-/** The request without its clock target, which follows the estimate and so moves once the
- * measured clock is applied. */
-const sameCell = (a: LayoutRequest, b: LayoutRequest) => cellKey(a) === cellKey(b) && a.accumulator_bits === b.accumulator_bits && a.exponent_bits === b.exponent_bits && a.skip_zeros === b.skip_zeros;
+/** The clock target follows the estimate, so it moves once the measured clock is applied. */
+const sameCell = (a: LayoutRequest, b: LayoutRequest) => cellKey(a) === cellKey(b);
 
 /** A real layout of the design's compute cell with OpenROAD, measured against the estimate. */
 export function LayoutPanel({ report }: { report: Report }) {
@@ -46,7 +35,7 @@ export function LayoutPanel({ report }: { report: Report }) {
   const node = String(params.node);
   if (node.startsWith("fpga")) return null;
   const open = OPEN_NODES[node];
-  const request = open ? cellRequest(params, report, node) : null;
+  const request = open ? cellRequest(report, node) : null;
   const decision = report.decisions[0];
   const stale = layout.request !== null && request !== null && !sameCell(layout.request, request);
   const result = layout.result;
