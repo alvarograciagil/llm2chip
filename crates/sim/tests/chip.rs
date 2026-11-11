@@ -88,9 +88,11 @@ fn whole_chip_in_gates(die: netlist::DieConfig, tag: &str) -> (Simulator, u64, L
     make_checkpoint(&dir);
     let program = compile_qwen3_5(CONFIG).unwrap();
 
-    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
     let code = layout.microprogram(&program).unwrap();
+    // Each register takes only the vector memory its routines reach.
+    let die = sim::chip::compact_die(die, &layout);
+    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     let info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
     let mut segments = image_segments(&die, &code, &layout);

@@ -6,7 +6,7 @@
 //! share grows with its lanes, each level of the network that joins the units costs every
 //! unit once more, and each cell costs the same wherever it is.
 
-use crate::lower::{chip_plan, vector_words, Layout, ENTRY_LOGITS, ENTRY_TOKEN};
+use crate::lower::{chip_plan, Layout, ENTRY_LOGITS, ENTRY_TOKEN};
 use crate::Weights;
 use compiler::Program;
 use netlist::{die_design, DieConfig, Microprogram};
@@ -138,7 +138,7 @@ pub struct Built {
     pub programs: Vec<Microprogram>,
     /// Bits of each cell's memory on the chip that needs most: every chip is the same silicon.
     pub cell_bits: u64,
-    /// Words of vector memory on the chip that needs most.
+    /// Words of vector memory of each unit on the chip that needs most.
     pub vector_words: u64,
 }
 
@@ -146,8 +146,7 @@ pub struct Built {
 /// so the one with most memory has as little as can be.
 pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32, chips: u32) -> Result<Built, String> {
     let plan = chip_plan(program, weights, chips as usize, context as usize, die.cell.activation_bits)?;
-    let vector = plan.iter().map(|ops| vector_words(program, ops.clone(), context as usize)).max().unwrap_or(0);
-    let mut cell_bits = 0;
+    let (mut cell_bits, mut vector) = (0, 0);
     let codes = (0..plan.len())
         .map(|chip| {
             let mut layout = Layout::for_image(program, weights, die, context as usize)?;
@@ -155,7 +154,10 @@ pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32,
             let (depth, groups) = layout.cell_depths();
             // The depth counts words, each as wide as the cell's weights.
             cell_bits = cell_bits.max(depth * die.cell.weight_bits as u64 + groups * 2 * die.scale_bits as u64);
-            layout.die_microprogram(program, &plan, chip)
+            let code = layout.die_microprogram(program, &plan, chip)?;
+            // The words its own routines reach, as the compact vector memory holds them.
+            vector = vector.max(layout.vector_words_used());
+            Ok(code)
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(Built { programs: codes, cell_bits, vector_words: vector })
@@ -225,9 +227,10 @@ fn evaluate(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs
     let clock = target.clock_hz.min(costs.clock_hz(cluster_bits, lane_bits, target.process.full_adder_ns));
     let cycles = timing.token_cycles;
     let gates = costs.gates(cluster_bits, lane_bits, cell_bits);
-    // Each lane of each unit keeps its share of the vectors twice, once for each read port.
+    // Every unit holds the words its routines reach, a share in each lane, twice: once for
+    // each read port.
     let banks = 1u64 << (cluster_bits + lane_bits);
-    let vectors = 2.0 * target.process.memory_mm2(banks, (vector_words * die.cell.activation_bits as u64).div_ceil(banks));
+    let vectors = 2.0 * target.process.memory_mm2(banks, (vector_words * die.cell.activation_bits as u64) >> lane_bits);
     let die_mm2 = gates * target.process.gate_um2 / 1e6 + target.process.memory_mm2(1 << cell_bits, bits) + vectors;
     Some(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, clock_hz: clock, tokens_per_second: clock / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / clock, gates: chips as f64 * gates, area_mm2: chips as f64 * die_mm2, die_mm2 })
 }

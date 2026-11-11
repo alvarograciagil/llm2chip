@@ -206,10 +206,29 @@ pub fn cell_segments(config: &DieConfig, layout: &Layout, weights: &Weights) -> 
 }
 
 /// Everything the firmware has to load onto the die from the image.
+/// The entries of a compact vector memory's register table: each register's base, with
+/// the step of the loops that visit it by number above it.
+pub fn register_table(config: &DieConfig, layout: &Layout) -> Vec<u32> {
+    let bits = config.features.vector_bits;
+    assert!(bits + netlist::die::BASE_SHIFT_BITS <= 32, "la tabla de registros no cabe en palabras de 32 bits");
+    let (bases, needed) = layout.register_bases();
+    assert!(needed <= bits, "la memoria vectorial del die tiene 2^{bits} palabras y hacen falta 2^{needed}");
+    bases.iter().map(|(base, shift)| base | shift << bits).collect()
+}
+
+/// The same die with a vector memory just as large as the layout's routines need.
+pub fn compact_die(config: DieConfig, layout: &Layout) -> DieConfig {
+    DieConfig { features: config.features.with_vector_bits(layout.register_bases().1), ..config }
+}
+
 pub fn image_segments(config: &DieConfig, code: &Microprogram, layout: &Layout) -> Vec<Segment> {
     let mask = |value: i64| value as u32 & ((1u64 << config.cell.activation_bits) - 1) as u32;
     let beats = word_bits(config).div_ceil(32);
     let mut segments = vec![Segment { target: Target::Microcode, unit: 0, address: 0, beats, words: code.words.iter().flat_map(|w| w.encode_words(config)).collect() }];
+    // A compact vector memory needs every register's place before anything goes into it.
+    if config.features.vector_bits > 0 {
+        segments.push(Segment { target: Target::RegisterBase, unit: 0, address: 0, beats: 1, words: register_table(config, layout) });
+    }
 
     // Consecutive addresses travel as one transfer.
     let mut places: Vec<(u32, i64)> = layout.setup().initial.iter().map(|((register, index), value)| ((*register << config.index_bits) | *index, *value)).collect();

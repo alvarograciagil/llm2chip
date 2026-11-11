@@ -10,6 +10,8 @@ export interface ServerModel {
   size_gb: number;
   config: string;
   adaptation: Adaptation;
+  /** What the model does with images, and what the simulator cannot follow yet. */
+  images: { reads: boolean; makes: boolean; note: string | null };
 }
 
 export type Numeric = "float" | "fixed" | "exact";

@@ -39,6 +39,9 @@ pub const LOAD_LANES: usize = 7;
 /// Word-address bits of the peripheral bus.
 pub const PERIPHERAL_BITS: u32 = 10;
 
+/// Bits that say which memory a block of the image goes to.
+pub const TARGET_BITS: u32 = 4;
+
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct SocConfig {
     /// log2 of the words of program memory.
@@ -147,7 +150,7 @@ fn loader(gen: &mut Gen) -> String {
     let image_req = b.output("image_req_valid", 1)[0];
     let image_addr = b.output("image_req_addr", 32);
     let write_valid = b.output("write_valid", 1)[0];
-    let write_target = b.output("write_target", 3);
+    let write_target = b.output("write_target", TARGET_BITS);
     let write_unit = b.output("write_unit", 16);
     let write_addr = b.output("write_addr", 32);
     let write_data = b.output("write_data", 32 * LOAD_LANES as u32);
@@ -158,7 +161,7 @@ fn loader(gen: &mut Gen) -> String {
 
     l.b.group("Registros");
     let source = l.fresh_bus(32);
-    let target = l.fresh_bus(3);
+    let target = l.fresh_bus(TARGET_BITS as usize);
     let unit = l.fresh_bus(16);
     let address = l.fresh_bus(32);
     let count = l.fresh_bus(32);
@@ -299,9 +302,9 @@ fn loader(gen: &mut Gen) -> String {
         let hit = write_reg(l, index);
         l.mux_bus(hit, q, data)
     };
-    let mut next_target = store(&mut l, 1, &target, &reg_data[..3]);
-    let program_target = constant(0, 3);
-    let data_target = constant(1, 3);
+    let mut next_target = store(&mut l, 1, &target, &reg_data[..TARGET_BITS as usize]);
+    let program_target = constant(0, TARGET_BITS as usize);
+    let data_target = constant(1, TARGET_BITS as usize);
     next_target = l.mux_bus(got_program, &next_target, &program_target);
     next_target = l.mux_bus(got_data, &next_target, &data_target);
     l.connect_flops(&next_target, &target);
@@ -415,7 +418,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     let image_req_valid = b.output("image_req_valid", 1)[0];
     let image_req_addr = b.output("image_req_addr", 32);
     let load_valid = b.output("load_valid", 1)[0];
-    let load_target = b.output("load_target", 3);
+    let load_target = b.output("load_target", TARGET_BITS);
     let load_unit = b.output("load_unit", 16);
     let load_addr = b.output("load_addr", 32);
     let load_data = b.output("load_data", 32 * LOAD_LANES as u32);

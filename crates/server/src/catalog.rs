@@ -63,6 +63,34 @@ pub struct ModelEntry {
     pub size_gb: f64,
     pub config: String,
     pub adaptation: Adaptation,
+    pub images: ImageAbility,
+}
+
+/// What a model does with images, and whether the simulator can follow it.
+#[derive(Clone, Default, Serialize)]
+pub struct ImageAbility {
+    /// It reads images and the simulator runs its encoder.
+    pub reads: bool,
+    /// It makes images and the simulator runs its decoder.
+    pub makes: bool,
+    /// What the model could do that the simulator cannot yet.
+    pub note: Option<String>,
+}
+
+/// What the checkpoint in `dir` does with images, from its configuration and files.
+pub fn image_ability(dir: &Path, config: &Value) -> ImageAbility {
+    let reads = sim::vision::VisionConfig::read(dir).ok().flatten().is_some() && config.get("model_type").and_then(Value::as_str).is_some_and(|t| t.starts_with("qwen3_5"));
+    // Models that draw emit image tokens a decoder turns into pixels: Janus describes its
+    // generator apart, Chameleon and Emu3 a VQ model.
+    let draws = ["gen_vision_config", "gen_head_config", "gen_aligner_config", "vq_config", "vqmodel_config"].iter().any(|key| config.get(key).is_some());
+    let note = if draws {
+        Some("El modelo genera imágenes, pero el simulador aún no tiene su decodificador de imagen.".into())
+    } else if config.get("vision_config").is_some() && !reads {
+        Some("El modelo lee imágenes con un codificador que el simulador aún no reproduce.".into())
+    } else {
+        None
+    };
+    ImageAbility { reads, makes: false, note }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -109,7 +137,8 @@ fn describe(dir: &Path, name: String) -> Option<ModelEntry> {
         adaptation.simulate = false;
         adaptation.reason = Some("falta tokenizer.json, que es lo que convierte el texto en tokens".into());
     }
-    Some(ModelEntry { name, path: dir.to_string_lossy().into(), supported: adaptation.simulate, architecture, size_gb: size as f64 / 1e9, config, adaptation })
+    let images = image_ability(dir, &value);
+    Some(ModelEntry { name, path: dir.to_string_lossy().into(), supported: adaptation.simulate, architecture, size_gb: size as f64 / 1e9, config, adaptation, images })
 }
 
 fn folder_name(dir: &Path) -> String {
@@ -354,5 +383,29 @@ mod tests {
         assert_eq!(again.view().model_dirs.len(), 1);
         assert_eq!(again.models().len(), 1);
         std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn a_model_says_what_it_does_with_images() {
+        let dir = std::env::temp_dir().join(format!("llm2chip-images-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ability = |config: &str| {
+            std::fs::write(dir.join("config.json"), config).unwrap();
+            image_ability(&dir, &serde_json::from_str(config).unwrap())
+        };
+        assert!(!ability(r#"{"model_type":"qwen3_5"}"#).reads);
+        std::fs::write(dir.join("model-vision.safetensors"), b"").unwrap();
+        let qwen = ability(r#"{"model_type":"qwen3_5","vision_config":{"depth":2}}"#);
+        assert!(qwen.reads && qwen.note.is_none());
+        let other = ability(r#"{"model_type":"llava","vision_config":{"depth":2}}"#);
+        assert!(!other.reads && other.note.unwrap().contains("codificador"));
+        let janus = ability(r#"{"model_type":"multi_modality","gen_vision_config":{}}"#);
+        assert!(!janus.makes && janus.note.unwrap().contains("genera imágenes"));
+        std::fs::remove_dir_all(dir).ok();
     }
 }

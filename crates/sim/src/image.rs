@@ -209,7 +209,9 @@ fn boot_plans(program: &Program, weights: &Weights, die: DieConfig, request: &Im
     // The same silicon serves every count, so it needs what any of the parts uses.
     let features = built.iter().flatten().map(|(_, code)| DieFeatures::of(code)).reduce(DieFeatures::union).unwrap_or_default().with_lane_bits(die.features.lane_bits).with_cluster_bits(die.features.cluster_bits).with_key_shift(die.features.key_shift);
     let words = built.iter().flatten().map(|(_, code)| code.words.len() as u64).max().unwrap_or(1);
-    let die = DieConfig { features, microcode_bits: bits_for(words), ..die };
+    // Each register takes only the vector memory its routines reach, on the chip that needs most.
+    let vector_bits = built.iter().flatten().map(|(layout, _)| layout.register_bases().1).max().unwrap_or(1);
+    let die = DieConfig { features: features.with_vector_bits(vector_bits), microcode_bits: bits_for(words), ..die };
     Ok(built
         .iter()
         .map(|parts| parts.iter().map(|(layout, code)| ChipPart { info: chip_info(&die, code, layout.logits_register(program), program.vocab as u32, &setup), segments: image_segments(&die, code, layout) }).collect())

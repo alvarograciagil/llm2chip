@@ -35,10 +35,15 @@ fn main() {
     eprintln!("{} registros, {} palabras de pesos y {} grupos de factores por celda", layout.registers_used(), depth, groups);
     // Only what this microprogram uses.
     let features = DieFeatures::of(&code).with_lane_bits(trial.features.lane_bits).with_cluster_bits(trial.features.cluster_bits).with_key_shift(trial.features.key_shift);
-    let die = DieConfig { features, ..trial };
+    let die = sim::chip::compact_die(DieConfig { features, ..trial }, &layout);
+    eprintln!("memoria vectorial compacta de 2^{} palabras, frente a 2^{} sin tabla", die.features.vector_bits, die.reg_bits + die.index_bits);
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let design = chip_design(config);
     eprintln!("{:.0} equivalentes NAND2, microprograma de {} palabras", design.gate_equivalents(), code.words.len());
+    // The die's cycles for one generated token at the last position, with its logits.
+    let last = 7;
+    let token = code.cycles(&die, sim::lower::ENTRY_TOKEN, 1, last) + code.cycles(&die, sim::lower::ENTRY_LOGITS, 1, last);
+    eprintln!("{token} ciclos del die por token generado");
     let text = if args.iter().any(|a| a == "--dsp") { to_verilog_for_fpga(&design) } else { to_verilog(&design) };
     std::fs::write(out, text).unwrap();
     std::fs::remove_dir_all(dir).ok();

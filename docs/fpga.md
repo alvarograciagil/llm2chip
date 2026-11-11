@@ -15,7 +15,7 @@ Es exactamente el circuito de la prueba `the_chip_sized_for_an_fpga_says_the_sam
 | Recurso | Cantidad |
 |---|---|
 | Lógica | ≈ 468 000 equivalentes NAND2 |
-| Memoria | 4,7 Mbit: microcódigo 1,3; banco vectorial 2,1 (dos copias por los dos puertos de lectura); CPU 0,8; tablas de función 0,5 |
+| Memoria | 2,7 Mbit: microcódigo 1,3; CPU 0,8; tablas de función 0,5; banco vectorial 0,07, con la tabla de registros que da a cada uno solo lo que usa (sin ella serían 2,1) |
 | Reloj | El camino crítico ronda 24 retardos de sumador completo: en una FPGA de gama baja, entre 20 y 50 MHz |
 
 ## Síntesis medida con Yosys
@@ -24,8 +24,10 @@ Con `--dsp`, cada multiplicador de un ciclo se escribe como un producto con sign
 
 | Familia | LUT | Biestables | Memoria de bloque | Multiplicadores |
 |---|---|---|---|---|
-| Xilinx serie 7 | ≈ 23 300 LUT6 | ≈ 6 100 | 137 BRAM36 + 31 BRAM18 | 73 DSP48 |
-| Gowin | ≈ 26 400 LUT4 + 2 272 ALU | ≈ 6 600 | 314 BSRAM de 18 Kb | 41 MULT18×18 + 32 MULT9×9 |
+| Xilinx serie 7 | ≈ 45 900 LUT6 | ≈ 14 200 | 75 BRAM36 + 31 BRAM18 | 73 DSP48 |
+| Gowin | ≈ 48 300 LUT4 + 2 272 ALU | ≈ 14 800 | 190 BSRAM de 18 Kb | 41 MULT18×18 + 32 MULT9×9 |
+
+La tabla de registros cuesta lógica (unas 22 000 LUT, porque se describe con biestables y se lee tres veces por ciclo) y ahorra unas 120 BSRAM; en una FPGA podría ir en memoria distribuida y costar mucho menos.
 
 Sin `--dsp`, en Xilinx hacen falta unas 110 600 LUT6 y ningún DSP: los multiplicadores se convierten en puertas.
 
@@ -35,13 +37,17 @@ Sin `--dsp`, en Xilinx hacen falta unas 110 600 LUT6 y ningún DSP: los multipli
 
 | Placa | FPGA | Lógica y memoria | Precio aproximado | ¿Cabe? |
 |---|---|---|---|---|
-| Sipeed Tang Mega 138K Pro | Gowin GW5AST-138 | 138 K LUT4, 340 BSRAM (6,1 Mbit), 298 DSP, 1 GB DDR3 | ~200 $ (dock) | Sí: lógica al 20 %, memoria al 92 % |
+| Sipeed Tang Mega 138K Pro | Gowin GW5AST-138 | 138 K LUT4, 340 BSRAM (6,1 Mbit), 298 DSP, 1 GB DDR3 | ~200 $ (dock) | Sí: lógica al 35 %, memoria al 56 % |
 | ALINX AX7202 / AX7A200B | Xilinx XC7A200T | 134 K LUT6, 365 BRAM36, 740 DSP | 400-700 $ | Sí, con mucho margen |
 | Digilent Nexys Video | Xilinx XC7A200T | igual | ~500 € | Sí |
-| Digilent Arty A7-100T | Xilinx XC7A100T | 63 K LUT6, 135 BRAM36, 240 DSP | ~250 $ | La lógica sí; la memoria se pasa un poco (≈ 153 BRAM36 equivalentes) |
+| Digilent Arty A7-100T | Xilinx XC7A100T | 63 K LUT6, 135 BRAM36, 240 DSP | ~250 $ | Sí: LUT al 72 %, BRAM al 67 % |
 | Sipeed Tang Primer 25K | Gowin GW5A-25 | 23 K LUT4, 56 BSRAM | ~35 $ | No |
 
-Recomendación: la **Tang Mega 138K Pro**. Cabe con la lógica sobrada, cuesta unos 200 $ y su DDR3 deja sitio para modelos algo mayores. La memoria va justa: el banco vectorial reserva hoy 2^9 registros de 2^7 palabras aunque el modelo use una fracción; con el direccionamiento compacto previsto bajaría unos 2 Mbit y cabría también en una Arty A7-100T. Si se prefiere margen y herramientas de Xilinx, una placa con **XC7A200T**.
+Recomendación: la **Tang Mega 138K Pro**. Cabe con margen en lógica y memoria, cuesta unos 200 $ y deja sitio para modelos algo mayores. La **Arty A7-100T** también cabe; una placa con **XC7A200T** da más margen con herramientas de Xilinx.
+
+## Velocidad esperada
+
+El die gasta 11 103 ciclos por token generado con el modelo de juguete (medido en su microprograma, en la última posición del contexto); con el firmware, unos 12 000-13 000. Sin colocar y rutar aún, el reloj en una GW5A rondaría 25-50 MHz: unos 2 000-4 000 tok/s, sin valor práctico más allá de validar que el chip funciona. Con stories260K y las mismas 8 celdas serían unos 50 000-80 000 ciclos por token, unos 300-1 000 tok/s.
 
 ## Pasos para la prueba
 

@@ -2464,3 +2464,12 @@ button.model-toggle {
   opacity: 0;
   cursor: pointer;
 }
+
+.pill.attach.disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pill.attach.disabled input {
+  cursor: default;
+}

@@ -352,7 +352,7 @@ Las celdas usan Booth radix-4 (menos productos parciales) y los carriles Wallace
 
 ### Registros vectoriales e índice
 
-La memoria vectorial se direcciona como registro e índice. Sus bits salen de cuántos registros usa el modelo y del más largo (caché KV, tabla RoPE, pesos de las celdas).
+El microprograma nombra cada dato por registro e índice. Una tabla, cargada con la imagen, da a cada registro su base en la memoria vectorial y el paso de los bucles que recorren registros por número; el compilador calcula hasta dónde llega cada registro en sus rutinas, así que cada uno ocupa solo lo que usa. Sin la tabla, cada registro reservaría tanto como el más largo.
 
 ### Microcódigo
 

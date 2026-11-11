@@ -106,6 +106,8 @@ export function SimulatorView() {
   const output = useSimulator((s) => s.output);
   const prompt = useSimulator((s) => s.prompt);
   const image = useSimulator((s) => s.image);
+  const current = useSimulator((s) => s.models.find((m) => m.name === s.loaded));
+  const readsImages = current?.images?.reads ?? false;
   const imageReport = useSimulator((s) => s.imageReport);
   const set = useSimulator((s) => s.set);
   const generate = useSimulator((s) => s.generate);
@@ -150,9 +152,9 @@ export function SimulatorView() {
           </figure>
         )}
         <div className="composer">
-          <label className="pill attach" title="Adjuntar una imagen: el codificador del modelo la convierte en tokens que se leen antes de la pregunta">
+          <label className={readsImages ? "pill attach" : "pill attach disabled"} title={readsImages ? "Adjuntar una imagen: el codificador del modelo la convierte en tokens que se leen antes de la pregunta" : current?.images?.note ?? "Este modelo no lee imágenes"}>
             Imagen
-            <input type="file" accept="image/*" onChange={(e) => {
+            <input type="file" accept="image/*" disabled={!readsImages} onChange={(e) => {
               const file = e.target.files?.[0];
               if (file) void readImage(file).then((picture) => set({ image: picture, imageReport: null }));
               e.target.value = "";

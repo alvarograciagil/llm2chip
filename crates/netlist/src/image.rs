@@ -19,6 +19,8 @@ pub enum Target {
     CellWeight = 5,
     CellScale = 6,
     SamplerTable = 7,
+    /// Where each register starts in a compact vector memory, and its loop step.
+    RegisterBase = 8,
 }
 
 /// A block of the image and where it goes on the chip.

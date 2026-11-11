@@ -58,18 +58,21 @@ function LocalList() {
             <div className="model-title">
               <strong>{m.name}</strong>
               <Tier adaptation={m.adaptation} />
+              {m.images?.reads && <span className="tier" title="Su codificador de imágenes corre en el simulador: se le puede adjuntar una imagen a la pregunta.">Lee imágenes</span>}
+              {m.images?.makes && <span className="tier" title="Su decodificador de imágenes corre en el simulador: puede generar imágenes desde texto.">Genera imágenes</span>}
             </div>
             <p className="muted-text">
               {m.architecture} · {formatBytes(m.size_gb * 1e9)}
               {m.adaptation.parameters ? ` · ${formatCount(m.adaptation.parameters)} parámetros · ${m.adaptation.layers} capas` : ""}
             </p>
             {m.adaptation.reason && <p className="model-reason">{m.adaptation.reason}</p>}
+            {m.images?.note && <p className="model-reason">{m.images.note}</p>}
             <p className="model-path" title={m.path}>{m.path}</p>
           </div>
           <div className="model-actions">
             <button className="pill" disabled={!m.adaptation.design} onClick={() => toDesigner(m.name, m.config, m.adaptation)}>Diseñar chip</button>
             <button className="pill" disabled={!m.supported} onClick={() => simulate(m)}>Simular</button>
-            <button className="pill" disabled={!m.supported || writing} onClick={() => makeImage(m)}>Generar imagen</button>
+            <button className="pill" disabled={!m.supported || writing} onClick={() => makeImage(m)} title="Prepara la imagen de arranque del chip: microcódigo, pesos y tablas que el firmware carga al encender">Imagen de arranque</button>
             <button className="pill" disabled={!m.supported || measuring} onClick={() => measure(m)}>Medir velocidad</button>
           </div>
         </li>

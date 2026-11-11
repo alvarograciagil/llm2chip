@@ -710,6 +710,125 @@ pub enum Step {
     CellDrain { rows: u32 },
 }
 
+/// The largest value each variable of a microprogram can take while it runs.
+#[derive(Clone, Debug)]
+pub struct VarRanges {
+    pub token: u32,
+    pub position: u32,
+    loops: HashMap<Var, u32>,
+}
+
+impl VarRanges {
+    /// Tokens up to `tokens - 1` at positions up to `positions - 1`.
+    pub fn new(tokens: u32, positions: u32) -> Self {
+        Self { token: tokens.saturating_sub(1), position: positions.saturating_sub(1), loops: HashMap::new() }
+    }
+
+    fn largest(&self, variable: Var) -> u32 {
+        match variable {
+            Var::Token => self.token,
+            Var::Position => self.position,
+            Var::WindowLength(window) => window,
+            Var::WindowSlot(window) => window.saturating_sub(1),
+            // A loop the steps do not enclose cannot run: none appears outside its own.
+            Var::Loop(_) => self.loops.get(&variable).copied().unwrap_or(0),
+        }
+    }
+
+    /// The largest value an index takes. Coefficients wrap like the address registers, so
+    /// one past half the range is a subtraction, largest when its variable is zero.
+    pub fn largest_of(&self, index: Expr) -> u32 {
+        let total = index.variables().fold(index.constant() as i32 as i64, |sum, (variable, coefficient)| {
+            let coefficient = coefficient as i32 as i64;
+            sum + if coefficient > 0 { coefficient * self.largest(variable) as i64 } else { 0 }
+        });
+        total.clamp(0, u32::MAX as i64) as u32
+    }
+}
+
+/// How far into each register `steps` reach: one past the largest index any of them can
+/// touch, whole blocks included, for every value their variables can take. It never
+/// falls short; it may reach a little further than a run ever does.
+/// Registers a loop reaches by adding to a register's number go in `windows`: the first,
+/// and how far past it the loop goes.
+pub fn register_extents(steps: &[Step], ranges: &mut VarRanges, lanes: u32, key_shift: u32, extents: &mut HashMap<u32, u32>, windows: &mut HashMap<u32, u32>) {
+    let mut reach = Reach { lanes, key_shift, extents, windows };
+    reach.steps(steps, ranges);
+}
+
+/// What `register_extents` gathers while it walks the steps.
+struct Reach<'a> {
+    lanes: u32,
+    key_shift: u32,
+    extents: &'a mut HashMap<u32, u32>,
+    windows: &'a mut HashMap<u32, u32>,
+}
+
+impl Reach<'_> {
+    fn touch(&mut self, ranges: &VarRanges, (reg, index): At<Expr>, span: u32, window: Option<Expr>) {
+        let end = ranges.largest_of(index).saturating_add(span);
+        let registers = window.map_or(0, |w| ranges.largest_of(w));
+        if window.is_some() {
+            let reach = self.windows.entry(reg).or_default();
+            *reach = (*reach).max(registers);
+        }
+        for r in reg..=reg.saturating_add(registers) {
+            let entry = self.extents.entry(r).or_default();
+            *entry = (*entry).max(end);
+        }
+    }
+
+    fn alu(&mut self, ranges: &VarRanges, s: &Alu<Expr>) {
+        let span = |whole: bool| if s.vector && !whole { self.lanes } else { 1 };
+        let (span_a, span_b, span_dst) = (span(s.broadcast_a), span(s.broadcast_b), span(false));
+        let window = |on: bool| on.then_some(s.window);
+        self.touch(ranges, s.a, span_a, window(s.window_a));
+        self.touch(ranges, s.b, span_b, window(s.window_b));
+        // A write that counts in columns of the key store moves `key_shift` bits up.
+        let dst = if s.write_spread { (s.dst.0, s.dst.1 * (1 << self.key_shift)) } else { s.dst };
+        self.touch(ranges, dst, span_dst, window(s.window_dst));
+    }
+
+    fn steps(&mut self, steps: &[Step], ranges: &mut VarRanges) {
+        let lanes = self.lanes;
+        for step in steps {
+            match step {
+                Step::One(s) => self.alu(ranges, s),
+                Step::Repeat { variable, count, body } => {
+                    let last = ranges.largest_of(*count).saturating_sub(1);
+                    ranges.loops.insert(*variable, last);
+                    self.steps(body, ranges);
+                }
+                Step::Stream { variable, count, in_elements, body } => {
+                    // A stream of blocks steps once a block over `count` elements.
+                    let count = ranges.largest_of(*count);
+                    let last = if *in_elements { count.div_ceil(lanes) } else { count }.saturating_sub(1);
+                    ranges.loops.insert(*variable, last);
+                    self.alu(ranges, body);
+                }
+                Step::Clustered { vars, assignments, body, .. } => {
+                    for (i, variable) in vars.iter().enumerate() {
+                        let largest = assignments.iter().filter_map(|unit| unit.get(i)).copied().max().unwrap_or(0);
+                        ranges.loops.insert(*variable, largest);
+                    }
+                    self.steps(body, ranges);
+                }
+                Step::CombineRows { weights, matrix, start, rows, window, window_a, window_b } => {
+                    self.touch(ranges, *weights, *rows, window_a.then_some(*window));
+                    self.touch(ranges, (*matrix, *start), rows * lanes, window_b.then_some(*window));
+                }
+                Step::Combine { weights, matrix, start, width, window, window_a, window_b, .. } => {
+                    self.touch(ranges, *weights, 1, window_a.then_some(*window));
+                    let width = ranges.largest_of(*width);
+                    self.touch(ranges, (*matrix, *start), width.next_multiple_of(lanes), window_b.then_some(*window));
+                }
+                Step::CellGroup { src, length, start, .. } => self.touch(ranges, (*src, *start), length.next_multiple_of(lanes), None),
+                Step::CellSeek { .. } | Step::CellPass | Step::WideReduce { .. } | Step::CellDrain { .. } => {}
+            }
+        }
+    }
+}
+
 /// Where the attention of one head reads its keys and values: each token's row starts
 /// `stride` further on, and this head's part of it `offset` into the row.
 #[derive(Clone, Copy, Debug)]

@@ -51,11 +51,14 @@ pub struct DieFeatures {
     /// The link to the next chip has a lane of its own for each vector lane, so a whole
     /// block crosses in one cycle.
     pub wide_link: bool,
+    /// log2 of the words of vector memory, when each register takes only the words it
+    /// uses: a table gives each its base. Zero gives every register `1 << index_bits`.
+    pub vector_bits: u32,
 }
 
 impl Default for DieFeatures {
     fn default() -> Self {
-        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false }
+        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0 }
     }
 }
 
@@ -73,6 +76,12 @@ impl DieFeatures {
     /// The same die with a link lane for each vector lane.
     pub fn with_wide_link(mut self, wide: bool) -> Self {
         self.wide_link = wide;
+        self
+    }
+
+    /// The same die with `1 << bits` words of vector memory, handed out by a table.
+    pub fn with_vector_bits(mut self, bits: u32) -> Self {
+        self.vector_bits = bits;
         self
     }
 
@@ -135,7 +144,7 @@ impl DieFeatures {
     /// Exactly what this microprogram needs.
     pub fn of(code: &Microprogram) -> Self {
         // Additions are also how the comparator and the sequencer's own results are made.
-        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false };
+        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0 };
         let mut highest_x = 0;
         for word in &code.words {
             features.ops |= 1 << word.op;
@@ -161,7 +170,7 @@ impl DieFeatures {
     pub fn union(self, other: Self) -> Self {
         let mut widths = self.widths;
         widths.iter_mut().zip(other.widths).for_each(|(a, b)| *a = (*a).max(b));
-        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link }
+        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link, vector_bits: self.vector_bits.max(other.vector_bits) }
     }
 
     fn uses(&self, op: u32) -> bool {
@@ -644,6 +653,10 @@ fn and_not(b: &mut Builder, enable: Bit, value: Bit, name: &str) -> Bit {
     b.and_to(enable, inverted, y);
     y
 }
+
+/// Bits of the step between registers a loop visits, as a power of two, in each entry of
+/// the register table.
+pub const BASE_SHIFT_BITS: u32 = 5;
 
 /// The pins of one lane of the link to the neighbouring chips.
 struct LinkPins {
@@ -1297,6 +1310,38 @@ impl Gen {
             strides
         };
         let global_running = running;
+        // With compact vector memory, a table gives each register where it starts and the
+        // step between the registers a loop over them visits; it is read once a cycle for
+        // every unit, by the register numbers in the word or those the host asks for.
+        let compact = c.features.vector_bits > 0;
+        let mem_bits = if compact { c.features.vector_bits } else { addr_bits };
+        let host_reads_top = bus_or(&mut b, start, halt_flag, "host_reads_top");
+        let bases: Option<[(Vec<Bit>, Vec<Bit>); 3]> = compact.then(|| {
+            let entry_bits = (mem_bits + BASE_SHIFT_BITS) as usize;
+            let load_base = b.input("load_base", 1)[0];
+            let base_addr = b.input("base_addr", c.reg_bits);
+            let base_data = b.input("base_data", mem_bits + BASE_SHIFT_BITS);
+            b.group("Tabla de registros");
+            let mut l = Logic { b: &mut b, next: 70_000 };
+            let entries: Vec<Vec<Bit>> = (0..1u32 << c.reg_bits)
+                .map(|e| {
+                    let q = l.fresh_bus(entry_bits);
+                    let here = l.equals(&base_addr, e);
+                    let write = l.and(load_base, here);
+                    let next = l.mux_bus(write, &q, &base_data);
+                    l.connect_flops(&next, &q);
+                    q
+                })
+                .collect();
+            let vec_reg = vec_addr[c.index_bits as usize..].to_vec();
+            let key_a = l.mux_bus(host_reads_top, &fields["reg_a"].iter().copied().chain(std::iter::repeat(Bit::Zero)).take(c.reg_bits as usize).collect::<Vec<_>>(), &vec_reg);
+            let key_w = l.mux_bus(load_vec, &fields["reg_dst"].iter().copied().chain(std::iter::repeat(Bit::Zero)).take(c.reg_bits as usize).collect::<Vec<_>>(), &vec_reg);
+            let key_b: Vec<Bit> = fields["reg_b"].iter().copied().chain(std::iter::repeat(Bit::Zero)).take(c.reg_bits as usize).collect();
+            [key_a, key_b, key_w].map(|key| {
+                let entry = l.select(&key, &entries);
+                (entry[..mem_bits as usize].to_vec(), entry[mem_bits as usize..].to_vec())
+            })
+        });
         let mut first_unit = None;
         let mut unit_ports = Vec::with_capacity(clusters);
         for (cluster, unit_banks) in cluster_banks.iter().enumerate() {
@@ -1482,16 +1527,55 @@ impl Gen {
                 b.inst(&format!("{name}_window"), &register_adder, &[("a", plain.to_vec()), ("b", by.to_vec()), ("cin", vec![Bit::Zero]), ("sum", sum.clone()), ("cout", carry)]);
                 sum
             };
-            let number_a = register(&mut b, "reg_a_final", &fields["reg_a"], &window_a);
-            let number_b = register(&mut b, "reg_b_final", &fields["reg_b"], &window_b);
-            let number_w = register(&mut b, "reg_dst_final", &fields["reg_dst"], &window_dst);
-            let addr_a = join(&number_a, &index_a);
-            let addr_b = join(&number_b, &index_b);
-            let addr_w = join(&number_w, &index_w);
+            let host_reading = bus_or(&mut b, start, halt_flag, "host_reads");
+            let (addr_b, waddr, raddr_a) = match &bases {
+                // Base, plus the loop's register step, plus the index; the host gives its
+                // own register and index and no step.
+                Some([(base_a, shift_a), (base_b, shift_b), (base_w, shift_w)]) => {
+                    let mut l = Logic { b: &mut b, next: 71_000 };
+                    let vec_index = &vec_addr[..c.index_bits as usize];
+                    let mut physical = |base: &[Bit], shift: &[Bit], window: &[Bit], index: &[Bit], host: Bit| -> Vec<Bit> {
+                        let index = l.mux_bus(host, index, vec_index);
+                        let alone = l.not(host);
+                        let window: Vec<Bit> = window.iter().map(|bit| l.and(*bit, alone)).collect();
+                        let mut step: Vec<Bit> = (0..mem_bits as usize).map(|i| window.get(i).copied().unwrap_or(Bit::Zero)).collect();
+                        for (level, bit) in shift.iter().enumerate() {
+                            let by = 1usize << level;
+                            let moved: Vec<Bit> = (0..step.len()).map(|i| if i >= by { step[i - by] } else { Bit::Zero }).collect();
+                            step = l.mux_bus(*bit, &step, &moved);
+                        }
+                        let index: Vec<Bit> = (0..mem_bits as usize).map(|i| index.get(i).copied().unwrap_or(Bit::Zero)).collect();
+                        let start = l.adder(base, &step, Bit::Zero).0;
+                        l.adder(&start, &index, Bit::Zero).0
+                    };
+                    let raddr_a = physical(base_a, shift_a, &window_a, &index_a, host_reading);
+                    let addr_b = physical(base_b, shift_b, &window_b, &index_b, Bit::Zero);
+                    let waddr = physical(base_w, shift_w, &window_dst, &index_w, load_vec);
+                    let named = |l: &mut Logic, name: &str, bits: Vec<Bit>| {
+                        let wire = l.b.wire(name, mem_bits);
+                        for (from, to) in bits.iter().zip(&wire) {
+                            l.b.or_to(*from, Bit::Zero, *to);
+                        }
+                        wire
+                    };
+                    (named(&mut l, "addr_b", addr_b), named(&mut l, "waddr", waddr), named(&mut l, "raddr_a", raddr_a))
+                }
+                None => {
+                    let number_a = register(&mut b, "reg_a_final", &fields["reg_a"], &window_a);
+                    let number_b = register(&mut b, "reg_b_final", &fields["reg_b"], &window_b);
+                    let number_w = register(&mut b, "reg_dst_final", &fields["reg_dst"], &window_dst);
+                    let addr_a = join(&number_a, &index_a);
+                    let addr_b = join(&number_b, &index_b);
+                    let addr_w = join(&number_w, &index_w);
+                    let waddr = b.wire("waddr", addr_bits);
+                    b.inst("waddr_select", &mux_addr, &[("s", vec![load_vec]), ("a", addr_w), ("b", vec_addr.clone()), ("y", waddr.clone())]);
+                    let raddr_a = b.wire("raddr_a", addr_bits);
+                    b.inst("raddr_select", &mux_addr, &[("s", vec![host_reading]), ("a", addr_a), ("b", vec_addr.clone()), ("y", raddr_a.clone())]);
+                    (addr_b, waddr, raddr_a)
+                }
+            };
 
             let write_data = b.wire("write_data", a);
-            let waddr = b.wire("waddr", addr_bits);
-            b.inst("waddr_select", &mux_addr, &[("s", vec![load_vec]), ("a", addr_w), ("b", vec_addr.clone()), ("y", waddr.clone())]);
             let wdata = b.wire("wdata", a);
             // A simple step writes its result as soon as it has it.
             let direct_result = b.wire("direct_result", a);
@@ -1501,9 +1585,6 @@ impl Gen {
             b.inst("wdata_select", &mux_a, &[("s", vec![load_vec]), ("a", finished), ("b", vec_data.clone()), ("y", wdata.clone())]);
             let any_write = bus_or(&mut b, write_en, write_now, "any_write");
             let we = bus_or(&mut b, any_write, load_vec, "vec_we");
-            let raddr_a = b.wire("raddr_a", addr_bits);
-            let host_reading = bus_or(&mut b, start, halt_flag, "host_reads");
-            b.inst("raddr_select", &mux_addr, &[("s", vec![host_reading]), ("a", addr_a), ("b", vec_addr.clone()), ("y", raddr_a.clone())]);
 
             let lane_products: Vec<Vec<Bit>> = (0..lanes).map(|lane| b.wire(&format!("lane_product{lane}"), 2 * a)).collect();
             // Every lane's product is kept a cycle: products are rounded, and added up, in the
@@ -1527,7 +1608,7 @@ impl Gen {
             let lane_direct: Vec<Vec<Bit>> = (0..lanes).map(|lane| if lane == 0 { direct_result.clone() } else { b.wire(&format!("lane{lane}_direct"), a) }).collect();
             let (mut banks_a, mut banks_b) = (Vec::with_capacity(lanes), Vec::with_capacity(lanes));
             {
-                let bank_bits = addr_bits - lane_bits as u32;
+                let bank_bits = mem_bits - lane_bits as u32;
                 let mut l = Logic { b: &mut b, next: 40_000 };
                 let written_together = l.and(any_write, vector_flag);
                 // A read in the cycle of a write to the same place gets the old value from the

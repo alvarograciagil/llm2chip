@@ -25,6 +25,17 @@ fn load_assembly(sim: &mut Simulator, c: &DieConfig, initial: &std::collections:
     sim.set("load_vec", 0).unwrap();
 }
 
+/// Where each register starts in a compact vector memory, before anything goes into it.
+fn load_register_table(sim: &mut Simulator, c: &DieConfig, layout: &Layout) {
+    sim.set("load_base", 1).unwrap();
+    for (register, entry) in sim::chip::register_table(c, layout).iter().enumerate() {
+        sim.set("base_addr", register as u64).unwrap();
+        sim.set("base_data", *entry as u64).unwrap();
+        sim.tick();
+    }
+    sim.set("load_base", 0).unwrap();
+}
+
 fn make_moe_checkpoint(dir: &Path) {
     let mut rng = Rng(0x0FED_CBA9_8765_4321);
     let mut w = Writer::default();
@@ -343,8 +354,11 @@ fn gates_in_cells(program: &compiler::Program, dir: &Path, c: DieConfig, tokens:
     let weights = Weights::open(dir).unwrap();
     let layout = Layout::with_cells(program, &weights, c, CHIP_TOKENS).unwrap();
     let code = layout.microprogram(program).unwrap();
+    // Each register takes only the vector memory its routines reach.
+    let c = sim::chip::compact_die(c, &layout);
     let mut sim = Simulator::new(&die_design(c)).unwrap();
     load_microprogram(&mut sim, &c, &code);
+    load_register_table(&mut sim, &c, &layout);
     load_assembly(&mut sim, &c, &layout.setup().initial);
     let data_mask = (1u64 << c.scale_bits.max(c.cell.weight_bits).max(c.cell.activation_bits)) - 1;
     sim.set("load_fn", 1).unwrap();

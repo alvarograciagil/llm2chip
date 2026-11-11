@@ -132,7 +132,7 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     b.or_to(bist_fail, Bit::Zero, self_test_fail[0]);
 
     let load_valid = b.wire("load_valid", 1)[0];
-    let load_target = b.wire("load_target", 3);
+    let load_target = b.wire("load_target", crate::soc::TARGET_BITS);
     let load_unit = b.wire("load_unit", 16);
     let load_addr = b.wire("load_addr", 32);
     let load_data = b.wire("load_data", 32 * crate::soc::LOAD_LANES as u32);
@@ -287,6 +287,12 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
         let load_vec = load_to(&mut l, crate::image::Target::Vector);
         let load_fn = load_to(&mut l, crate::image::Target::Function);
         let table_write = load_to(&mut l, crate::image::Target::SamplerTable);
+        // Where each register starts in a compact vector memory, one entry a register.
+        if c.die.features.vector_bits > 0 {
+            let load_base = load_to(&mut l, crate::image::Target::RegisterBase);
+            let entry = (c.die.features.vector_bits + crate::die::BASE_SHIFT_BITS) as usize;
+            die_pins.extend([("load_base", vec![load_base]), ("base_addr", load_addr[..c.die.reg_bits as usize].to_vec()), ("base_data", load_data[..entry].to_vec())]);
+        }
         // Weights fixed at manufacture need no network to reach their cells.
         if !c.die.cell.fixed_weights {
             let weight_load = load_to(&mut l, crate::image::Target::CellWeight);

@@ -4,9 +4,9 @@
 use crate::weights::{CellRow, Weights};
 use compiler::{Inst, Op, Program, RopeScaling};
 use netlist::block::{FN_GELU, FN_GELU_TANH, FN_TANH};
-use netlist::block::{chained_rows, encode_vector, Assembly, AttentionRegs, BlockOps, CellMatrix, DeltaRegs, Expr, KeyStore, MatvecPart, Var, FN_EXP, FN_SIGMOID, FN_SOFTPLUS};
+use netlist::block::{chained_rows, encode_vector, exponent_register, register_extents, Assembly, AttentionRegs, BlockOps, CellMatrix, DeltaRegs, Expr, KeyStore, MatvecPart, Step, Var, VarRanges, FN_EXP, FN_SIGMOID, FN_SOFTPLUS};
 use netlist::{DieConfig, DieProgram, Microprogram};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
@@ -35,17 +35,6 @@ fn state_words(program: &Program, op: &Op, context: usize) -> u64 {
         }
         _ => 0,
     }
-}
-
-/// Words of vector memory a chip needs for the operations `ops` at `context` tokens: their
-/// states, every buffer, the work registers and the rotation table.
-pub fn vector_words(program: &Program, ops: Range<usize>, context: usize) -> u64 {
-    let states: u64 = program.ops[ops].iter().map(|inst| state_words(program, &inst.op, context)).sum();
-    let buffers: u64 = program.buffers.iter().map(|b| *b as u64).sum();
-    // Work registers hold at most a hidden vector at a time.
-    let work = (TEMPORARIES + 2 * PARTS) as u64 * program.hidden as u64;
-    let rope_half = program.ops.iter().find_map(|i| if let Op::Rope { rotary, .. } = i.op { Some(rotary / 2) } else { None }).unwrap_or(0);
-    states + buffers + work + (context * (3 * rope_half + 1)) as u64
 }
 
 /// The layers each of `chips` chips runs, cut so the chip with most memory has as little as
@@ -364,6 +353,13 @@ pub struct Layout {
     /// gives every matrix of it, with its output buffer; the others do nothing alone.
     chains: HashMap<String, Vec<(String, usize)>>,
     followers: HashSet<String>,
+    /// How far into each register the routines assembled so far reach, and the registers
+    /// their loops step through by number: what a compact vector memory has to hold.
+    extents: RefCell<HashMap<u32, u32>>,
+    windows: RefCell<HashMap<u32, u32>>,
+    /// The most tokens and positions the routines can see.
+    tokens: u32,
+    positions: u32,
 }
 
 impl Layout {
@@ -624,7 +620,7 @@ impl Layout {
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
         }
-        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers })
+        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), tokens: program.vocab as u32, positions: chip_tokens.unwrap_or(1) as u32 })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -657,7 +653,7 @@ impl Layout {
         let routine = |code: &mut DieProgram, build: &mut dyn FnMut(&mut Assembly) -> Result<(), String>| {
             let mut asm = self.assembly();
             build(&mut asm)?;
-            code.assemble(&asm.steps);
+            self.assemble(code, &asm.steps);
             Ok::<(), String>(())
         };
         routine(&mut code, &mut |asm| self.run_range(asm, program, 0..program.logits_from, token, position, true))?;
@@ -705,7 +701,7 @@ impl Layout {
             let output = program.crossing(plan[die + 1].start)?;
             asm.send(self.reg(output), (program.buffers[output] as u32).into());
         }
-        code.assemble(&asm.steps);
+        self.assemble(&mut code, &asm.steps);
         code.next_entry();
 
         // The logits are made on the first chip, which samples them: the last one sends it
@@ -724,8 +720,72 @@ impl Layout {
         if first {
             self.run_list(&mut asm, program, tail, token, position, false)?;
         }
-        code.assemble(&asm.steps);
+        self.assemble(&mut code, &asm.steps);
         Ok(code.finish_program())
+    }
+
+    /// Lays out a routine's steps, noting how far into each register they reach.
+    fn assemble(&self, code: &mut DieProgram, steps: &[Step]) {
+        code.assemble(steps);
+        let mut ranges = VarRanges::new(self.tokens, self.positions);
+        let lanes = 1u32 << self.config.features.lane_bits;
+        register_extents(steps, &mut ranges, lanes, self.config.features.key_shift, &mut self.extents.borrow_mut(), &mut self.windows.borrow_mut());
+    }
+
+    /// Where each register starts in a compact vector memory with the step of the loops
+    /// that visit it by number, and log2 of the words the memory needs, for the routines
+    /// assembled so far. Each register takes only the words they reach, in whole blocks of
+    /// lanes; registers a loop steps through sit one after another, a power of two apart.
+    pub fn register_bases(&self) -> (Vec<(u32, u32)>, u32) {
+        let (bases, _, bits) = self.register_layout();
+        (bases, bits)
+    }
+
+    /// Words of vector memory each unit needs for the routines assembled so far.
+    pub fn vector_words_used(&self) -> u64 {
+        self.register_layout().1
+    }
+
+    fn register_layout(&self) -> (Vec<(u32, u32)>, u64, u32) {
+        let lanes = 1u64 << self.config.features.lane_bits;
+        let mut extents = self.extents.borrow().clone();
+        // What is loaded before the first routine, and the exponent of every register.
+        for (register, index) in self.setup.initial.keys() {
+            let entry = extents.entry(*register).or_default();
+            *entry = (*entry).max(index + 1);
+        }
+        let exponents = extents.entry(exponent_register(&self.config)).or_default();
+        *exponents = (*exponents).max(self.next);
+        let words = |r: u32| (extents.get(&r).copied().unwrap_or(0) as u64).max(1).next_multiple_of(lanes);
+        // Runs of registers a loop visits by number; runs that overlap become one.
+        let mut runs: Vec<(u32, u32)> = self.windows.borrow().iter().map(|(first, reach)| (*first, first + reach)).collect();
+        runs.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::new();
+        for (first, last) in runs {
+            match merged.last_mut() {
+                Some((_, end)) if first <= *end => *end = (*end).max(last),
+                _ => merged.push((first, last)),
+            }
+        }
+        let mut bases = vec![(0u32, 0u32); 1 << self.config.reg_bits];
+        let mut placed = vec![false; bases.len()];
+        let mut next = 0u64;
+        for (first, last) in merged {
+            let stride = (first..=last).map(words).max().unwrap_or(lanes).next_power_of_two();
+            for r in first..=last {
+                bases[r as usize] = ((next + (r - first) as u64 * stride) as u32, stride.trailing_zeros());
+                placed[r as usize] = true;
+            }
+            next += (last - first + 1) as u64 * stride;
+        }
+        let mut alone: Vec<u32> = extents.keys().copied().filter(|r| !placed[*r as usize]).collect();
+        alone.sort_unstable();
+        for r in alone {
+            bases[r as usize] = (next as u32, 0);
+            next += words(r);
+        }
+        let bits = (u64::BITS - next.max(lanes * 2).saturating_sub(1).leading_zeros()).max(self.config.features.lane_bits + 1);
+        (bases, next, bits)
     }
 
     /// Forgets the weights of every matrix that the given operations do not use.
@@ -743,7 +803,7 @@ impl Layout {
         let mut asm = self.assembly();
         self.run_list(&mut asm, program, std::slice::from_ref(inst), Expr::var(Var::Token), Expr::var(Var::Position), first)?;
         let mut code = DieProgram::new(self.config);
-        code.assemble(&asm.steps);
+        self.assemble(&mut code, &asm.steps);
         Ok(code.finish_program())
     }
 
