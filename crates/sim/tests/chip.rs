@@ -154,7 +154,6 @@ fn the_embedding_can_stay_in_the_image_and_come_a_row_at_a_time() {
 }
 
 #[test]
-#[ignore = "lenta: solo tiene sentido con optimizaciones: son cientos de miles de ciclos"]
 fn text_goes_through_the_whole_chip_in_gates() {
     if build_firmware().is_none() {
         return;
@@ -179,7 +178,6 @@ fn text_goes_through_the_whole_chip_in_gates() {
 }
 
 #[test]
-#[ignore = "lenta: millones de instrucciones: solo con optimizaciones"]
 fn any_token_on_the_stop_list_ends_the_answer() {
     let Some(firmware) = build_firmware() else { return };
     let dir = std::env::temp_dir().join(format!("llm2chip-stop-{}", std::process::id()));

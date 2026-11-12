@@ -308,7 +308,6 @@ fn chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &str,
 }
 
 #[test]
-#[ignore = "lenta: tres chips completos en puertas: solo con optimizaciones"]
 fn a_number_of_chips_the_image_does_not_cover_is_reported() {
     let Some(firmware) = build_firmware() else { return };
     let setup = setup("three", &firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, Sharing::Layers);
