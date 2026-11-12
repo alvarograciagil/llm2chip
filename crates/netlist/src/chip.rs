@@ -238,6 +238,17 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
         };
         l.connect_flops(&[keep_parked], &[parked]);
         let start = l.or(parked, entry_write);
+        // The bus's orders reach the die a cycle later, from registers: otherwise a store
+        // of the CPU would decode, start the die and address its memories in one cycle.
+        let delayed = |l: &mut Logic, bits: &[Bit]| -> Vec<Bit> {
+            let q = l.fresh_bus(bits.len());
+            l.connect_flops(bits, &q);
+            q
+        };
+        let start = delayed(&mut l, &[start])[0];
+        let order = delayed(&mut l, &bus_wdata);
+        let param_write = delayed(&mut l, &[param_write])[0];
+        let param_index = delayed(&mut l, &bus_address[..x_bits(&c.die) as usize]);
 
         let cpu_vector_address = stored(&mut l, REG_VECTOR_ADDRESS, vector_bits);
         let sample_base = stored(&mut l, REG_SAMPLE_BASE, vector_bits);
@@ -294,7 +305,7 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
         if dictionary > 0 {
             let load_index = load_to(&mut l, crate::image::Target::MicrocodeIndex);
             let shift = crate::die::ENTRY_INDEX_SHIFT as usize;
-            die_pins.extend([("load_index", vec![load_index]), ("entry_index", bus_wdata[shift..shift + dictionary].to_vec())]);
+            die_pins.extend([("load_index", vec![load_index]), ("entry_index", order[shift..shift + dictionary].to_vec())]);
         }
         // Where each register starts in a compact vector memory, one entry a register.
         if c.die.features.vector_bits > 0 {
@@ -320,10 +331,10 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
 
         die_pins.extend([
             ("start", vec![start]),
-            ("entry", bus_wdata[..c.die.microcode_bits as usize].to_vec()),
+            ("entry", order[..c.die.microcode_bits as usize].to_vec()),
             ("param_write", vec![param_write]),
-            ("param_index", bus_address[..x_bits(&c.die) as usize].to_vec()),
-            ("param_data", bus_wdata[..c.die.index_bits as usize].to_vec()),
+            ("param_index", param_index),
+            ("param_data", order[..c.die.index_bits as usize].to_vec()),
             ("load_code", vec![load_code]),
             ("code_addr", load_addr[..c.die.microcode_bits as usize].to_vec()),
             ("code_data", load_data[..word_bits(&c.die) as usize].to_vec()),
@@ -362,7 +373,8 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
 
         l.b.group("Contadores y depuración");
         let not_halted = l.not(die_halted[0]);
-        let idle_flag = l.or(parked, entry_write);
+        // Neither the cycle of the order nor the one it reaches the die in is the die's work.
+        let idle_flag = l.any(&[parked, entry_write, start]);
         let not_idle = l.not(idle_flag);
         let die_busy = l.and(not_halted, not_idle);
         let counters: Vec<Vec<Bit>> = [Bit::One, die_busy, streaming]
@@ -424,7 +436,12 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
         let sign = vector_out[activation - 1];
         let vector_word: Vec<Bit> = vector_out.iter().copied().chain(std::iter::repeat_n(sign, 32 - activation)).collect();
         let mut value = constant(0, 32);
-        for (register, word) in [(REG_STATUS, widen(&die_halted)), (REG_VECTOR_DATA, vector_word), (REG_SAMPLE_DONE, widen(&sampler_done)), (REG_SAMPLE_TOKEN, widen(&sampler_token)), (REG_FOLLOWER, widen(&follower)), (REG_CHAIN_DATA, chain_held.clone()), (REG_CHAIN_STATUS, widen(&[chain_has_data[0], chain_can_send[0]]))] {
+        // A die whose order is on its way already counts as busy.
+        let free = {
+            let waiting = l.not(start);
+            l.and(die_halted[0], waiting)
+        };
+        for (register, word) in [(REG_STATUS, widen(&[free])), (REG_VECTOR_DATA, vector_word), (REG_SAMPLE_DONE, widen(&sampler_done)), (REG_SAMPLE_TOKEN, widen(&sampler_token)), (REG_FOLLOWER, widen(&follower)), (REG_CHAIN_DATA, chain_held.clone()), (REG_CHAIN_STATUS, widen(&[chain_has_data[0], chain_can_send[0]]))] {
             let chosen = l.equals(&selected, register);
             value = l.mux_bus(chosen, &value, &word);
         }
@@ -539,7 +556,8 @@ impl<E: DieEngine> Peripheral for ChipModel<E> {
                 self.engine.run(routine, token, position);
                 let cycles = self.engine.cycles(routine, token, position);
                 self.die_busy += cycles;
-                self.die_free_at = cycle + cycles;
+                // The order reaches the die a cycle after the store.
+                self.die_free_at = cycle + 1 + cycles;
             }
             REG_VECTOR_ADDRESS => self.vector_address = value,
             REG_SAMPLE_BASE => self.sample_base = value,
