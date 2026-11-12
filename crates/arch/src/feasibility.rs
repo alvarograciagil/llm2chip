@@ -110,6 +110,12 @@ pub const BOARD_PACKAGES: u32 = 16;
 /// Small chips of a few milliwatts in plastic packages: many more fit a board.
 pub const BOARD_SMALL_PACKAGES: u32 = 64;
 
+/// Distinct dies to make. The chips are one netlist repeated, each loading its part of the
+/// model from the image; only weights burnt into ROM make each die a design of its own.
+fn designs(p: &ChipParams, dies: u32) -> u32 {
+    if p.weight_backend == WeightBackend::Rom && p.die_mode == DieMode::Custom { dies } else { 1 }
+}
+
 /// Area as a person reads it: whole square millimetres once there are many.
 fn mm2(area: f64) -> String {
     if area >= 100.0 { format!("{area:.0}") } else { format!("{area:.1}") }
@@ -145,8 +151,8 @@ fn chip_notes(p: &ChipParams, report: &Report, tech: Option<&TechNode>) -> Vec<S
     } else {
         notes.push(format!("{} chips en un solo encapsulado, unidos por UCIe.", report.dies));
     }
-    if p.die_mode == DieMode::Custom && tech.is_some_and(|t| t.open_pdk && t.fabricable) {
-        notes.push(format!("Cada uno de los {} dies es un diseño distinto: en una lanzadera abierta ocupa una plaza propia. Con «Todos iguales» basta un diseño fabricado {} veces.", report.dies, report.dies));
+    if designs(p, report.dies) > 1 && tech.is_some_and(|t| t.open_pdk && t.fabricable) {
+        notes.push(format!("Con los pesos grabados en ROM, cada uno de los {} dies es un diseño distinto: en una lanzadera abierta ocupa una plaza propia. Con «Todos iguales» basta un diseño fabricado {} veces.", report.dies, report.dies));
     }
     notes
 }
@@ -193,7 +199,7 @@ pub fn judge(p: &ChipParams, report: &Report) -> Feasibility {
         reasons,
         notes,
         dies: report.dies,
-        designs: if p.die_mode == DieMode::Identical { 1 } else { report.dies },
+        designs: designs(p, report.dies),
         die_area_mm2: report.die_area_mm2,
         die_limit_mm2: limit,
         largest: blocks,

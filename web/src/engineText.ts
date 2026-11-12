@@ -199,7 +199,7 @@ export const ENGINE_TEXT: [string, string][] = [
   ["{n} chips en {n} encapsulados no caben en una placa (unos {n} encapsulados por placa): harían falta {n} placas unidas por cable. Funciona, pero cada token cruza todos los enlaces: {n} µs por token solo en ellos.", "{0} chips in {1} packages do not fit on one board (about {2} packages per board): it would take {3} boards joined by cable. It works, but each token crosses every link: {4} µs per token in them alone."],
   ["{n} chips en {n} encapsulados sobre una placa, unidos por SerDes: {n} µs por token en enlaces.", "{0} chips in {1} packages on one board, joined by SerDes: {2} µs per token in links."],
   ["{n} chips en un solo encapsulado, unidos por UCIe.", "{0} chips in a single package, joined by UCIe."],
-  ["Cada uno de los {n} dies es un diseño distinto: en una lanzadera abierta ocupa una plaza propia. Con «Todos iguales» basta un diseño fabricado {n} veces.", "Each of the {0} dies is a different design: on an open shuttle it takes a place of its own. With “All identical” one design made {1} times is enough."],
+  ["Con los pesos grabados en ROM, cada uno de los {n} dies es un diseño distinto: en una lanzadera abierta ocupa una plaza propia. Con «Todos iguales» basta un diseño fabricado {n} veces.", "With the weights burnt into ROM, each of the {0} dies is a different design: on an open shuttle it takes a place of its own. With “All identical” one design made {1} times is enough."],
   ["{s} {n} mm²", "{0} {1} mm²"],
   [" aun repartido en {n} chips", " even spread over {0} chips"],
   ["Cada die necesita {n} mm²{s} y el proceso admite {n} mm²: {s}.", "Each die needs {0} mm²{1} and the process takes {2} mm²: {3}."],

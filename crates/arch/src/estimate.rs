@@ -693,24 +693,24 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     let sampler_um2 = p.sampler_entries.max(1) as f64 * ((logit_bits + index_bits) * (tech.ff_um2 + tech.mux_um2) + logit_bits * tech.fa_um2)
         + p.sampler_lanes as f64 * logit_bits * tech.fa_um2
         + 24.0 * 16.0 * tech.fa_um2;
-    push("sampler", "Unidad de muestreo", sampler_um2 * um2 * ROUTING_OVERHEAD / d,
+    // Every chip is the same one repeated, so each carries the parts only the first uses:
+    // the sampler, the tokenizer's tables, the CPU and its memory.
+    push("sampler", "Unidad de muestreo", sampler_um2 * um2 * ROUTING_OVERHEAD,
         "Conserva los mejores logits y elige el siguiente token, con top-k y temperatura.");
     // Merge table, token offsets and the text of each token, read only by the CPU.
     let tokenizer_bits = vocabulary_room(model, p) * TOKENIZER_BITS_PER_TOKEN;
     let tokenizer_density = if p.weight_backend == WeightBackend::Rom { tech.rom_mbit_mm2 } else { tech.sram_density(1024.0) };
-    push("tokenizer_tables", "Tablas del tokenizador", tokenizer_bits / 1e6 / tokenizer_density / d,
+    push("tokenizer_tables", "Tablas del tokenizador", tokenizer_bits / 1e6 / tokenizer_density,
         "Vocabulario y fusiones que el firmware usa para convertir texto en tokens y volver.");
     // Not in the tech file's CPU figure: this grows with the context the design allows.
     let (text_bytes, arena_words) = tokenizer_rt::memory_for_context(p.context_tokens);
     let cpu_memory_bits = 8.0 * (FIRMWARE_PROGRAM_BYTES as f64 + text_bytes as f64 + 4.0 * arena_words as f64);
-    let cpu_memory_share = if p.die_mode == DieMode::Identical { 1.0 } else { 1.0 / d };
-    push("cpu_memory", "Memoria de la CPU", cpu_memory_bits / 1e6 / tech.sram_density(1024.0) * cpu_memory_share,
+    push("cpu_memory", "Memoria de la CPU", cpu_memory_bits / 1e6 / tech.sram_density(1024.0),
         "Programa del firmware y memoria donde el tokenizador trabaja con el texto de entrada.");
     push("control", "Secuenciador y microprograma", 0.8,
         "Ejecuta el microprograma que dirige cada etapa.");
     // Interchangeable dies all carry the CPU, even though only the first one leads.
-    let control_share = if p.die_mode == DieMode::Identical { 1.0 } else { 1.0 / d };
-    push("system", "CPU de control y carga", (tech.cpu_mm2 + tech.io_mm2) * control_share,
+    push("system", "CPU de control y carga", tech.cpu_mm2 + tech.io_mm2,
         if p.weight_backend == WeightBackend::Rom {
             "Tokenizador, muestreo y carga del microprograma. Los pesos ya vienen grabados."
         } else {
