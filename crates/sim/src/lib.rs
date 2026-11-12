@@ -37,6 +37,19 @@ pub trait Runner: Send {
     fn step_embedding(&mut self, _embedding: &[f32], _positions: [u64; 3], _want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
         Err("este núcleo de inferencia aún no admite imágenes: elige el de coma flotante".into())
     }
+    /// Runs a picture through the image encoder the engine carries, if it carries one, and
+    /// keeps it there: gives how many tokens it makes, which `step_image` reads one by one.
+    fn encode_image(&mut self, _tower: &vision::VisionTower, _image: &vision::Patches) -> Result<Option<usize>, String> {
+        Ok(None)
+    }
+    /// The most patches the engine's own encoder takes.
+    fn image_patches(&self) -> Option<usize> {
+        None
+    }
+    /// Token `index` of the image `encode_image` left, at its time, row and column.
+    fn step_image(&mut self, _index: u32, _positions: [u64; 3], _want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
+        Err("este núcleo de inferencia no lleva codificador de imágenes".into())
+    }
     /// Rotary frequencies follow three positions, `section` of them each, interleaved.
     fn set_mrope(&mut self, _section: [usize; 3]) {}
     /// Where the text after an image goes on from.
@@ -119,6 +132,21 @@ impl Runner for ExactEngine {
     fn draft(&mut self, token: u32, want_logits: bool) -> Result<Option<&[f32]>, String> {
         self.logits = ExactEngine::draft(self, token, want_logits)?.unwrap_or_default();
         Ok(want_logits.then_some(self.logits.as_slice()))
+    }
+    fn encode_image(&mut self, tower: &vision::VisionTower, image: &vision::Patches) -> Result<Option<usize>, String> {
+        if self.image_patches().is_none() {
+            return Ok(None);
+        }
+        ExactEngine::encode_image(self, tower, image).map(Some)
+    }
+    fn image_patches(&self) -> Option<usize> {
+        ExactEngine::image_patches(self)
+    }
+    fn step_image(&mut self, index: u32, positions: [u64; 3], want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
+        let started = std::time::Instant::now();
+        self.logits = ExactEngine::step_image(self, index, positions, want_logits)?.unwrap_or_default();
+        let stats = StepStats { seconds: started.elapsed().as_secs_f64(), saturated: 0 };
+        Ok((want_logits.then_some(self.logits.as_slice()), stats))
     }
     fn step_embedding(&mut self, embedding: &[f32], positions: [u64; 3], want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
         let started = std::time::Instant::now();

@@ -93,7 +93,7 @@ interface SimulatorState {
   /** A picture the question is about: its pixels as RGB, and a preview to show. */
   image: { width: number; height: number; rgb: number[]; preview: string } | null;
   /** What the encoder made of the picture in the last run. */
-  imageReport: { patches: number; tokens: number; seconds: number } | null;
+  imageReport: { patches: number; tokens: number; seconds: number; onChip: boolean } | null;
   /** Draw a picture of the prompt instead of answering it, with a model that draws. */
   draw: boolean;
   /** How far the drawing has gone: image tokens written, and whether it is decoding. */
@@ -246,7 +246,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
     ws.onclose = () => set({ running: false });
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      if (data.type === "image") set({ imageReport: { patches: data.patches, tokens: data.tokens, seconds: data.seconds } });
+      if (data.type === "image") set({ imageReport: { patches: data.patches, tokens: data.tokens, seconds: data.seconds, onChip: Boolean(data.on_chip) } });
       if (data.type === "drawing") set((s) => ({ phase: "Dibujando", drawing: { done: data.done, total: data.total, seconds: data.seconds, decoding: false }, pulse: s.pulse + 1 }));
       if (data.type === "decoding") set((s) => ({ phase: "Decodificando la imagen", drawing: s.drawing && { ...s.drawing, decoding: true } }));
       if (data.type === "picture") set({ picture: { data: data.data, side: data.side, seconds: data.seconds } });

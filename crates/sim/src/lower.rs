@@ -404,6 +404,26 @@ fn rope_row(theta: f32, scaling: Option<RopeScaling>, half: usize, position: u32
     table
 }
 
+/// Values as mantissas of `bits` bits at a fixed `exponent`, the largest kept in range.
+pub fn encode_at(values: &[f64], bits: u32, exponent: i64) -> Vec<i64> {
+    let top = (1i64 << (bits - 1)) - 1;
+    let scale = 2f64.powi(bits as i32 - 1 - exponent as i32);
+    values.iter().map(|v| ((v * scale).round() as i64).clamp(-top, top)).collect()
+}
+
+/// The row of the encoder's rotation table for a patch at `angles`: their cosines, minus
+/// their sines, their sines and a one for the elements past the rotated ones.
+pub fn patch_rotation_row(angles: &[f64]) -> Vec<f64> {
+    let mut row: Vec<f64> = angles.iter().map(|a| a.cos()).collect();
+    row.extend(angles.iter().map(|a| -a.sin()));
+    row.extend(angles.iter().map(|a| a.sin()));
+    row.push(1.0);
+    row
+}
+
+/// The exponent the encoder's rotation table keeps: its values reach 1.
+pub const PATCH_ROTATION_EXPONENT: i64 = 1;
+
 /// Cosines and sines for a token whose rotary frequencies follow three positions, as M-RoPE
 /// interleaves them: frequency `i` takes the row's if `i % 3 == 1` and the column's if
 /// `i % 3 == 2`, as far as their sections reach, and time's otherwise.
@@ -477,7 +497,11 @@ pub struct Layout {
     vision_rope: Option<(u32, u32, usize)>,
     /// Set while laying out or running a token whose input is the image encoder's output.
     from_image: Cell<bool>,
-    /// The most tokens and positions the routines can see.
+    /// For each store of rows, the register that keeps each row's exponent, and how wide
+    /// its rows are.
+    row_exponents: HashMap<usize, (u32, u32)>,
+    /// The most tokens and positions the routines can see: a token is also an image
+    /// encoder's patch.
     tokens: u32,
     positions: u32,
     /// This chip's place among those that share every product by rows, and the products
@@ -541,10 +565,12 @@ impl Layout {
             (program.buffers.iter().map(|_| alloc(1)).collect(), vec![false; program.buffers.len()])
         };
         let mut setup = Assembly::new(&config);
-        // A store of rows keeps them all at one exponent, as the cache does its keys.
+        // A store of rows keeps each row with its own exponent, beside it: the rows of an
+        // image encoder's state range from a few units to thousands.
+        let mut row_exponents: HashMap<usize, (u32, u32)> = HashMap::new();
         for inst in all_ops(program) {
-            if let Op::StoreRow { store, .. } = inst.op {
-                setup.load_mantissas(buffers[store], &[], STATE_EXPONENT);
+            if let Op::StoreRow { src, store } = inst.op {
+                row_exponents.entry(store).or_insert_with(|| (alloc(1), program.buffers[src] as u32));
             }
         }
         let mut matrices: HashMap<String, u32> = HashMap::new();
@@ -625,6 +651,10 @@ impl Layout {
                     let (group, groups, quant) = if cut { (part, cols / part, group) } else { (group, groups, group) };
                     // As many codes in each word of the cells as fit, while each group fills whole words.
                     let code_bits = matrix.cell_code_bits(cols, config.cell.activation_bits);
+                    // Weights with no format of their own go in whole, one mantissa each.
+                    if code_bits > config.cell.weight_bits {
+                        return Err(format!("las celdas guardan pesos de {} bits y {name}, sin cuantizar, necesita {code_bits}: dale un formato de pesos o celdas más anchas", config.cell.weight_bits));
+                    }
                     let packing = (0..=config.cell.most_packing()).rev().find(|p| code_bits << p <= config.cell.weight_bits && group.is_multiple_of(1 << p)).unwrap_or(0);
                     let exponent = matrix.exponent(cols);
                     setup.load_mantissas(reg, &[], exponent);
@@ -772,7 +802,7 @@ impl Layout {
         // The host writes a row of the encoder's table for each patch; its values reach 1.
         let vision_rope = all_ops(program).find_map(|i| if let Op::Rope { rotary, table: VISION_TABLE, .. } = i.op { Some(rotary / 2) } else { None }).map(|half| {
             let (row, table) = (alloc(1), alloc(1));
-            setup.load_mantissas(table, &[], 1);
+            setup.load_mantissas(table, &[], PATCH_ROTATION_EXPONENT);
             (row, table, half)
         });
         // Working registers come last, so a die with fewer registers keeps the first of
@@ -833,7 +863,7 @@ impl Layout {
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
         }
-        Ok(Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: program.vocab as u32, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside: None })
+        Ok(Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: program.vocab.max(program.vision.as_ref().map_or(0, |v| v.patches)) as u32, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside: None })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -846,6 +876,10 @@ impl Layout {
 
     pub fn logits_register(&self, program: &Program) -> u32 {
         self.buffers[program.logits]
+    }
+
+    pub fn config(&self) -> DieConfig {
+        self.config
     }
 
     pub fn register_of(&self, buffer: usize) -> u32 {
@@ -1322,6 +1356,15 @@ impl Layout {
                 let (list, rope) = if routine == ENTRY_DRAFT { (&draft.ops[..draft.logits_from], true) } else { (&draft.ops[draft.logits_from..], false) };
                 self.run_list(ops, program, list, token, position, rope)
             }
+            ENTRY_TOKEN_FROM_IMAGE if program.vision.is_some() => self.run_token_from_image(ops, program, position, false),
+            // The encoder's routines, as `microprogram` lays them out.
+            other if other > ENTRY_TOKEN_FROM_IMAGE && program.vision.is_some() => {
+                let vision = program.vision.as_ref().unwrap();
+                let index = other - ENTRY_VISION;
+                let range = vision.routines().into_iter().nth(index).ok_or_else(|| format!("rutina desconocida: {other}"))?;
+                let rope = index % 2 == 1 && index < 2 * vision.blocks.len();
+                self.run_list(ops, program, &vision.ops[range], token, position, rope)
+            }
             other => Err(format!("rutina desconocida: {other}")),
         }
     }
@@ -1359,8 +1402,6 @@ impl Layout {
     /// What the host writes into the rotation table for the rows set with `set_rotation`, at
     /// the table's exponent: `(register, index)` and mantissa.
     pub fn rotation_writes(&self) -> Vec<((u32, u32), i64)> {
-        let bits = self.config.cell.activation_bits;
-        let top = (1i64 << (bits - 1)) - 1;
         self.rotations
             .borrow()
             .iter()
@@ -1369,22 +1410,59 @@ impl Layout {
                     (VISION_TABLE, Some((_, register, half))) => (register, half),
                     _ => (self.rope_table[*table], self.rope_half),
                 };
-                let exponent = self.setup.initial.get(&(exponent_register(&self.config), register)).copied().unwrap_or(0);
-                let scale = 2f64.powi(bits as i32 - 1 - exponent as i32);
                 let width = 3 * half as u32 + 1;
-                values.iter().enumerate().map(move |(i, v)| ((register, row * width + i as u32), ((v * scale).round() as i64).clamp(-top, top))).collect::<Vec<_>>()
+                self.rotation_mantissas(register, values).into_iter().enumerate().map(move |(i, m)| ((register, row * width + i as u32), m)).collect::<Vec<_>>()
             })
             .collect()
+    }
+
+    /// A row of rotations as the table in `register` holds it, at that table's exponent.
+    fn rotation_mantissas(&self, register: u32, values: &[f64]) -> Vec<i64> {
+        let exponent = self.setup.initial.get(&(exponent_register(&self.config), register)).copied().unwrap_or(0);
+        encode_at(values, self.config.cell.activation_bits, exponent)
+    }
+
+    /// The row of the text's rotation table for a token at `positions`, interleaved under
+    /// M-RoPE with `section`, as the die's table holds it.
+    pub fn text_rotation(&self, program: &Program, positions: [u64; 3], section: [usize; 3]) -> Vec<i64> {
+        self.rotation_mantissas(self.rope_table[0], &mixed_rope_row(program.rope_theta, program.rope_scaling, self.rope_half, positions, section))
+    }
+
+    /// The row of the encoder's rotation table for a patch at `angles`, as the host writes it.
+    pub fn patch_rotation(&self, angles: &[f64]) -> Vec<i64> {
+        let Some((_, register, _)) = self.vision_rope else { return Vec::new() };
+        self.rotation_mantissas(register, &patch_rotation_row(angles))
+    }
+
+    /// What the firmware needs to run the encoder this layout carries, for a die whose
+    /// rotation table is in its registers.
+    pub fn vision_info(&self, program: &Program, config: &crate::vision::VisionConfig) -> Option<netlist::chip::VisionInfo> {
+        let part = program.vision.as_ref()?;
+        let (_, patch_table, patch_half) = self.vision_rope?;
+        let bits = self.config.index_bits;
+        let exponents = exponent_register(&self.config);
+        let vector = |buffer: usize| (self.reg(buffer) << bits, exponents << bits | self.reg(buffer), program.buffers[buffer] as u32);
+        // Only a table in registers can have its rows rewritten for an image's tokens.
+        let rope = self.setup.initial.contains_key(&(self.rope_table[0], 0)).then(|| self.rope_table[0] << bits);
+        Some(netlist::chip::VisionInfo {
+            patches: part.patches as u32,
+            image_token: config.image_token,
+            merge: config.merge as u32,
+            blocks: part.blocks.len() as u32,
+            pixels: vector(part.pixels),
+            position: vector(part.position),
+            patch_rope: (patch_table << bits, 3 * patch_half as u32 + 1),
+            rope: rope.unwrap_or(0),
+            rope_half: if rope.is_some() { self.rope_half as u32 } else { 0 },
+            mrope_rows: config.mrope_section[1] as u32,
+            mrope_cols: config.mrope_section[2] as u32,
+        })
     }
 
     /// The rotation of `slot` by its own angles, one for each pair of a head: an image patch's
     /// row and column. The host writes it in the table the die reads by position.
     pub fn set_rotation(&self, slot: u32, angles: &[f64]) {
-        let mut row: Vec<f64> = angles.iter().map(|a| a.cos()).collect();
-        row.extend(angles.iter().map(|a| -a.sin()));
-        row.extend(angles.iter().map(|a| a.sin()));
-        row.push(1.0);
-        self.rotations.borrow_mut().insert((VISION_TABLE, slot), row);
+        self.rotations.borrow_mut().insert((VISION_TABLE, slot), patch_rotation_row(angles));
     }
 
     fn run_range<O: BlockOps>(&self, ops: &mut O, program: &Program, range: Range<usize>, token: O::N, position: O::N, rope: bool) -> Result<(), String> {
@@ -1699,14 +1777,29 @@ impl Layout {
                 ops.gather_heads(&parts, self.reg(*dst));
             }
             Op::LoadRow { store, dst } => {
-                let width = program.buffers[*dst] as u32;
-                ops.copy_part(self.reg(*store), token * width, self.reg(*dst), zero, width.into());
-                ops.normalize(self.reg(*dst), width.into());
+                // Several rows side by side, such as the patches of one token, line up on
+                // the largest of their exponents.
+                let (exponents, row) = self.row_exponents[store];
+                let rows = program.buffers[*dst] as u32 / row;
+                let (store, dst) = (self.reg(*store), self.reg(*dst));
+                if rows == 1 {
+                    ops.copy_part(store, token * row, dst, zero, row.into());
+                    ops.restore_exponent((exponents, token), dst);
+                } else {
+                    for k in 0..rows {
+                        let at = token * rows + k.into();
+                        ops.copy_part(store, at * row, self.parts[k as usize], zero, row.into());
+                        ops.restore_exponent((exponents, at), self.parts[k as usize]);
+                    }
+                    let parts: Vec<(u32, u32)> = (0..rows as usize).map(|k| (self.parts[k], row)).collect();
+                    ops.gather(&parts, dst);
+                }
+                ops.normalize(dst, (rows * row).into());
             }
             Op::StoreRow { src, store } => {
-                // Every row of a store shares one exponent, as the cache's keys do.
-                let width = program.buffers[*src] as u32;
-                ops.align_to(self.reg(*src), zero, STATE_EXPONENT, self.reg(*store), token * width, width.into());
+                let (exponents, row) = self.row_exponents[store];
+                ops.copy_part(self.reg(*src), zero, self.reg(*store), token * row, row.into());
+                ops.save_exponent(self.reg(*src), (exponents, token));
             }
             Op::SplitQueryGate { src, query, gate, block } => {
                 let heads = program.buffers[*query] / block;

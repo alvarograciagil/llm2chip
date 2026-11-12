@@ -63,7 +63,8 @@ const INFO_THINK_BUDGET: usize = 20;
 const INFO_TABLE_SOURCE: usize = 21;
 const INFO_TABLE_ADDRESS: usize = 22;
 const INFO_TABLE_COLS: usize = 23;
-const INFO_PARAMETERS: usize = 24;
+const INFO_VISION: usize = 24;
+const INFO_PARAMETERS: usize = 25;
 const TARGET_VECTOR: u32 = 3;
 
 /// The tokenizer's tables, which the image builder leaves after the segment table.
@@ -78,6 +79,22 @@ const ROUTINE_DRAFT: u32 = 4;
 const ROUTINE_DRAFT_LOGITS: u32 = 5;
 const REG_DRAFT_RESULT: usize = 48;
 const MAX_DRAFT_DEPTH: usize = 3;
+const ROUTINE_TOKEN_FROM_IMAGE: u32 = 6;
+const ROUTINE_VISION: u32 = 7;
+
+/// The words of the image encoder's description, from `INFO_VISION`.
+const V_PATCHES: usize = 0;
+const V_IMAGE_TOKEN: usize = 1;
+const V_MERGE: usize = 2;
+const V_BLOCKS: usize = 3;
+const V_PIXELS: usize = 4;
+const V_POSITION: usize = 7;
+const V_PATCH_ROPE: usize = 10;
+const V_PATCH_ROPE_WIDTH: usize = 11;
+const V_ROPE: usize = 12;
+const V_ROPE_HALF: usize = 13;
+const V_MROPE_ROWS: usize = 14;
+const V_MROPE_COLS: usize = 15;
 
 global_asm!(
     r#"
@@ -362,6 +379,143 @@ fn read_prompt(sink: &mut impl FnMut(u32)) {
     }
 }
 
+fn receive_word() -> u32 {
+    let mut word = 0u32;
+    for shift in 0..4 {
+        word |= (receive() as u32) << (8 * shift);
+    }
+    word
+}
+
+fn vision(field: usize) -> u32 {
+    info(info(INFO_VISION) as usize + field)
+}
+
+/// Writes one element, or an exponent, of the die's vector memory while the die is idle.
+fn vector_write(address: u32, value: u32) {
+    peripheral_write(REG_VECTOR_ADDRESS, address);
+    peripheral_write(REG_VECTOR_DATA, value);
+}
+
+/// A vector from the host: its exponent, then its elements.
+fn receive_vector(field: usize) {
+    let (address, exponent, size) = (vision(field), vision(field + 1), vision(field + 2));
+    vector_write(exponent, receive_word());
+    for i in 0..size {
+        vector_write(address + i, receive_word());
+    }
+}
+
+/// Copies `count` elements of vector memory as the image left them, from `from` to `to`,
+/// with the load controller: the image is never written, so it still holds every row of
+/// the rotation table however the die's copy has been rewritten.
+fn copy_from_image(from: u32, to: u32, count: u32) {
+    unsafe {
+        let table = TABLE_WORD;
+        let segments = data_word(table) as usize;
+        let mut done = 0;
+        while done < count {
+            let at = from + done;
+            let mut found = None;
+            for index in 0..segments {
+                let field = |i: usize| data_word(table + 1 + index * SEGMENT_FIELDS + i);
+                let (address, length) = (field(3), field(4));
+                if field(1) == TARGET_VECTOR && field(5) == 1 && at >= address && at < address + length {
+                    found = Some((field(0) + (at - address), (address + length - at).min(count - done)));
+                    break;
+                }
+            }
+            match found {
+                Some((source, length)) => {
+                    let fields = [source, TARGET_VECTOR, 0, to + done, length, 1];
+                    for (register, value) in fields.iter().enumerate() {
+                        write_volatile(LOADER.add(register), *value);
+                    }
+                    write_volatile(LOADER.add(LOADER_START), 1);
+                    while read_volatile(LOADER.add(LOADER_BUSY)) != 0 {}
+                    done += length;
+                }
+                // An element the image leaves out starts at zero.
+                None => {
+                    vector_write(to + done, 0);
+                    done += 1;
+                }
+            }
+        }
+    }
+}
+
+/// An image the encoder has turned into tokens, waiting for its place in the prompt.
+#[derive(Clone, Copy, Default)]
+struct Picture {
+    tokens: u32,
+    /// Tokens per row of the image's grid of tokens, and rows.
+    width: u32,
+    height: u32,
+}
+
+/// Reads an image from the host, if it sends one, and runs the encoder over it: each patch's
+/// pixels, learned position and rotation row, then each block twice over every patch.
+fn read_picture() -> Option<Picture> {
+    let count = receive_word();
+    if count == 0 {
+        return None;
+    }
+    let (rows, cols) = (receive_word(), receive_word());
+    let width = vision(V_PATCH_ROPE_WIDTH);
+    if count > vision(V_PATCHES) {
+        // More than the encoder's stores hold: the image is read and left aside.
+        for _ in 0..count * (vision(V_PIXELS + 2) + vision(V_POSITION + 2) + 2 + width) {
+            receive_word();
+        }
+        return None;
+    }
+    for patch in 0..count {
+        receive_vector(V_PIXELS);
+        receive_vector(V_POSITION);
+        for i in 0..width {
+            vector_write(vision(V_PATCH_ROPE) + patch * width + i, receive_word());
+        }
+        run_die(ROUTINE_VISION, patch, patch);
+    }
+    for block in 0..vision(V_BLOCKS) {
+        for patch in 0..count {
+            run_die(ROUTINE_VISION + 1 + 2 * block, patch, patch);
+        }
+        // Every patch attends over all of them.
+        for patch in 0..count {
+            run_die(ROUTINE_VISION + 2 + 2 * block, patch, count - 1);
+        }
+    }
+    let merge = vision(V_MERGE);
+    Some(Picture { tokens: count / (merge * merge), width: cols / merge, height: rows / merge })
+}
+
+/// The rotation of the cache's position `slot`: the table's own row for `from`.
+fn rotate_as(slot: u32, from: u32) {
+    let width = 3 * vision(V_ROPE_HALF) + 1;
+    copy_from_image(vision(V_ROPE) + from * width, vision(V_ROPE) + slot * width, width);
+}
+
+/// The rotation of an image token at `slot`, at row `row` and column `column` of an image
+/// that starts at `start`: under M-RoPE, frequency `i` follows the row if `i % 3 == 1` and
+/// the column if `i % 3 == 2`, as far as their sections reach, and the start otherwise.
+fn rotate_image_token(slot: u32, start: u32, row: u32, column: u32) {
+    let half = vision(V_ROPE_HALF);
+    let (base, width) = (vision(V_ROPE), 3 * half + 1);
+    rotate_as(slot, start);
+    for i in 0..half {
+        let from = match i % 3 {
+            1 if i < 3 * vision(V_MROPE_ROWS) => start + row,
+            2 if i < 3 * vision(V_MROPE_COLS) => start + column,
+            _ => continue,
+        };
+        for offset in [0, half, 2 * half] {
+            copy_from_image(base + from * width + offset + i, base + slot * width + offset + i, 1);
+        }
+    }
+}
+
 /// Follows the model's reasoning, between its opening and closing tokens, and closes it
 /// itself once it has taken as many tokens as the budget allows.
 #[derive(Default)]
@@ -417,8 +571,32 @@ extern "C" fn main() {
     let depth = (info(INFO_DRAFT_DEPTH) as usize).min(MAX_DRAFT_DEPTH);
     let (mut last, mut position, mut draft_position) = (0, 0, 0u32);
     let mut reasoning = Reasoning::default();
+    // A chip that carries an image encoder first hears whether an image comes.
+    let mut picture = if info(INFO_VISION) != 0 { read_picture() } else { None };
+    // After an image, the text's rotations run behind the cache by this much.
+    let mut behind = 0u32;
+    let rotates = info(INFO_VISION) != 0 && vision(V_ROPE_HALF) != 0;
     read_prompt(&mut |token| {
+        if let Some(image) = picture.filter(|_| token == vision(V_IMAGE_TOKEN)) {
+            // The image's tokens take the placeholder's place, one by one, and the text
+            // goes on after the longer side of the image.
+            let start = position;
+            for index in 0..image.tokens {
+                run_die(ROUTINE_VISION + 1 + 2 * vision(V_BLOCKS), index, index);
+                if rotates {
+                    rotate_image_token(position, start, index / image.width, index % image.width);
+                }
+                run_die(ROUTINE_TOKEN_FROM_IMAGE, 0, position);
+                position += 1;
+            }
+            behind = image.tokens - image.width.max(image.height);
+            picture = None;
+            return;
+        }
         reasoning.see(token);
+        if rotates && behind > 0 {
+            rotate_as(position, position - behind);
+        }
         // The draft head reads the state before each token, to predict the one after it.
         if depth > 0 && position > 0 {
             run_die(ROUTINE_FEED_FROM_MAIN, 0, 0);
@@ -482,6 +660,9 @@ extern "C" fn main() {
         emit(last, &mut decoding);
         if watch.push(last) {
             return;
+        }
+        if rotates && behind > 0 {
+            rotate_as(position, position - behind);
         }
         run_die(entry_token, last, position);
         position += 1;

@@ -20,6 +20,24 @@ fn the_toy_encoder_turns_a_picture_into_tokens_of_the_model_width() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn a_picture_larger_than_the_chip_takes_is_resized_down_to_fit() {
+    let dir = std::env::temp_dir().join(format!("llm2chip-vision-within-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_vision_checkpoint(&dir);
+    let tower = VisionTower::open(&dir).unwrap().expect("codificador");
+    // 64 × 32 pixels are 32 × 16 patches; the chip takes 32 at most.
+    let image = patches(&tower.config.within(32), &test_picture(64, 32), 64, 32).unwrap();
+    let count = image.rows * image.cols;
+    assert!(count <= 32 && count > 8, "{} × {} parches", image.rows, image.cols);
+    assert!(image.rows.is_multiple_of(tower.config.merge) && image.cols.is_multiple_of(tower.config.merge));
+    assert!(image.cols > image.rows, "conserva la forma apaisada");
+    // A small one is enlarged to the least the encoder takes, which here is also the most.
+    let image = patches(&tower.config.within(32), &test_picture(12, 4), 12, 4).unwrap();
+    assert!(image.rows * image.cols <= 32, "{} × {} parches", image.rows, image.cols);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A die with room for everything, its vectors of `bits` bits.
 fn roomy_die(bits: u32) -> netlist::DieConfig {
     let base = die_config();

@@ -31,6 +31,7 @@ use sim::chip::{RunnerEngine, FLOW_DRAFT_REGISTER, FLOW_REGISTER_BITS, FLOW_INDE
 use sim::image::{fitted_die, load_or_build, verify, write_chip_image, ImageRequest, LoadReport};
 use sim::lower::Layout;
 use sim::tokenizer::TokenizerTables;
+use sim::chip::{ImageTokens, Placement};
 use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -43,6 +44,9 @@ const PORT: u16 = 7878;
 const FIRMWARE: &[u8] = include_bytes!("../../../firmware/prebuilt/firmware.elf");
 const FLOW_LOGITS_REGISTER: u32 = 1;
 const DEFAULT_CONTEXT: u64 = 8192;
+/// The most patches of a picture the chip's own image encoder takes: 256 of 16×16 pixels,
+/// the least the Qwen encoder asks for. Larger pictures are resized down to fit.
+const CHIP_IMAGE_PATCHES: usize = 256;
 
 struct Loaded {
     name: String,
@@ -465,7 +469,11 @@ fn load_model(catalog: &Catalog, request: LoadRequest) -> Result<Loaded, String>
         None => Numeric::Float,
         Some(n) => Numeric::Block { activation_bits: n.activation_bits.clamp(4, 24), state_bits: n.state_bits.clamp(4, 24), table_bits: n.table_bits.map(|b| b.clamp(4, 16)) },
     };
-    let weights = Weights::open(dir)?.with_format(format);
+    let exact_bits = exact.then(|| numeric.map_or(16, |n| n.activation_bits.clamp(8, 24)));
+    // On the die's arithmetic, the chip carries the model's image encoder, Qwen's, with it.
+    let janus = serde_json::from_str::<serde_json::Value>(&config).map_err(|e| e.to_string())?["model_type"] == "janus";
+    let carries_encoder = exact_bits.is_some() && !janus && sim::vision::VisionConfig::read(dir)?.is_some();
+    let weights = if carries_encoder { Weights::open_with_vision(dir)? } else { Weights::open(dir)? }.with_format(format);
     let weights = if gpu { weights.with_gpu() } else { weights };
     let accelerator = weights.accelerator_name();
     let load_report = if transaction {
@@ -478,8 +486,8 @@ fn load_model(catalog: &Catalog, request: LoadRequest) -> Result<Loaded, String>
         None
     };
     let program = compile_model(&config)?;
+    let program = if carries_encoder { compiler::attach_vision(program, &config, CHIP_IMAGE_PATCHES)? } else { program };
     let prompt = PromptStyle::read(dir, &program.family, &tokenizer);
-    let exact_bits = exact.then(|| numeric.map_or(16, |n| n.activation_bits.clamp(8, 24)));
     let engine: Box<dyn Runner> = match exact_bits {
         Some(bits) => Box::new(ExactEngine::new(program, weights, bits)?),
         None => Box::new(Engine::new(program, weights, mode)?),
@@ -672,7 +680,12 @@ fn activity_json(a: &netlist::activity::ChipActivity) -> serde_json::Value {
 }
 
 /// Runs the chip's real firmware at instruction level around the loaded engine.
-fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32], request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+/// An image for the firmware: its tokens and their places, as the engine reads them, and
+/// what the host sends the chip with the chip's description of its encoder.
+type ImageForFirmware = (ImageTokens, Placement, u32, (Vec<u8>, netlist::chip::VisionInfo));
+
+#[allow(clippy::too_many_arguments)]
+fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32], request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool, picture: Option<ImageForFirmware>) -> Result<(), String> {
     use std::sync::atomic::Ordering::Relaxed;
     if request.mtp_depth > 0 && !loaded.engine.has_draft_head() {
         return Err("este modelo no trae cabeza MTP".into());
@@ -681,7 +694,9 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
     let vocabulary = loaded.engine.vocabulary();
     let cell = CellConfig { weight_bits: 8, activation_bits: FLOW_BITS, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false };
     let die = DieConfig { cells: 1, cell, scale_bits: 16, reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: Default::default() };
-    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }] };
+    // With an image, the routines that take it: its tokens, each patch and their fusion.
+    let routines = if picture.is_some() { sim::lower::ENTRY_VISION as u32 + 2 } else { 6 };
+    let code = Microprogram { words: Vec::new(), entries: (0..routines).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }] };
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u32);
     let setup = GenerationSetup {
         max_new: request.max_tokens as u32,
@@ -696,7 +711,10 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
         think: loaded.prompt.think,
         think_budget: request.think_budget.unwrap_or(u32::MAX),
     };
-    let info = chip_info(&die, &code, FLOW_LOGITS_REGISTER, vocabulary as u32, &setup);
+    let mut info = chip_info(&die, &code, FLOW_LOGITS_REGISTER, vocabulary as u32, &setup);
+    if let Some((.., (_, vision))) = &picture {
+        netlist::chip::add_vision(&mut info, vision);
+    }
     let use_tables = request.fidelity.tokenizer;
     let context = if request.fidelity.context_tokens > 0 { request.fidelity.context_tokens } else { DEFAULT_CONTEXT };
     if use_tables && loaded.firmware_tables.as_ref().is_none_or(|(built_for, _)| *built_for != context) {
@@ -709,17 +727,25 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
         _ => &[],
     };
     let image = build_image(&firmware.program, &firmware.data, &info, tables, &[])?;
-    let input: Vec<u8> = if use_tables {
+    let prompt: Vec<u8> = if use_tables {
         text.bytes().chain([0]).collect()
     } else {
         ids.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect()
+    };
+    // The image goes first, before the prompt that places it.
+    let (input, picture) = match picture {
+        Some((tokens, placement, placeholder, (bytes, _))) => (bytes.into_iter().chain(prompt).collect::<Vec<u8>>(), Some((tokens, placement, placeholder))),
+        None => (prompt, None),
     };
 
     let Loaded { engine, tokenizer, .. } = loaded;
     // The memory the chip needs for this model's tables and its image layout.
     let data_bits = (image.len().max(1 << 13).next_power_of_two().ilog2()).max(13);
     let unit = sampler_model(vocabulary, seed, request.fidelity.sampler_lanes);
-    let runner = RunnerEngine::new(engine.as_mut(), FLOW_BITS, request.fidelity.cycles_per_token.max(0.0) as u64);
+    let mut runner = RunnerEngine::new(engine.as_mut(), FLOW_BITS, request.fidelity.cycles_per_token.max(0.0) as u64);
+    if let Some((tokens, placement, placeholder)) = picture {
+        runner = runner.with_image(tokens, placement, placeholder);
+    }
     let soc = SocConfig { program_bits: 14, data_bits, fifo_bits: 6 };
     let mut bus = SocBus::booted_with(soc, &image, &input, ChipModel::new(runner, code, unit))?;
     let mut cpu = Rv32Iss::default();
@@ -874,8 +900,8 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     // The image becomes the tokens that take the place of its `<|image_pad|>`.
     let image = match &request.image {
         Some(input) => {
-            if request.fidelity.firmware || request.mtp_depth > 0 {
-                return Err("las imágenes aún no pasan por el firmware ni por la cabeza MTP".into());
+            if request.mtp_depth > 0 {
+                return Err("las imágenes aún no pasan por la cabeza MTP".into());
             }
             if loaded.vision.is_none() {
                 loaded.vision = Some(Seer::open(&loaded.dir)?.ok_or("este modelo no trae codificador de imágenes")?);
@@ -883,16 +909,29 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
             let started = std::time::Instant::now();
             let plan = match loaded.vision.as_ref().unwrap() {
                 Seer::Qwen(tower) => {
-                    let patches = sim::vision::patches(&tower.config, &input.rgb, input.width, input.height)?;
-                    let tokens = tower.encode(&patches)?;
                     loaded.engine.set_mrope(tower.config.mrope_section);
-                    (tokens, patches.rows * patches.cols, Placement::Grid(patches.rows, patches.cols, tower.config.merge), tower.config.image_token)
+                    // A chip that carries the encoder runs it in its own arithmetic and keeps
+                    // the tokens; otherwise the host encodes in floating point.
+                    let config = loaded.engine.image_patches().map_or_else(|| tower.config.clone(), |most| tower.config.within(most));
+                    let patches = sim::vision::patches(&config, &input.rgb, input.width, input.height)?;
+                    let tokens = match loaded.engine.encode_image(tower, &patches)? {
+                        Some(count) => ImageTokens::OnChip(count),
+                        None => ImageTokens::Vectors(tower.encode(&patches)?),
+                    };
+                    // Through the firmware, the host sends the patches over the chip's port.
+                    let wire = (sim::vision_chip::picture_bytes(tower, Some(&patches), FLOW_BITS)?, sim::vision_chip::software_vision_info(&tower.config, patches.rows * patches.cols, FLOW_INDEX_BITS, FLOW_REGISTER_BITS));
+                    (tokens, patches.rows * patches.cols, Placement::Grid(patches.rows, patches.cols, tower.config.merge), tower.config.image_token, wire)
                 }
                 // Janus reads its patches one after another, as text.
-                Seer::Janus(eye) => (eye.encode(&input.rgb, input.width, input.height)?, eye.tokens(), Placement::Line, eye.placeholder),
+                Seer::Janus(eye) => {
+                    let tokens = eye.encode(&input.rgb, input.width, input.height)?;
+                    let wire = line_wire(tokens.len(), eye.placeholder);
+                    (ImageTokens::Vectors(tokens), eye.tokens(), Placement::Line, eye.placeholder, wire)
+                }
             };
-            let _ = sender.blocking_send(serde_json::json!({ "type": "image", "patches": plan.1, "tokens": plan.0.len(), "seconds": started.elapsed().as_secs_f64() }));
-            Some((plan.0, plan.2, plan.3))
+            let on_chip = matches!(plan.0, ImageTokens::OnChip(_));
+            let _ = sender.blocking_send(serde_json::json!({ "type": "image", "patches": plan.1, "tokens": plan.0.len(), "seconds": started.elapsed().as_secs_f64(), "on_chip": on_chip }));
+            Some((plan.0, plan.2, plan.3, plan.4))
         }
         None => None,
     };
@@ -904,7 +943,7 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     }
     let _ = sender.blocking_send(serde_json::json!({ "type": "start", "prompt_tokens": ids.len() + image_tokens }));
     if request.fidelity.firmware {
-        return run_firmware(loaded, &text, add_special, &ids, &request, sender, cancelled);
+        return run_firmware(loaded, &text, add_special, &ids, &request, sender, cancelled, image);
     }
 
     let mut unit = sampler_model(loaded.engine.vocabulary(), 0x1234_5679, request.fidelity.sampler_lanes);
@@ -919,16 +958,16 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
         }
         let last = i + 1 == ids.len();
         let wants_mtp = request.mtp_depth > 0;
-        if let Some((tokens, layout, _)) = image.as_ref().filter(|image| *id == image.2) {
+        if let Some((tokens, layout, ..)) = image.as_ref().filter(|image| *id == image.2) {
             // In a grid, the image's tokens all take the position the placeholder had, plus
             // their row and column, and the text goes on past the longer side; in a line,
             // each takes the next position.
-            let (positions, after) = match layout {
-                Placement::Grid(rows, cols, merge) => sim::vision::image_positions(i as u64, *rows, *cols, *merge),
-                Placement::Line => ((0..tokens.len() as u64).map(|k| [i as u64 + k; 3]).collect(), (i + tokens.len()) as u64),
-            };
-            for (token, position) in tokens.iter().zip(positions) {
-                loaded.engine.step_embedding(token, position, false)?;
+            let (positions, after) = layout.positions(i as u64, tokens.len());
+            for (index, position) in positions.into_iter().enumerate().take(tokens.len()) {
+                match tokens {
+                    ImageTokens::Vectors(vectors) => loaded.engine.step_embedding(&vectors[index], position, false)?,
+                    ImageTokens::OnChip(_) => loaded.engine.step_image(index as u32, position, false)?,
+                };
             }
             loaded.engine.continue_text_at(after);
             let _ = sender.blocking_send(serde_json::json!({ "type": "prefill", "done": i + 1 + image_tokens, "total": ids.len() + image_tokens, "seconds": 0.0 }));
@@ -1036,12 +1075,14 @@ impl Seer {
     }
 }
 
-/// How an image's tokens take their positions.
-enum Placement {
-    /// Rows and columns of patches merged `merge` by `merge`, with M-RoPE.
-    Grid(usize, usize, usize),
-    /// One after another.
-    Line,
+/// What the host sends a software die for an image whose tokens are already vectors, one
+/// after another: as many patches as tokens, each with nothing in it.
+fn line_wire(tokens: usize, placeholder: u32) -> (Vec<u8>, netlist::chip::VisionInfo) {
+    let words = [tokens as u32, 1, tokens as u32].into_iter().chain((0..tokens).flat_map(|_| [0, 0]));
+    let bytes = words.flat_map(u32::to_le_bytes).collect();
+    let exponents = ((1u32 << FLOW_REGISTER_BITS) - 1) << FLOW_INDEX_BITS;
+    let info = netlist::chip::VisionInfo { patches: tokens as u32, image_token: placeholder, merge: 1, blocks: 0, pixels: (3 << FLOW_INDEX_BITS, exponents | 3, 0), position: (4 << FLOW_INDEX_BITS, exponents | 4, 0), patch_rope: (5 << FLOW_INDEX_BITS, 0), rope: 0, rope_half: 0, mrope_rows: 0, mrope_cols: 0 };
+    (bytes, info)
 }
 
 async fn guard(State(app): State<App>, request: Request, next: Next) -> Response {

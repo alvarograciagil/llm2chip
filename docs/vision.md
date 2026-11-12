@@ -49,12 +49,45 @@ Cada etapa se comprueba contra la anterior en un codificador de juguete (`make_v
 | 1 | `compile_vision`: el codificador como un programa con sus rutinas (embedding de parche, las dos de cada bloque y la fusión) y tres operaciones nuevas: `LayerNorm` y leer y guardar la fila de un parche (`LoadRow`, `StoreRow`) | Hecha |
 | 2 | `ExactVision`: las rutinas en la aritmética exacta del die, en el orden del firmware; difiere de la coma flotante menos de un 0,5 % y el modelo de lenguaje elige el mismo token con sus tokens que con los de la referencia | Hecha |
 | 3 | Cada rutina en puertas, bit a bit igual que la máquina exacta: un microprograma con una entrada por rutina (`routines_microprogram`) y el anfitrión escribiendo píxeles, posiciones y filas de rotación (`rotation_writes`) | Hecha |
-| 4 | El firmware las ordena; simulador de instrucciones frente a puertas, de la imagen al texto | Pendiente: hoy las ordena el anfitrión (`routine_order`) |
+| 4 | El firmware las ordena; simulador de instrucciones frente a puertas, de la imagen al texto | Hecha: ver «El firmware con una imagen» |
 | 5 | La rutina de token del modelo de lenguaje toma la imagen como entrada, de punta a punta | En la máquina exacta: `attach_vision` mete el codificador en el programa del modelo (sus búferes y ranuras de claves con los del modelo, su propia tabla de rotación, la 2), y una entrada del microcódigo lee el token desde la salida del codificador en lugar del embedding. Da los mismos logits que darle al modelo los tokens del codificador aparte. En puertas, con el anfitrión ordenando las rutinas, un mismo die codifica la imagen y el modelo la lee, con los logits bit a bit iguales a la máquina exacta |
 
-Cómo se ejecuta: el anfitrión escribe por cada parche sus píxeles y su posición aprendida ya interpolada, y la rotación de su fila y columna en la tabla que el die lee por posición. La rutina de embedding guarda cada parche en un almacén de filas. Cada bloque pasa dos veces por todos los parches: la primera guarda claves, valores y consulta; la segunda atiende sobre todos (con la posición en el último parche) y sigue con el resto del bloque. La fusión lee cuatro filas consecutivas del almacén como un vector.
+Cómo se ejecuta: el anfitrión escribe por cada parche sus píxeles y su posición aprendida ya interpolada, y la rotación de su fila y columna en la tabla que el die lee por posición. La rutina de embedding guarda cada parche en un almacén de filas. Cada bloque pasa dos veces por todos los parches: la primera guarda claves, valores y consulta; la segunda atiende sobre todos (con la posición en el último parche) y sigue con el resto del bloque. El último bloque aplica ya la LayerNorm de la fusión, que es de cada parche por separado, y la fusión lee cuatro filas consecutivas del almacén y las junta en un vector.
 
-Los almacenes guardan sus filas con un exponente fijo, como la caché de claves (`STATE_EXPONENT`, valores por debajo de 64): en un codificador real, con estados mayores, habrá que darles el suyo.
+### Exponentes por fila
+
+En el codificador real, el estado de los parches crece de unas pocas unidades a casi 300 a partir del bloque 10, y tras el último bloque llega a 4 828 en un canal: el canal atípico de los ViT. Las consultas, claves y valores no pasan de 14. Un exponente fijo para todo el almacén no sirve: por debajo de 64 satura el canal atípico (error del 440 %), y por debajo de 8 192 se lleva la precisión del resto de filas (51 % a 16 bits).
+
+Por eso cada fila de un almacén guarda su propio exponente, como lo tiene cada registro: `StoreRow` copia las mantisas tal cual y anota el exponente del vector en un registro aparte, en la posición de la fila; `LoadRow` las copia de vuelta y recupera el exponente. Son dos operaciones nuevas del juego (`save_exponent` y `restore_exponent`), un movimiento del ALU escalar entre el registro de exponentes y un elemento, sin hardware nuevo. Cuando la fusión junta cuatro filas, se alinean al mayor de sus exponentes; por eso la LayerNorm de la fusión va antes, en el último bloque: así una fila con el canal atípico no ahoga los valores pequeños de sus vecinas.
+
+Con el codificador real de Qwen3.8-27B y una imagen de 256×256 (256 parches, 64 tokens), los tokens del die difieren de la coma flotante un 1,5 % con vectores de 16 bits y un 0,9 % con 20 bits (`cargo run --release -p sim --example see_exact -- <modelo> [bits]`). Con todo en la aritmética del die, codificador y modelo de lenguaje, el Qwen3.8-27B ve el disco rojo y responde «Rojo» (`--example see -- <modelo> rojo "<pregunta>" 3 chip`, unos 8 minutos).
+
+### En la app
+
+Con «Aritmética del die», un modelo con codificador lo lleva dentro del chip (`attach_vision`, hasta 256 parches; una imagen mayor se reduce hasta caber). La imagen pasa por el codificador en esa aritmética y el modelo lee sus tokens desde la salida del codificador; la app indica dónde se codificó. En coma flotante, el anfitrión la codifica como antes. Con «El chip completo», el firmware real recibe la imagen por el puerto del anfitrión y ordena sus rutinas (ver abajo); el die, que la app simula como un motor de software, codifica y lee la imagen igual que en «Aritmética del die». Con la cabeza MTP no se admiten imágenes.
+
+## El firmware con una imagen
+
+Un chip que lleva el codificador lo dice en su descripción (`INFO_VISION`, `add_vision`): cuántos parches admite, el token que la imagen sustituye, los bloques, dónde van los píxeles, la posición y la fila de rotación de cada parche, y dónde está la tabla de rotaciones del texto. El CPU puede escribir la memoria vectorial: escribe la dirección en `REG_VECTOR_ADDRESS` y el valor en `REG_VECTOR_DATA`, que entra por el puerto de carga del die un ciclo después, con el die parado y sin logits en camino. Solo lo tiene un chip con visión (`DieFeatures::host_writes`); los de solo texto no cambian.
+
+El protocolo, antes del prompt (`vision_chip::picture_bytes`, cada número en 4 bytes little-endian):
+
+1. Número de parches (0 si no hay imagen), filas y columnas de la rejilla.
+2. Por cada parche: el exponente y los elementos de sus píxeles, ya normalizados y en el formato del die; lo mismo de su posición aprendida, ya interpolada; y su fila de la tabla de rotaciones del codificador.
+
+Es la parte del anfitrión, como la de un controlador de cámara. El firmware escribe cada parche y ejecuta su embedding, luego cada bloque dos veces sobre todos los parches, y espera el prompt. Cuando llega el token de la imagen, por cada token de imagen ejecuta la fusión, compone su rotación M-RoPE y lo lee en lugar de un embedding.
+
+**Rotaciones sin coma flotante en el CPU.** La fila de rotación de un token de imagen en (tiempo p, fila p + r, columna p + c) toma cada frecuencia de la fila de la tabla de la posición que le toca: la de p, la de p + r o la de p + c, según las secciones de M-RoPE. El firmware la compone copiando esos elementos con el controlador de carga desde la imagen del chip, donde la tabla está entera y nunca se escribe. El texto que sigue va max(h, w) posiciones después del inicio de la imagen, no h × w: antes de cada token en el hueco s de la caché, el firmware trae desde la imagen la fila s − (h × w − max(h, w)). Como la fuente es siempre la imagen, reescribir filas de la tabla del die no estropea las que se leen después.
+
+Se comprueba en `crates/sim/tests/vision_chip.rs`, con el modelo de juguete y una imagen de 8 × 4 parches (2 × 4 tokens, filas distintas de columnas), texto antes y después y tres tokens generados:
+
+- El firmware, sobre la máquina exacta del die, escribe los mismos tokens que el anfitrión ordenando las mismas rutinas y escribiendo las rotaciones calculadas desde las tres posiciones.
+- El chip entero en puertas da los mismos bytes en los mismos ciclos que el simulador de instrucciones (prueba lenta, 1,3 millones de ciclos en minuto y medio).
+- El firmware, sobre el die de software que usa la app, escribe los mismos tokens con los mismos logits que el anfitrión llamando a `step_image` con las tres posiciones.
+
+Las pruebas detectan una rotación M-RoPE mal compuesta o un texto sin desplazar: los logits cambian.
+
+**Pesos sin cuantizar en las celdas.** Los pesos del codificador real vienen en BF16 y los del de juguete en coma flotante. Sin un formato de pesos, una matriz así entra en las celdas como una mantisa del ancho de los vectores por peso (16 bits), y las celdas deben guardar pesos de ese ancho. Antes, unas celdas de 8 bits los truncaban en silencio y solo la máquina exacta multiplicaba bien; ahora el `Layout` da un error que pide un formato de pesos o celdas más anchas. El modelo de lenguaje no lo nota porque llega ya cuantizado.
 
 ## Dibujar con Janus-Pro
 

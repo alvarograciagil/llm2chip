@@ -337,6 +337,19 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         }
         let idle_address = l.mux_bus(streaming, &cpu_vector_address, &stream_address);
         let vector_address = l.mux_bus(load_vec, &idle_address, &load_addr[..vector_bits]);
+        let (vector_write, vector_data) = if c.die.features.host_writes {
+            // The CPU writes an element, or a register's exponent, at the address it set,
+            // through the load port a cycle later: what the host sends, such as a picture,
+            // goes in this way while the die is idle and no logits are on their way out.
+            let strobe = hit(&mut l, REG_VECTOR_DATA);
+            let strobe = delayed(&mut l, &[strobe])[0];
+            let free = l.not(streaming);
+            let cpu_write = l.and(strobe, free);
+            let data = delayed(&mut l, &bus_wdata[..activation]);
+            (l.or(load_vec, cpu_write), l.mux_bus(cpu_write, &load_data[..activation], &data))
+        } else {
+            (load_vec, load_data[..activation].to_vec())
+        };
 
         die_pins.extend([
             ("start", vec![start]),
@@ -347,9 +360,9 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
             ("load_code", vec![load_code]),
             ("code_addr", load_addr[..c.die.microcode_bits as usize].to_vec()),
             ("code_data", load_data[..word_bits(&c.die) as usize].to_vec()),
-            ("load_vec", vec![load_vec]),
+            ("load_vec", vec![vector_write]),
             ("vec_addr", vector_address),
-            ("vec_data", load_data[..activation].to_vec()),
+            ("vec_data", vector_data),
             ("load_fn", vec![load_fn]),
             ("fn_addr", load_addr[..function_address].to_vec()),
             ("cell_data", load_data[..cell_bits].to_vec()),
@@ -520,6 +533,8 @@ pub trait DieEngine {
     fn cycles(&self, routine: usize, token: u32, position: u32) -> u64;
     /// Reads a vector register element or exponent, by its full address.
     fn read(&mut self, address: u32) -> i64;
+    /// Writes one, as the CPU does while the die is idle.
+    fn write(&mut self, _address: u32, _value: i64) {}
 }
 
 /// The chip's peripherals at instruction level, with the same timing as the gates.
@@ -594,6 +609,7 @@ impl<E: DieEngine> Peripheral for ChipModel<E> {
                 self.die_free_at = cycle + 1 + cycles;
             }
             REG_VECTOR_ADDRESS => self.vector_address = value,
+            REG_VECTOR_DATA => self.engine.write(self.vector_address, value as i32 as i64),
             REG_SAMPLE_BASE => self.sample_base = value,
             REG_SAMPLE_COUNT => self.sample_count = value,
             REG_SAMPLE_INVERSE => self.inverse = value & 0xFFFF,
@@ -620,6 +636,8 @@ impl<E: DieEngine> Peripheral for ChipModel<E> {
     fn load(&mut self, write: &LoadWrite) {
         if write.target == crate::image::Target::SamplerTable as u32 {
             self.sampler.table[write.address as usize] = write.words[0] & 0xFFFF;
+        } else if write.target == crate::image::Target::Vector as u32 {
+            self.engine.write(write.address, write.words[0] as i64);
         }
     }
 }
@@ -652,7 +670,49 @@ pub const INFO_THINK_BUDGET: usize = 20;
 pub const INFO_TABLE_SOURCE: usize = 21;
 pub const INFO_TABLE_ADDRESS: usize = 22;
 pub const INFO_TABLE_COLS: usize = 23;
-pub const INFO_PARAMETERS: usize = 24;
+/// Where the description of the chip's image encoder starts, if it carries one; zero if not.
+pub const INFO_VISION: usize = 24;
+pub const INFO_PARAMETERS: usize = 25;
+
+/// What the firmware needs to run the image encoder a chip carries, in the order of its
+/// words: see `VisionInfo`.
+pub const VISION_WORDS: usize = 16;
+
+/// The image encoder a chip carries, for the firmware. Addresses are of vector memory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VisionInfo {
+    /// The most patches it takes.
+    pub patches: u32,
+    /// The placeholder token whose place the image's tokens take.
+    pub image_token: u32,
+    /// Patches per side of a token.
+    pub merge: u32,
+    pub blocks: u32,
+    /// The patch's pixels, its learned position and the row of the encoder's rotation
+    /// table for patch 0: each vector's first element and its exponent's address, and size.
+    pub pixels: (u32, u32, u32),
+    pub position: (u32, u32, u32),
+    pub patch_rope: (u32, u32),
+    /// The text's rotation table, row 0, and half its rotated elements: zero when the
+    /// firmware need not rotate image tokens, as a die run by software.
+    pub rope: u32,
+    pub rope_half: u32,
+    /// How many of the text's frequencies follow the image's row and its column (M-RoPE).
+    pub mrope_rows: u32,
+    pub mrope_cols: u32,
+}
+
+impl VisionInfo {
+    fn words(&self) -> [u32; VISION_WORDS] {
+        [self.patches, self.image_token, self.merge, self.blocks, self.pixels.0, self.pixels.1, self.pixels.2, self.position.0, self.position.1, self.position.2, self.patch_rope.0, self.patch_rope.1, self.rope, self.rope_half, self.mrope_rows, self.mrope_cols]
+    }
+}
+
+/// Adds the image encoder's description to a chip's.
+pub fn add_vision(info: &mut Vec<u32>, vision: &VisionInfo) {
+    info[INFO_VISION] = info.len() as u32;
+    info.extend(vision.words());
+}
 pub const REG_DRAFT_RESULT: u32 = 48;
 pub const INFO_PARAMETER_SLOTS: usize = 16;
 

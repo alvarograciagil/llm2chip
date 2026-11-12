@@ -78,6 +78,15 @@ impl DieEngine for VmEngine {
             self.vm.mantissa(register, index)
         }
     }
+
+    fn write(&mut self, address: u32, value: i64) {
+        let (register, index) = (address >> self.index_bits, address & ((1 << self.index_bits) - 1));
+        if register == self.exponents {
+            self.vm.set_register_exponent(index, value)
+        } else {
+            self.vm.write_mantissa(register, index, value)
+        }
+    }
 }
 
 /// Addresses of the logits and their exponent when the die runs as one software engine.
@@ -85,11 +94,62 @@ pub const FLOW_DRAFT_REGISTER: u32 = 2;
 pub const FLOW_INDEX_BITS: u32 = 18;
 pub const FLOW_REGISTER_BITS: u32 = 12;
 
+/// The tokens of an image a software die reads, as vectors the host computed or kept in the
+/// engine that encoded them.
+pub enum ImageTokens {
+    Vectors(Vec<Vec<f32>>),
+    OnChip(usize),
+}
+
+impl ImageTokens {
+    pub fn len(&self) -> usize {
+        match self {
+            ImageTokens::Vectors(vectors) => vectors.len(),
+            ImageTokens::OnChip(count) => *count,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// How an image's tokens take their positions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Placement {
+    /// Rows and columns of patches merged `merge` by `merge`, with M-RoPE.
+    Grid(usize, usize, usize),
+    /// One after another.
+    Line,
+}
+
+impl Placement {
+    /// The three positions of each of `tokens` tokens of an image that starts at `start`, and
+    /// where the text after it goes on from.
+    pub fn positions(&self, start: u64, tokens: usize) -> (Vec<[u64; 3]>, u64) {
+        match *self {
+            Placement::Grid(rows, cols, merge) => crate::vision::image_positions(start, rows, cols, merge),
+            Placement::Line => ((0..tokens as u64).map(|k| [start + k; 3]).collect(), start + tokens as u64),
+        }
+    }
+}
+
+/// What waits for the next routine to know whether its logits are wanted.
+enum Waiting {
+    Token(u32),
+    /// Token `index` of the image, at its three positions.
+    Image(usize, [u64; 3]),
+}
+
 /// Any engine behind the die's registers, so the real firmware can drive a real model.
 pub struct RunnerEngine<'a> {
     engine: &'a mut dyn Runner,
     /// A token waits here until it is known whether its logits are wanted.
-    pending: Option<u32>,
+    pending: Option<Waiting>,
+    /// An image the host sent, its tokens and their places, where the first one went, and
+    /// the placeholder they take the place of.
+    image: Option<(ImageTokens, Placement, Option<u64>)>,
+    placeholder: u32,
     mantissas: Vec<i64>,
     exponent: i64,
     draft_mantissas: Vec<i64>,
@@ -108,10 +168,21 @@ pub struct RunnerEngine<'a> {
 
 impl<'a> RunnerEngine<'a> {
     pub fn new(engine: &'a mut dyn Runner, bits: u32, cycles_per_token: u64) -> Self {
-        Self { engine, pending: None, mantissas: Vec::new(), exponent: 0, draft_mantissas: Vec::new(), bits, cycles_per_token, steps: 0, last_seconds: 0.0, saturated: 0, die_cycles: 0, error: None, tokens: Vec::new(), generated: 0 }
+        Self { engine, pending: None, image: None, placeholder: 0, mantissas: Vec::new(), exponent: 0, draft_mantissas: Vec::new(), bits, cycles_per_token, steps: 0, last_seconds: 0.0, saturated: 0, die_cycles: 0, error: None, tokens: Vec::new(), generated: 0 }
     }
 
-    fn step(&mut self, token: u32, want_logits: bool) {
+    /// The image the firmware will put in its placeholder's place, already encoded.
+    pub fn with_image(mut self, tokens: ImageTokens, placement: Placement, placeholder: u32) -> Self {
+        self.image = Some((tokens, placement, None));
+        self.placeholder = placeholder;
+        self
+    }
+
+    fn step(&mut self, waiting: Waiting, want_logits: bool) {
+        let token = match waiting {
+            Waiting::Token(token) => token,
+            Waiting::Image(index, positions) => return self.step_image(index, positions, want_logits),
+        };
         match self.engine.step(token, want_logits) {
             Ok((logits, stats)) => {
                 self.steps += 1;
@@ -126,6 +197,30 @@ impl<'a> RunnerEngine<'a> {
         }
     }
 
+    fn step_image(&mut self, index: usize, positions: [u64; 3], want_logits: bool) {
+        let Some((tokens, placement, Some(start))) = &self.image else { return };
+        let done = match tokens {
+            ImageTokens::Vectors(vectors) => self.engine.step_embedding(&vectors[index], positions, want_logits),
+            ImageTokens::OnChip(_) => self.engine.step_image(index as u32, positions, want_logits),
+        };
+        let last = index + 1 == tokens.len();
+        let next = placement.positions(*start, tokens.len()).1;
+        match done {
+            Ok((logits, stats)) => {
+                self.last_seconds = stats.seconds;
+                if let Some(logits) = logits {
+                    let values: Vec<f64> = logits.iter().map(|v| *v as f64).collect();
+                    (self.mantissas, self.exponent) = encode_vector(&values, self.bits);
+                }
+            }
+            Err(error) => self.error = Some(error),
+        }
+        // The image counts as one step of the prompt, as its placeholder does.
+        if last {
+            self.steps += 1;
+            self.engine.continue_text_at(next);
+        }
+    }
 }
 
 impl DieEngine for RunnerEngine<'_> {
@@ -155,15 +250,33 @@ impl DieEngine for RunnerEngine<'_> {
         }
         if routine == crate::lower::ENTRY_TOKEN {
             self.die_cycles += self.cycles_per_token;
-            self.pending = Some(token);
+            self.pending = Some(Waiting::Token(token));
             self.tokens.push(token);
+        } else if routine == crate::lower::ENTRY_TOKEN_FROM_IMAGE {
+            // The image's tokens take the cache's positions from the first one on.
+            let Some((tokens, placement, start)) = &mut self.image else {
+                self.error = Some("el firmware pide un token de imagen sin imagen".into());
+                return;
+            };
+            if start.is_none() {
+                // To the firmware's tokenizer, the image is its placeholder.
+                self.tokens.push(self.placeholder);
+            }
+            let first = *start.get_or_insert(position as u64);
+            let index = (position as u64 - first) as usize;
+            if index >= tokens.len() {
+                self.error = Some("el firmware pide más tokens de imagen de los que hay".into());
+                return;
+            }
+            self.die_cycles += self.cycles_per_token;
+            self.pending = Some(Waiting::Image(index, placement.positions(first, tokens.len()).0[index]));
         } else if routine == crate::lower::ENTRY_LOGITS {
             self.generated += 1;
         }
     }
 
     fn cycles(&self, routine: usize, _token: u32, _position: u32) -> u64 {
-        if routine == crate::lower::ENTRY_TOKEN { self.cycles_per_token } else { 0 }
+        if routine == crate::lower::ENTRY_TOKEN || routine == crate::lower::ENTRY_TOKEN_FROM_IMAGE { self.cycles_per_token } else { 0 }
     }
 
     fn read(&mut self, address: u32) -> i64 {
@@ -351,7 +464,7 @@ pub fn fpga_chip_for(models: &[(&Program, &Weights)], trial: DieConfig, context:
             layout.table_outside(program);
         }
         let code = layout.microprogram(program)?;
-        let features = netlist::DieFeatures::of(&code).with_lane_bits(trial.features.lane_bits).with_cluster_bits(trial.features.cluster_bits).with_key_shift(trial.features.key_shift).with_factor_steps(options.factor_steps);
+        let features = netlist::DieFeatures::of(&code).with_host_writes(program.vision.is_some()).with_lane_bits(trial.features.lane_bits).with_cluster_bits(trial.features.cluster_bits).with_key_shift(trial.features.key_shift).with_factor_steps(options.factor_steps);
         let die = compact_die(DieConfig { features, microcode_bits: bits_for(code.words.len() as u64), ..trial }, &layout);
         needs.push(if options.dictionary { with_code_dictionary(die, &code) } else { die });
         built.push((layout, code));

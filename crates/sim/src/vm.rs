@@ -111,6 +111,16 @@ impl BlockVm {
         self.exponents[reg as usize]
     }
 
+    /// Writes one element as the CPU does, its bits taken as the vectors' width.
+    pub fn write_mantissa(&mut self, reg: u32, index: u32, value: i64) {
+        let value = self.wrap(value);
+        self.set(reg, index, value);
+    }
+
+    pub fn set_register_exponent(&mut self, reg: u32, value: i64) {
+        self.set_exp(reg, value);
+    }
+
     pub fn floats(&self, reg: u32, len: usize) -> Vec<f32> {
         let scale = 2f32.powi(self.exponents[reg as usize] as i32 - self.fraction() as i32);
         (0..len).map(|i| self.get(reg, i as u32) as f32 * scale).collect()
@@ -195,8 +205,13 @@ impl BlockOps for BlockVm {
         }
     }
 
-    fn load_row(&mut self, _table: u32, row: u32, _width: u32, dst: u32, values: impl Fn(u32) -> Vec<f64>) {
-        self.load_vector(dst, &values(row));
+    fn load_row(&mut self, table: u32, row: u32, width: u32, dst: u32, values: impl Fn(u32) -> Vec<f64>) {
+        // A table the die holds, as the gates read it; otherwise the row as it would be.
+        if self.registers[table as usize].len() >= ((row + 1) * width) as usize {
+            self.copy_part(table, row * width, dst, 0, width);
+        } else {
+            self.load_vector(dst, &values(row));
+        }
     }
 
     fn sum_products(&mut self, set: u32, pairs: &[(Place, Place)]) {
@@ -354,6 +369,14 @@ impl BlockOps for BlockVm {
 
     fn move_element(&mut self, from: Place, to: Place) {
         self.set(to.0, to.1, self.get(from.0, from.1));
+    }
+
+    fn save_exponent(&mut self, reg: u32, to: Place) {
+        self.set(to.0, to.1, self.exp(reg));
+    }
+
+    fn restore_exponent(&mut self, from: Place, reg: u32) {
+        self.set_exp(reg, self.get(from.0, from.1));
     }
 
     fn maximum(&mut self, src: u32, len: u32, dst: u32) {

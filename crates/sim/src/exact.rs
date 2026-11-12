@@ -9,7 +9,7 @@ use netlist::{CellConfig, DieConfig};
 use std::sync::Arc;
 
 /// Large register space and 12-bit tables: real models are not limited by a test die.
-fn exact_config(bits: u32) -> DieConfig {
+pub(crate) fn exact_config(bits: u32) -> DieConfig {
     DieConfig {
         cells: 1,
         cell: CellConfig { weight_bits: 8, activation_bits: bits, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false },
@@ -112,6 +112,11 @@ impl ExactEngine {
         self.layout.run_token(&mut self.vm, &self.program, 0, self.position as u32, want_logits)?;
         self.position += 1;
         Ok(want_logits.then(|| self.vm.floats(self.layout.logits_register(&self.program), self.program.vocab)))
+    }
+
+    /// The most patches of a picture the encoder the chip carries takes, if it carries one.
+    pub fn image_patches(&self) -> Option<usize> {
+        self.program.vision.as_ref().map(|part| part.patches)
     }
 
     /// Runs a picture through the model's own image encoder, which the chip carries with it

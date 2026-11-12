@@ -63,11 +63,14 @@ pub struct DieFeatures {
     /// log2 of the distinct words of a microcode kept once each: the program is then a
     /// list of numbers into that dictionary. Zero keeps every word as it comes.
     pub dictionary_bits: u32,
+    /// The CPU can write vector memory, for what the host sends in, such as a picture's
+    /// patches. Only a chip that carries an image encoder needs it.
+    pub host_writes: bool,
 }
 
 impl Default for DieFeatures {
     fn default() -> Self {
-        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0 }
+        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0, host_writes: false }
     }
 }
 
@@ -127,6 +130,12 @@ impl DieFeatures {
         self
     }
 
+    /// The same die with the CPU's write port into vector memory, or without it.
+    pub fn with_host_writes(mut self, host_writes: bool) -> Self {
+        self.host_writes = host_writes;
+        self
+    }
+
     /// The same die with `lane_bits` of parallel vector lanes.
     pub fn with_lane_bits(mut self, lane_bits: u32) -> Self {
         self.lane_bits = lane_bits;
@@ -169,7 +178,7 @@ impl DieFeatures {
     /// Exactly what this microprogram needs.
     pub fn of(code: &Microprogram) -> Self {
         // Additions are also how the comparator and the sequencer's own results are made.
-        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0 };
+        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0, host_writes: false };
         let mut highest_x = 0;
         for word in &code.words {
             features.ops |= 1 << word.op;
@@ -195,7 +204,7 @@ impl DieFeatures {
     pub fn union(self, other: Self) -> Self {
         let mut widths = self.widths;
         widths.iter_mut().zip(other.widths).for_each(|(a, b)| *a = (*a).max(b));
-        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link, vector_bits: self.vector_bits.max(other.vector_bits), factor_bits: self.factor_bits.max(other.factor_bits), wide_bits: self.wide_bits.max(other.wide_bits), dictionary_bits: self.dictionary_bits.max(other.dictionary_bits) }
+        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link, vector_bits: self.vector_bits.max(other.vector_bits), factor_bits: self.factor_bits.max(other.factor_bits), wide_bits: self.wide_bits.max(other.wide_bits), dictionary_bits: self.dictionary_bits.max(other.dictionary_bits), host_writes: self.host_writes || other.host_writes }
     }
 
     fn uses(&self, op: u32) -> bool {

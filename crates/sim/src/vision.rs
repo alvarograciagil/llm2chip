@@ -72,21 +72,34 @@ impl VisionConfig {
         self.patch * self.merge
     }
 
+    /// The same encoder for images of at most `patches` patches, as a chip that carries it
+    /// takes them: larger ones are resized down to fit.
+    pub fn within(&self, patches: usize) -> Self {
+        let most = patches * self.patch * self.patch;
+        Self { max_pixels: self.max_pixels.min(most), min_pixels: self.min_pixels.min(most), ..self.clone() }
+    }
+
     /// The size an image is resized to: sides multiple of the factor, its area within
     /// bounds, its shape kept as well as that allows.
     pub fn fitted_size(&self, width: usize, height: usize) -> (usize, usize) {
         let factor = self.factor() as f64;
         let (w, h) = (width as f64, height as f64);
         let round = |v: f64| ((v / factor).round() * factor).max(factor);
+        let shrunk = || {
+            let beta = (w * h / self.max_pixels as f64).sqrt();
+            (((w / beta / factor).floor() * factor).max(factor), ((h / beta / factor).floor() * factor).max(factor))
+        };
         let (mut fw, mut fh) = (round(w), round(h));
         if fw * fh > self.max_pixels as f64 {
-            let beta = (w * h / self.max_pixels as f64).sqrt();
-            fw = ((w / beta / factor).floor() * factor).max(factor);
-            fh = ((h / beta / factor).floor() * factor).max(factor);
+            (fw, fh) = shrunk();
         } else if fw * fh < self.min_pixels as f64 {
             let beta = (self.min_pixels as f64 / (w * h)).sqrt();
             fw = (w * beta / factor).ceil() * factor;
             fh = (h * beta / factor).ceil() * factor;
+            // Rounding up may overshoot the most, which wins.
+            if fw * fh > self.max_pixels as f64 {
+                (fw, fh) = shrunk();
+            }
         }
         (fw as usize, fh as usize)
     }

@@ -1,14 +1,15 @@
 //! Shows the model an image and asks about it, all in floating point: the reference the
-//! chip's image path is checked against.
+//! chip's image path is checked against. With `chip`, the die's arithmetic does it all
+//! instead, the image encoder included, carried by the chip with the model.
 //!
-//! `cargo run --release -p sim --example see -- <carpeta> [figura] "<pregunta>" [tokens]`
+//! `cargo run --release -p sim --example see -- <carpeta> [figura] "<pregunta>" [tokens] [chip]`
 //!
 //! The figure is drawn here, 256×256 pixels on white: `rojo` (a red disc), `azul` (a blue
 //! square) or `verde` (a green triangle).
 
 use compiler::compile_qwen3_5;
 use sim::vision::{image_positions, patches, VisionTower};
-use sim::{Engine, Numeric, Weights};
+use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -38,28 +39,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = Path::new(&args[1]);
     let kind = args.get(2).map_or("rojo", String::as_str);
     let question = args.get(3).map_or("¿De qué color es la figura? Responde con una sola palabra.", String::as_str);
-    let count: usize = args.get(4).map_or(8, |n| n.parse().unwrap());
+    let count_out: usize = args.get(4).map_or(8, |n| n.parse().unwrap());
     let tower = VisionTower::open(dir)?.ok_or("este modelo no trae codificador de imágenes")?;
     let c = tower.config.clone();
     let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| e.to_string())?;
     let encode = |text: &str| tokenizer.encode(text, false).map(|e| e.get_ids().to_vec()).map_err(|e| e.to_string());
 
-    let started = std::time::Instant::now();
-    let image = patches(&c, &figure(kind), SIDE, SIDE)?;
-    let tokens = tower.encode(&image)?;
-    eprintln!("imagen: {} parches, {} tokens, {:.1} s", image.rows * image.cols, tokens.len(), started.elapsed().as_secs_f64());
-
-    let program = compile_qwen3_5(&std::fs::read_to_string(dir.join("config.json"))?)?;
-    let mut engine = Engine::new(program, Weights::open(dir)?, Numeric::Float)?;
+    let on_chip = args.get(5).is_some_and(|a| a == "chip");
+    let config = std::fs::read_to_string(dir.join("config.json"))?;
+    let program = compile_qwen3_5(&config)?;
+    let mut engine: Box<dyn Runner> = if on_chip {
+        Box::new(ExactEngine::new(compiler::attach_vision(program, &config, 256)?, Weights::open_with_vision(dir)?, 16)?)
+    } else {
+        Box::new(Engine::new(program, Weights::open(dir)?, Numeric::Float)?)
+    };
     engine.set_mrope(c.mrope_section);
+
+    let started = std::time::Instant::now();
+    let image = patches(&c.within(256), &figure(kind), SIDE, SIDE)?;
+    let tokens = if on_chip { None } else { Some(tower.encode(&image)?) };
     let before = encode("<|im_start|>user\n<|vision_start|>")?;
     let after = encode(&format!("<|vision_end|>{question}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"))?;
     for id in &before {
         engine.step(*id, false)?;
     }
+    let count = match &tokens {
+        Some(tokens) => tokens.len(),
+        None => engine.encode_image(&tower, &image)?.ok_or("el chip no lleva codificador")?,
+    };
+    eprintln!("imagen: {} parches, {count} tokens, {:.1} s", image.rows * image.cols, started.elapsed().as_secs_f64());
     let (positions, next) = image_positions(before.len() as u64, image.rows, image.cols, c.merge);
-    for (token, position) in tokens.iter().zip(positions) {
-        engine.step_embedding(token, position, false)?;
+    for (index, position) in positions.into_iter().enumerate() {
+        match &tokens {
+            Some(tokens) => engine.step_embedding(&tokens[index], position, false)?,
+            None => engine.step_image(index as u32, position, false)?,
+        };
     }
     engine.continue_text_at(next);
     let mut last = 0;
@@ -69,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let mut output = Vec::new();
-    for _ in 0..count {
+    for _ in 0..count_out {
         output.push(last);
         if last == 248046 || last == 248044 {
             break;

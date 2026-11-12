@@ -296,6 +296,10 @@ pub trait BlockOps: Sized {
     fn gather(&mut self, parts: &[(u32, u32)], dst: u32);
     fn align_to(&mut self, src: u32, from: Self::N, exponent: i64, dst: u32, to: Self::N, len: Self::N);
     fn move_element(&mut self, from: At<Self::N>, to: At<Self::N>);
+    /// `to` becomes the exponent of `reg`, to keep it beside a row stored elsewhere.
+    fn save_exponent(&mut self, reg: u32, to: At<Self::N>);
+    /// `reg` takes the exponent kept at `from`.
+    fn restore_exponent(&mut self, from: At<Self::N>, reg: u32);
     /// `dst[0]` becomes the largest of `src[..len]`, sharing `src`'s exponent.
     fn maximum(&mut self, src: u32, len: Self::N, dst: u32);
     /// `dst[i]` becomes 1 at the first element equal to `b[0]`, and 0 everywhere else.
@@ -2288,6 +2292,14 @@ impl BlockOps for Assembly {
 
     fn move_element(&mut self, from: At<Expr>, to: At<Expr>) {
         self.binary(OP_MOV, from, self.sc(15), to);
+    }
+
+    fn save_exponent(&mut self, reg: u32, to: At<Expr>) {
+        self.binary(OP_MOV, self.exponent(reg), self.sc(15), to);
+    }
+
+    fn restore_exponent(&mut self, from: At<Expr>, reg: u32) {
+        self.binary(OP_MOV, from, self.sc(15), self.exponent(reg));
     }
 
     fn maximum(&mut self, src: u32, len: Expr, dst: u32) {

@@ -187,7 +187,7 @@ export function SimulatorView() {
           <figure className="attached">
             <img src={image.preview} alt="Imagen adjunta" />
             <figcaption>
-              {image.width} × {image.height} px{imageReport ? ` · ${formatNumber(imageReport.patches)} parches → ${formatNumber(imageReport.tokens)} tokens en ${formatNumber(imageReport.seconds)} s` : ""}
+              {image.width} × {image.height} px{imageReport ? ` · ${formatNumber(imageReport.patches)} parches → ${formatNumber(imageReport.tokens)} tokens en ${formatNumber(imageReport.seconds)} s${imageReport.onChip ? ", codificada por el chip con su aritmética" : ", codificada por el anfitrión en coma flotante"}` : ""}
               <button className="link inline" onClick={() => set({ image: null, imageReport: null })}>Quitar</button>
             </figcaption>
           </figure>

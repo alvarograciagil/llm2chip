@@ -42,6 +42,11 @@ impl ExactVision {
         Self::with_program(program, vision, weights, config)
     }
 
+    /// The encoder alone with the exact engine's large die and `bits`-bit vectors.
+    pub fn exact(config_json: &str, weights: Weights, patches: usize, bits: u32) -> Result<Self, String> {
+        Self::new(config_json, weights, patches, crate::exact::exact_config(bits))
+    }
+
     /// The encoder `part` of `program`, which may be a language model's as well.
     pub fn with_program(program: Program, part: VisionPart, weights: Weights, config: DieConfig) -> Result<Self, String> {
         let weights = Arc::new(weights);
@@ -107,4 +112,56 @@ pub(crate) fn run_encoder(layout: &Layout, vm: &mut BlockVm, program: &Program, 
         layout.run_ops(vm, program, list, *token, *position, *rope)?;
     }
     Ok(count / (tower.config.merge * tower.config.merge))
+}
+
+/// What the host sends a chip that carries the encoder before the prompt: how many patches,
+/// the grid's rows and columns, and for each patch its pixels and learned position, each
+/// as its exponent and its elements in the die's format of `bits` bits, and its row of the
+/// encoder's rotation table. Every number is 4 bytes, little-endian. No image is a count
+/// of zero.
+pub fn picture_bytes(tower: &VisionTower, image: Option<&Patches>, bits: u32) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let mut word = |value: i64| bytes.extend((value as i32).to_le_bytes());
+    let Some(image) = image else {
+        word(0);
+        return Ok(bytes);
+    };
+    let c = &tower.config;
+    word((image.rows * image.cols) as i64);
+    word(image.rows as i64);
+    word(image.cols as i64);
+    let positions = tower.positions(image.rows, image.cols)?;
+    let angles = patch_angles(c, image.rows, image.cols);
+    for ((pixels, place), angles) in image.values.chunks(3 * c.temporal * c.patch * c.patch).zip(&positions).zip(&angles) {
+        for values in [pixels, place.as_slice()] {
+            let (mantissas, exponent) = encode_vector(&values.iter().map(|v| *v as f64).collect::<Vec<_>>(), bits);
+            word(exponent);
+            mantissas.into_iter().for_each(&mut word);
+        }
+        let row = crate::lower::patch_rotation_row(&angles.iter().map(|a| *a as f64).collect::<Vec<_>>());
+        crate::lower::encode_at(&row, bits, crate::lower::PATCH_ROTATION_EXPONENT).into_iter().for_each(&mut word);
+    }
+    Ok(bytes)
+}
+
+/// What the firmware needs to run an encoder of `config` on a die run in software, which
+/// takes the image from the host and leaves its work to the engine: no blocks of its own
+/// and no rotations to write, and its vectors in registers 3 to 5 of `index_bits`.
+pub fn software_vision_info(config: &crate::vision::VisionConfig, patches: usize, index_bits: u32, register_bits: u32) -> netlist::chip::VisionInfo {
+    let exponents = ((1u32 << register_bits) - 1) << index_bits;
+    let vector = |register: u32, size: usize| (register << index_bits, exponents | register, size as u32);
+    let head_dim = config.hidden / config.heads;
+    netlist::chip::VisionInfo {
+        patches: patches as u32,
+        image_token: config.image_token,
+        merge: config.merge as u32,
+        blocks: 0,
+        pixels: vector(3, 3 * config.temporal * config.patch * config.patch),
+        position: vector(4, config.hidden),
+        patch_rope: (5 << index_bits, 3 * (head_dim / 2) as u32 + 1),
+        rope: 0,
+        rope_half: 0,
+        mrope_rows: config.mrope_section[1] as u32,
+        mrope_cols: config.mrope_section[2] as u32,
+    }
 }

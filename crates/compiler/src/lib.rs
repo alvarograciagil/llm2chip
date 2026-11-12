@@ -1152,20 +1152,37 @@ fn vision_part(root: &Value, patches: usize, program: &mut Program) -> Result<Vi
         emit(Op::Matvec { matrix: b("mlp.linear_fc2"), src: gelu, dst: down }, "MLP, bajada", layer);
         emit(Op::AddWeight { src: down, weight: b("mlp.linear_fc2.bias"), dst: down_b }, "sesgo de bajada", layer);
         emit(Op::Add { a: h3, b: down_b, dst: h4 }, "residual", layer);
-        emit(Op::StoreRow { src: h4, store: state }, "guardar parche", layer);
-        blocks.push((start..middle, middle..start + 25));
+        if block + 1 < depth {
+            emit(Op::StoreRow { src: h4, store: state }, "guardar parche", layer);
+            blocks.push((start..middle, middle..start + 25));
+        } else {
+            // The fusion's norm is each patch's own, so the last block applies it before
+            // storing: the patches of a token then line up without one of them, much larger
+            // than its neighbours, drowning their small values.
+            let normed = buf(hidden);
+            emit(Op::LayerNorm { src: h4, weight: t("merger.norm"), block: hidden, dst: normed }, "norma de la fusión", layer);
+            emit(Op::StoreRow { src: normed, store: state }, "guardar parche", layer);
+            blocks.push((start..middle, middle..start + 26));
+        }
     }
 
-    let start = 4 + depth * 25;
-    let (joined, normed, up, up_b, gelu, down, output) = (buf(merged), buf(merged), buf(merged), buf(merged), buf(merged), buf(out), buf(out));
-    emit(Op::LoadRow { store: state, dst: joined }, "leer los parches de un token", None);
-    emit(Op::LayerNorm { src: joined, weight: t("merger.norm"), block: hidden, dst: normed }, "norma de la fusión", None);
+    let start = 4 + depth * 25 + usize::from(depth > 0);
+    let (joined, up, up_b, gelu, down, output) = (buf(merged), buf(merged), buf(merged), buf(merged), buf(out), buf(out));
+    let normed = if depth == 0 {
+        let normed = buf(merged);
+        emit(Op::LoadRow { store: state, dst: joined }, "leer los parches de un token", None);
+        emit(Op::LayerNorm { src: joined, weight: t("merger.norm"), block: hidden, dst: normed }, "norma de la fusión", None);
+        normed
+    } else {
+        emit(Op::LoadRow { store: state, dst: joined }, "leer los parches de un token", None);
+        joined
+    };
     emit(Op::Matvec { matrix: t("merger.linear_fc1"), src: normed, dst: up }, "fusión, subida", None);
     emit(Op::AddWeight { src: up, weight: t("merger.linear_fc1.bias"), dst: up_b }, "sesgo de subida", None);
     emit(Op::Gelu { src: up_b, approximate: false, dst: gelu }, "GELU", None);
     emit(Op::Matvec { matrix: t("merger.linear_fc2"), src: gelu, dst: down }, "fusión, bajada", None);
     emit(Op::AddWeight { src: down, weight: t("merger.linear_fc2.bias"), dst: output }, "sesgo de bajada", None);
-    let merge_range = start..start + 7;
+    let merge_range = start..start + if depth == 0 { 7 } else { 6 };
     debug_assert_eq!(ops.len(), merge_range.end);
 
     program.kv_slots.extend((0..depth).map(|_| KvShape { head_dim, heads }));

@@ -183,7 +183,9 @@ pub fn fitted_die(program: &Program, weights: &Weights, request: &ImageRequest) 
     let longest_buffer = program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1);
     let rope_rows = tokens * (3 * 128 + 1);
     let index_bits = bits_for(longest_store.max(longest_buffer).max(rope_rows)).min(26);
-    let roomy = DieConfig { index_bits: 26, cell: CellConfig { addr_bits: 26, ..cell }, ..trial };
+    // Measured on cells wide enough for any code: weights with no format take a whole
+    // mantissa each.
+    let roomy = DieConfig { index_bits: 26, cell: CellConfig { addr_bits: 26, weight_bits: cell.weight_bits.max(request.activation_bits), ..cell }, ..trial };
     let (code_bits, group) = Layout::for_image(program, weights, roomy, 1)?.cell_shape(weights)?;
     // Words as wide as the widest code: narrower codes share them.
     let roomy = DieConfig { cell: CellConfig { weight_bits: code_bits, ..roomy.cell }, ..roomy };
@@ -222,7 +224,7 @@ fn boot_plans(program: &Program, weights: &Weights, die: DieConfig, request: &Im
         built.push(parts);
     }
     // The same silicon serves every count, so it needs what any of the parts uses.
-    let features = built.iter().flatten().map(|(_, code)| DieFeatures::of(code)).reduce(DieFeatures::union).unwrap_or_default().with_lane_bits(die.features.lane_bits).with_cluster_bits(die.features.cluster_bits).with_key_shift(die.features.key_shift);
+    let features = built.iter().flatten().map(|(_, code)| DieFeatures::of(code)).reduce(DieFeatures::union).unwrap_or_default().with_lane_bits(die.features.lane_bits).with_cluster_bits(die.features.cluster_bits).with_key_shift(die.features.key_shift).with_host_writes(program.vision.is_some());
     let words = built.iter().flatten().map(|(_, code)| code.words.len() as u64).max().unwrap_or(1);
     // Each register takes only the vector memory its routines reach, on the chip that needs most.
     let vector_bits = built.iter().flatten().map(|(layout, _)| layout.register_bases().1).max().unwrap_or(1);
