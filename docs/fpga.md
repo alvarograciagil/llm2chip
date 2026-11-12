@@ -85,11 +85,12 @@ Con OSS CAD Suite (Yosys y nextpnr) el chip de juguete se coloca y se ruta en un
 | Productos en DSP, el resto en puertas | 15,4 MHz (estimada tras colocar) | 45 391 | 190 DP16KD | 89 |
 | Además, los sumadores como sumas (cadenas de acarreo) y el microcódigo con diccionario | 18,2 MHz | 44 748 | 142 DP16KD | 89 |
 | Además, el multiplicador del muestreo en un bloque DSP | 20,4 MHz | 43 084 | 142 DP16KD | 91 |
-| Además, escala y sesgo en dos ciclos (`--factor-steps 2`) | **22,1 MHz** | 46 699 | — | 59 |
+| Además, escala y sesgo en dos ciclos (`--factor-steps 2`) | 22,1 MHz | 46 699 | — | 59 |
+| Además, las órdenes de la CPU llegan al die desde registros | **26,5 MHz** | 48 501 | 142 DP16KD | 59 |
 
-El camino crítico era la unidad de muestreo: un multiplicador de desplazamiento y suma de 16 filas, en un ciclo, que alimentaba la dirección de la tabla exponencial. Después pasó a las celdas del die: lectura del sesgo, producto por la escala (repartido en varios bloques DSP encadenados) y acumulador en un mismo ciclo, 49 ns. Con escala y sesgo en dos ciclos, el factor sale de un registro y cada ciclo multiplica la mitad de sus bits: el die gasta 11 172 ciclos por token en vez de 11 103 (un 0,6 % más) y el reloj sube a 22,1 MHz, así que los diseños para FPGA lo usan por defecto. El camino crítico es ahora el bus que va de la CPU de control al cargador y al die, con 35 de sus 45 ns en rutado por la congestión: registrar ese bus es el siguiente paso. Es la familia más lenta de las del catálogo; en una Xilinx serie 7 o UltraScale+ el mismo circuito debería ir bastante más rápido.
+El camino crítico era la unidad de muestreo: un multiplicador de desplazamiento y suma de 16 filas, en un ciclo, que alimentaba la dirección de la tabla exponencial. Después pasó a las celdas del die: lectura del sesgo, producto por la escala (repartido en varios bloques DSP encadenados) y acumulador en un mismo ciclo, 49 ns. Con escala y sesgo en dos ciclos, el factor sale de un registro y cada ciclo multiplica la mitad de sus bits: el die gasta 11 172 ciclos por token en vez de 11 103 (un 0,6 % más) y el reloj sube a 22,1 MHz, así que los diseños para FPGA lo usan por defecto. Después fue el bus de la CPU al die: una escritura de la CPU se decodificaba, arrancaba el die y llevaba una dirección a su memoria vectorial en el mismo ciclo. Con las órdenes registradas, el reloj sube a 26,5 MHz. El camino crítico es ahora el del propio secuenciador: la palabra de microcódigo recién leída decide en el mismo ciclo la dirección de la memoria vectorial, con 27 de sus 38 ns en rutado. Es la familia más lenta de las del catálogo; en una Xilinx serie 7 o UltraScale+ el mismo circuito debería ir bastante más rápido.
 
-Con 22 MHz, el modelo de juguete daría unos 1 800-2 000 tok/s, sin valor práctico más allá de validar que el chip funciona.
+Con 26,5 MHz, el modelo de juguete daría unos 2 200-2 400 tok/s, sin valor práctico más allá de validar que el chip funciona.
 
 ### Con un modelo que escribe cuentos: stories260K
 
