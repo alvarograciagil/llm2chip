@@ -15,10 +15,8 @@ mod common;
 
 use common::*;
 use compiler::compile_qwen3_5;
-use netlist::chip::{chip_design, chip_design_alone, ChipConfig};
-use netlist::sampler::SamplerConfig;
-use netlist::soc::SocConfig;
-use netlist::{to_verilog, to_verilog_for_fpga, CellConfig, Design, DieConfig, DieFeatures, InstKind, Prim};
+use netlist::{to_verilog, to_verilog_for_fpga, CellConfig, Design, DieConfig, InstKind, Prim};
+use sim::chip::{fpga_chip, FpgaChip, FpgaOptions};
 use sim::lower::Layout;
 use sim::Weights;
 use std::collections::HashMap;
@@ -103,38 +101,25 @@ fn main() {
             (compile_qwen3_5(CONFIG).unwrap(), Weights::open(&test_dir).unwrap(), fpga_die_config(), 8)
         }
     };
-    // With `--factor-steps`, scale and bias multiply a few bits a cycle from registers, which
-    // cuts the cell's longest path: factor memory, product and total in one cycle. The
-    // microprogram is laid out for it.
-    let steps: u32 = option("--factor-steps").map_or(trial.features.factor_steps, |n| n.parse().unwrap());
-    let trial = DieConfig { features: trial.features.with_factor_steps(steps), ..trial };
-    // Only as many registers as the routines reach into.
-    let roomy = Layout::with_cells(&program, &weights, trial, context).unwrap();
-    roomy.microprogram(&program).unwrap();
-    let trial = sim::chip::with_registers_needed(trial, &roomy);
-    let mut layout = Layout::with_cells(&program, &weights, trial, context).unwrap();
-    if !args.iter().any(|a| a == "--table-inside") && layout.table_outside(&program) {
+    let tokenizer_words = option("--tokenizer").map_or(0, |path| sim::tokenizer::TokenizerTables::from_file(Path::new(&path), context as u64).unwrap().to_words().len());
+    let options = FpgaOptions {
+        factor_steps: option("--factor-steps").map_or(trial.features.factor_steps, |n| n.parse().unwrap()),
+        table_inside: args.iter().any(|a| a == "--table-inside"),
+        dictionary: !args.iter().any(|a| a == "--no-dictionary"),
+        tokenizer_words,
+        chain: args.iter().any(|a| a == "--chain"),
+    };
+    let FpgaChip { design, config, layout, code } = fpga_chip(&program, &weights, trial, context, options).unwrap();
+    let die = config.die;
+    if layout.outside_table().is_some() {
         eprintln!("la tabla de embedding se queda en la imagen");
     }
-    let code = layout.microprogram(&program).unwrap();
     eprintln!("registros más largos: {:?}", layout.longest_registers(6));
     let (depth, groups) = layout.cell_depths();
-    eprintln!("{} registros (2^{} en la tabla), {} palabras de pesos y {} grupos de factores por celda", layout.registers_used(), trial.reg_bits, depth, groups);
-    // Only what this microprogram uses.
-    let features = DieFeatures::of(&code).with_lane_bits(trial.features.lane_bits).with_cluster_bits(trial.features.cluster_bits).with_key_shift(trial.features.key_shift).with_factor_steps(steps);
-    let die = sim::chip::compact_die(DieConfig { features, microcode_bits: bits_for(code.words.len() as u64), ..trial }, &layout);
-    let die = if args.iter().any(|a| a == "--no-dictionary") { die } else { sim::chip::with_code_dictionary(die, &code) };
+    eprintln!("{} registros (2^{} en la tabla), {} palabras de pesos y {} grupos de factores por celda", layout.registers_used(), die.reg_bits, depth, groups);
     let distinct: std::collections::HashSet<_> = code.words.iter().map(|w| format!("{w:?}")).collect();
     eprintln!("microprograma: {} palabras, {} distintas", code.words.len(), distinct.len());
     eprintln!("memoria vectorial compacta de 2^{} palabras, frente a 2^{} sin tabla", die.features.vector_bits, die.reg_bits + die.index_bits);
-    // The firmware's data, its stack and the chip's description take the first 32 KB; with
-    // `--tokenizer DIR/tokenizer.json` the CPU also keeps that model's tables, after them.
-    let tokenizer_words = option("--tokenizer").map_or(0, |path| sim::tokenizer::TokenizerTables::from_file(Path::new(&path), context as u64).unwrap().to_words().len());
-    let data_bits = (netlist::soc::TOKENIZER_WORD + tokenizer_words).next_power_of_two().ilog2();
-    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: bits_for(program.vocab as u64).max(4), entries: 4, lanes: 1 } };
-    // A board on its own needs neither the manufacturing tests nor the chain to other chips;
-    // `--chain` keeps them, for boards joined to each other.
-    let design = if args.iter().any(|a| a == "--chain") { chip_design(config) } else { chip_design_alone(config) };
     eprintln!("{:.0} equivalentes NAND2, microprograma de {} palabras", design.gate_equivalents(), code.words.len());
     let mut memories: Vec<_> = memory_bits(&design).into_iter().collect();
     memories.sort();

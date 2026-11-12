@@ -3,6 +3,7 @@
 
 pub mod activity;
 pub mod block;
+pub mod board;
 pub mod chip;
 pub mod format;
 pub mod image;

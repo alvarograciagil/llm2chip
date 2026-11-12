@@ -31,6 +31,19 @@ fn selector_bits(config: &SamplerConfig) -> usize {
     (config.entries as usize + 1).next_power_of_two().trailing_zeros() as usize
 }
 
+/// `a + b + carry_in` through an adder module, which the FPGA export writes as a sum on the
+/// carry chain: a bit below the operands brings the carry in and one above takes it out.
+fn add(l: &mut Logic, adder: &str, a: &[Bit], b: &[Bit], carry_in: Bit) -> (Vec<Bit>, Bit) {
+    let n = a.len();
+    let name = format!("sampler_adder{}", l.next);
+    l.next += 1;
+    let sum = l.b.wire(&name, n as u32 + 2);
+    let wide_a: Vec<Bit> = [Bit::One].into_iter().chain(a.iter().copied()).chain([Bit::Zero]).collect();
+    let wide_b: Vec<Bit> = [carry_in].into_iter().chain(b.iter().copied()).chain([Bit::Zero]).collect();
+    l.b.inst(&format!("{name}_unit"), adder, &[("a", wide_a), ("b", wide_b), ("sum", sum.clone())]);
+    (sum[1..=n].to_vec(), sum[n + 1])
+}
+
 pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
     let (bits, index_bits, entries) = (c.logit_bits as usize, c.index_bits as usize, c.entries as usize);
     let count_bits = selector_bits(&c);
@@ -61,6 +74,9 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
         // and in an FPGA a multiplier block.
         let factor_width = (bits + 1).max(SUM_BITS);
         let probability_tree = gen.tree_multiplier(crate::multiplier::MultiplierKind::Wallace, factor_width as u32 + 1, 17, 1);
+        // Comparisons of logits and the sums of probabilities, two bits wider for the carries.
+        let logit_adder = gen.prefix_adder(bits as u32 + 3);
+        let sum_adder = gen.prefix_adder(SUM_BITS as u32 + 2);
         let mut l = Logic { b: &mut b, next: 0 };
         l.b.group("Control");
         let streaming = l.fresh();
@@ -88,7 +104,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
                 let widen = |v: &[Bit]| -> Vec<Bit> { v.iter().copied().chain([v[bits - 1]]).collect() };
                 let (left, right) = (widen(&values[entries - 1]), widen(&incoming[lane]));
                 let inverted: Vec<Bit> = right.iter().map(|x| l.not(*x)).collect();
-                let (difference, _) = l.adder(&left, &inverted, Bit::One);
+                let (difference, _) = add(&mut l, &logit_adder, &left, &inverted, Bit::One);
                 let beats_worst = difference[bits];
                 let not_full = l.not(full);
                 let passes = l.or(not_full, beats_worst);
@@ -141,7 +157,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
                 let widen = |v: &[Bit]| -> Vec<Bit> { v.iter().copied().chain([v[bits - 1]]).collect() };
                 let (left, right) = (widen(&values[j]), widen(&logit_data));
                 let inverted: Vec<Bit> = right.iter().map(|x| l.not(*x)).collect();
-                let (difference, _) = l.adder(&left, &inverted, Bit::One);
+                let (difference, _) = add(&mut l, &logit_adder, &left, &inverted, Bit::One);
                 let not_less = l.not(difference[bits]);
                 l.and(used[j], not_less)
             })
@@ -215,7 +231,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
             let widen = |v: &[Bit]| -> Vec<Bit> { v.iter().copied().chain([v[bits - 1]]).collect() };
             let (left, right) = (widen(&values[0]), widen(&current_value));
             let inverted: Vec<Bit> = right.iter().map(|x| l.not(*x)).collect();
-            l.adder(&left, &inverted, Bit::One).0
+            add(&mut l, &logit_adder, &left, &inverted, Bit::One).0
         };
         let sum = l.fresh_bus(SUM_BITS);
         let rng = l.fresh_bus(32);
@@ -239,7 +255,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
         let in_pass = l.or(first_pass, second_pass);
         let adding = l.and(in_pass, add_phase);
         let extended: Vec<Bit> = table_value.iter().copied().chain(std::iter::repeat_n(Bit::Zero, SUM_BITS - 16)).collect();
-        let added = l.adder(&sum, &extended, Bit::Zero).0;
+        let added = add(&mut l, &sum_adder, &sum, &extended, Bit::Zero).0;
         let next_phase = {
             let t = l.not(add_phase);
             l.and(t, in_pass)
@@ -282,7 +298,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
         let over_threshold = {
             // threshold < sum after adding, that is, threshold - sum borrows.
             let inverted: Vec<Bit> = added.iter().map(|v| l.not(*v)).collect();
-            let (_, no_borrow) = l.adder(&threshold, &inverted, Bit::One);
+            let (_, no_borrow) = add(&mut l, &sum_adder, &threshold, &inverted, Bit::One);
             l.not(no_borrow)
         };
         let first_ends = {

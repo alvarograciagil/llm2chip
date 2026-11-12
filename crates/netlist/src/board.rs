@@ -1,0 +1,400 @@
+//! A first test on a small FPGA board: one compute cell of the chip behind a serial port.
+//! The host loads its weights, sends activations one by one and reads each row's total, the
+//! same products the chip makes, on a board too small for the whole chip.
+
+use crate::{cell_design, to_verilog_for_fpga, CellConfig};
+use std::collections::BTreeMap;
+
+/// Where a board wires its clock, reset, serial port and lights.
+pub struct Board {
+    pub name: &'static str,
+    pub family: &'static str,
+    pub device: &'static str,
+    pub clock_mhz: u32,
+    pub clock: &'static str,
+    pub reset_n: &'static str,
+    pub uart_rx: &'static str,
+    pub uart_tx: &'static str,
+    pub leds: [&'static str; 4],
+    /// Whether the pins come from the board's own schematic.
+    pub pins_checked: bool,
+    pub notes: &'static str,
+}
+
+/// The OMDAZZ Cyclone IV board: EP4CE10E22C8N, 50 MHz oscillator, EPCS16 flash.
+pub const OMDAZZ_EP4CE10: Board = Board {
+    name: "OMDAZZ Cyclone IV EP4CE10",
+    family: "Cyclone IV E",
+    device: "EP4CE10E22C8",
+    clock_mhz: 50,
+    clock: "PIN_23",
+    reset_n: "PIN_25",
+    uart_rx: "PIN_115",
+    uart_tx: "PIN_114",
+    leds: ["PIN_87", "PIN_86", "PIN_85", "PIN_84"],
+    pins_checked: false,
+    notes: "Son los pines habituales de las placas EP4CE6/EP4CE10 de este tipo (reloj de 50 MHz en PIN_23, reset en PIN_25, LED en PIN_84-87, serie en PIN_114/115), sin comprobar en el esquema de la OMDAZZ: compruébalos antes de programarla. Si el puerto serie es un conector DB9 (RS-232), hace falta un adaptador USB a RS-232; si es un mini-USB con CH340 o PL2303, basta el cable.",
+};
+
+/// The cell the demo carries: 8-bit weights, 16-bit activations, room for 4096 weights.
+pub fn demo_cell() -> CellConfig {
+    let mut c = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 12, coding: Default::default(), exponent_bits: 0, multiplier: crate::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false };
+    c.accumulator_bits = c.required_accumulator().max(32);
+    c
+}
+
+/// The board's top: serial receiver and sender, and the cell under a small command loop.
+///
+/// Commands, one byte each and then their data:
+/// - `L` n (2 bytes) and n weights: loads them from address 0, answers `K`.
+/// - `C`: back to the first weight with the total at zero, answers `K`.
+/// - `X` x (2 bytes): multiplies the next weight by x and adds it to the total.
+/// - `T`: waits for the last product, answers the total (4 bytes) and sets it to zero.
+fn top(c: &CellConfig) -> String {
+    format!(
+        r#"// Generado por llm2chip: una celda de cálculo del chip detrás de un puerto serie.
+module uart_receiver #(parameter CLKS_PER_BIT = 434) (input clk, input rx, output reg valid, output reg [7:0] data);
+  reg sync1 = 1'b1, sync2 = 1'b1, busy = 1'b0;
+  reg [15:0] count = 0;
+  reg [3:0] bit_index = 0;
+  reg [7:0] shift = 0;
+  initial begin valid = 1'b0; data = 8'd0; end
+  always @(posedge clk) begin
+    sync1 <= rx;
+    sync2 <= sync1;
+    valid <= 1'b0;
+    if (!busy) begin
+      // The middle of the start bit is half a bit away.
+      if (!sync2) begin busy <= 1'b1; count <= CLKS_PER_BIT / 2; bit_index <= 0; end
+    end else if (count != 0) begin
+      count <= count - 1'b1;
+    end else begin
+      count <= CLKS_PER_BIT - 1;
+      if (bit_index == 0) begin
+        if (sync2) busy <= 1'b0;
+        bit_index <= 1;
+      end else if (bit_index <= 8) begin
+        shift <= {{sync2, shift[7:1]}};
+        bit_index <= bit_index + 1'b1;
+      end else begin
+        busy <= 1'b0;
+        if (sync2) begin valid <= 1'b1; data <= shift; end
+      end
+    end
+  end
+endmodule
+
+module uart_sender #(parameter CLKS_PER_BIT = 434) (input clk, input send, input [7:0] data, output reg tx, output busy);
+  reg [9:0] frame = 10'h3FF;
+  reg [3:0] left = 0;
+  reg [15:0] count = 0;
+  initial tx = 1'b1;
+  assign busy = left != 0;
+  always @(posedge clk) begin
+    if (left == 0) begin
+      // Start bit, eight data bits, stop bit, and one more bit of rest.
+      if (send) begin frame <= {{1'b1, data, 1'b0}}; left <= 4'd11; count <= 0; end
+    end else if (count != 0) begin
+      count <= count - 1'b1;
+    end else begin
+      tx <= frame[0];
+      frame <= {{1'b1, frame[9:1]}};
+      left <= left - 1'b1;
+      count <= CLKS_PER_BIT - 1;
+    end
+  end
+endmodule
+
+module cell_demo #(parameter CLKS_PER_BIT = {bit_clocks}) (input clk, input reset_n, input uart_rx, output uart_tx, output [3:0] led);
+  localparam W = {w}, A = {a}, ACC = {acc}, AB = {ab}, LATENCY = {latency};
+  localparam IDLE = 0, LENGTH_LOW = 1, LENGTH_HIGH = 2, LOADING = 3, X_LOW = 4, X_HIGH = 5, WAIT = 6, SEND = 7, REPLY = 8;
+  wire rx_valid;
+  wire [7:0] rx_data;
+  uart_receiver #(CLKS_PER_BIT) receiver (.clk(clk), .rx(uart_rx), .valid(rx_valid), .data(rx_data));
+  reg tx_send = 1'b0;
+  reg [7:0] tx_data = 8'd0;
+  wire tx_busy;
+  uart_sender #(CLKS_PER_BIT) sender (.clk(clk), .send(tx_send), .data(tx_data), .tx(uart_tx), .busy(tx_busy));
+
+  reg clear = 1'b0, clear_total = 1'b0, load_en = 1'b0, run = 1'b0;
+  reg [AB-1:0] load_addr = 0;
+  reg [W-1:0] load_data = 0;
+  reg [A-1:0] x = 0;
+  wire [ACC-1:0] total;
+  compute_cell compute (.clk(clk), .clear(clear), .clear_total(clear_total), .load_en(load_en), .load_addr(load_addr), .load_data(load_data), .run(run), .x(x), .total(total));
+
+  reg [3:0] state = IDLE;
+  reg [15:0] remaining = 0;
+  reg [7:0] low = 0;
+  reg [7:0] wait_count = 0;
+  reg [31:0] answer = 0;
+  reg [2:0] answer_left = 0;
+  reg [7:0] reply = 0;
+  reg [3:0] commands = 0;
+  reg [24:0] heartbeat = 0;
+
+  always @(posedge clk) begin
+    clear <= 1'b0;
+    clear_total <= 1'b0;
+    load_en <= 1'b0;
+    run <= 1'b0;
+    tx_send <= 1'b0;
+    heartbeat <= heartbeat + 1'b1;
+    if (!reset_n) begin
+      state <= IDLE;
+    end else case (state)
+      IDLE: if (rx_valid) begin
+        commands <= commands + 1'b1;
+        case (rx_data)
+          "L": state <= LENGTH_LOW;
+          "C": begin clear <= 1'b1; reply <= "K"; state <= REPLY; end
+          "X": state <= X_LOW;
+          "T": begin wait_count <= LATENCY + 1; state <= WAIT; end
+          default: state <= IDLE;
+        endcase
+      end
+      LENGTH_LOW: if (rx_valid) begin remaining[7:0] <= rx_data; state <= LENGTH_HIGH; end
+      LENGTH_HIGH: if (rx_valid) begin
+        remaining[15:8] <= rx_data;
+        load_addr <= {{AB{{1'b1}}}};
+        if (rx_data == 0 && remaining[7:0] == 0) begin reply <= "K"; state <= REPLY; end
+        else state <= LOADING;
+      end
+      LOADING: if (rx_valid) begin
+        load_en <= 1'b1;
+        load_addr <= load_addr + 1'b1;
+        load_data <= rx_data[W-1:0];
+        remaining <= remaining - 1'b1;
+        if (remaining == 1) begin reply <= "K"; state <= REPLY; end
+      end
+      X_LOW: if (rx_valid) begin low <= rx_data; state <= X_HIGH; end
+      X_HIGH: if (rx_valid) begin x <= {{rx_data, low}}; run <= 1'b1; state <= IDLE; end
+      WAIT: if (wait_count != 0) wait_count <= wait_count - 1'b1;
+        else begin answer <= total[31:0]; answer_left <= 3'd4; clear_total <= 1'b1; state <= SEND; end
+      SEND: if (answer_left == 0) state <= IDLE;
+        else if (!tx_busy && !tx_send) begin
+          tx_data <= answer[7:0];
+          tx_send <= 1'b1;
+          answer <= answer >> 8;
+          answer_left <= answer_left - 1'b1;
+        end
+      REPLY: if (!tx_busy && !tx_send) begin tx_data <= reply; tx_send <= 1'b1; state <= IDLE; end
+      default: state <= IDLE;
+    endcase
+  end
+  // Lights: the clock is alive, a command arrived, the cell is busy, the board is in reset.
+  assign led = {{~reset_n, state != IDLE, commands[0], heartbeat[24]}};
+endmodule
+"#,
+        bit_clocks = 434,
+        w = c.weight_bits,
+        a = c.activation_bits,
+        acc = c.accumulator_bits,
+        ab = c.addr_bits,
+        latency = c.latency(),
+    )
+}
+
+fn mask(value: i64, bits: u32) -> u64 {
+    (value as u64) & ((1u64 << bits) - 1)
+}
+
+/// A testbench that sends `weights` and the rows of a product with `activations` through
+/// the serial port, a few clocks per bit, and checks every total against `expected`.
+fn testbench(c: &CellConfig, weights: &[i64], activations: &[i64], expected: &[i64]) -> String {
+    let mut steps = String::new();
+    let byte = |b: u64| format!("    send_byte(8'd{});\n", b & 0xFF);
+    steps += &byte(b'L' as u64);
+    steps += &byte(weights.len() as u64);
+    steps += &byte(weights.len() as u64 >> 8);
+    for w in weights {
+        steps += &byte(mask(*w, c.weight_bits));
+    }
+    steps += "    expect_byte(8'd75);\n";
+    steps += &byte(b'C' as u64);
+    steps += "    expect_byte(8'd75);\n";
+    for (row, want) in expected.iter().enumerate() {
+        for x in activations {
+            steps += &byte(b'X' as u64);
+            steps += &byte(mask(*x, 16));
+            steps += &byte(mask(*x, 16) >> 8);
+        }
+        steps += &byte(b'T' as u64);
+        steps += &format!("    expect_word(32'd{}, {row});\n", mask(*want, 32));
+    }
+    format!(
+        r#"`timescale 1ns/1ns
+// Envía por el puerto serie los pesos y las activaciones de un producto matriz-vector y
+// comprueba cada total con el que calcula llm2chip.
+module testbench;
+  localparam BIT = 8;
+  reg clk = 0, rx = 1;
+  wire tx;
+  wire [3:0] led;
+  integer errors = 0;
+  always #5 clk = ~clk;
+  cell_demo #(.CLKS_PER_BIT(BIT)) board (.clk(clk), .reset_n(1'b1), .uart_rx(rx), .uart_tx(tx), .led(led));
+
+  task send_byte(input [7:0] value);
+    integer i;
+    begin
+      rx = 0;
+      repeat (BIT) @(posedge clk);
+      for (i = 0; i < 8; i = i + 1) begin rx = value[i]; repeat (BIT) @(posedge clk); end
+      rx = 1;
+      repeat (BIT) @(posedge clk);
+    end
+  endtask
+
+  // The board may answer while the last byte is still going out: a process of its own
+  // listens all the time and keeps what arrives.
+  reg [7:0] heard [0:255];
+  integer arrived = 0, taken = 0;
+  always begin : listen
+    reg [7:0] value;
+    integer i;
+    @(negedge tx);
+    repeat (BIT / 2) @(posedge clk);
+    for (i = 0; i < 8; i = i + 1) begin repeat (BIT) @(posedge clk); value[i] = tx; end
+    repeat (BIT) @(posedge clk);
+    heard[arrived % 256] = value;
+    arrived = arrived + 1;
+  end
+
+  task receive_byte(output [7:0] value);
+    begin
+      wait (arrived > taken);
+      value = heard[taken % 256];
+      taken = taken + 1;
+    end
+  endtask
+
+  task expect_byte(input [7:0] want);
+    reg [7:0] got;
+    begin
+      receive_byte(got);
+      if (got !== want) begin errors = errors + 1; $display("respuesta %0d, se esperaba %0d", got, want); end
+    end
+  endtask
+
+  task expect_word(input [31:0] want, input integer row);
+    reg [7:0] b0, b1, b2, b3;
+    begin
+      receive_byte(b0); receive_byte(b1); receive_byte(b2); receive_byte(b3);
+      if ({{b3, b2, b1, b0}} !== want) begin errors = errors + 1; $display("fila %0d: %0d, se esperaba %0d", row, $signed({{b3, b2, b1, b0}}), $signed(want)); end
+    end
+  endtask
+
+  initial begin
+    repeat (4) @(posedge clk);
+{steps}    if (errors == 0) $display("PASS"); else $display("FAIL: %0d errores", errors);
+    $finish;
+  end
+endmodule
+"#
+    )
+}
+
+fn qsf(board: &Board) -> String {
+    let checked = if board.pins_checked { "comprobados en el esquema de la placa" } else { "SIN VERIFICAR: compruébalos en el esquema de la placa antes de programarla" };
+    let mut pins = format!("set_location_assignment {} -to clk\nset_location_assignment {} -to reset_n\nset_location_assignment {} -to uart_rx\nset_location_assignment {} -to uart_tx\n", board.clock, board.reset_n, board.uart_rx, board.uart_tx);
+    for (i, pin) in board.leds.iter().enumerate() {
+        pins += &format!("set_location_assignment {pin} -to led[{i}]\n");
+    }
+    format!(
+        "# {name}: una celda de cálculo de llm2chip detrás del puerto serie.\nset_global_assignment -name FAMILY \"{family}\"\nset_global_assignment -name DEVICE {device}\nset_global_assignment -name TOP_LEVEL_ENTITY cell_demo\nset_global_assignment -name VERILOG_FILE ../rtl/compute_cell.v\nset_global_assignment -name VERILOG_FILE ../rtl/cell_demo.v\nset_global_assignment -name SDC_FILE cell_demo.sdc\nset_global_assignment -name STRATIX_DEVICE_IO_STANDARD \"3.3-V LVTTL\"\nset_global_assignment -name RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP \"AS INPUT TRI-STATED\"\nset_global_assignment -name CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION \"USE AS REGULAR IO\"\n\n# Pines, {checked}.\n{pins}",
+        name = board.name,
+        family = board.family,
+        device = board.device,
+    )
+}
+
+fn host_script(c: &CellConfig) -> String {
+    format!(
+        r#"#!/usr/bin/env python3
+"""Prueba la celda de llm2chip en la placa: carga una matriz, la multiplica por un vector
+por el puerto serie y compara cada fila con el cálculo exacto.
+
+    pip install pyserial
+    python3 matvec.py /dev/tty.usbserial-XXXX [filas] [columnas]
+"""
+import random
+import struct
+import sys
+
+import serial
+
+ROWS = int(sys.argv[2]) if len(sys.argv) > 2 else 8
+COLS = int(sys.argv[3]) if len(sys.argv) > 3 else 64
+MAX_WEIGHTS = {weights}
+
+def expect(port, want):
+    got = port.read(1)
+    if got != want:
+        sys.exit(f"la placa respondió {{got!r}} y se esperaba {{want!r}}")
+
+def main():
+    assert ROWS * COLS <= MAX_WEIGHTS, f"la celda guarda {{MAX_WEIGHTS}} pesos"
+    rng = random.Random(1)
+    matrix = [[rng.randint(-128, 127) for _ in range(COLS)] for _ in range(ROWS)]
+    vector = [rng.randint(-32768, 32767) for _ in range(COLS)]
+    with serial.Serial(sys.argv[1], 115200, timeout=2) as port:
+        weights = [w & 0xFF for row in matrix for w in row]
+        port.write(b"L" + struct.pack("<H", len(weights)) + bytes(weights))
+        expect(port, b"K")
+        port.write(b"C")
+        expect(port, b"K")
+        errors = 0
+        for r, row in enumerate(matrix):
+            port.write(b"".join(b"X" + struct.pack("<h", x) for x in vector) + b"T")
+            got = struct.unpack("<i", port.read(4))[0]
+            want = sum(w * x for w, x in zip(row, vector))
+            want = (want + 2**31) % 2**32 - 2**31
+            print(f"fila {{r}}: {{got}} {{'✓' if got == want else f'✗, se esperaba {{want}}'}}")
+            errors += got != want
+        print("todo correcto" if errors == 0 else f"{{errors}} filas mal")
+
+main()
+"#,
+        weights = 1u32 << c.addr_bits,
+    )
+}
+
+fn readme(board: &Board, c: &CellConfig) -> String {
+    format!(
+        "# Una celda de llm2chip en la {name}\n\nUna celda de cálculo del chip (memoria de {weights} pesos de {w} bits, multiplicador por activaciones de {a} bits y acumulador de {acc} bits), generada por llm2chip, detrás del puerto serie de la placa a 115 200 baudios. El chip completo no cabe en esta FPGA; esta prueba comprueba en hardware real la pieza que más se repite.\n\n## Archivos\n\n- `rtl/compute_cell.v`: la celda, tal como la genera llm2chip (el producto como multiplicación con signo, para los bloques multiplicadores de la FPGA).\n- `rtl/cell_demo.v`: receptor y emisor serie y el bucle de órdenes.\n- `tb/testbench.v`: envía una matriz y un vector por el puerto serie simulado y comprueba cada fila.\n- `quartus/`: proyecto para Quartus Prime Lite (gratuito).\n- `host/matvec.py`: la misma prueba con la placa de verdad.\n\n## Simular\n\n```bash\niverilog -g2005 -o tb.vvp rtl/compute_cell.v rtl/cell_demo.v tb/testbench.v && vvp tb.vvp\n```\n\nDebe escribir `PASS`.\n\n## Programar la placa\n\n1. {notes}\n2. Abre `quartus/cell_demo.qpf` en Quartus Prime Lite y compila.\n3. Programa el `.sof` por JTAG con el USB-Blaster; para que quede en la flash EPCS16, conviértelo a `.jic` (File → Convert Programming Files).\n4. `python3 host/matvec.py PUERTO` carga una matriz de 8 × 64, la multiplica por un vector y compara cada fila.\n\n## Órdenes\n\n| Orden | Datos | Respuesta |\n|---|---|---|\n| `L` | número de pesos (2 bytes) y los pesos | `K` |\n| `C` | | `K`: vuelve al primer peso con el total a cero |\n| `X` | activación (2 bytes, con signo) | multiplica el peso siguiente y lo suma al total |\n| `T` | | el total (4 bytes, con signo) y lo pone a cero |\n\nLas luces: la primera parpadea con el reloj, la segunda cambia con cada orden, la tercera se enciende mientras la celda trabaja y la cuarta en reset (en muchas placas se encienden con un cero: entonces es al revés).\n",
+        name = board.name,
+        weights = 1u32 << c.addr_bits,
+        w = c.weight_bits,
+        a = c.activation_bits,
+        acc = c.accumulator_bits,
+        notes = board.notes,
+    )
+}
+
+/// Every file of the demo for `board`, with a testbench that checks a product of
+/// `rows` × `cols` against the exact arithmetic.
+pub fn cell_demo_files(board: &Board, rows: usize, cols: usize) -> BTreeMap<String, String> {
+    let c = demo_cell();
+    assert!(rows * cols <= 1 << c.addr_bits, "la celda guarda {} pesos", 1 << c.addr_bits);
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = |range: i64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % (2 * range as u64)) as i64 - range
+    };
+    let weights: Vec<i64> = (0..rows * cols).map(|_| next(128)).collect();
+    let activations: Vec<i64> = (0..cols).map(|_| next(32768)).collect();
+    let expected: Vec<i64> = weights.chunks(cols).map(|row| row.iter().zip(&activations).map(|(w, x)| w * x).sum()).collect();
+    let mut files = BTreeMap::new();
+    files.insert("rtl/compute_cell.v".into(), to_verilog_for_fpga(&cell_design(c)));
+    files.insert("rtl/cell_demo.v".into(), top(&c));
+    files.insert("tb/testbench.v".into(), testbench(&c, &weights, &activations, &expected));
+    files.insert("quartus/cell_demo.qsf".into(), qsf(board));
+    files.insert("quartus/cell_demo.qpf".into(), "PROJECT_REVISION = \"cell_demo\"\n".into());
+    files.insert("quartus/cell_demo.sdc".into(), format!("create_clock -name clk -period {:.3} [get_ports clk]\nderive_clock_uncertainty\n", 1000.0 / board.clock_mhz as f64));
+    files.insert("host/matvec.py".into(), host_script(&c));
+    files.insert("README.md".into(), readme(board, &c));
+    files
+}
