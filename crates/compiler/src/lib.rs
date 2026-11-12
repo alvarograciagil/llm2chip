@@ -46,6 +46,14 @@ pub enum Op {
     SigmoidMoe { prefix: String, src: Buf, dst: Buf, experts: usize, top_k: usize, intermediate: usize, shared_intermediate: usize, scaling: f32, normalize: bool },
     /// Sparse mixture of experts: routes to `top_k` experts plus a shared expert.
     Moe { prefix: String, src: Buf, dst: Buf, experts: usize, top_k: usize, intermediate: usize, shared_intermediate: usize },
+    /// `(x − mean(x)) · rsqrt(var(x) + eps) · w + b`, per block of `block` values, with
+    /// `{weight}.weight` and `{weight}.bias`.
+    LayerNorm { src: Buf, weight: String, block: usize, dst: Buf },
+    /// Row `token` of a store of rows as long as `dst`: an image's patch, kept between the
+    /// routines that go through the encoder block by block.
+    LoadRow { store: Buf, dst: Buf },
+    /// `src` into row `token` of a store.
+    StoreRow { src: Buf, store: Buf },
 }
 
 impl Op {
@@ -64,6 +72,10 @@ impl Op {
             Op::AttnSum { query, dst, .. } => (vec![*query], vec![*dst]),
             Op::DeltaStep { mixed, a, b, dst, .. } => (vec![*mixed, *a, *b], vec![*dst]),
             Op::RmsGated { src, z, dst, .. } => (vec![*src, *z], vec![*dst]),
+            Op::LayerNorm { src, dst, .. } => (vec![*src], vec![*dst]),
+            Op::LoadRow { store, dst } => (vec![*store], vec![*dst]),
+            // A store keeps its other rows: writing one also reads it.
+            Op::StoreRow { src, store } => (vec![*src, *store], vec![*store]),
         }
     }
 }
@@ -976,6 +988,10 @@ mod tests {
                 Op::AttnSum { query, dst, .. } => (vec![*query], vec![*dst]),
                 Op::DeltaStep { mixed, a, b, dst, .. } => (vec![*mixed, *a, *b], vec![*dst]),
                 Op::RmsGated { src, z, dst, .. } => (vec![*src, *z], vec![*dst]),
+            Op::LayerNorm { src, dst, .. } => (vec![*src], vec![*dst]),
+            Op::LoadRow { store, dst } => (vec![*store], vec![*dst]),
+            // A store keeps its other rows: writing one also reads it.
+            Op::StoreRow { src, store } => (vec![*src, *store], vec![*store]),
                 Op::Concat { a, b, dst } => (vec![*a, *b], vec![*dst]),
                 Op::Moe { src, dst, .. } => (vec![*src], vec![*dst]),
             };
@@ -987,4 +1003,135 @@ mod tests {
             }
         }
     }
+}
+
+/// An image encoder as the chip runs it: one program whose operations form routines, and
+/// the order the firmware runs them in. A routine runs once for each patch (or merged
+/// token), with the patch as the token; the rest of an encoder block attends over every
+/// patch, so its position is the last patch.
+#[derive(Clone, Debug, Serialize)]
+pub struct VisionProgram {
+    pub program: Program,
+    /// Turns a patch's pixels, with its learned position, into the first hidden state.
+    pub embed: std::ops::Range<usize>,
+    /// For each block: the routine that stores the patch's keys, values and query, and
+    /// the one that attends over every patch and runs the rest of the block.
+    pub blocks: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>,
+    /// Joins `merge × merge` patches into one token of the language model.
+    pub merge: std::ops::Range<usize>,
+    /// What the host writes before the patch embedding: the pixels and the learned
+    /// position, already resampled to the image's grid.
+    pub pixels: Buf,
+    pub position: Buf,
+    /// The token for the language model each merge routine leaves.
+    pub output: Buf,
+    pub head_dim: usize,
+    /// The most patches an image may have, which sizes the stores.
+    pub patches: usize,
+}
+
+/// The encoder in `vision_config`, for images of at most `patches` patches.
+pub fn compile_vision(config: &str, patches: usize) -> Result<VisionProgram, String> {
+    let root: Value = serde_json::from_str(config).map_err(|e| e.to_string())?;
+    let v = &root["vision_config"];
+    let number = |key: &str| v[key].as_u64().map(|n| n as usize).ok_or(format!("vision_config sin {key}"));
+    let (hidden, heads, depth, intermediate) = (number("hidden_size")?, number("num_heads")?, number("depth")?, number("intermediate_size")?);
+    let (patch, temporal, merge, out) = (number("patch_size")?, number("temporal_patch_size")?, number("spatial_merge_size")?, number("out_hidden_size")?);
+    let theta = v["rope_parameters"]["rope_theta"].as_f64().unwrap_or(10_000.0) as f32;
+    let head_dim = hidden / heads;
+    let merged = hidden * merge * merge;
+    let patches = patches.next_multiple_of(merge * merge);
+
+    let mut buffers: Vec<usize> = Vec::new();
+    let mut buf = |len: usize| {
+        buffers.push(len);
+        buffers.len() - 1
+    };
+    let mut ops: Vec<Inst> = Vec::new();
+    let mut emit = |op: Op, name: &'static str, layer: Option<u32>| ops.push(Inst { op, layer, name });
+    let t = |name: &str| format!("vision_tower.{name}");
+
+    let pixels = buf(3 * temporal * patch * patch);
+    let position = buf(hidden);
+    let state = buf(patches * hidden);
+    let (x, biased, placed) = (buf(hidden), buf(hidden), buf(hidden));
+    emit(Op::Matvec { matrix: t("patch_embed.proj"), src: pixels, dst: x }, "embedding de parche", None);
+    emit(Op::AddWeight { src: x, weight: t("patch_embed.proj.bias"), dst: biased }, "sesgo del parche", None);
+    emit(Op::Add { a: biased, b: position, dst: placed }, "posición aprendida", None);
+    emit(Op::StoreRow { src: placed, store: state }, "guardar parche", None);
+    let embed = 0..4;
+
+    let mut blocks = Vec::new();
+    let mut kv_slots = Vec::new();
+    for block in 0..depth {
+        let b = |name: &str| t(&format!("blocks.{block}.{name}"));
+        let layer = Some(block as u32);
+        let queries = buf(patches * hidden);
+        let start = 4 + block * 25;
+        let (h, normed, qkv, qkv_b, q, k, v_) = (buf(hidden), buf(hidden), buf(3 * hidden), buf(3 * hidden), buf(hidden), buf(hidden), buf(hidden));
+        emit(Op::LoadRow { store: state, dst: h }, "leer parche", layer);
+        emit(Op::LayerNorm { src: h, weight: b("norm1"), block: hidden, dst: normed }, "norma 1", layer);
+        emit(Op::Matvec { matrix: b("attn.qkv"), src: normed, dst: qkv }, "q, k y v", layer);
+        emit(Op::AddWeight { src: qkv, weight: b("attn.qkv.bias"), dst: qkv_b }, "sesgo de q, k y v", layer);
+        emit(Op::Slice { src: qkv_b, from: 0, dst: q }, "consulta", layer);
+        emit(Op::Slice { src: qkv_b, from: hidden, dst: k }, "clave", layer);
+        emit(Op::Slice { src: qkv_b, from: 2 * hidden, dst: v_ }, "valor", layer);
+        emit(Op::Rope { buf: q, block: head_dim, rotary: head_dim, table: 0 }, "RoPE 2D de la consulta", layer);
+        emit(Op::Rope { buf: k, block: head_dim, rotary: head_dim, table: 0 }, "RoPE 2D de la clave", layer);
+        emit(Op::KvAppend { slot: block, key: k, value: v_, window: None }, "guardar clave y valor", layer);
+        emit(Op::StoreRow { src: q, store: queries }, "guardar consulta", layer);
+        kv_slots.push(KvShape { head_dim, heads });
+        let middle = start + 11;
+        let (q2, attended, projected, projected_b, h2, h3, normed2, up, up_b, gelu, down, down_b, h4) =
+            (buf(hidden), buf(hidden), buf(hidden), buf(hidden), buf(hidden), buf(hidden), buf(hidden), buf(intermediate), buf(intermediate), buf(intermediate), buf(hidden), buf(hidden), buf(hidden));
+        emit(Op::LoadRow { store: queries, dst: q2 }, "leer consulta", layer);
+        emit(Op::AttnSum { slot: block, query: q2, head_dim, scale_dim: head_dim, heads, kv_heads: heads, window: None, softcap: None, dst: attended }, "atención sobre todos los parches", layer);
+        emit(Op::Matvec { matrix: b("attn.proj"), src: attended, dst: projected }, "proyección", layer);
+        emit(Op::AddWeight { src: projected, weight: b("attn.proj.bias"), dst: projected_b }, "sesgo de la proyección", layer);
+        emit(Op::LoadRow { store: state, dst: h2 }, "leer parche", layer);
+        emit(Op::Add { a: h2, b: projected_b, dst: h3 }, "residual", layer);
+        emit(Op::LayerNorm { src: h3, weight: b("norm2"), block: hidden, dst: normed2 }, "norma 2", layer);
+        emit(Op::Matvec { matrix: b("mlp.linear_fc1"), src: normed2, dst: up }, "MLP, subida", layer);
+        emit(Op::AddWeight { src: up, weight: b("mlp.linear_fc1.bias"), dst: up_b }, "sesgo de subida", layer);
+        emit(Op::Gelu { src: up_b, approximate: true, dst: gelu }, "GELU", layer);
+        emit(Op::Matvec { matrix: b("mlp.linear_fc2"), src: gelu, dst: down }, "MLP, bajada", layer);
+        emit(Op::AddWeight { src: down, weight: b("mlp.linear_fc2.bias"), dst: down_b }, "sesgo de bajada", layer);
+        emit(Op::Add { a: h3, b: down_b, dst: h4 }, "residual", layer);
+        emit(Op::StoreRow { src: h4, store: state }, "guardar parche", layer);
+        blocks.push((start..middle, middle..start + 25));
+    }
+
+    let start = 4 + depth * 25;
+    let (joined, normed, up, up_b, gelu, down, output) = (buf(merged), buf(merged), buf(merged), buf(merged), buf(merged), buf(out), buf(out));
+    emit(Op::LoadRow { store: state, dst: joined }, "leer los parches de un token", None);
+    emit(Op::LayerNorm { src: joined, weight: t("merger.norm"), block: hidden, dst: normed }, "norma de la fusión", None);
+    emit(Op::Matvec { matrix: t("merger.linear_fc1"), src: normed, dst: up }, "fusión, subida", None);
+    emit(Op::AddWeight { src: up, weight: t("merger.linear_fc1.bias"), dst: up_b }, "sesgo de subida", None);
+    emit(Op::Gelu { src: up_b, approximate: false, dst: gelu }, "GELU", None);
+    emit(Op::Matvec { matrix: t("merger.linear_fc2"), src: gelu, dst: down }, "fusión, bajada", None);
+    emit(Op::AddWeight { src: down, weight: t("merger.linear_fc2.bias"), dst: output }, "sesgo de bajada", None);
+    let merge_range = start..start + 7;
+    debug_assert_eq!(ops.len(), merge_range.end);
+
+    let program = Program {
+        family: "vision".into(),
+        vocab: 1,
+        hidden,
+        num_layers: depth,
+        buffers,
+        logits_from: ops.len(),
+        ops,
+        logits: output,
+        kv_slots,
+        delta_slots: Vec::new(),
+        conv_slots: Vec::new(),
+        rope_theta: theta,
+        rope_scaling: None,
+        local_rope_theta: None,
+        rms_epsilon: 1e-6,
+        final_hidden: output,
+        draft: None,
+        image: None,
+    };
+    Ok(VisionProgram { program, embed, blocks, merge: merge_range, pixels, position, output, head_dim, patches })
 }

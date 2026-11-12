@@ -295,6 +295,9 @@ fn buffers_read(op: &Op) -> Vec<usize> {
         Op::DeltaStep { mixed, a, b, .. } => vec![*mixed, *a, *b],
         Op::RmsGated { src, z, .. } => vec![*src, *z],
         Op::Mla { query, latent, rope_key, .. } => vec![*query, *latent, *rope_key],
+        Op::LayerNorm { src, .. } => vec![*src],
+        Op::LoadRow { store, .. } => vec![*store],
+        Op::StoreRow { src, store } => vec![*src, *store],
     }
 }
 
@@ -528,6 +531,12 @@ impl Layout {
             (program.buffers.iter().map(|_| alloc(1)).collect(), vec![false; program.buffers.len()])
         };
         let mut setup = Assembly::new(&config);
+        // A store of rows keeps them all at one exponent, as the cache does its keys.
+        for inst in all_ops(program) {
+            if let Op::StoreRow { store, .. } = inst.op {
+                setup.load_mantissas(buffers[store], &[], STATE_EXPONENT);
+            }
+        }
         let mut matrices: HashMap<String, u32> = HashMap::new();
         let mut by_exponent: HashMap<i64, u32> = HashMap::new();
         let mut cell_plan: Vec<CellEntry> = Vec::new();
@@ -627,8 +636,10 @@ impl Layout {
                 }
             }
             previous = Some(&inst.op);
-            if let Op::RmsNorm { block, .. } | Op::RmsGated { block, .. } = &inst.op {
-                if !block.is_power_of_two() {
+            // A layer norm's mean needs `1 / block` whatever the block.
+            let mean = matches!(inst.op, Op::LayerNorm { .. });
+            if let Op::RmsNorm { block, .. } | Op::RmsGated { block, .. } | Op::LayerNorm { block, .. } = &inst.op {
+                if mean || !block.is_power_of_two() {
                     inverse_len.entry(*block).or_insert_with(|| {
                         let reg = alloc(1);
                         setup.load_vector(reg, &[1.0 / *block as f64]);
@@ -650,6 +661,13 @@ impl Layout {
                     let name = format!("{weight}.weight");
                     let values = weights.floats(&name)?.iter().map(|w| *w as f64).collect();
                     store(name, values, &mut setup, &mut small);
+                }
+                Op::LayerNorm { weight, .. } => {
+                    for part in ["weight", "bias"] {
+                        let name = format!("{weight}.{part}");
+                        let values = weights.floats(&name)?.iter().map(|w| *w as f64).collect();
+                        store(name, values, &mut setup, &mut small);
+                    }
                 }
                 Op::Dconv { slot, weight, .. } => {
                     // Kept as one row per tap, which is how the history is stored too.
@@ -708,7 +726,9 @@ impl Layout {
         // every expert: as many ones as either.
         let experts = all_ops(program).filter_map(|i| if let Op::Moe { experts, .. } | Op::SigmoidMoe { experts, .. } = i.op { Some(experts) } else { None }).max().unwrap_or(0);
         let ones = alloc(1);
-        setup.load_vector(ones, &vec![1.0; chip_tokens.unwrap_or(ONES_LENGTH).max(experts).max(1)]);
+        // A layer norm adds up its block with them too.
+        let norm_block = all_ops(program).filter_map(|i| if let Op::LayerNorm { block, .. } = i.op { Some(block) } else { None }).max().unwrap_or(0);
+        setup.load_vector(ones, &vec![1.0; chip_tokens.unwrap_or(ONES_LENGTH).max(experts).max(norm_block).max(1)]);
         let minus_one = alloc(1);
         setup.load_vector(minus_one, &[-1.0]);
         let epsilon = alloc(1);
@@ -1275,6 +1295,22 @@ impl Layout {
         self.run_range(ops, program, 0..limit, token, position, true)
     }
 
+    /// One routine of a program made of several, such as an image encoder's: its operations,
+    /// with `rope` loading the rotation of `position` first.
+    pub fn run_ops<O: BlockOps>(&self, ops: &mut O, program: &Program, range: Range<usize>, token: O::N, position: O::N, rope: bool) -> Result<(), String> {
+        self.run_range(ops, program, range, token, position, rope)
+    }
+
+    /// The rotation of `slot` by its own angles, one for each pair of a head: an image patch's
+    /// row and column. The host writes it in the table the die reads by position.
+    pub fn set_rotation(&self, slot: u32, angles: &[f64]) {
+        let mut row: Vec<f64> = angles.iter().map(|a| a.cos()).collect();
+        row.extend(angles.iter().map(|a| -a.sin()));
+        row.extend(angles.iter().map(|a| a.sin()));
+        row.push(1.0);
+        self.rotations.borrow_mut().insert(slot, row);
+    }
+
     fn run_range<O: BlockOps>(&self, ops: &mut O, program: &Program, range: Range<usize>, token: O::N, position: O::N, rope: bool) -> Result<(), String> {
         self.run_list(ops, program, &program.ops[range], token, position, rope)
     }
@@ -1549,6 +1585,40 @@ impl Layout {
                 let count = program.buffers[*dst] / block;
                 let w = self.small[&format!("{weight}.weight")];
                 self.rms_blocks(ops, self.reg(*src), Some(w), *block, count, self.reg(*dst));
+            }
+            Op::LayerNorm { src, weight, block, dst } => {
+                let count = (program.buffers[*dst] / block) as u32;
+                let d = *block as u32;
+                let (w, bias) = (self.small[&format!("{weight}.weight")], self.small[&format!("{weight}.bias")]);
+                let (src, inverse, first) = (self.reg(*src), self.inverse_len[block], self.parts[0]);
+                // Each block less its mean, then the same norm as RMSNorm, scaled and moved
+                // by its weight and bias, in a part of its own: blocks have their own exponents.
+                ops.each_head(count, 1, |ops, k, _| {
+                    ops.with_window(k, &[first], |ops, offset| {
+                        let part = first + offset;
+                        ops.copy_part(src, k * d, t[46], zero, d.into());
+                        ops.dot(t[46], self.ones, t[47], d.into());
+                        ops.scale(inverse, t[47], t[48], 1.into());
+                        ops.sub_scalar(t[46], t[48], t[40], d.into());
+                        ops.normalize(t[40], d.into());
+                        ops.rms_normalize(t[40], t[41], d, (t[42], t[43]), Some(inverse), Some(self.epsilon));
+                        ops.multiply(t[41], w, t[44], d.into());
+                        ops.add(t[44], bias, part, d.into());
+                        ops.align_heads(part, d);
+                    });
+                });
+                let parts: Vec<(u32, u32)> = (0..count as usize).map(|k| (self.parts[k], d)).collect();
+                ops.gather_heads(&parts, self.reg(*dst));
+            }
+            Op::LoadRow { store, dst } => {
+                let width = program.buffers[*dst] as u32;
+                ops.copy_part(self.reg(*store), token * width, self.reg(*dst), zero, width.into());
+                ops.normalize(self.reg(*dst), width.into());
+            }
+            Op::StoreRow { src, store } => {
+                // Every row of a store shares one exponent, as the cache's keys do.
+                let width = program.buffers[*src] as u32;
+                ops.align_to(self.reg(*src), zero, STATE_EXPONENT, self.reg(*store), token * width, width.into());
             }
             Op::SplitQueryGate { src, query, gate, block } => {
                 let heads = program.buffers[*query] / block;

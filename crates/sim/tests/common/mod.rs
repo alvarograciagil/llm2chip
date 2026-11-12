@@ -179,3 +179,66 @@ pub fn firmware() -> Option<netlist::soc::FirmwareImage> {
         })
         .clone()
 }
+
+/// The toy image encoder: hidden 8 in 2 heads of 4, 2 blocks, patches of 2×2 pixels in 2
+/// frames, 2×2 patches to a token of 8 values, the toy language model's width.
+#[allow(dead_code)]
+pub const VISION: (usize, usize, usize, usize, usize, usize, usize) = (8, 2, 2, 16, 2, 2, 2);
+
+/// Writes the toy encoder next to a checkpoint: its config, the preprocessor's size limits
+/// (images of 4 to 64 tokens) and its weights as plain floats.
+#[allow(dead_code)]
+pub fn make_vision_checkpoint(dir: &Path) {
+    let (hidden, heads, depth, intermediate, patch, temporal, merge) = VISION;
+    let side = 3;
+    let config = serde_json::json!({
+        "model_type": "qwen3_5",
+        "image_token_id": 7, "vision_start_token_id": 5, "vision_end_token_id": 6,
+        "text_config": { "rope_parameters": { "mrope_section": [1, 1, 0] } },
+        "vision_config": { "depth": depth, "hidden_size": hidden, "num_heads": heads, "intermediate_size": intermediate, "patch_size": patch, "temporal_patch_size": temporal, "spatial_merge_size": merge, "out_hidden_size": 8, "num_position_embeddings": side * side, "rope_parameters": { "rope_theta": 100.0 } }
+    });
+    std::fs::write(dir.join("config.json"), serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    let pixels = (patch * merge) * (patch * merge);
+    std::fs::write(dir.join("preprocessor_config.json"), serde_json::json!({ "size": { "shortest_edge": 4 * pixels, "longest_edge": 64 * pixels } }).to_string()).unwrap();
+
+    let mut rng = Rng(0x0BAD_5EED_1234_5678);
+    let mut w = Writer::default();
+    let mut put = |w: &mut Writer, name: &str, shape: &[usize], spread: f32, offset: f32| {
+        let values: Vec<f32> = (0..shape.iter().product()).map(|_| offset + spread * rng.unit()).collect();
+        let bytes = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        w.tensor(&format!("vision_tower.{name}"), "F32", shape, bytes);
+    };
+    let input = 3 * temporal * patch * patch;
+    put(&mut w, "patch_embed.proj.weight", &[hidden, input], 0.1, 0.0);
+    put(&mut w, "patch_embed.proj.bias", &[hidden], 0.1, 0.0);
+    put(&mut w, "pos_embed.weight", &[side * side, hidden], 0.2, 0.0);
+    for block in 0..depth {
+        let b = |s: &str| format!("blocks.{block}.{s}");
+        put(&mut w, &b("norm1.weight"), &[hidden], 0.2, 1.0);
+        put(&mut w, &b("norm1.bias"), &[hidden], 0.1, 0.0);
+        put(&mut w, &b("attn.qkv.weight"), &[3 * hidden, hidden], 0.3, 0.0);
+        put(&mut w, &b("attn.qkv.bias"), &[3 * hidden], 0.1, 0.0);
+        put(&mut w, &b("attn.proj.weight"), &[hidden, hidden], 0.3, 0.0);
+        put(&mut w, &b("attn.proj.bias"), &[hidden], 0.1, 0.0);
+        put(&mut w, &b("norm2.weight"), &[hidden], 0.2, 1.0);
+        put(&mut w, &b("norm2.bias"), &[hidden], 0.1, 0.0);
+        put(&mut w, &b("mlp.linear_fc1.weight"), &[intermediate, hidden], 0.3, 0.0);
+        put(&mut w, &b("mlp.linear_fc1.bias"), &[intermediate], 0.1, 0.0);
+        put(&mut w, &b("mlp.linear_fc2.weight"), &[hidden, intermediate], 0.2, 0.0);
+        put(&mut w, &b("mlp.linear_fc2.bias"), &[hidden], 0.1, 0.0);
+    }
+    let merged = hidden * merge * merge;
+    put(&mut w, "merger.norm.weight", &[hidden], 0.2, 1.0);
+    put(&mut w, "merger.norm.bias", &[hidden], 0.1, 0.0);
+    put(&mut w, "merger.linear_fc1.weight", &[merged, merged], 0.2, 0.0);
+    put(&mut w, "merger.linear_fc1.bias", &[merged], 0.1, 0.0);
+    put(&mut w, "merger.linear_fc2.weight", &[8, merged], 0.2, 0.0);
+    put(&mut w, "merger.linear_fc2.bias", &[8], 0.1, 0.0);
+    w.write(&dir.join("model-vision.safetensors"));
+}
+
+/// A small picture, `width` × `height` RGB, the same every time.
+#[allow(dead_code)]
+pub fn test_picture(width: usize, height: usize) -> Vec<u8> {
+    (0..width * height * 3).map(|i| ((i * 37 + i / 3 * 11) % 251) as u8).collect()
+}

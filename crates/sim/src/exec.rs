@@ -172,6 +172,7 @@ impl Engine {
         for inst in program.ops.iter().chain(draft_ops) {
             let names: Vec<String> = match &inst.op {
                 Op::RmsNorm { weight, .. } | Op::RmsGated { weight, .. } => vec![format!("{weight}.weight")],
+                Op::LayerNorm { weight, .. } => vec![format!("{weight}.weight"), format!("{weight}.bias")],
                 Op::Dconv { weight, .. } => vec![format!("{weight}.weight")],
                 Op::DeltaStep { a_log, dt_bias, .. } => vec![a_log.clone(), dt_bias.clone()],
                 Op::AddWeight { weight, .. } => vec![weight.clone()],
@@ -722,6 +723,30 @@ impl Engine {
             }
             Op::Moe { prefix, src, dst, experts, top_k, intermediate, shared_intermediate } => {
                 self.run_moe(prefix, *src, *dst, *experts, *top_k, *intermediate, *shared_intermediate)?;
+            }
+            Op::LayerNorm { src, weight, block, dst } => {
+                let (w, b) = (self.floats[&format!("{weight}.weight")].clone(), self.floats[&format!("{weight}.bias")].clone());
+                let f = self.functions;
+                let epsilon = self.program.rms_epsilon as f32;
+                let (x, y) = pair(&mut self.buffers, *src, *dst);
+                for (xs, ys) in x.chunks_exact(*block).zip(y.chunks_exact_mut(*block)) {
+                    let mean = xs.iter().sum::<f32>() / *block as f32;
+                    let variance = xs.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / *block as f32;
+                    let inv = f.inv_sqrt(variance + epsilon);
+                    for i in 0..*block {
+                        ys[i] = (xs[i] - mean) * inv * w[i] + b[i];
+                    }
+                }
+                self.quantize(*dst);
+            }
+            Op::LoadRow { store, dst } => {
+                let width = self.buffers[*dst].len();
+                let row = self.buffers[*store][token as usize * width..][..width].to_vec();
+                self.buffers[*dst].copy_from_slice(&row);
+            }
+            Op::StoreRow { src, store } => {
+                let row = self.buffers[*src].clone();
+                self.buffers[*store][token as usize * row.len()..][..row.len()].copy_from_slice(&row);
             }
             Op::RmsGated { src, z, weight, block, dst } => {
                 let w = self.floats[&format!("{weight}.weight")].clone();

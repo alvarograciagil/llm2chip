@@ -10,6 +10,7 @@ pub mod lower;
 pub mod sizing;
 pub mod tokenizer;
 pub mod vision;
+pub mod vision_chip;
 mod requant;
 mod vm;
 mod weights;

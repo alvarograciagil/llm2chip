@@ -39,6 +39,23 @@ Casi todo se compone con operaciones que el die ya tiene:
 
 Lo que falta para hacerlo en puertas es el orden capa a capa del firmware y las rutinas del codificador; la aritmética ya está.
 
+## Estado, etapa a etapa
+
+Cada etapa se comprueba contra la anterior en un codificador de juguete (`make_vision_checkpoint` en las pruebas: ancho 8 en 2 cabezas de 4, 2 bloques, parches de 2×2 píxeles en 2 fotogramas, 2×2 parches por token de ancho 8, el del modelo de lenguaje de juguete), con las pruebas de `crates/sim/tests/vision.rs`.
+
+| Etapa | Qué | Estado |
+|---|---|---|
+| 0 | Codificador de juguete; la referencia en coma flotante lo ejecuta | Hecha |
+| 1 | `compile_vision`: el codificador como un programa con sus rutinas (embedding de parche, las dos de cada bloque y la fusión) y tres operaciones nuevas: `LayerNorm` y leer y guardar la fila de un parche (`LoadRow`, `StoreRow`) | Hecha |
+| 2 | `ExactVision`: las rutinas en la aritmética exacta del die, en el orden del firmware; difiere de la coma flotante menos de un 0,5 % y el modelo de lenguaje elige el mismo token con sus tokens que con los de la referencia | Hecha |
+| 3 | Cada rutina en puertas, bit a bit igual que la máquina exacta | Pendiente |
+| 4 | El firmware las ordena; simulador de instrucciones frente a puertas, de la imagen al texto | Pendiente |
+| 5 | La rutina de token del modelo de lenguaje toma la imagen como entrada, de punta a punta | Pendiente |
+
+Cómo se ejecuta: el anfitrión escribe por cada parche sus píxeles y su posición aprendida ya interpolada, y la rotación de su fila y columna en la tabla que el die lee por posición. La rutina de embedding guarda cada parche en un almacén de filas. Cada bloque pasa dos veces por todos los parches: la primera guarda claves, valores y consulta; la segunda atiende sobre todos (con la posición en el último parche) y sigue con el resto del bloque. La fusión lee cuatro filas consecutivas del almacén como un vector.
+
+Los almacenes guardan sus filas con un exponente fijo, como la caché de claves (`STATE_EXPONENT`, valores por debajo de 64): en un codificador real, con estados mayores, habrá que darles el suyo.
+
 ## Dibujar con Janus-Pro
 
 Janus-Pro-1B también genera imágenes: su modelo de lenguaje escribe 576 tokens de un libro de códigos (una rejilla de 24 × 24), guiado lejos de lo que dibujaría sin el texto, y un decodificador convolucional los convierte en píxeles. `cargo run --release -p sim --example draw -- <carpeta> "<descripción>" salida.bmp [temperatura] [semilla]`.

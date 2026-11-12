@@ -253,6 +253,32 @@ impl VisionTower {
         self.weights.floats(&format!("vision_tower.{name}"))
     }
 
+    /// Each patch's learned position, resampled bilinearly (corners aligned) to the image's
+    /// grid, in the encoder's order: what the host adds to each patch.
+    pub fn positions(&self, rows: usize, cols: usize) -> Result<Vec<Vec<f32>>, String> {
+        let c = &self.config;
+        let (table, side, hidden) = (self.tensor("pos_embed.weight")?, c.position_side, c.hidden);
+        let axis = |index: usize, size: usize| {
+            let source = if size > 1 { index as f32 * (side - 1) as f32 / (size - 1) as f32 } else { 0.0 };
+            let low = source.floor() as usize;
+            (low.min(side - 1), (low + 1).min(side - 1), source - low as f32)
+        };
+        Ok(merge_order(rows, cols, c.merge)
+            .iter()
+            .map(|(row, col)| {
+                let (r0, r1, fr) = axis(*row, rows);
+                let (c0, c1, fc) = axis(*col, cols);
+                let mut out = vec![0f32; hidden];
+                for (r, col_tap, weight) in [(r0, c0, (1.0 - fr) * (1.0 - fc)), (r0, c1, (1.0 - fr) * fc), (r1, c0, fr * (1.0 - fc)), (r1, c1, fr * fc)] {
+                    for (v, e) in out.iter_mut().zip(&table[(r * side + col_tap) * hidden..(r * side + col_tap + 1) * hidden]) {
+                        *v += weight * e;
+                    }
+                }
+                out
+            })
+            .collect())
+    }
+
     /// The tokens the language model reads for an image: one vector of `out_hidden`
     /// values for each 2×2 of patches, in the order of `positions`.
     pub fn encode(&self, image: &Patches) -> Result<Vec<Vec<f32>>, String> {
@@ -261,33 +287,13 @@ impl VisionTower {
         let patch_size = 3 * c.temporal * c.patch * c.patch;
         let mut x = linear(&image.values, patch_size, &self.tensor("patch_embed.proj.weight")?, &self.tensor("patch_embed.proj.bias")?);
 
-        // Learned positions, resampled bilinearly (corners aligned) to this grid.
-        let table = self.tensor("pos_embed.weight")?;
-        let side = c.position_side;
-        let order = merge_order(image.rows, image.cols, c.merge);
-        let axis = |index: usize, size: usize| {
-            let source = if size > 1 { index as f32 * (side - 1) as f32 / (size - 1) as f32 } else { 0.0 };
-            let low = source.floor() as usize;
-            (low.min(side - 1), (low + 1).min(side - 1), source - low as f32)
-        };
-        for (patch, (row, col)) in order.iter().enumerate() {
-            let (r0, r1, fr) = axis(*row, image.rows);
-            let (c0, c1, fc) = axis(*col, image.cols);
-            let taps = [(r0, c0, (1.0 - fr) * (1.0 - fc)), (r0, c1, (1.0 - fr) * fc), (r1, c0, fr * (1.0 - fc)), (r1, c1, fr * fc)];
-            for (r, col_tap, weight) in taps {
-                let entry = &table[(r * side + col_tap) * hidden..(r * side + col_tap + 1) * hidden];
-                for (v, e) in x[patch * hidden..(patch + 1) * hidden].iter_mut().zip(entry) {
-                    *v += weight * e;
-                }
+        for (patch, row) in self.positions(image.rows, image.cols)?.iter().enumerate() {
+            for (v, e) in x[patch * hidden..(patch + 1) * hidden].iter_mut().zip(row) {
+                *v += e;
             }
         }
-
-        // Rotations from each patch's row and column: the first half of each head's
-        // frequencies follow the row, the second the column.
         let head_dim = hidden / c.heads;
-        let quarter = head_dim / 4;
-        let frequency: Vec<f32> = (0..quarter).map(|i| 1.0 / c.rope_theta.powf((2 * i) as f32 / (head_dim / 2) as f32)).collect();
-        let angles: Vec<Vec<f32>> = order.iter().map(|(row, col)| frequency.iter().map(|f| *row as f32 * f).chain(frequency.iter().map(|f| *col as f32 * f)).collect()).collect();
+        let angles = patch_angles(c, image.rows, image.cols);
 
         for block in 0..c.depth {
             let p = |name: &str| self.tensor(&format!("blocks.{block}.{name}"));
@@ -346,6 +352,15 @@ impl VisionTower {
         let out = linear(&up, merged, &self.tensor("merger.linear_fc2.weight")?, &self.tensor("merger.linear_fc2.bias")?);
         Ok(out.chunks(c.out_hidden).map(<[f32]>::to_vec).collect())
     }
+}
+
+/// Each patch's rotation angles, in the encoder's order: the first half of each head's
+/// frequencies follow its row, the second its column.
+pub fn patch_angles(c: &VisionConfig, rows: usize, cols: usize) -> Vec<Vec<f32>> {
+    let head_dim = c.hidden / c.heads;
+    let quarter = head_dim / 4;
+    let frequency: Vec<f32> = (0..quarter).map(|i| 1.0 / c.rope_theta.powf((2 * i) as f32 / (head_dim / 2) as f32)).collect();
+    merge_order(rows, cols, c.merge).iter().map(|(row, col)| frequency.iter().map(|f| *row as f32 * f).chain(frequency.iter().map(|f| *col as f32 * f)).collect()).collect()
 }
 
 /// Row and column of each patch, in the order the encoder takes them: block by block of
