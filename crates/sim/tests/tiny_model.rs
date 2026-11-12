@@ -319,7 +319,7 @@ fn tiny_model_runs_whole_on_the_gates() {
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
+#[ignore = "lenta: cientos de miles de ciclos: solo con optimizaciones"]
 fn a_die_built_for_its_program_runs_it_identically_with_less_logic() {
     let dir = std::env::temp_dir().join(format!("llm2chip-trim-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -400,7 +400,7 @@ fn gates_in_cells(program: &compiler::Program, dir: &Path, c: DieConfig, tokens:
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
+#[ignore = "lenta: cientos de miles de ciclos: solo con optimizaciones"]
 fn the_cells_reach_the_same_bits_as_the_exact_machine() {
     let dir = std::env::temp_dir().join(format!("llm2chip-cells-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -434,7 +434,7 @@ fn the_cells_reach_the_same_bits_as_the_exact_machine() {
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
+#[ignore = "lenta: cientos de miles de ciclos: solo con optimizaciones"]
 fn quantisation_groups_cut_among_the_units_keep_the_bits() {
     // Groups of four columns over four units: each unit takes two columns of a group, and
     // its cells move on to the next scale and bias only where the whole group ends.
@@ -464,7 +464,7 @@ fn quantisation_groups_cut_among_the_units_keep_the_bits() {
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
+#[ignore = "lenta: cientos de miles de ciclos: solo con optimizaciones"]
 fn two_bit_codes_share_each_word_four_at_a_time() {
     // Words of eight bits: each keeps four codes, and the cells pick them in turn.
     GROUP.with(|g| g.set(4));
@@ -493,7 +493,7 @@ fn two_bit_codes_share_each_word_four_at_a_time() {
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
+#[ignore = "lenta: cientos de miles de ciclos: solo con optimizaciones"]
 fn parallel_lanes_compute_the_same_bits_in_fewer_cycles() {
     let dir = std::env::temp_dir().join(format!("llm2chip-lanes-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -525,7 +525,7 @@ fn parallel_lanes_compute_the_same_bits_in_fewer_cycles() {
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
+#[ignore = "lenta: cientos de miles de ciclos: solo con optimizaciones"]
 fn sliding_windows_and_biases_run_on_the_gates() {
     for family in ["gemma3_text", "qwen2", "deepseek_v3"] {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/plain").join(family);
@@ -552,7 +552,7 @@ fn sliding_windows_and_biases_run_on_the_gates() {
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "millones de instrucciones: solo con optimizaciones")]
+#[ignore = "lenta: millones de instrucciones: solo con optimizaciones"]
 fn the_firmware_scores_the_draft_head_like_the_software() {
     use netlist::chip::{chip_info, ChipModel, GenerationSetup};
     use netlist::image::build_image;
@@ -754,7 +754,7 @@ fn grouped_checkpoint(dir: &Path) {
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "cientos de miles de ciclos: solo con optimizaciones")]
+#[ignore = "lenta: cientos de miles de ciclos: solo con optimizaciones"]
 fn heads_in_groups_of_three_run_on_units_a_power_of_two_apart() {
     let dir = std::env::temp_dir().join(format!("llm2chip-grouped-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -881,7 +881,7 @@ fn loaded_die(layout: &Layout, code: &Microprogram, weights: &Weights, c: DieCon
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "cuatro dies en puertas: solo con optimizaciones")]
+#[ignore = "lenta: cuatro dies en puertas: solo con optimizaciones"]
 fn two_groups_of_two_dies_run_a_token_over_their_links() {
     let dir = std::env::temp_dir().join(format!("llm2chip-groups-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

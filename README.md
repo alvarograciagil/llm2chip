@@ -108,10 +108,16 @@ Para empaquetar la aplicación de escritorio:
 scripts/build-app.sh
 ```
 
-Para pasar todas las comprobaciones:
+Para pasar las comprobaciones rápidas, un par de minutos:
 
 ```bash
 scripts/check.sh
+```
+
+Y todas, con los chips completos en puertas (unos 30 minutos), antes de subir cambios del hardware:
+
+```bash
+scripts/check.sh --completa
 ```
 
 Windows tiene los equivalentes `.ps1`. Los pesos no se incluyen: la aplicación busca en `~/.llm2chip/models`, `~/.mtplx/models`, la caché de Hugging Face y las carpetas que añadas en la vista Modelos.

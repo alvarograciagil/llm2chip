@@ -209,28 +209,28 @@ fn setup_for(name: &str, firmware: &FirmwareImage, die: DieConfig, sharing: Shar
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "dos chips completos en puertas: solo con optimizaciones")]
+#[ignore = "lenta: dos chips completos en puertas: solo con optimizaciones"]
 fn the_same_image_adapts_to_one_or_two_chips() {
     let Some(firmware) = build_firmware() else { return };
     two_chips_say_what_one_says(&firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, "two", Sharing::Layers);
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "dos chips completos en puertas: solo con optimizaciones")]
+#[ignore = "lenta: dos chips completos en puertas: solo con optimizaciones"]
 fn two_chips_that_share_every_product_by_rows_say_what_one_says() {
     let Some(firmware) = build_firmware() else { return };
     two_chips_say_what_one_says(&firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, "rows", Sharing::Rows);
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "cuatro chips completos en puertas: solo con optimizaciones")]
+#[ignore = "lenta: cuatro chips completos en puertas: solo con optimizaciones"]
 fn two_groups_of_two_chips_sharing_rows_in_a_chain_say_what_one_says() {
     let Some(firmware) = build_firmware() else { return };
     chips_say_what_one_says(&firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, "mixed", Sharing::Mixed(2), 4);
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "dos chips completos en puertas: solo con optimizaciones")]
+#[ignore = "lenta: dos chips completos en puertas: solo con optimizaciones"]
 fn chips_sharing_rows_over_a_wide_link_say_what_one_says() {
     let Some(firmware) = build_firmware() else { return };
     let base = cell_die_config();
@@ -239,7 +239,7 @@ fn chips_sharing_rows_over_a_wide_link_say_what_one_says() {
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "dos chips completos en puertas: solo con optimizaciones")]
+#[ignore = "lenta: dos chips completos en puertas: solo con optimizaciones"]
 fn a_wide_link_moves_blocks_between_two_chips_and_keeps_the_text() {
     let Some(firmware) = build_firmware() else { return };
     let base = cell_die_config();
@@ -308,7 +308,7 @@ fn chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &str,
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "tres chips completos en puertas: solo con optimizaciones")]
+#[ignore = "lenta: tres chips completos en puertas: solo con optimizaciones"]
 fn a_number_of_chips_the_image_does_not_cover_is_reported() {
     let Some(firmware) = build_firmware() else { return };
     let setup = setup("three", &firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, Sharing::Layers);

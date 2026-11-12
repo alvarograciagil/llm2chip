@@ -279,7 +279,7 @@ fn running_out_of_memory_is_reported_not_misread() {
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "millones de instrucciones: solo con optimizaciones")]
+#[ignore = "lenta: millones de instrucciones: solo con optimizaciones"]
 fn the_firmware_tokenizes_like_the_reference() {
     let Some(firmware) = build_firmware() else {
         eprintln!("omitido: falta el firmware");

@@ -93,7 +93,7 @@ fn run_self_test(sim: &mut Simulator, cycles: u64) -> (u64, u64) {
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "millones de operaciones: solo con optimizaciones")]
+#[ignore = "lenta: millones de operaciones: solo con optimizaciones"]
 fn every_memory_passes_its_self_test_and_a_stuck_bit_is_found() {
     let cycles = 1 << 16;
     let (done, failed) = run_self_test(&mut chip(), cycles);
