@@ -8,6 +8,7 @@ import { useDesign } from "../store";
 import { matchingPreset } from "../params";
 import { chipDraftDepth, loadSignature, useSimulator } from "./simulatorStore";
 import { sameModel } from "./sameModel";
+import { ChipActivity } from "./ChipActivity";
 
 const KIND_LABEL: Record<ScheduledStage["kind"], string> = {
   matvec: "Matriz × vector",
@@ -187,6 +188,7 @@ export function SimulatorView() {
             <button className="pill primary-pill" disabled={!loaded || !prompt.trim()} onClick={generate}>Enviar</button>
           )}
         </div>
+        {loaded && <ChipActivity />}
         {schedule && <Timeline schedule={schedule} pulse={pulse} />}
       </div>
     </section>

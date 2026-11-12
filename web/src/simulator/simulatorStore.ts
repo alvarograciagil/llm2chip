@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import type { Adaptation } from "../models/modelsStore";
 import { useDesign } from "../store";
+import { addActivity, EMPTY_ACTIVITY, readActivity, readCpuInfo, type ChipStep, type CpuInfo, type StepActivity } from "./activity";
+
+/** Steps kept for the list: the oldest go once there are more. */
+const MAX_STEPS = 2000;
 
 export interface ServerModel {
   name: string;
@@ -111,6 +115,12 @@ interface SimulatorState {
   seconds: number[];
   saturated: number;
   pulse: number;
+  /** What the chip's CPU is, when the run goes through it. */
+  cpuInfo: CpuInfo | null;
+  /** What the chip did in each step, with the CPU and its firmware. */
+  steps: ChipStep[];
+  /** All of it added up since the run began. */
+  totals: StepActivity | null;
 
   connect: () => Promise<void>;
   set: (patch: Partial<SimulatorState>) => void;
@@ -169,6 +179,9 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   seconds: [],
   saturated: 0,
   pulse: 0,
+  cpuInfo: null,
+  steps: [],
+  totals: null,
 
   async connect() {
     try {
@@ -218,7 +231,13 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
     const rate = metric("tok_s");
     const fidelity = { firmware, sampler_unit: samplerUnit || firmware, cycles_per_token: rate > 0 ? (metric("freq_ghz") * 1e9) / rate : 0, sampler_lanes: useDesign.getState().params.sampler_lanes, tokenizer: firmware && firmwareTokenizer, context_tokens: useDesign.getState().params.context_tokens };
     socket?.close();
-    set({ ending: null, drawing: null, picture: draw ? null : get().picture, chip: null, output: "", running: true, error: null, phase: "Conectando", tokens: 0, prefilled: 0, promptTokens: 0, seconds: [], saturated: 0, acceptance: { hits: [], tries: [] } });
+    set({ ending: null, drawing: null, picture: draw ? null : get().picture, chip: null, output: "", running: true, error: null, phase: "Conectando", tokens: 0, prefilled: 0, promptTokens: 0, seconds: [], saturated: 0, acceptance: { hits: [], tries: [] }, cpuInfo: null, steps: [], totals: null });
+    // A step the chip reported, with what it did, at the end of the list.
+    const step = (kind: ChipStep["kind"], index: number, text: string, data: Record<string, unknown>) => (s: SimulatorState) => {
+      if (!data.activity) return {};
+      const activity = readActivity(data.activity);
+      return { steps: [...s.steps, { kind, index, text, cycles: Number(data.cycles) || 0, activity }].slice(-MAX_STEPS), totals: addActivity(s.totals ?? EMPTY_ACTIVITY, activity) };
+    };
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${location.host}/api/generate`);
     socket = ws;
@@ -232,7 +251,8 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
       if (data.type === "decoding") set((s) => ({ phase: "Decodificando la imagen", drawing: s.drawing && { ...s.drawing, decoding: true } }));
       if (data.type === "picture") set({ picture: { data: data.data, side: data.side, seconds: data.seconds } });
       if (data.type === "start") set({ promptTokens: data.prompt_tokens, phase: "Leyendo el prompt" });
-      if (data.type === "prefill") set((s) => ({ prefilled: data.done, saturated: s.saturated, pulse: s.pulse + 1 }));
+      if (data.type === "cpu") set({ cpuInfo: readCpuInfo(data) });
+      if (data.type === "prefill") set((s) => ({ prefilled: data.done, saturated: s.saturated, pulse: s.pulse + 1, ...step("prefill", data.done, "", data)(s) }));
       if (data.type === "token") {
         set((s) => ({
           output: s.output + data.text,
@@ -242,9 +262,12 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
           phase: "Generando",
           pulse: s.pulse + 1,
           acceptance: data.tries ? { hits: data.hits, tries: data.tries } : s.acceptance,
+          ...step("token", data.index, data.text, data)(s),
         }));
       }
       if (data.type === "done") {
+        // What the firmware did after its last token: closing the answer.
+        if (data.activity) set((s) => ({ totals: addActivity(s.totals ?? EMPTY_ACTIVITY, readActivity(data.activity)) }));
         set({ phase: "Terminado", running: false, ending: ["limit", "loop", "context"].includes(data.reason) ? data.reason : null, chip: data.chip ? { cycles: data.chip.cycles, dieCycles: data.chip.die_cycles, tokenizerMatch: data.chip.tokenizer_match ?? null } : null });
         ws.close();
       }

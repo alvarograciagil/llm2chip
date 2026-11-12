@@ -1590,6 +1590,160 @@ button.link-row {
   bottom: 0;
 }
 
+.activity {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--group-solid);
+  box-shadow: 0 0 0 0.5px var(--separator);
+}
+
+.activity > .muted-text {
+  margin: 0 0 8px;
+}
+
+/* The CPU's cycles by group: the waiting part is grey and striped, idle rather than work. */
+.task-bar {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 3px;
+}
+
+.task-bar i {
+  min-width: 2px;
+  height: 100%;
+}
+
+.task-bar i:first-child {
+  border-radius: 3px 0 0 3px;
+}
+
+.task-bar i:last-child {
+  border-radius: 0 3px 3px 0;
+}
+
+.task-bar i.waiting,
+.swatch.waiting {
+  background-image: repeating-linear-gradient(135deg, transparent 0 3px, rgba(255, 255, 255, 0.45) 3px 5px) !important;
+}
+
+.activity-wait {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
+.steps-legend {
+  margin: 2px 0 4px;
+  font-size: 11px;
+}
+
+.activity-metrics {
+  margin: 8px 0 4px;
+}
+
+.task-table summary {
+  cursor: pointer;
+  color: var(--label-2);
+  font-size: 12px;
+}
+
+.task-table table {
+  width: 100%;
+  margin-top: 4px;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-table td {
+  padding: 2px 4px;
+  border-top: 0.5px solid var(--separator);
+}
+
+.task-table td:not(:first-child) {
+  color: var(--label-2);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.steps-head {
+  margin-top: 12px;
+}
+
+.steps {
+  max-height: 260px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.step-head {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) minmax(60px, 34%) 64px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 2px;
+  border: 0;
+  border-top: 0.5px solid var(--separator);
+  background: none;
+  color: var(--label);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.step-head:hover,
+.step.open .step-head {
+  background: var(--control);
+}
+
+.step-name {
+  color: var(--label-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.step-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
+.step-cycles {
+  color: var(--label-2);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.step-detail {
+  padding: 4px 8px 8px 24px;
+  font-size: 12px;
+}
+
+.step-detail ol {
+  margin: 0 0 4px;
+  padding-left: 16px;
+}
+
+.step-detail li + li {
+  margin-top: 2px;
+}
+
+@media (max-width: 560px) {
+  .step-head {
+    grid-template-columns: 76px minmax(0, 1fr) 56px;
+  }
+
+  .step-head .task-bar {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+
 .tl-matvec { background: var(--cat-memoria); }
 .tl-vector { background: var(--cat-vectorial); }
 .tl-embedding { background: var(--cat-calculo); }
