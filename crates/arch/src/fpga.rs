@@ -46,20 +46,20 @@ pub fn base_logic_k(board: &FpgaBoard) -> f64 {
     match board.lut {
         // A Cyclone IV has no distributed memory, only blocks that read a cycle late, so
         // its register table stays in flip-flops (synth_intel, memories aside).
-        "LE" if board.fpga.contains("Cyclone IV") => 64.3,
+        "LE" if board.fpga.contains("Cyclone IV") => 53.6,
         // With the register table in distributed memory, counted in the look-up tables
         // it takes.
-        "LUT6" => 12.9,
+        "LUT6" => 12.8,
         // Look-up tables and carry cells, as Gowin's count them.
-        "LE" => 20.8,
+        "LE" => 20.2,
         // Lattice ECP5 with the products in DSP blocks and the sums on carry chains.
-        _ => 18.4,
+        _ => 17.9,
     }
 }
 
 /// The memories of that chip besides weights and caches: microcode as a dictionary,
 /// CPU memory and function tables, in megabits.
-pub const BASE_MEMORY_MBIT: f64 = 1.69;
+pub const BASE_MEMORY_MBIT: f64 = 1.68;
 
 macro_rules! board {
     ($id:literal, $maker:literal, $name:literal, $fpga:literal, $url:literal, $image:expr, $luts:literal, $lut:literal, $bram:literal, $dsp:literal, $ddr:literal, $ddr_gbps:literal, $clock:literal, $measured:literal, $usd:literal, $price:literal, $tools:literal) => {
@@ -75,7 +75,7 @@ pub fn boards() -> &'static [FpgaBoard] {
             board!("tang-mega-60k", "Sipeed", "Sipeed Tang Mega 60K Dock", "Gowin GW5AT-60", "https://wiki.sipeed.com/hardware/en/tang/tang-mega-60k/mega-60k.html", Some("https://wiki.sipeed.com/hardware/zh/tang/tang-mega-60k/assets/mega_60k_top.png"), 60.0, "LUT4", 2.1, 118, 0.25, 1.6, 40.0, false, 90.0, "~90 $", "Gowin EDA"),
             board!("tang-mega-138k-dock", "Sipeed", "Sipeed Tang Mega 138K Dock", "Gowin GW5AST-138", "https://wiki.sipeed.com/hardware/en/tang/tang-mega-138k/mega-138k.html", Some("https://wiki.sipeed.com/hardware/zh/tang/tang-mega-138k/assets/mega_138k_top.jpg"), 138.0, "LUT4", 6.1, 298, 0.5, 1.6, 40.0, false, 130.0, "~130 $", "Gowin EDA"),
             board!("tang-mega-138k", "Sipeed", "Sipeed Tang Mega 138K Pro", "Gowin GW5AST-138", "https://wiki.sipeed.com/hardware/en/tang/tang-mega-138k/mega-138k-pro.html", Some("https://wiki.sipeed.com/hardware/en/tang/tang-mega-138k/assets/mega_138k_pro_top.png"), 138.0, "LUT4", 6.1, 298, 1.0, 3.2, 40.0, false, 195.0, "~195 $", "Gowin EDA"),
-            board!("ulx3s-85f", "Radiona", "Radiona ULX3S 85F", "Lattice ECP5 LFE5U-85F", "https://radiona.org/ulx3s/", None, 84.0, "LUT4", 3.7, 156, 0.032, 0.2, 35.3, true, 150.0, "~130-150 $", "Yosys + nextpnr, libres"),
+            board!("ulx3s-85f", "Radiona", "Radiona ULX3S 85F", "Lattice ECP5 LFE5U-85F", "https://radiona.org/ulx3s/", None, 84.0, "LUT4", 3.7, 156, 0.032, 0.2, 34.5, true, 150.0, "~130-150 $", "Yosys + nextpnr, libres"),
             // The usual small boards with this chip carry 32 MB of SDRAM on 16 bits.
             board!("cyclone-iv-ep4ce10", "Altera", "Placa con Cyclone IV EP4CE10", "Altera Cyclone IV E EP4CE10", "https://www.intel.com/content/www/us/en/products/details/fpga/cyclone/iv/e.html", None, 10.3, "LE", 0.41, 23, 0.008, 0.2, 40.0, false, 30.0, "~25-40 $", "Quartus Prime Lite (gratuito)"),
             board!("atum-a3-nano", "Terasic", "Terasic Atum A3 Nano", "Altera Agilex 3 A3CZ135", "https://www.terasic.com.tw/cgi-bin/page/archive.pl?Language=English&CategoryNo=44&No=1373", None, 135.0, "LE", 8.3, 368, 0.064, 0.2, 80.0, false, 180.0, "180-245 $", "Quartus Prime Pro (licencia gratuita para Agilex 3)"),

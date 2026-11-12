@@ -79,7 +79,6 @@ fn whole_chip_in_gates(die: netlist::DieConfig, tag: &str) -> (Simulator, u64, L
 
 /// The same, choosing whether the embedding table stays in the image.
 fn chip_in_gates(die: netlist::DieConfig, tag: &str, table_outside: bool, design: fn(ChipConfig) -> netlist::Design) -> (Simulator, u64, Layout, PathBuf) {
-    let firmware = build_firmware().expect("firmware");
     let dir = std::env::temp_dir().join(format!("llm2chip-chip-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     make_checkpoint(&dir);
@@ -95,19 +94,29 @@ fn chip_in_gates(die: netlist::DieConfig, tag: &str, table_outside: bool, design
     let die = sim::chip::with_code_dictionary(sim::chip::compact_die(die, &layout), &code);
     eprintln!("diccionario de microcódigo: 2^{} palabras", die.features.dictionary_bits);
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let design = design(config);
+    let (sim, die_busy) = says_the_same_in_gates(config, &design, &layout, &code, CONFIG, &dir);
+    (sim, die_busy, layout, dir)
+}
+
+/// Boots `design` with the image of one model and checks it writes what the instruction-level
+/// simulation writes, in as many cycles. Gives the simulator and the cycles the die was busy.
+fn says_the_same_in_gates(config: ChipConfig, design: &netlist::Design, layout: &Layout, code: &netlist::Microprogram, model: &str, dir: &std::path::Path) -> (Simulator, u64) {
+    let firmware = build_firmware().expect("firmware");
+    let die = config.die;
     let setup = GenerationSetup { max_new: 2, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
-    let info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
-    let mut segments = image_segments(&die, &code, &layout);
+    let info = chip_info(&die, code, layout.logits_register(&compile_qwen3_5(model).unwrap()), 8, &setup);
+    let mut segments = image_segments(&die, code, layout);
     // The model's own weights go through the real controller into the cells.
-    let checkpoint = Weights::open(&dir).unwrap();
-    segments.extend(cell_segments(&die, &layout, &checkpoint).unwrap());
+    let checkpoint = Weights::open(dir).unwrap();
+    segments.extend(cell_segments(&die, layout, &checkpoint).unwrap());
     eprintln!("{} segmentos, microprograma de {} palabras", segments.len(), code.words.len());
     let tables = tiny_tokenizer();
     let image = build_image(&firmware.program, &firmware.data, &info, &tables.to_words(), &segments).unwrap();
     eprintln!("imagen de {} palabras", image.len());
 
     let input = b"hoy\0";
-    let engine = VmEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
+    let engine = VmEngine::new(compile_qwen3_5(model).unwrap(), Weights::open(dir).unwrap(), die, CHIP_TOKENS).unwrap();
     let model = ChipModel::new(engine, code.clone(), SamplerModel { config: config.sampler, rng: 0, table: exponential_table() });
     let mut bus = SocBus::booted_with(config.soc, &image, input, model).unwrap();
     let mut cpu = Rv32Iss::default();
@@ -121,13 +130,12 @@ fn chip_in_gates(die: netlist::DieConfig, tag: &str, table_outside: bool, design
     let at_boot = segments.iter().filter(|s| s.target != netlist::image::Target::RuntimeTable).count();
     assert_eq!(expected.iter().filter(|b| **b == b'.').count(), at_boot, "todos los segmentos deben cargar bien");
 
-    let design = design(config);
     let start = std::time::Instant::now();
-    let (output, cycles, sim) = run_gates(&design, &image, input, cpu.cycle + 4096);
+    let (output, cycles, sim) = run_gates(design, &image, input, cpu.cycle + 4096);
     eprintln!("puertas: {cycles} ciclos en {:.1} s, salida {:?}", start.elapsed().as_secs_f64(), String::from_utf8_lossy(&output));
     assert_eq!(String::from_utf8_lossy(&output), String::from_utf8_lossy(&expected));
     assert_eq!(cycles, cpu.cycle, "ciclos");
-    (sim, bus.peripheral.die_busy, layout, dir)
+    (sim, bus.peripheral.die_busy)
 }
 
 #[test]
@@ -188,6 +196,36 @@ fn a_chip_alone_on_one_board_says_the_same_without_tests_or_chain() {
     assert_eq!(sim.get("chain_tx_valid").unwrap(), 0);
     assert_eq!(sim.get("jtag_tdo").unwrap(), 0);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn one_chip_runs_either_of_two_models_from_its_image() {
+    if build_firmware().is_none() {
+        return;
+    }
+    // The test model twice, with codes of 4 and of 2 bits: different weights, different
+    // packing in the cells, different microcode.
+    let dirs: Vec<PathBuf> = [(2, 4), (4, 2)]
+        .iter()
+        .enumerate()
+        .map(|(i, (group, bits))| {
+            GROUP.with(|g| g.set(*group));
+            BITS.with(|b| b.set(*bits));
+            let dir = std::env::temp_dir().join(format!("llm2chip-dos-{i}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            make_checkpoint(&dir);
+            dir
+        })
+        .collect();
+    let programs: Vec<_> = dirs.iter().map(|_| compile_qwen3_5(CONFIG).unwrap()).collect();
+    let weights: Vec<_> = dirs.iter().map(|d| Weights::open(d).unwrap()).collect();
+    let models: Vec<_> = programs.iter().zip(&weights).collect();
+    let trial = netlist::DieConfig { microcode_bits: 15, ..cell_die_config() };
+    let chip = sim::chip::fpga_chip_for(&models, trial, CHIP_TOKENS, sim::chip::FpgaOptions { table_inside: true, tokenizer_words: tiny_tokenizer().to_words().len(), ..Default::default() }).unwrap();
+    for ((layout, code), dir) in chip.models.iter().zip(&dirs) {
+        says_the_same_in_gates(chip.config, &chip.design, layout, code, CONFIG, dir);
+        std::fs::remove_dir_all(dir).ok();
+    }
 }
 
 #[test]

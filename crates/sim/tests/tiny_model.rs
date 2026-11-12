@@ -137,7 +137,7 @@ fn assert_vm_matches_gates(program: &compiler::Program, config: &str, dir: &Path
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }
-    for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !layout.is_spread(*buffer)) {
+    for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !layout.is_spread(*buffer) && !layout.is_overwritten(*buffer)) {
         let gates = layout.register_of(buffer);
         let fast = vm.register_of(buffer);
         for index in 0..*length as u32 {
@@ -307,7 +307,7 @@ fn tiny_model_runs_whole_on_the_gates() {
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }
-    for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !layout.is_spread(*buffer)) {
+    for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !layout.is_spread(*buffer) && !layout.is_overwritten(*buffer)) {
         let gates = layout.register_of(buffer);
         let fast = vm.register_of(buffer);
         for index in 0..*length as u32 {
@@ -418,7 +418,7 @@ fn the_cells_reach_the_same_bits_as_the_exact_machine() {
         let c = DieConfig { cells, features: cell_die_config().features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits), ..cell_die_config() };
         let mut run = gates_in_cells(&program, &dir, c, &tokens);
         // Some buffers stay a slice per unit: what reads them takes the same slices.
-        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer)) {
+        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer) && !run.layout.is_overwritten(*buffer)) {
             let gates = run.layout.register_of(buffer);
             let fast = vm.register_of(buffer);
             for index in 0..*length as u32 {
@@ -452,7 +452,7 @@ fn quantisation_groups_cut_among_the_units_keep_the_bits() {
     for (lane_bits, cluster_bits, steps) in [(2, 2, 1), (2, 2, 2), (1, 0, 4)] {
         let c = DieConfig { cells: 16, features: cell_die_config().features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits).with_factor_steps(steps), ..cell_die_config() };
         let mut run = gates_in_cells(&program, &dir, c, &tokens);
-        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer)) {
+        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer) && !run.layout.is_overwritten(*buffer)) {
             let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
             for index in 0..*length as u32 {
                 let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
@@ -480,7 +480,9 @@ fn two_bit_codes_share_each_word_four_at_a_time() {
     for (lane_bits, cluster_bits) in [(2, 0), (1, 1)] {
         let c = DieConfig { cells: 16, features: cell_die_config().features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits), ..cell_die_config() };
         let mut run = gates_in_cells(&program, &dir, c, &tokens);
-        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer)) {
+        // On a real chip, buffers that are never alive at once share a register.
+        assert!((0..program.buffers.len()).any(|b| run.layout.is_overwritten(b)), "ningún registro compartido");
+        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer) && !run.layout.is_overwritten(*buffer)) {
             let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
             for index in 0..*length as u32 {
                 let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
@@ -537,7 +539,7 @@ fn sliding_windows_and_biases_run_on_the_gates() {
             vm.step(*token, position + 1 == tokens.len()).unwrap();
         }
         // Some buffers stay a slice per unit: what reads them takes the same slices.
-        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer)) {
+        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer) && !run.layout.is_overwritten(*buffer)) {
             let gates = run.layout.register_of(buffer);
             let fast = vm.register_of(buffer);
             for index in 0..*length as u32 {
@@ -569,7 +571,7 @@ fn a_die_with_only_the_registers_its_routines_reach_computes_the_same() {
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }
-    for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer)) {
+    for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer) && !run.layout.is_overwritten(*buffer)) {
         let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
         for index in 0..*length as u32 {
             assert_eq!(read_block_value(&mut run.sim, c, gates, index).0, vm.mantissa(fast, index), "búfer {buffer}, elemento {index}");
@@ -876,7 +878,7 @@ fn heads_in_groups_of_three_run_on_units_a_power_of_two_apart() {
         let c = DieConfig { cells: 4 << cluster_bits, features: cell_die_config().features.with_lane_bits(2).with_cluster_bits(cluster_bits), ..cell_die_config() };
         let mut run = gates_in_cells(&program, &dir, c, &tokens);
         // Some buffers stay a slice per unit: what reads them takes the same slices.
-        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer)) {
+        for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer) && !run.layout.is_overwritten(*buffer)) {
             let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
             for index in 0..*length as u32 {
                 let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);

@@ -1,12 +1,13 @@
 //! The whole chip, in Verilog, to synthesise for an FPGA: the RISC-V controller, the die
 //! with only the logic its microprogram uses, and the sampling unit.
 //!
-//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR] [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary] [--factor-steps N] [--tokenizer FILE] [--chain] [--path NET] [--groups]`
+//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR]... [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary] [--factor-steps N] [--tokenizer FILE] [--chain] [--path NET] [--groups]`
 //!
 //! With `--dsp`, each one-cycle multiplier is written as a signed product so the FPGA
 //! tools put it in their multiplier blocks. Without `--model`, the chip is the one
 //! `the_chip_sized_for_an_fpga_says_the_same_in_gates` runs for the test model; with it,
-//! a chip of the same shape sized for that model's weights and `--context` tokens. The
+//! a chip of the same shape sized for that model's weights and `--context` tokens; with
+//! several, one chip that runs any of them, each booting from its own image. The
 //! embedding table stays in the image, and the firmware brings each token's row; with
 //! `--table-inside` it goes into the vector memory instead.
 
@@ -16,7 +17,7 @@ mod common;
 use common::*;
 use compiler::compile_qwen3_5;
 use netlist::{to_verilog, to_verilog_for_fpga, CellConfig, Design, DieConfig, InstKind, Prim};
-use sim::chip::{fpga_chip, FpgaChip, FpgaOptions};
+use sim::chip::{fpga_chip_for, FpgaChip, FpgaOptions};
 use sim::lower::Layout;
 use sim::Weights;
 use std::collections::HashMap;
@@ -76,30 +77,36 @@ fn main() {
     let out = args.get(1).expect("archivo de salida");
     let option = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let test_dir = std::env::temp_dir().join(format!("llm2chip-fpga-{}", std::process::id()));
-    let (program, weights, trial, context) = match option("--model") {
-        Some(dir) => {
-            let dir = Path::new(&dir);
-            let program = compiler::compile_model(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
-            let weights = Weights::open(dir).unwrap();
-            let context: usize = option("--context").map_or(128, |n| n.parse().unwrap());
-            let cells: u32 = option("--cells").map_or(8, |n| n.parse().unwrap());
-            let lane_bits = option("--lanes").map_or(0, |n| n.parse::<u32>().unwrap().max(1).ilog2());
-            // Room for everything first, then just the bits the layout needs.
-            let base = fpga_die_config();
-            let roomy = DieConfig { cells, reg_bits: 12, index_bits: 20, cell: CellConfig { addr_bits: 20, ..base.cell }, features: base.features.with_key_shift(bits_for(context as u64)).with_lane_bits(lane_bits), ..base };
-            let layout = Layout::with_cells(&program, &weights, roomy, context).unwrap();
-            let (depth, groups) = layout.cell_depths();
-            let (code_bits, _) = layout.cell_shape(&weights).unwrap();
-            let addr_bits = bits_for(depth.max(2 * groups));
-            let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1).max(context as u64 * 512)).max(addr_bits);
-            let trial = DieConfig { reg_bits: 12, index_bits, cell: CellConfig { weight_bits: code_bits.max(2), addr_bits, ..roomy.cell }, ..roomy };
-            (program, weights, trial, context)
-        }
-        None => {
-            std::fs::create_dir_all(&test_dir).unwrap();
-            make_checkpoint(&test_dir);
-            (compile_qwen3_5(CONFIG).unwrap(), Weights::open(&test_dir).unwrap(), fpga_die_config(), 8)
-        }
+    // Every `--model DIR`: one chip that runs them all, each from its own image.
+    let dirs: Vec<&String> = args.iter().enumerate().filter(|(_, a)| *a == "--model").filter_map(|(i, _)| args.get(i + 1)).collect();
+    let context: usize = if dirs.is_empty() { 8 } else { option("--context").map_or(128, |n| n.parse().unwrap()) };
+    let (models, trial): (Vec<(compiler::Program, Weights)>, DieConfig) = if dirs.is_empty() {
+        std::fs::create_dir_all(&test_dir).unwrap();
+        make_checkpoint(&test_dir);
+        (vec![(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&test_dir).unwrap())], fpga_die_config())
+    } else {
+        let cells: u32 = option("--cells").map_or(8, |n| n.parse().unwrap());
+        let lane_bits = option("--lanes").map_or(0, |n| n.parse::<u32>().unwrap().max(1).ilog2());
+        // Room for everything first, then just the bits the layouts need, the most of any.
+        let base = fpga_die_config();
+        let roomy = DieConfig { cells, reg_bits: 12, index_bits: 20, cell: CellConfig { addr_bits: 20, ..base.cell }, features: base.features.with_key_shift(bits_for(context as u64)).with_lane_bits(lane_bits), ..base };
+        let mut trial = DieConfig { index_bits: 1, cell: CellConfig { weight_bits: 2, addr_bits: 1, ..roomy.cell }, ..roomy };
+        let models = dirs
+            .iter()
+            .map(|dir| {
+                let dir = Path::new(dir.as_str());
+                let program = compiler::compile_model(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+                let weights = Weights::open(dir).unwrap();
+                let layout = Layout::with_cells(&program, &weights, roomy, context).unwrap();
+                let (depth, groups) = layout.cell_depths();
+                let (code_bits, _) = layout.cell_shape(&weights).unwrap();
+                let addr_bits = bits_for(depth.max(2 * groups));
+                let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1).max(context as u64 * 512)).max(addr_bits);
+                trial = DieConfig { index_bits: trial.index_bits.max(index_bits), cell: CellConfig { weight_bits: trial.cell.weight_bits.max(code_bits), addr_bits: trial.cell.addr_bits.max(addr_bits), ..trial.cell }, ..trial };
+                (program, weights)
+            })
+            .collect();
+        (models, trial)
     };
     let tokenizer_words = option("--tokenizer").map_or(0, |path| sim::tokenizer::TokenizerTables::from_file(Path::new(&path), context as u64).unwrap().to_words().len());
     let options = FpgaOptions {
@@ -109,18 +116,26 @@ fn main() {
         tokenizer_words,
         chain: args.iter().any(|a| a == "--chain"),
     };
-    let FpgaChip { design, config, layout, code } = fpga_chip(&program, &weights, trial, context, options).unwrap();
+    let pairs: Vec<(&compiler::Program, &Weights)> = models.iter().map(|(p, w)| (p, w)).collect();
+    let FpgaChip { design, config, models: built } = fpga_chip_for(&pairs, trial, context, options).unwrap();
     let die = config.die;
-    if layout.outside_table().is_some() {
-        eprintln!("la tabla de embedding se queda en la imagen");
+    let last = context as u32 - 1;
+    for ((layout, code), name) in built.iter().zip(dirs.iter().map(|d| d.as_str()).chain(["modelo de prueba"])) {
+        eprintln!("== {name}");
+        if layout.outside_table().is_some() {
+            eprintln!("la tabla de embedding se queda en la imagen");
+        }
+        eprintln!("registros más largos: {:?}", layout.longest_registers(6));
+        let (depth, groups) = layout.cell_depths();
+        eprintln!("{} registros usados (2^{} en la tabla), {} palabras de pesos y {} grupos de factores por celda", layout.registers_needed(), die.reg_bits, depth, groups);
+        let distinct: std::collections::HashSet<_> = code.words.iter().map(|w| format!("{w:?}")).collect();
+        eprintln!("microprograma: {} palabras, {} distintas", code.words.len(), distinct.len());
+        // The die's cycles for one generated token at the last position, with its logits.
+        let token = code.cycles(&die, sim::lower::ENTRY_TOKEN, 1, last) + code.cycles(&die, sim::lower::ENTRY_LOGITS, 1, last);
+        eprintln!("{token} ciclos del die por token generado en la posición {last}");
     }
-    eprintln!("registros más largos: {:?}", layout.longest_registers(6));
-    let (depth, groups) = layout.cell_depths();
-    eprintln!("{} registros (2^{} en la tabla), {} palabras de pesos y {} grupos de factores por celda", layout.registers_used(), die.reg_bits, depth, groups);
-    let distinct: std::collections::HashSet<_> = code.words.iter().map(|w| format!("{w:?}")).collect();
-    eprintln!("microprograma: {} palabras, {} distintas", code.words.len(), distinct.len());
     eprintln!("memoria vectorial compacta de 2^{} palabras, frente a 2^{} sin tabla", die.features.vector_bits, die.reg_bits + die.index_bits);
-    eprintln!("{:.0} equivalentes NAND2, microprograma de {} palabras", design.gate_equivalents(), code.words.len());
+    eprintln!("{:.0} equivalentes NAND2, microcódigo de 2^{} palabras", design.gate_equivalents(), die.microcode_bits);
     let mut memories: Vec<_> = memory_bits(&design).into_iter().collect();
     memories.sort();
     let total: u64 = memories.iter().map(|(_, bits)| bits).sum();
@@ -130,10 +145,6 @@ fn main() {
             eprintln!("  {count} × {name}: 2^{addr} × {width} bits = {:.3} Mbit", (count * (1u64 << addr) * width as u64) as f64 / 1e6);
         }
     }
-    // The die's cycles for one generated token at the last position, with its logits.
-    let last = context as u32 - 1;
-    let token = code.cycles(&die, sim::lower::ENTRY_TOKEN, 1, last) + code.cycles(&die, sim::lower::ENTRY_LOGITS, 1, last);
-    eprintln!("{token} ciclos del die por token generado en la posición {last}");
     // `--groups`: the die's gates and flip-flops by the area they are drawn in.
     if args.iter().any(|a| a == "--groups") {
         fn gates(design: &Design, module: &str) -> (u64, u64) {

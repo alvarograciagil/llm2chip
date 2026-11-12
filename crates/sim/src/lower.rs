@@ -53,6 +53,80 @@ fn all_ops(program: &Program) -> impl Iterator<Item = &Inst> {
     program.ops.iter().chain(program.draft.iter().flat_map(|d| d.ops.iter())).chain(program.image.iter().flat_map(|i| i.logits_ops.iter().chain(&i.input_ops)))
 }
 
+/// Which buffers can share a register: each is alive from its first write to its last read
+/// within a token, and two whose lives never meet take the same one. The logits, the final
+/// hidden state, whatever the draft or image heads touch and anything read before it is
+/// written (carried from one token to the next) keep a register of their own. A run of
+/// products of the same vector writes all its outputs at its first product, so their lives
+/// start there. Returns, for each buffer, a group (buffers of a group share a register) and
+/// whether a later buffer of its group takes the register over.
+fn buffer_groups(program: &Program) -> (Vec<usize>, Vec<bool>) {
+    let count = program.buffers.len();
+    let mut first: Vec<Option<usize>> = vec![None; count];
+    let mut last = vec![0usize; count];
+    let mut alone = vec![false; count];
+    let mut run_start = 0;
+    let mut previous_src = None;
+    for (index, inst) in program.ops.iter().enumerate() {
+        let (reads, writes) = inst.op.buffers();
+        let src = if let Op::Matvec { src, .. } = inst.op { Some(src) } else { None };
+        if src.is_none() || src != previous_src {
+            run_start = index;
+        }
+        previous_src = src;
+        for buffer in reads {
+            if first[buffer].is_none() {
+                alone[buffer] = true;
+            }
+            last[buffer] = last[buffer].max(index);
+        }
+        for buffer in writes {
+            let start = if src.is_some() { run_start } else { index };
+            first[buffer] = Some(first[buffer].map_or(start, |f| f.min(start)));
+            last[buffer] = last[buffer].max(index);
+        }
+    }
+    let mut kept = vec![program.logits, program.final_hidden];
+    if let Some(draft) = &program.draft {
+        kept.extend([draft.hidden_in, draft.hidden_out, draft.logits]);
+        kept.extend(draft.ops.iter().flat_map(|i| { let (r, w) = i.op.buffers(); r.into_iter().chain(w) }));
+    }
+    if let Some(image) = &program.image {
+        kept.extend([image.logits, image.input]);
+        kept.extend(image.logits_ops.iter().chain(&image.input_ops).flat_map(|i| { let (r, w) = i.op.buffers(); r.into_iter().chain(w) }));
+    }
+    for buffer in kept {
+        alone[buffer] = true;
+    }
+    let mut order: Vec<usize> = (0..count).collect();
+    order.sort_by_key(|b| first[*b].unwrap_or(0));
+    let mut groups = vec![usize::MAX; count];
+    let mut overwritten = vec![false; count];
+    // The last use of each group's current buffer, and that buffer.
+    let mut busy_until: Vec<usize> = Vec::new();
+    let mut occupant: Vec<usize> = Vec::new();
+    for buffer in order {
+        let shareable = !alone[buffer] && first[buffer].is_some();
+        let free = shareable.then(|| busy_until.iter().position(|until| *until < first[buffer].unwrap_or(0))).flatten();
+        let group = match free {
+            Some(group) => group,
+            None => {
+                busy_until.push(0);
+                occupant.push(buffer);
+                busy_until.len() - 1
+            }
+        };
+        if occupant[group] != buffer {
+            overwritten[occupant[group]] = true;
+            occupant[group] = buffer;
+        }
+        // A buffer kept alone takes a group that nothing else will join.
+        busy_until[group] = if shareable { last[buffer] } else { usize::MAX };
+        groups[buffer] = group;
+    }
+    (groups, overwritten)
+}
+
 fn matrices_of(program: &Program, op: &Op) -> Vec<(String, usize, usize)> {
     match op {
         Op::Matvec { matrix, src, dst } => vec![(matrix.clone(), program.buffers[*dst], program.buffers[*src])],
@@ -345,6 +419,8 @@ fn mixed_rope_row(theta: f32, scaling: Option<RopeScaling>, half: usize, positio
 pub struct Layout {
     config: DieConfig,
     buffers: Vec<u32>,
+    /// Buffers whose register a later buffer takes over within the token.
+    overwritten: Vec<bool>,
     weights: HashMap<String, u32>,
     small: HashMap<String, u32>,
     keys: Vec<u32>,
@@ -442,9 +518,18 @@ impl Layout {
     fn build(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: Option<usize>, matrices_in_registers: bool, cells: bool) -> Result<Self, String> {
         let next = Cell::new(1u32);
         let alloc = |count: u32| next.replace(next.get() + count);
-        let buffers: Vec<u32> = program.buffers.iter().map(|_| alloc(1)).collect();
+        // A real chip shares registers among buffers that are never alive at once; the
+        // exact engine keeps one each, so every buffer can be read after a token.
+        let (buffers, overwritten): (Vec<u32>, Vec<bool>) = if cells {
+            let (groups, overwritten) = buffer_groups(program);
+            let registers: Vec<u32> = (0..groups.iter().max().map_or(0, |g| g + 1)).map(|_| alloc(1)).collect();
+            (groups.iter().map(|g| registers[*g]).collect(), overwritten)
+        } else {
+            (program.buffers.iter().map(|_| alloc(1)).collect(), vec![false; program.buffers.len()])
+        };
         let mut setup = Assembly::new(&config);
         let mut matrices: HashMap<String, u32> = HashMap::new();
+        let mut by_exponent: HashMap<i64, u32> = HashMap::new();
         let mut cell_plan: Vec<CellEntry> = Vec::new();
         // Consecutive products of the same vector run in one pass of the cells.
         let mut chains: HashMap<String, Vec<(String, usize)>> = HashMap::new();
@@ -483,7 +568,16 @@ impl Layout {
                 if table {
                     lookup_tables.insert(name.clone());
                 }
-                let reg = *matrices.entry(name.clone()).or_insert_with(|| alloc(1));
+                // A matrix in the cells keeps only its exponent in its register: matrices with
+                // the same exponent share one on a real chip.
+                let reg = match matrices.get(&name) {
+                    Some(reg) => *reg,
+                    None => {
+                        let reg = if cells && !table { *by_exponent.entry(weights.matrix(&name)?.exponent(cols)).or_insert_with(|| alloc(1)) } else { alloc(1) };
+                        matrices.insert(name.clone(), reg);
+                        reg
+                    }
+                };
                 if chip_tokens.is_some() && matrices_in_registers && (!cells || table) && in_registers.insert(name.clone()) {
                     if rows * cols > 1 << config.index_bits {
                         return Err(format!("la matriz {name} tiene {} elementos y el direccionamiento solo llega a {}", rows * cols, 1usize << config.index_bits));
@@ -698,7 +792,7 @@ impl Layout {
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
         }
-        Ok(Self { config, buffers, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: program.vocab as u32, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside: None })
+        Ok(Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: program.vocab as u32, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside: None })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -715,6 +809,12 @@ impl Layout {
 
     pub fn register_of(&self, buffer: usize) -> u32 {
         self.buffers[buffer]
+    }
+
+    /// Whether another buffer takes this one's register later in the token, so it no longer
+    /// holds its value once the token is done.
+    pub fn is_overwritten(&self, buffer: usize) -> bool {
+        self.overwritten[buffer]
     }
 
     /// Whether a die with several units leaves `buffer` a slice on each, never whole.

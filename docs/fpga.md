@@ -14,8 +14,8 @@ Por defecto es el chip para **una placa sola**: sin puerto JTAG, sin el autotest
 
 | Recurso | Cantidad |
 |---|---|
-| Lógica | ≈ 414 000 equivalentes NAND2 (con escala y sesgo en dos ciclos) |
-| Memoria | 1,69 Mbit: CPU 0,52 (32 KB de programa y 32 KB de datos); tablas de función 0,26; microcódigo 0,5 (con diccionario; 1,3 sin él); banco vectorial 0,07, con la tabla de registros que da a cada uno solo lo que usa (sin ella serían 2,1) |
+| Lógica | ≈ 355 000 equivalentes NAND2 (con escala y sesgo en dos ciclos) |
+| Memoria | 1,68 Mbit: CPU 0,52 (32 KB de programa y 32 KB de datos); tablas de función 0,26; microcódigo 0,5 (con diccionario; 1,3 sin él); banco vectorial 0,07, con la tabla de registros que da a cada uno solo lo que usa (sin ella serían 2,1) |
 | Reloj | El camino crítico ronda 24 retardos de sumador completo: en una FPGA de gama baja, entre 20 y 50 MHz |
 
 ## Síntesis medida con Yosys
@@ -26,10 +26,10 @@ Con `--dsp`, cada multiplicador de un ciclo se escribe como un producto con sign
 
 | Familia | LUT | Biestables | Memoria de bloque | Multiplicadores |
 |---|---|---|---|---|
-| Xilinx serie 7 | 10 996 LUT6 + 467 de memoria distribuida | 5 449 | 44 BRAM36 + 11 BRAM18 | 42 DSP48 |
-| Gowin | 18 715 LUT + 2 063 ALU + 432 RAM16SDP4 | 5 531 | 126 BSRAM | 42 MULT18×18 + 18 MULT9×9 |
-| Lattice ECP5 | 18 486 LUT4, con 432 bloques de memoria distribuida | 5 539 | 126 DP16KD | 59 MULT18×18 |
-| Altera Cyclone IV E (memorias aparte) | 64 268 LE | 13 119 | — | — |
+| Xilinx serie 7 | 11 166 LUT6 + 403 de memoria distribuida | | | 42 DSP48 |
+| Gowin | 17 961 LUT + 2 214 ALU | | 125 BSRAM | 42 MULT18×18 + 18 MULT9×9 |
+| Lattice ECP5 | 17 872 LUT4, con memoria distribuida | | 125 DP16KD | 59 MULT18×18 |
+| Altera Cyclone IV E (memorias aparte) | 53 603 LE | 9 017 | — | — |
 
 Antes de recortar la tabla de registros, quitar lo que una placa sola no usa y ajustar las tablas de función y la memoria de la CPU eran 23 500 LUT6 en Xilinx, 24 400 LUT4 en Gowin y 28 610 LUT4 en ECP5.
 
@@ -63,7 +63,7 @@ El asistente de proyecto («+» en la barra, «Una FPGA») tiene estas placas y 
 | Digilent Genesys 2 | Kintex-7 XC7K325T | 204 K LUT6 | 16 Mbit | 840 | 1 GB DDR3 | ~1 000 $ |
 | AMD Alveo U250 | UltraScale+ XCU250 | 1 728 K LUT6 | 432 Mbit | 12 288 | 64 GB DDR4 | ~9 000 $ |
 
-La Cyclone IV EP4CE10 es la más pequeña del catálogo: el chip más pequeño que genera el proyecto necesita unos 64 000 elementos lógicos (medidos con Yosys, `synth_intel`, sin contar memorias) y 1,69 Mbit de memoria interna, frente a sus 10 300 y 0,41 (la Cyclone IV no tiene memoria distribuida, así que su tabla de registros sigue en biestables, y solo el microcódigo ya ocupa 0,5 Mbit), aunque los pesos vayan a la SDRAM de la placa. Su memoria SDRAM tampoco sirve hoy para los pesos: el chip los guarda en la memoria de cada celda y no tiene camino para leerlos de fuera.
+La Cyclone IV EP4CE10 es la más pequeña del catálogo: el chip más pequeño que genera el proyecto necesita unos 54 000 elementos lógicos (medidos con Yosys, `synth_intel`, sin contar memorias) y 1,68 Mbit de memoria interna, frente a sus 10 300 y 0,41 (la Cyclone IV no tiene memoria distribuida, así que su tabla de registros sigue en biestables, y solo el microcódigo ya ocupa 0,5 Mbit), aunque los pesos vayan a la SDRAM de la placa. Su memoria SDRAM tampoco sirve hoy para los pesos: el chip los guarda en la memoria de cada celda y no tiene camino para leerlos de fuera.
 
 En ella cabe, en cambio, una celda de cálculo del chip detrás del puerto serie: `cargo run -p netlist --example board -- DIR` escribe el proyecto, con su banco de pruebas, el proyecto de Quartus y un guion para el ordenador que carga una matriz, la multiplica por un vector y compara cada fila con el cálculo exacto. Ocupa unos 790 LE y 280 biestables (un 10 % de la EP4CE10) y 32 Kbit de memoria. La prueba `the_cell_behind_the_serial_port_multiplies_a_matrix_exactly` lo ejecuta en iverilog. Los pines del proyecto son los habituales de estas placas y están marcados como sin verificar: hay que comprobarlos en el esquema de la placa.
 
@@ -98,6 +98,7 @@ Con OSS CAD Suite (Yosys y nextpnr) el chip de juguete se coloca y se ruta en un
 | Además, la tabla de registros en memoria distribuida y las sumas de la dirección vectorial en cadenas de acarreo | 32,1 MHz | 28 610 | 142 DP16KD | 59 |
 | Para una placa sola, con registros, tablas de función y memoria de la CPU a medida | 30,7 MHz | 18 486 | 126 DP16KD | 59 |
 | Además, las sumas y comparaciones de la unidad de muestreo en cadenas de acarreo | **35,4 MHz** | 18 440 | 126 DP16KD | 59 |
+| Además, registros compartidos entre búferes que no viven a la vez | 34,5 MHz | 17 872 | 125 DP16KD | 59 |
 
 El camino crítico era la unidad de muestreo: un multiplicador de desplazamiento y suma de 16 filas, en un ciclo, que alimentaba la dirección de la tabla exponencial. Después pasó a las celdas del die: lectura del sesgo, producto por la escala (repartido en varios bloques DSP encadenados) y acumulador en un mismo ciclo, 49 ns. Con escala y sesgo en dos ciclos, el factor sale de un registro y cada ciclo multiplica la mitad de sus bits: el die gasta 11 172 ciclos por token en vez de 11 103 (un 0,6 % más) y el reloj sube a 22,1 MHz, así que los diseños para FPGA lo usan por defecto. Después fue el bus de la CPU al die: una escritura de la CPU se decodificaba, arrancaba el die y llevaba una dirección a su memoria vectorial en el mismo ciclo. Con las órdenes registradas, el reloj sube a 26,5 MHz. Después fue la dirección de la memoria vectorial: la palabra de microcódigo recién leída elegía una entrada de la tabla de registros entre 512, la desplazaba y sumaba dos veces, puerta a puerta, en el mismo ciclo, 38 ns con 27 en rutado. Con la tabla en memoria distribuida y las sumas en cadenas de acarreo, el reloj sube a 32,1 MHz con la mitad de lógica. El camino crítico pasó entonces al bucle del secuenciador: la palabra recién leída compara su cuenta de repeticiones, y eso elige la dirección de la siguiente en el diccionario, 31 ns con 21 en rutado. Adelantar la suma del PC no lo mejora (30,5 MHz, dentro del ruido de la colocación). Con el chip para una placa sola volvió a ser la unidad de muestreo, 32,6 ns: la resta que da la diferencia de logits iba puerta a puerta y la herramienta la convertía en una cadena de 16 LUT antes del multiplicador. Con las sumas de la unidad de muestreo como sumas, en cadenas de acarreo, el reloj sube a 35,4 MHz, con los mismos ciclos. Ahora manda la celda: escala por el producto en dos bloques DSP encadenados, unos 28 ns con 18 en rutado.
 
@@ -113,12 +114,12 @@ Con 35,4 MHz, el modelo de juguete daría unos 2 700-3 000 tok/s, sin valor prá
 
 | Celdas × carriles | Ciclos por token | tok/s a 25-50 MHz | Memoria |
 |---|---|---|---|
-| 8 × 1 | 211 500 | 120-240 | 4,84 Mbit |
-| 8 × 4 | 104 800 | 240-480 | 6,01 Mbit |
-| 16 × 4 | 87 500 | 290-570 | 6,01 Mbit |
-| 32 × 8 | 52 700 | 470-950 | 6,68 Mbit |
+| 8 × 1 | 211 500 | 120-240 | 4,63 Mbit |
+| 8 × 4 | 104 800 | 240-480 | 5,62 Mbit |
+| 16 × 4 | 87 500 | 290-570 | 5,62 Mbit |
+| 32 × 8 | 52 700 | 470-950 | 6,47 Mbit |
 
-La variante de 8 × 1 cabe con holgura en los 6,1 Mbit de la Tang Mega 138K y las de 8 × 4 y 16 × 4 justas; todas caben en una XC7A200T (13,1 Mbit) y en la Kria KV260 (23,1 Mbit). Con más carriles crece sobre todo la tabla de funciones, una por carril.
+Las variantes de 8 × 1, 8 × 4 y 16 × 4 caben en los 6,1 Mbit de la Tang Mega 138K; todas caben en una XC7A200T (13,1 Mbit) y en la Kria KV260 (23,1 Mbit). Con más carriles crece sobre todo la tabla de funciones, una por carril.
 
 ### Optimizaciones de memoria
 
@@ -136,9 +137,19 @@ Antes de ellas, la variante de 8 × 1 necesitaba unos 10,2 Mbit. Ninguna cambia 
 
 ### Lógica: registros a medida
 
-Los registros de trabajo (temporales y partes de cada cabeza) eran una reserva fija de 320, más de la mitad de los 464 de stories260K. Ahora van al final de los registros y el die solo tiene los que alcanzan sus rutinas: stories260K pasa a 253 registros, la tabla de registros a 2^8 entradas y la lógica de esa tabla a la mitad (24 600 puertas y 5 376 biestables menos), con los mismos ciclos. Si un microprograma llegara a un registro que el die no tiene, el ensamblado falla con un error en vez de generar un chip que calcula mal.
+stories260K usaba 464 registros, uno por búfer, uno por matriz y una reserva fija de 320 de trabajo. Ahora usa 118, sin cambiar un solo ciclo:
 
-Todo esto es a medida del microprograma, que cambia con el modelo: el chip para FPGA se genera para un modelo, como ya lo eran sus operaciones, los campos de control y la memoria vectorial. Otro modelo pide volver a generarlo. Una imagen para varios chips se dimensiona con lo que usa cualquiera de ellos, en cualquiera de los repartos que guarda.
+- Los registros de trabajo van al final y el die solo tiene los que alcanzan sus rutinas.
+- Dos búferes que nunca viven a la vez dentro de un token comparten registro. Cada uno vive desde que se escribe hasta su última lectura; los productos encadenados escriben todas sus salidas en el primero, así que sus salidas viven desde ahí. Los logits, el estado final, lo que tocan las cabezas MTP y de imagen y lo que se lee antes de escribirse (lo que pasa de un token al siguiente) tienen registro propio.
+- Las matrices de las celdas solo guardan su exponente en el registro: las que tienen el mismo comparten uno.
+
+La tabla de registros pasa de 2^9 a 2^7 entradas y los campos de registro del microcódigo se estrechan: unos 75 000 equivalentes NAND2 y 0,2 Mbit de microcódigo menos en stories260K; en el modelo de prueba, de 2^9 a 2^8. Si un microprograma llegara a un registro que el die no tiene, el ensamblado falla con un error en vez de generar un chip que calcula mal. El motor exacto, el del laboratorio numérico, sigue con un registro por búfer para poder leerlos todos al acabar un token.
+
+Todo esto es a medida del microprograma, que cambia con el modelo: el chip para FPGA se genera para los modelos que va a ejecutar, como ya lo eran sus operaciones, los campos de control y la memoria vectorial. Una imagen para varios chips se dimensiona con lo que usa cualquiera de ellos, en cualquiera de los repartos que guarda.
+
+### Un chip para varios modelos
+
+El microcódigo, el diccionario, la tabla de registros, las tablas de función y los pesos llegan con la imagen al arrancar, así que un mismo chip puede ejecutar varios modelos si se construye para todos: con `--model` repetido, el ejemplo `fpga` junta la lógica que usa cualquiera de sus microprogramas y da a cada memoria lo que necesita el que más. Cada modelo arranca después desde su propia imagen, con los mismos ciclos que en un chip solo suyo. Con stories260K en coma flotante y en 8 bits, el chip para los dos es el del primero (518 000 NAND2 y 6,73 Mbit), frente a 478 000 y 4,63 Mbit del de 8 bits solo. La prueba `one_chip_runs_either_of_two_models_from_its_image` ejecuta en puertas dos versiones del modelo de prueba, con códigos de 4 y de 2 bits, en el mismo chip.
 
 ## Pasos para la prueba
 

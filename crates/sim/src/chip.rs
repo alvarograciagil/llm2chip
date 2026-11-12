@@ -311,41 +311,60 @@ impl Default for FpgaOptions {
     }
 }
 
-/// A chip for an FPGA board, with what it was built from.
+/// A chip for an FPGA board, with what it was built from: a layout and a microprogram for
+/// each model it runs.
 pub struct FpgaChip {
     pub design: netlist::Design,
     pub config: netlist::chip::ChipConfig,
-    pub layout: Layout,
-    pub code: Microprogram,
+    pub models: Vec<(Layout, Microprogram)>,
 }
 
 /// The chip for `program` on an FPGA: `trial` sized for it, then only the registers, logic
 /// and memory its microprogram uses.
 pub fn fpga_chip(program: &Program, weights: &Weights, trial: DieConfig, context: usize, options: FpgaOptions) -> Result<FpgaChip, String> {
+    fpga_chip_for(&[(program, weights)], trial, context, options)
+}
+
+/// One chip for several models: the logic any of their microprograms uses and, for each
+/// memory, the most any of them needs. Each model then boots from its own image on the
+/// same bitstream, since microcode, tables and weights all come from the image.
+pub fn fpga_chip_for(models: &[(&Program, &Weights)], trial: DieConfig, context: usize, options: FpgaOptions) -> Result<FpgaChip, String> {
     use netlist::chip::{chip_design, chip_design_alone, ChipConfig};
     use netlist::sampler::SamplerConfig;
     use netlist::soc::{SocConfig, TOKENIZER_WORD};
     let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
-    // Scale and bias a few bits a cycle cut the cell's longest path; the microprogram is
+    // Scale and bias a few bits a cycle cut the cell's longest path; the microprograms are
     // laid out for it.
     let trial = DieConfig { features: trial.features.with_factor_steps(options.factor_steps), ..trial };
-    let roomy = Layout::with_cells(program, weights, trial, context)?;
-    roomy.microprogram(program)?;
-    let trial = with_registers_needed(trial, &roomy);
-    let mut layout = Layout::with_cells(program, weights, trial, context)?;
-    if !options.table_inside {
-        layout.table_outside(program);
+    let mut reg_bits = 1;
+    for (program, weights) in models {
+        let roomy = Layout::with_cells(program, weights, trial, context)?;
+        roomy.microprogram(program)?;
+        reg_bits = reg_bits.max(with_registers_needed(trial, &roomy).reg_bits);
     }
-    let code = layout.microprogram(program)?;
-    let features = netlist::DieFeatures::of(&code).with_lane_bits(trial.features.lane_bits).with_cluster_bits(trial.features.cluster_bits).with_key_shift(trial.features.key_shift).with_factor_steps(options.factor_steps);
-    let die = compact_die(DieConfig { features, microcode_bits: bits_for(code.words.len() as u64), ..trial }, &layout);
-    let die = if options.dictionary { with_code_dictionary(die, &code) } else { die };
+    let trial = DieConfig { reg_bits, ..trial };
+    let mut built = Vec::new();
+    let mut needs: Vec<DieConfig> = Vec::new();
+    for (program, weights) in models {
+        let mut layout = Layout::with_cells(program, weights, trial, context)?;
+        if !options.table_inside {
+            layout.table_outside(program);
+        }
+        let code = layout.microprogram(program)?;
+        let features = netlist::DieFeatures::of(&code).with_lane_bits(trial.features.lane_bits).with_cluster_bits(trial.features.cluster_bits).with_key_shift(trial.features.key_shift).with_factor_steps(options.factor_steps);
+        let die = compact_die(DieConfig { features, microcode_bits: bits_for(code.words.len() as u64), ..trial }, &layout);
+        needs.push(if options.dictionary { with_code_dictionary(die, &code) } else { die });
+        built.push((layout, code));
+    }
+    let features = needs.iter().map(|d| d.features).reduce(netlist::DieFeatures::union).ok_or("ningún modelo")?;
+    let die = DieConfig { features, microcode_bits: needs.iter().map(|d| d.microcode_bits).max().unwrap_or(1), ..trial };
     // The firmware's data, its stack and the chip's description take the first 32 KB, and
     // the tokenizer's tables, if any, go after them.
     let data_bits = (TOKENIZER_WORD + options.tokenizer_words).next_power_of_two().ilog2();
-    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: bits_for(program.vocab as u64).max(4), entries: 4, lanes: 1 } };
+    let vocabulary = models.iter().map(|(p, _)| p.vocab as u64).max().unwrap_or(2);
+    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: bits_for(vocabulary).max(4), entries: 4, lanes: 1 } };
     let design = if options.chain { chip_design(config) } else { chip_design_alone(config) };
-    Ok(FpgaChip { design, config, layout, code })
+    Ok(FpgaChip { design, config, models: built })
 }
 
 /// As many registers as the routines assembled on `layout` reach into, and the two the
