@@ -201,6 +201,11 @@ impl DieFeatures {
     fn uses(&self, op: u32) -> bool {
         self.ops >> op & 1 == 1
     }
+
+    /// Whether some word goes over the loop back, so the die has its pins.
+    pub fn uses_loop(&self) -> bool {
+        self.widths[LINK_LOOP_FIELD] > 0 || self.widths[LINK_TAKE_LOOP_FIELD] > 0
+    }
 }
 
 impl DieConfig {
@@ -328,10 +333,17 @@ pub struct ControlWord {
     pub slice_end: bool,
     /// With `cell_seek_weights`: log2 of the codes the matrix keeps in each word of the cells.
     pub cell_packing: u32,
+    /// Sends over the loop back instead of the link to the next chip.
+    pub link_loop: bool,
+    /// Takes from the loop back instead of the link from the chip before. A word can send
+    /// for one step and take for another, so each has its own bit.
+    pub link_take_loop: bool,
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 79;
+pub const FIELD_COUNT: usize = 81;
+const LINK_LOOP_FIELD: usize = 79;
+const LINK_TAKE_LOOP_FIELD: usize = 80;
 const LINK_SEND_FIELD: usize = 17;
 const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
@@ -450,6 +462,8 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("quant_bits", 3),
         ("slice_end", 1),
         ("cell_packing", crate::cell::bits_for_packing(crate::cell::MAX_PACKING)),
+        ("link_loop", 1),
+        ("link_take_loop", 1),
     ]
 }
 
@@ -540,6 +554,8 @@ impl ControlWord {
             self.quant_bits as u128,
             self.slice_end as u128,
             self.cell_packing as u128,
+            self.link_loop as u128,
+            self.link_take_loop as u128,
         ]
     }
 
@@ -642,7 +658,10 @@ pub fn describe_word(f: &BTreeMap<&'static str, u128>) -> String {
         parts.push("lo suma al acumulador".into());
     }
     if on("link_send") {
-        parts.push("lo envía al chip siguiente".into());
+        parts.push(if on("link_loop") { "lo envía de vuelta al primer chip del grupo".into() } else { "lo envía al chip siguiente".into() });
+    }
+    if on("link_take_loop") {
+        parts.push("lo toma del enlace de vuelta del último chip del grupo".into());
     }
     if get("repeat") > 0 {
         let times = get("repeat");
@@ -1137,6 +1156,9 @@ impl Gen {
         let extra_link: Vec<LinkPins> = (1..link_lanes).map(|k| LinkPins::new(&mut b, &format!("link{k}"), a)).collect();
         let link_lane_in: Vec<Vec<Bit>> = (1..link_lanes).map(|k| b.wire(&format!("link_in{k}"), a)).collect();
         let link_lane_out: Vec<Vec<Bit>> = (1..link_lanes).map(|k| b.wire(&format!("link_out{k}"), a)).collect();
+        // The loop back: the last chip of a group closes the group's ring to the first with
+        // it, while the link goes on to the next group.
+        let loop_pins = c.features.uses_loop().then(|| LinkPins::new(&mut b, "loop", a));
 
         // --- Sequencer ---
         b.group("Secuenciador");
@@ -2300,6 +2322,10 @@ impl Gen {
         // The sequencer waits when it needs a word that has not arrived or cannot send one.
         b.group("Enlace entre dies");
         let link_send = ctl("link_send", &mut b, &fields);
+        // Which port the word sends on and which it takes from: the word's own bits, not
+        // gated by the sequencer's running, as the ports' readiness decides whether it runs.
+        let raw = |name: &str| fields.get(name).and_then(|f| f.first()).copied().unwrap_or(Bit::Zero);
+        let (link_loop, take_loop) = (raw("link_loop"), raw("link_take_loop"));
         let has_link = c.features.uses(OP_LINK) || c.features.widths[LINK_SEND_FIELD] > 0;
         let endpoint = self.link_endpoint(a);
         let can_send = b.wire("link_can_send", 1)[0];
@@ -2323,14 +2349,24 @@ impl Gen {
             // Every lane of the link sends and takes a word together: a block goes when all
             // can send, and is taken when all have one.
             let lanes_in = std::iter::once(LinkPins { tx_valid: link_tx_valid, tx_bits: link_tx_bits, tx_ready: link_tx_ready, rx_valid: link_rx_valid, rx_bits: link_rx_bits, rx_ready: link_rx_ready, tx_ack: link_tx_ack, rx_ack: link_rx_ack.clone() }).chain(extra_link);
-            let data_out = std::iter::once(write_data).chain(link_lane_out);
-            let data_in = std::iter::once(link_in).chain(link_lane_in);
+            let data_out = std::iter::once(write_data.clone()).chain(link_lane_out);
+            // With a loop back, the link's word comes in on its own wire and is chosen.
+            let main_in = if loop_pins.is_some() { b.wire("link_main_in", a) } else { link_in.clone() };
+            let data_in = std::iter::once(main_in.clone()).chain(link_lane_in);
+            let (main_send, main_pop) = match loop_pins {
+                Some(_) => {
+                    let mut l = Logic { b: &mut b, next: 21_500 };
+                    let (not_send_loop, not_take_loop) = (l.not(link_loop), l.not(take_loop));
+                    (l.and(link_send, not_send_loop), l.and(link_pop, not_take_loop))
+                }
+                None => (link_send, link_pop),
+            };
             let (mut sendable, mut ready, mut corrected, mut failed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             for (k, ((pins, out), into)) in lanes_in.zip(data_out).zip(data_in).enumerate() {
                 let name = if k == 0 { "link".to_string() } else { format!("link{k}") };
                 let (lane_can, lane_has, lane_corrected, lane_failed) = (b.wire(&format!("{name}_can_send"), 1)[0], b.wire(&format!("{name}_has_data"), 1)[0], b.wire(&format!("{name}_corrected"), 1)[0], b.wire(&format!("{name}_failed"), 1)[0]);
                 b.inst(&name, &endpoint, &[
-                    ("tx_send", vec![link_send]),
+                    ("tx_send", vec![main_send]),
                     ("tx_data", out),
                     ("tx_can_send", vec![lane_can]),
                     ("pin_tx_valid", pins.tx_valid),
@@ -2343,7 +2379,7 @@ impl Gen {
                     ("pin_rx_ack", pins.rx_ack),
                     ("pin_rx_stall", link_rx_stall.clone()),
                     ("core_stall", vec![Bit::Zero]),
-                    ("rx_pop", vec![link_pop]),
+                    ("rx_pop", vec![main_pop]),
                     ("rx_data", into),
                     ("rx_has_data", vec![lane_has]),
                     ("corrected", vec![lane_corrected]),
@@ -2354,13 +2390,59 @@ impl Gen {
                 corrected.push(lane_corrected);
                 failed.push(lane_failed);
             }
-            let mut l = Logic { b: &mut b, next: 21_000 };
-            let (all_can, all_have) = (l.all(&sendable), l.all(&ready));
-            l.b.or_to(all_can, Bit::Zero, can_send);
-            l.b.or_to(all_have, Bit::Zero, has_data);
-            for (lane, (fixed, lost)) in corrected.iter().zip(&failed).enumerate() {
-                l.b.or_to(*fixed, Bit::Zero, link_corrected[lane]);
-                l.b.or_to(*lost, Bit::Zero, link_failed[lane]);
+            if let Some(pins) = loop_pins {
+                let (loop_can, loop_has, loop_corrected, loop_failed) = (b.wire("loop_can_send", 1)[0], b.wire("loop_has_data", 1)[0], b.wire("loop_corrected", 1)[0], b.wire("loop_failed", 1)[0]);
+                let loop_in = b.wire("loop_in", a);
+                let (loop_send, loop_pop) = {
+                    let mut l = Logic { b: &mut b, next: 21_600 };
+                    (l.and(link_send, link_loop), l.and(link_pop, take_loop))
+                };
+                b.inst("loop", &endpoint, &[
+                    ("tx_send", vec![loop_send]),
+                    ("tx_data", write_data),
+                    ("tx_can_send", vec![loop_can]),
+                    ("pin_tx_valid", pins.tx_valid),
+                    ("pin_tx_bits", pins.tx_bits),
+                    ("pin_tx_ready", pins.tx_ready),
+                    ("pin_rx_valid", pins.rx_valid),
+                    ("pin_rx_bits", pins.rx_bits),
+                    ("pin_rx_ready", pins.rx_ready),
+                    ("pin_tx_ack", pins.tx_ack),
+                    ("pin_rx_ack", pins.rx_ack),
+                    ("pin_rx_stall", link_rx_stall.clone()),
+                    ("core_stall", vec![Bit::Zero]),
+                    ("rx_pop", vec![loop_pop]),
+                    ("rx_data", loop_in.clone()),
+                    ("rx_has_data", vec![loop_has]),
+                    ("corrected", vec![loop_corrected]),
+                    ("failed", vec![loop_failed]),
+                ]);
+                let mut l = Logic { b: &mut b, next: 21_000 };
+                let (all_can, all_have) = (l.all(&sendable), l.all(&ready));
+                let can = l.mux(link_loop, all_can, loop_can);
+                let have = l.mux(take_loop, all_have, loop_has);
+                l.b.or_to(can, Bit::Zero, can_send);
+                l.b.or_to(have, Bit::Zero, has_data);
+                let chosen = l.mux_bus(take_loop, &main_in, &loop_in);
+                for (bit, into) in chosen.iter().zip(&link_in) {
+                    l.b.or_to(*bit, Bit::Zero, *into);
+                }
+                // Errors on the loop are counted with the link's first lane.
+                corrected[0] = l.or(corrected[0], loop_corrected);
+                failed[0] = l.or(failed[0], loop_failed);
+                for (lane, (fixed, lost)) in corrected.iter().zip(&failed).enumerate() {
+                    l.b.or_to(*fixed, Bit::Zero, link_corrected[lane]);
+                    l.b.or_to(*lost, Bit::Zero, link_failed[lane]);
+                }
+            } else {
+                let mut l = Logic { b: &mut b, next: 21_000 };
+                let (all_can, all_have) = (l.all(&sendable), l.all(&ready));
+                l.b.or_to(all_can, Bit::Zero, can_send);
+                l.b.or_to(all_have, Bit::Zero, has_data);
+                for (lane, (fixed, lost)) in corrected.iter().zip(&failed).enumerate() {
+                    l.b.or_to(*fixed, Bit::Zero, link_corrected[lane]);
+                    l.b.or_to(*lost, Bit::Zero, link_failed[lane]);
+                }
             }
         } else {
             // A die that never talks to a neighbour has no endpoint at all.
@@ -3052,6 +3134,8 @@ impl DieProgram {
             if (1..n + 1 + extra).contains(&k) {
                 (w.op, w.shift, w.function, w.magnitude_scan, w.accumulate, w.wide_scan, w.max_scan) = (step.op, step.shift, step.function, step.magnitude_scan && k <= n, step.accumulate && k <= n, step.wide_scan && k <= n, step.max_scan && k <= n);
                 (w.broadcast_a, w.broadcast_b) = (step.broadcast_a, step.broadcast_b);
+                // A stream that takes from a link takes from the port its step names.
+                w.link_take_loop = step.link_loop && step.op == OP_LINK;
             }
             if (written..n + written).contains(&k) {
                 (w.reg_dst, w.offset_dst, w.window_dst, w.write_en, w.write_spread) = (step.dst.0, offset_dst, step.window_dst, step.write, step.write_spread);
@@ -3461,6 +3545,8 @@ impl DieProgram {
             (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
             w.from_cluster = step.from_cluster;
             w.op = step.op;
+            // The word that takes from a link names the port with it.
+            w.link_take_loop = step.link_loop && step.op == OP_LINK;
             w.shift = step.shift;
             w.function = step.function;
             w.magnitude_scan = step.magnitude_scan;
@@ -3503,6 +3589,7 @@ impl DieProgram {
         w.load_shift_b = step.load_shift_b;
         w.load_shift_left = step.load_shift_left;
         w.link_send = step.link_send;
+        w.link_loop = step.link_loop && step.link_send;
         w.load_wide_shift = step.load_wide_shift;
     }
 

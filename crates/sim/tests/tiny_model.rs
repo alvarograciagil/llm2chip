@@ -841,3 +841,124 @@ fn the_hidden_state_an_image_head_reads_comes_from_the_chip_as_in_float() {
     }
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// A die of `c` with `layout`'s weights and `code` loaded, as the firmware would leave it.
+fn loaded_die(layout: &Layout, code: &Microprogram, weights: &Weights, c: DieConfig) -> Simulator {
+    let c = sim::chip::compact_die(c, layout);
+    let mut sim = Simulator::with_names(&die_design(c)).unwrap();
+    load_microprogram(&mut sim, &c, code);
+    load_register_table(&mut sim, &c, layout);
+    load_assembly(&mut sim, &c, &layout.setup().initial);
+    let data_mask = (1u64 << c.scale_bits.max(c.cell.weight_bits).max(c.cell.activation_bits)) - 1;
+    sim.set("load_fn", 1).unwrap();
+    for (address, value) in tables(&c).iter().enumerate() {
+        sim.set("fn_addr", address as u64).unwrap();
+        sim.set("cell_data", *value as u64 & mask(&c)).unwrap();
+        sim.tick();
+    }
+    sim.set("load_fn", 0).unwrap();
+    let put = |sim: &mut Simulator, address: u64, value: i64| {
+        sim.set("cell_addr", address).unwrap();
+        sim.set("cell_data", value as u64 & data_mask).unwrap();
+        sim.tick();
+    };
+    for cell in 0..c.cells {
+        let (codes, factors) = layout.cell_contents(weights, cell).unwrap();
+        sim.set("load_cell", 1 << cell).unwrap();
+        sim.set("load_scale", 0).unwrap();
+        for (address, code) in codes.iter().enumerate() {
+            put(&mut sim, address as u64, *code);
+        }
+        sim.set("load_scale", 1).unwrap();
+        for (group, (scale, bias)) in factors.iter().enumerate() {
+            put(&mut sim, 2 * group as u64, *scale);
+            put(&mut sim, 2 * group as u64 + 1, *bias);
+        }
+    }
+    sim.set("load_cell", 0).unwrap();
+    sim.set("load_scale", 0).unwrap();
+    sim
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "cuatro dies en puertas: solo con optimizaciones")]
+fn two_groups_of_two_dies_run_a_token_over_their_links() {
+    let dir = std::env::temp_dir().join(format!("llm2chip-groups-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+    let weights = Weights::open(&dir).unwrap();
+    let base = DieConfig { microcode_bits: 15, ..cell_die_config() };
+    let share = sim::chip::ShareOut::new(&program, &weights, 4, CHIP_TOKENS, base.cell.activation_bits, sim::chip::Sharing::Mixed(2)).unwrap();
+    let mut first = None;
+    let mut dies: Vec<(Simulator, Microprogram)> = (0..4)
+        .map(|chip| {
+            let mut layout = Layout::with_cells(&program, &weights, base, CHIP_TOKENS).unwrap();
+            let code = share.microprogram(&mut layout, &program, chip).unwrap();
+            let die = loaded_die(&layout, &code, &weights, base);
+            if chip == 0 {
+                first = Some((layout.logits_register(&program), sim::chip::compact_die(base, &layout)));
+            }
+            (die, code)
+        })
+        .collect();
+    // The link goes round all four; each group's last closes its ring to its first.
+    let wires = [(0, 1, "link"), (1, 2, "link"), (2, 3, "link"), (3, 0, "link"), (1, 0, "loop"), (3, 2, "loop")];
+    for routine in [ENTRY_TOKEN, ENTRY_LOGITS] {
+        for (sim, code) in &mut dies {
+            sim.set("start", 0).unwrap();
+            sim.set("param_write", 1).unwrap();
+            for parameter in &code.parameters {
+                sim.set("param_index", parameter.register as u64).unwrap();
+                sim.set("param_data", parameter.value(3, 0) as u64).unwrap();
+                sim.tick();
+            }
+            sim.set("param_write", 0).unwrap();
+            sim.set("entry", code.entries[routine] as u64).unwrap();
+            sim.set("start", 1).unwrap();
+            sim.tick();
+            sim.set("start", 0).unwrap();
+        }
+        let mut cycles = 0u64;
+        let mut traffic = vec![0u64; wires.len()];
+        while dies.iter().any(|(sim, _)| sim.get("halted").unwrap() == 0) {
+            let outputs: Vec<_> = wires.iter().map(|(from, to, p)| {
+                let (a, b) = (&dies[*from].0, &dies[*to].0);
+                (a.get(&format!("{p}_tx_valid")).unwrap(), a.get_wide(&format!("{p}_tx_bits")).unwrap(), b.get(&format!("{p}_rx_ready")).unwrap(), b.get(&format!("{p}_rx_ack")).unwrap())
+            }).collect();
+            for (count, (valid, _, ready, _)) in traffic.iter_mut().zip(&outputs) {
+                *count += valid & ready;
+            }
+            for ((from, to, p), (valid, bits, ready, ack)) in wires.iter().zip(outputs) {
+                dies[*to].0.set(&format!("{p}_rx_valid"), valid).unwrap();
+                dies[*to].0.set_wide(&format!("{p}_rx_bits"), bits).unwrap();
+                dies[*from].0.set(&format!("{p}_tx_ready"), ready).unwrap();
+                dies[*from].0.set(&format!("{p}_tx_ack"), ack).unwrap();
+            }
+            for (sim, _) in &mut dies {
+                sim.tick();
+            }
+            cycles += 1;
+            if cycles >= 300_000 {
+                let pcs: Vec<String> = dies.iter().map(|(sim, code)| {
+                    let pc = sim.snapshot("").and_then(|nets| nets.get("pc").map(|bits| usize::from_str_radix(bits, 2).unwrap())).unwrap_or(0);
+                    let word = code.words.get(pc).map(|w| format!("op {} send {} loop {}", w.op, w.link_send, w.link_loop)).unwrap_or_default();
+                    format!("pc {pc} ({word}), detenido {}", sim.get("halted").unwrap())
+                }).collect();
+                panic!("rutina {routine}: los dies no terminan: {pcs:?}; palabras por cable {:?}", wires.iter().zip(&traffic).collect::<Vec<_>>());
+            }
+        }
+        eprintln!("rutina {routine}: {cycles} ciclos");
+    }
+    // The logits the first chip made are, bit for bit, those of one die on its own.
+    let mut alone = gates_in_cells(&program, &dir, base, &[3]);
+    let (logits, c) = first.unwrap();
+    let single = alone.layout.logits_register(&program);
+    let alone_c = sim::chip::compact_die(base, &alone.layout);
+    for index in 0..8 {
+        let (got, _) = read_block_value(&mut dies[0].0, c, logits, index);
+        let (want, _) = read_block_value(&mut alone.sim, alone_c, single, index);
+        assert_eq!(got, want, "logit {index}");
+    }
+    std::fs::remove_dir_all(dir).ok();
+}

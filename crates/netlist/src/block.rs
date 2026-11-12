@@ -560,6 +560,9 @@ pub struct Alu<N = u32> {
     pub accumulate: bool,
     pub accumulator_clear: bool,
     pub link_send: bool,
+    /// The word sends or takes over the loop back, not the link to the next chip: the last
+    /// and first chips of a group close their ring with it.
+    pub link_loop: bool,
     pub wide_write: bool,
     pub wide_scan: bool,
     pub wide_clear: bool,
@@ -604,6 +607,7 @@ impl<N: Default> Alu<N> {
             accumulate: false,
             accumulator_clear: false,
             link_send: false,
+            link_loop: false,
             wide_write: false,
             wide_scan: false,
             wide_clear: false,
@@ -659,6 +663,7 @@ impl Alu<Expr> {
             accumulate: self.accumulate,
             accumulator_clear: self.accumulator_clear,
             link_send: self.link_send,
+            link_loop: self.link_loop,
             wide_write: self.wide_write,
             wide_scan: self.wide_scan,
             wide_clear: self.wide_clear,
@@ -688,6 +693,7 @@ impl From<Alu<u32>> for Alu<Expr> {
         out.accumulate = s.accumulate;
         out.accumulator_clear = s.accumulator_clear;
         out.link_send = s.link_send;
+        out.link_loop = s.link_loop;
         out.wide_write = s.wide_write;
         out.wide_scan = s.wide_scan;
         out.wide_clear = s.wide_clear;
@@ -960,6 +966,10 @@ pub struct Assembly {
     /// How many chips around the ring share each product by rows: their narrowing has to
     /// agree on the shifts, which each would otherwise take from its own rows alone.
     pub ring: u32,
+    /// The ends of a group's ring when the chips are in several groups: the last sends its
+    /// ring's steps over the loop back, and the first takes them from it.
+    pub ring_first: bool,
+    pub ring_last: bool,
     across_chips: bool,
 }
 
@@ -1096,7 +1106,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, across_chips: false }
+        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1388,8 +1398,26 @@ impl Assembly {
     fn ring_max(&mut self, value: At<Expr>, spare: At<Expr>) {
         for _ in 1..self.ring {
             self.send_place(value);
+            self.on_ring_send();
             self.receive_place(spare);
+            self.on_ring_receive();
             self.binary(OP_MAX, value, spare, value);
+        }
+    }
+
+    /// The last word sends to the next chip of the ring: over the loop back if this chip
+    /// closes its group's ring.
+    fn on_ring_send(&mut self) {
+        if let (true, Some(Step::One(word))) = (self.ring_last, self.steps.last_mut()) {
+            word.link_loop = true;
+        }
+    }
+
+    /// The last word takes from the chip before in the ring: over the loop back if this
+    /// chip opens its group's ring.
+    fn on_ring_receive(&mut self) {
+        if let (true, Some(Step::One(word))) = (self.ring_first, self.steps.last_mut()) {
+            word.link_loop = true;
         }
     }
 
@@ -1442,12 +1470,14 @@ impl Assembly {
                 let at = first + Expr::from(k * unit);
                 let mut word = alu(OP_MOV);
                 (word.a, word.write, word.link_send, word.vector) = ((reg, at + Expr::from(sent)), false, true, unit > 1);
+                word.link_loop = s.ring_last;
                 s.push(word);
             }
             for k in 0..count {
                 let at = first + Expr::from(k * unit);
                 let mut word = alu(OP_LINK);
                 (word.dst, word.vector) = ((reg, at + Expr::from(received)), unit > 1);
+                word.link_loop = s.ring_first;
                 s.push(word);
             }
         };

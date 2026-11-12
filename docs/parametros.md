@@ -420,7 +420,7 @@ Cada chip guarda una parte de cada matriz y de cada grupo de cabezas, y todos ca
 
 ### Mixto
 
-Grupos de chips que comparten cada capa en tensor, unidos en cadena. Es lo que usan los sistemas grandes: cada grupo dentro de un encapsulado, con UCIe, y los grupos por la placa. Con un grupo de 1 chip es el reparto por capas; con todos en un grupo, el reparto por tensor. El estimador lo modela; el generador de puertas aún no: una imagen de arranque pedida en modo mixto se genera por capas.
+Grupos de chips que comparten cada capa en tensor, unidos en cadena. Es lo que usan los sistemas grandes: cada grupo dentro de un encapsulado, con UCIe, y los grupos por la placa. Con un grupo de 1 chip es el reparto por capas; con todos en un grupo, el reparto por tensor. En puertas, el último chip de cada grupo cierra el anillo del grupo con un enlace de vuelta al primero, y el vector oculto pasa al grupo siguiente por el enlace de siempre. Una imagen de arranque lleva un plan por cada número de chips: los que no forman grupos enteros se reparten por capas.
 
 ## Dimensionado
 

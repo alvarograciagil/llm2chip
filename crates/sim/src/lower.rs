@@ -413,6 +413,9 @@ pub struct OutsideTable {
 pub struct Shard {
     pub index: u32,
     pub chips: u32,
+    /// The ring is one group of several, joined in a chain: its last chip closes it over
+    /// the loop back, and the logits' matrices stay whole on the first chip of all.
+    pub grouped: bool,
 }
 
 impl Layout {
@@ -777,6 +780,52 @@ impl Layout {
         Ok(code.finish_program())
     }
 
+    /// The microcode of member `shard.index` of group `stage` when the chips are in groups
+    /// that share each product by rows, joined in a chain by layers (`plan`, one range per
+    /// group). The first of a group takes the hidden vector from the group before and every
+    /// member passes it on to the next; the last of a group sends its result on to the next
+    /// group. The logits are made on the first chip of all, from the final hidden state the
+    /// last chip of all sends it.
+    pub fn group_microprogram(&self, program: &Program, plan: &[Range<usize>], stage: usize) -> Result<Microprogram, String> {
+        let shard = self.shard.filter(|s| s.grouped).ok_or("el reparto mixto necesita la porción del chip en su grupo")?;
+        let (member, members) = (shard.index as usize, shard.chips as usize);
+        let token = Expr::var(Var::Token);
+        let position = Expr::var(Var::Position);
+        let (first_stage, last_stage) = (stage == 0, stage + 1 == plan.len());
+        let last_member = member + 1 == members;
+        let mut code = DieProgram::new(self.config);
+
+        let mut asm = self.assembly();
+        if !first_stage {
+            let input = program.crossing(plan[stage].start)?;
+            let length: Expr = (program.buffers[input] as u32).into();
+            asm.receive(self.reg(input), length);
+            if !last_member {
+                asm.send(self.reg(input), length);
+            }
+        }
+        self.run_list(&mut asm, program, &program.ops[plan[stage].clone()], token, position, true)?;
+        if !last_stage && last_member {
+            let output = program.crossing(plan[stage + 1].start)?;
+            asm.send(self.reg(output), (program.buffers[output] as u32).into());
+        }
+        self.assemble(&mut code, &asm.steps);
+        code.next_entry();
+
+        let mut asm = self.assembly();
+        let hidden = program.crossing(program.logits_from)?;
+        let length: Expr = (program.buffers[hidden] as u32).into();
+        if last_stage && last_member {
+            asm.send(self.reg(hidden), length);
+        }
+        if first_stage && member == 0 {
+            asm.receive(self.reg(hidden), length);
+            self.run_list(&mut asm, program, &program.ops[program.logits_from..], token, position, false)?;
+        }
+        self.assemble(&mut code, &asm.steps);
+        Ok(code.finish_program())
+    }
+
     /// Lays out a routine's steps, noting how far into each register they reach.
     fn assemble(&self, code: &mut DieProgram, steps: &[Step]) {
         code.assemble(steps);
@@ -861,6 +910,9 @@ impl Layout {
         asm.in_cells = self.in_cells.clone();
         asm.key_capacity = self.key_capacity;
         asm.ring = self.shard.map_or(1, |s| s.chips);
+        if let Some(shard) = self.shard.filter(|s| s.grouped) {
+            (asm.ring_first, asm.ring_last) = (shard.index == 0, shard.index + 1 == shard.chips);
+        }
         asm
     }
 
@@ -963,8 +1015,14 @@ impl Layout {
 
     pub fn keep_weights_of(&mut self, program: &Program, plan: &[Range<usize>], die: usize) {
         // The first chip makes the logits, as `die_microprogram` lays out.
+        self.keep_weights_of_part(program, plan, die, die == 0);
+    }
+
+    /// Like `keep_weights_of` for the part `die` of the plan, with the logits' matrices
+    /// only if `logits`: in groups, only the first member of the first group makes them.
+    pub fn keep_weights_of_part(&mut self, program: &Program, plan: &[Range<usize>], die: usize, logits: bool) {
         let tail = program.logits_from..program.ops.len();
-        let used: HashSet<String> = plan[die].clone().chain(if die == 0 { tail } else { 0..0 }).flat_map(|i| matrices_of(program, &program.ops[i].op)).map(|(name, ..)| name).collect();
+        let used: HashSet<String> = plan[die].clone().chain(if logits { tail } else { 0..0 }).flat_map(|i| matrices_of(program, &program.ops[i].op)).map(|(name, ..)| name).collect();
         let dropped: HashSet<u32> = self.weights.iter().filter(|(name, _)| !used.contains(*name)).map(|(_, reg)| *reg).collect();
         self.setup.initial.retain(|(register, _), _| !dropped.contains(register));
         self.cell_plan.retain(|e| used.contains(&e.name));
@@ -985,7 +1043,9 @@ impl Layout {
                 if matches!(inst.op, Op::Matvec { .. }) { &mut plain } else { &mut other }.insert(name);
             }
         }
-        let fits = |e: &CellEntry| plain.contains(&e.name) && !other.contains(&e.name) && e.block == e.rows && e.rows.is_multiple_of(chips * lanes);
+        // In groups, the first chip makes the logits on its own, so their matrices stay whole.
+        let tail: HashSet<String> = if shard.grouped { program.ops[program.logits_from..].iter().flat_map(|i| matrices_of(program, &i.op)).map(|(name, ..)| name).collect() } else { HashSet::new() };
+        let fits = |e: &CellEntry| plain.contains(&e.name) && !other.contains(&e.name) && !tail.contains(&e.name) && e.block == e.rows && e.rows.is_multiple_of(chips * lanes);
         // Products that run in one pass of the cells are shared alike, or not at all.
         let mut start = 0;
         while start < self.cell_plan.len() {
@@ -1240,7 +1300,7 @@ impl Layout {
                 ops.normalize(self.reg(*dst), len.into());
             }
             Op::Matvec { matrix, src, dst } if self.by_rows.contains(matrix) => {
-                let Shard { index, chips } = self.shard.expect("reparto por filas");
+                let Shard { index, chips, .. } = self.shard.expect("reparto por filas");
                 let share = |buffer: usize| program.buffers[buffer] as u32 / chips;
                 if let Some(chain) = self.chains.get(matrix) {
                     let parts: Vec<(u32, u32, u32, u32)> = chain.iter().map(|(name, dst)| (self.weights[name], self.reg(*dst), share(*dst), index * share(*dst))).collect();

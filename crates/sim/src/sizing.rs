@@ -155,7 +155,7 @@ pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32,
             let mut layout = Layout::for_image(program, weights, die, context as usize)?;
             let by_rows = sharing == Sharing::Rows && chips > 1;
             if by_rows {
-                layout.share_rows(program, Shard { index: chip as u32, chips });
+                layout.share_rows(program, Shard { index: chip as u32, chips, grouped: false });
             } else {
                 layout.keep_weights_of(program, &plan, chip);
             }

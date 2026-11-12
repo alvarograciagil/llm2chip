@@ -200,17 +200,11 @@ fn boot_plans(program: &Program, weights: &Weights, die: DieConfig, request: &Im
     let tokens = request.context_tokens as usize;
     let mut built: Vec<Vec<(Layout, Microprogram)>> = Vec::new();
     for chips in &request.chips {
-        let plan = crate::lower::chip_plan(program, weights, *chips, tokens, die.cell.activation_bits)?;
+        let share = crate::chip::ShareOut::new(program, weights, *chips, tokens, die.cell.activation_bits, request.sharing)?;
         let parts = (0..*chips)
             .map(|chip| {
                 let mut layout = Layout::for_image(program, weights, die, tokens)?;
-                let code = if request.sharing == Sharing::Rows && *chips > 1 {
-                    layout.share_rows(program, crate::lower::Shard { index: chip as u32, chips: *chips as u32 });
-                    layout.microprogram(program)?
-                } else {
-                    layout.keep_weights_of(program, &plan, chip);
-                    layout.die_microprogram(program, &plan, chip)?
-                };
+                let code = share.microprogram(&mut layout, program, chip)?;
                 Ok::<_, String>((layout, code))
             })
             .collect::<Result<Vec<_>, _>>()?;

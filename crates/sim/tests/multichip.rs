@@ -99,8 +99,10 @@ struct Board<'a> {
 }
 
 impl<'a> Board<'a> {
-    fn new(design: &Design, count: usize, image: &'a [u32], input: &'a [u8], link_lanes: usize) -> Self {
-        let mut chips: Vec<Simulator> = (0..count).map(|_| Simulator::new(design).unwrap()).collect();
+    /// With `group`, the chips are in groups of that many and the last of each closes its
+    /// group's ring with a loop back to the first.
+    fn new(design: &Design, count: usize, image: &'a [u32], input: &'a [u8], link_lanes: usize, group: Option<usize>) -> Self {
+        let mut chips: Vec<Simulator> = (0..count).map(|_| Simulator::with_names(design).unwrap()).collect();
         for (index, chip) in chips.iter_mut().enumerate() {
             chip.set("follower", (index != 0) as u64).unwrap();
             chip.set("reset", 1).unwrap();
@@ -121,6 +123,10 @@ impl<'a> Board<'a> {
                     wires.push(Wire::new(from, to, (format!("{p}_tx"), format!("{p}_rx")), netlist::link::wire_bits(16)));
                 }
                 wires.push(Wire::new(from, to, ("chain_tx".into(), "chain_rx".into()), netlist::link::wire_bits(32)));
+            }
+            for last in group.into_iter().flat_map(|g| (g - 1..count).step_by(g)) {
+                let group = group.unwrap();
+                wires.push(Wire::new(last, last + 1 - group, ("loop_tx".into(), "loop_rx".into()), netlist::link::wire_bits(16)));
             }
         }
         Self { chips, wires, pending: vec![None; count], image, noise: Noise(0x0BAD_C0DE_1234_5678), flips: 0, doubles: 0, input, fed: 0, output: Vec::new(), cycles: 0 }
@@ -157,7 +163,21 @@ impl<'a> Board<'a> {
                 chip.tick();
             }
             self.cycles += 1;
-            assert!(self.cycles < limit, "la placa no termina; salida {:?}", String::from_utf8_lossy(&self.output));
+            if self.cycles.is_multiple_of(500_000) {
+                eprintln!("{} ciclos, salida {:?}", self.cycles, String::from_utf8_lossy(&self.output));
+            }
+            if self.cycles >= limit {
+                // Where each chip stands: its CPU's address and whether its die is busy.
+                let states: Vec<String> = self.chips.iter_mut().map(|chip| {
+                    let mut read = |what: u64| {
+                        chip.set("debug_select", what).unwrap();
+                        chip.settle();
+                        chip.get("debug_value").unwrap()
+                    };
+                    format!("pc {:#x}, die {}", read(netlist::chip::DEBUG_CPU_PC), read(netlist::chip::DEBUG_DIE_BUSY))
+                }).collect();
+                panic!("la placa no termina; salida {:?}; chips: {states:?}", String::from_utf8_lossy(&self.output));
+            }
         }
     }
 }
@@ -171,6 +191,11 @@ struct Setup {
 }
 
 fn setup(name: &str, firmware: &FirmwareImage, die: DieConfig, sharing: Sharing) -> Setup {
+    setup_for(name, firmware, die, sharing, 2)
+}
+
+/// The image covers one chip and `chips` of them.
+fn setup_for(name: &str, firmware: &FirmwareImage, die: DieConfig, sharing: Sharing, chips: usize) -> Setup {
     let dir = std::env::temp_dir().join(format!("llm2chip-board-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     make_checkpoint(&dir);
@@ -178,7 +203,7 @@ fn setup(name: &str, firmware: &FirmwareImage, die: DieConfig, sharing: Sharing)
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let tables = tiny_tokenizer();
     let generation = GenerationSetup { max_new: 1, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
-    let plans: Vec<_> = [1, 2].iter().map(|chips| plan_parts(&program, &dir, die, CHIP_TOKENS, &generation, *chips, sharing).unwrap()).collect();
+    let plans: Vec<_> = [1, chips].iter().map(|chips| plan_parts(&program, &dir, die, CHIP_TOKENS, &generation, *chips, sharing).unwrap()).collect();
     let image = build_plan_image(&firmware.program, &firmware.data, &tables.to_words(), &plans).unwrap();
     Setup { design: chip_design(config), image, dir, config, die }
 }
@@ -195,6 +220,13 @@ fn the_same_image_adapts_to_one_or_two_chips() {
 fn two_chips_that_share_every_product_by_rows_say_what_one_says() {
     let Some(firmware) = build_firmware() else { return };
     two_chips_say_what_one_says(&firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, "rows", Sharing::Rows);
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "cuatro chips completos en puertas: solo con optimizaciones")]
+fn two_groups_of_two_chips_sharing_rows_in_a_chain_say_what_one_says() {
+    let Some(firmware) = build_firmware() else { return };
+    chips_say_what_one_says(&firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, "mixed", Sharing::Mixed(2), 4);
 }
 
 #[test]
@@ -218,7 +250,12 @@ fn a_wide_link_moves_blocks_between_two_chips_and_keeps_the_text() {
 /// Two chips on a noisy board say the same as one at instruction level, with the very
 /// same image, and their links count every error they correct or have repeated.
 fn two_chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &str, sharing: Sharing) {
-    let setup = setup(name, firmware, die, sharing);
+    chips_say_what_one_says(firmware, die, name, sharing, 2);
+}
+
+/// Several chips on a noisy board say the same as one at instruction level.
+fn chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &str, sharing: Sharing, chips: usize) {
+    let setup = setup_for(name, firmware, die, sharing, chips);
     let input = b"hoy\0";
     let program = compile_qwen3_5(CONFIG).unwrap();
 
@@ -235,8 +272,12 @@ fn two_chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &
     let reference = String::from_utf8_lossy(&bus.tx).trim_start_matches('.').to_string();
     assert_eq!(reference.len(), 1, "{:?}", String::from_utf8_lossy(&bus.tx));
 
-    let mut board = Board::new(&setup.design, 2, &setup.image, input, setup.die.features.link_lanes());
-    board.run(8_000_000);
+    let group = match sharing {
+        Sharing::Mixed(g) if (g as usize) < chips => Some(g as usize),
+        _ => None,
+    };
+    let mut board = Board::new(&setup.design, chips, &setup.image, input, setup.die.features.link_lanes(), group);
+    board.run(std::env::var("LIMITE").ok().and_then(|l| l.parse().ok()).unwrap_or(8_000_000));
     let text = String::from_utf8_lossy(&board.output).into_owned();
     eprintln!("{} ciclos, {} bits invertidos en los enlaces, salida {text:?}", board.cycles, board.flips);
     assert_eq!(text.trim_start_matches('.'), reference, "el texto debe ser el mismo que con un solo chip");
@@ -271,8 +312,9 @@ fn two_chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &
 fn a_number_of_chips_the_image_does_not_cover_is_reported() {
     let Some(firmware) = build_firmware() else { return };
     let setup = setup("three", &firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, Sharing::Layers);
-    let mut board = Board::new(&setup.design, 3, &setup.image, b"hoy\0", 1);
+    let mut board = Board::new(&setup.design, 3, &setup.image, b"hoy\0", 1, None);
     board.run(2_000_000);
     assert_eq!(String::from_utf8_lossy(&board.output), "N");
     std::fs::remove_dir_all(&setup.dir).ok();
 }
+

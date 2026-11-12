@@ -100,7 +100,7 @@ interface ModelsState {
   cancel: (id: string) => Promise<void>;
   discard: (id: string) => Promise<void>;
   pollJobs: () => Promise<Job[]>;
-  startImage: (path: string, chips: number[], context: number, cells: number, bits: number, lanes: number, units: number, sharing: "layers" | "rows") => Promise<void>;
+  startImage: (path: string, chips: number[], context: number, cells: number, bits: number, lanes: number, units: number, sharing: "layers" | "rows" | { mixed: number }) => Promise<void>;
   cancelImage: () => Promise<void>;
   pollImage: () => Promise<void>;
 }

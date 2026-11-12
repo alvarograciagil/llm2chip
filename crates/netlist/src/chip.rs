@@ -85,11 +85,13 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     let link_tx_ack = b.input("link_tx_ack", crate::link::ACK_BITS as u32);
     let link_rx_ack = b.output("link_rx_ack", crate::link::ACK_BITS as u32);
     let link_rx_stall = b.input("link_rx_stall", 1);
-    // A wide link's further lanes go straight from the die to pins of the same names.
+    // A wide link's further lanes, and the loop back of a group's ring, go straight from
+    // the die to pins of the same names.
     let ack = crate::link::ACK_BITS as u32;
-    let extra_link: Vec<(String, Vec<Bit>)> = (1..c.die.features.link_lanes())
-        .flat_map(|k| {
-            let p = format!("link{k}");
+    let prefixes: Vec<String> = (1..c.die.features.link_lanes()).map(|k| format!("link{k}")).chain(c.die.features.uses_loop().then(|| "loop".to_string())).collect();
+    let extra_link: Vec<(String, Vec<Bit>)> = prefixes
+        .iter()
+        .flat_map(|p| {
             [
                 (format!("{p}_tx_valid"), b.output(&format!("{p}_tx_valid"), 1)),
                 (format!("{p}_tx_bits"), b.output(&format!("{p}_tx_bits"), data_bits)),

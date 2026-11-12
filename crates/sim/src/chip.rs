@@ -186,22 +186,62 @@ pub enum Sharing {
     /// Every chip holds a slice of the rows of each matrix and they all work on every
     /// product at once, passing their slices around the ring.
     Rows,
+    /// Groups of this many chips share each product by rows, each group in a ring closed by
+    /// a loop back, and the groups take runs of layers in a chain.
+    Mixed(u32),
+}
+
+/// How `chips` of them share the model: the groups' size when they are in several groups,
+/// whether each product is shared by rows, and the runs of layers of the chain.
+pub struct ShareOut {
+    group: Option<usize>,
+    rows: bool,
+    plan: Vec<std::ops::Range<usize>>,
+}
+
+impl ShareOut {
+    pub fn new(program: &Program, weights: &Weights, chips: usize, chip_tokens: usize, activation_bits: u32, sharing: Sharing) -> Result<Self, String> {
+        // An image carries a plan for each number of chips: one that does not make whole
+        // groups goes by layers, and one that fits in a single group shares by rows.
+        let group = match sharing {
+            Sharing::Mixed(group) if group > 1 && chips > group as usize && chips.is_multiple_of(group as usize) => Some(group as usize),
+            _ => None,
+        };
+        let rows = group.is_none() && chips > 1 && match sharing {
+            Sharing::Rows => true,
+            Sharing::Mixed(group) => chips <= group as usize,
+            Sharing::Layers => false,
+        };
+        let stages = group.map_or(chips, |g| chips / g);
+        let plan = crate::lower::chip_plan(program, weights, stages, chip_tokens, activation_bits)?;
+        Ok(Self { group, rows, plan })
+    }
+
+    /// Lays out chip `chip`'s part on `layout` and gives its microcode.
+    pub fn microprogram(&self, layout: &mut Layout, program: &Program, chip: usize) -> Result<Microprogram, String> {
+        if let Some(g) = self.group {
+            let (stage, member) = (chip / g, chip % g);
+            layout.keep_weights_of_part(program, &self.plan, stage, chip == 0);
+            layout.share_rows(program, crate::lower::Shard { index: member as u32, chips: g as u32, grouped: true });
+            layout.group_microprogram(program, &self.plan, stage)
+        } else if self.rows {
+            layout.share_rows(program, crate::lower::Shard { index: chip as u32, chips: self.plan.len() as u32, grouped: false });
+            layout.microprogram(program)
+        } else {
+            layout.keep_weights_of(program, &self.plan, chip);
+            layout.die_microprogram(program, &self.plan, chip)
+        }
+    }
 }
 
 /// What each chip takes from the image when the model is shared among `chips` of them.
 pub fn plan_parts(program: &Program, dir: &Path, config: DieConfig, chip_tokens: usize, setup: &GenerationSetup, chips: usize, sharing: Sharing) -> Result<Vec<ChipPart>, String> {
-    let plan = crate::lower::chip_plan(program, &Weights::open(dir)?, chips, chip_tokens, config.cell.activation_bits)?;
+    let share = ShareOut::new(program, &Weights::open(dir)?, chips, chip_tokens, config.cell.activation_bits, sharing)?;
     (0..chips)
         .map(|chip| {
             let weights = Weights::open(dir)?;
             let mut layout = Layout::with_cells(program, &weights, config, chip_tokens)?;
-            let code = if sharing == Sharing::Rows && chips > 1 {
-                layout.share_rows(program, crate::lower::Shard { index: chip as u32, chips: chips as u32 });
-                layout.microprogram(program)?
-            } else {
-                layout.keep_weights_of(program, &plan, chip);
-                layout.die_microprogram(program, &plan, chip)?
-            };
+            let code = share.microprogram(&mut layout, program, chip)?;
             let mut segments = image_segments(&config, &code, &layout);
             segments.extend(cell_segments(&config, &layout, &weights)?);
             Ok(ChipPart { info: chip_info(&config, &code, layout.logits_register(program), program.vocab as u32, setup), segments })

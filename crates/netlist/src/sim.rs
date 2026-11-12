@@ -166,7 +166,7 @@ impl Elaborator<'_> {
 }
 
 /// Orders gates so each one runs after everything that drives it.
-fn levelize(gates: Vec<Gate>, signals: usize) -> Result<Vec<Gate>, SimError> {
+fn levelize(gates: Vec<Gate>, signals: usize, names: &[String]) -> Result<Vec<Gate>, SimError> {
     let mut driver = vec![usize::MAX; signals];
     for (i, g) in gates.iter().enumerate() {
         if driver[g.y] != usize::MAX {
@@ -203,7 +203,19 @@ fn levelize(gates: Vec<Gate>, signals: usize) -> Result<Vec<Gate>, SimError> {
         }
     }
     if order.len() != gates.len() {
-        return Err(SimError("el circuito tiene un bucle combinacional".into()));
+        // Walk back from a gate left over through inputs also left over until one repeats:
+        // that is the loop. With names, it says which signals it goes through.
+        let mut walk = vec![(0..gates.len()).find(|i| pending[*i] > 0).unwrap_or(0)];
+        let cycle = loop {
+            let g = &gates[*walk.last().unwrap()];
+            let Some(next) = inputs(g).into_iter().filter(|s| *s > ONE && driver[*s] != usize::MAX).map(|s| driver[s]).find(|d| pending[*d] > 0) else { break Vec::new() };
+            if let Some(at) = walk.iter().position(|w| *w == next) {
+                break walk[at..].to_vec();
+            }
+            walk.push(next);
+        };
+        let through: Vec<String> = cycle.iter().take(12).map(|i| names.get(gates[*i].y).cloned().unwrap_or_else(|| format!("#{}", gates[*i].y))).collect();
+        return Err(SimError(format!("el circuito tiene un bucle combinacional: {}", through.join(" ← "))));
     }
     Ok(order)
 }
@@ -242,7 +254,7 @@ impl Simulator {
         e.elaborate(&design.top, "", &ports);
 
         let signals = e.next;
-        let gates = levelize(e.gates, signals)?;
+        let gates = levelize(e.gates, signals, &e.names)?;
         let mut values = vec![0u8; signals];
         values[ONE] = 1;
         let mut sim = Self {

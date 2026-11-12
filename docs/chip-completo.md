@@ -89,10 +89,19 @@ Al arrancar, el maestro envía un contador por la cadena de control. Cada chip t
 | Pines | Función |
 |---|---|
 | `link_tx_*`, `link_rx_*` | Datos entre dies, en anillo: activaciones y, del último al primero, los logits |
+| `loop_tx_*`, `loop_rx_*` | En el reparto mixto, enlace de vuelta del último chip de cada grupo al primero, que cierra el anillo del grupo |
 | `chain_tx_*`, `chain_rx_*` | Recuento al arrancar y órdenes del maestro, en anillo |
 | `image_req_*`, `image_resp_*` | Cada chip pide su parte de la misma imagen |
 | `follower` | A cero en el chip que manda |
 | `reset`, `host_*`, `debug_*` | Reset, host (solo se usa en el maestro) y depuración |
+
+### Repartos
+
+- **Por capas**: cada chip ejecuta unas capas enteras y pasa el vector oculto al siguiente por `link`.
+- **Por filas**: todos los chips guardan una porción de las filas de cada matriz, calculan cada producto a la vez y se pasan sus porciones en anillo por `link`, con el último unido al primero.
+- **Mixto**: grupos de chips por filas, unidos en cadena por capas. Dentro de un grupo, el anillo va por `link` y lo cierra `loop`, del último chip del grupo al primero; por `link` va también el vector oculto del último chip de un grupo al primero del siguiente, que lo pasa a los demás de su grupo. Cada palabra de microcódigo lleva dos bits, uno para el puerto por el que envía y otro para el puerto del que toma, porque una palabra puede enviar para una instrucción y tomar para otra. Las matrices de los logits no se reparten: solo el primer chip los hace, con el estado final que le envía el último. `two_groups_of_two_dies_run_a_token_over_their_links` ejecuta un token en cuatro dies en puertas, unidos así, y comprueba que los logits del primero son bit a bit los de un solo die.
+
+Una imagen lleva un plan por cada número de chips: en el mixto, los números que no forman grupos enteros se reparten por capas, y los que caben en un solo grupo, por filas.
 
 Cada palabra lleva un código que corrige un bit y detecta dos, y una señal de válido y otra de listo. No hay reintento: un error doble se cuenta, pero el dato llega mal. El reloj sigue siendo común en la simulación, así que falta el cruce entre dominios de reloj. La imagen debe traer el reparto de capas de cada número de chips admitido.
 
