@@ -5,10 +5,10 @@ import { PARAM_HELP_EN } from "./paramHelpEn";
 import { FIELDS } from "./params";
 
 /** Strings in the engine's sources that never reach a person: names, links, ids. */
-const NOT_TEXT = [/^https:/, /board!\(/, /^Sipeed|^Radiona|^Digilent|^AMD |^Gowin|^Lattice|^Xilinx|^Zynq/, /^Cada die ocupa$/];
+const NOT_TEXT = [/^https:/, /board!\(/, /^Sipeed|^Radiona|^Digilent|^AMD |^Gowin|^Lattice|^Xilinx|^Zynq|^Terasic|^Altera|^Intel /, /^Cada die ocupa$/];
 
 function engineStrings(file: string): string[] {
-  const source = readFileSync(new URL(`../../crates/arch/src/${file}`, import.meta.url), "utf8").split("#[cfg(test)]")[0].replace(/\/\/[^\n]*/g, "");
+  const source = readFileSync(new URL(`../../crates/arch/src/${file}`, import.meta.url), "utf8").split("#[cfg(test)]")[0].replace(/(^|[^:])\/\/[^\n]*/gm, "$1"); // a URL's "://" is not a comment
   return [...source.matchAll(/"((?:[^"\\]|\\.)*)"/g)]
     .map((m) => m[1])
     .filter((s) => s.includes(" ") && /[a-záéíóúñ]/.test(s) && !(s.startsWith("{") && s.endsWith("}") && !s.slice(1).includes("{")))

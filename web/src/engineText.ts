@@ -190,6 +190,13 @@ export const ENGINE_TEXT: [string, string][] = [
   ["Hay {n} productos por ciclo y {n} bloques DSP: el resto se hace con LUT, mucho más grandes.", "There are {0} products per cycle and {1} DSP blocks: the rest is done with LUTs, much larger."],
   ["Baja los multiplicadores por die.", "Lower the multipliers per die."],
 
+  ["Placa con Cyclone IV EP4CE10", "Cyclone IV EP4CE10 board"],
+  ["Quartus Prime Lite (gratuito)", "Quartus Prime Lite (free)"],
+  ["Yosys + nextpnr, libres", "Yosys + nextpnr, open source"],
+  ["Quartus Prime Pro (licencia gratuita para Agilex 3)", "Quartus Prime Pro (free licence for Agilex 3)"],
+  ["Vivado (edición gratuita)", "Vivado (free edition)"],
+  ["Vivado (licencia del dispositivo incluida)", "Vivado (device licence included)"],
+
   // Feasibility.
   ["DRAM apilada", "stacked DRAM"],
   ["memoria externa DDR", "external DDR memory"],

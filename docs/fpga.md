@@ -39,6 +39,7 @@ El asistente de proyecto («+» en la barra, «Una FPGA») tiene estas placas y 
 
 | Placa | FPGA | Lógica | Memoria en el chip | DSP | Memoria en la placa | Precio |
 |---|---|---|---|---|---|---|
+| Placa con Cyclone IV EP4CE10 | Altera Cyclone IV E | 10,3 K LE | 0,41 Mbit | 23 | 32 MB SDRAM (las habituales) | ~25-40 $ |
 | Sipeed Tang Primer 25K | Gowin GW5A-25 | 23 K LUT4 | 1 Mbit | 28 | — | ~35 $ |
 | Sipeed Tang Mega 60K Dock | Gowin GW5AT-60 | 60 K LUT4 | 2,1 Mbit | 118 | 256 MB DDR3 | ~90 $ |
 | Sipeed Tang Mega 138K Dock | Gowin GW5AST-138 | 138 K LUT4 | 6,1 Mbit | 298 | DDR3 | ~130 $ |
@@ -55,6 +56,8 @@ El asistente de proyecto («+» en la barra, «Una FPGA») tiene estas placas y 
 | Digilent Nexys Video | XC7A200T | 134 K LUT6 | 13,1 Mbit | 740 | 512 MB DDR3 | ~500 € |
 | Digilent Genesys 2 | Kintex-7 XC7K325T | 204 K LUT6 | 16 Mbit | 840 | 1 GB DDR3 | ~1 000 $ |
 | AMD Alveo U250 | UltraScale+ XCU250 | 1 728 K LUT6 | 432 Mbit | 12 288 | 64 GB DDR4 | ~9 000 $ |
+
+La Cyclone IV EP4CE10 es la más pequeña del catálogo: el chip más pequeño que genera el proyecto necesita unos 48 000 elementos lógicos y 1,95 Mbit de memoria interna, frente a sus 10 300 y 0,41, aunque los pesos vayan a la SDRAM de la placa. Sirve para probar piezas sueltas, como una celda de cálculo (`cargo run -p netlist --example export`) o un extremo de enlace, pero no un chip completo.
 
 ### Recomendación por unos 200 $: Kria KV260
 

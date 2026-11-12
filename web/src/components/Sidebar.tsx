@@ -270,7 +270,7 @@ function TargetRows() {
                     .filter((b) => b.maker === maker)
                     .map((b) => (
                       <option key={b.id} value={b.id}>
-                        {b.name}
+                        {t(b.name)}
                       </option>
                     ))}
                 </optgroup>

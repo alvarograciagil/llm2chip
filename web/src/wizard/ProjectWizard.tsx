@@ -233,6 +233,7 @@ function BoardDrawing({ board }: { board: FpgaBoard }) {
 }
 
 function BoardPicker({ board, choose }: { board: string; choose: (id: string) => void }) {
+  const t = useT();
   const boards = useMemo(() => fpgaBoards() as FpgaBoard[], []);
   const current = boards.find((b) => b.id === board) ?? boards[0];
   const [photoFailed, setPhotoFailed] = useState<string | null>(null);
@@ -255,7 +256,7 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
           <select value={current.id} onChange={(e) => choose(e.target.value)}>
             {models.map((b) => (
               <option key={b.id} value={b.id}>
-                {b.name} · {b.price}
+                {t(b.name)} · {b.price}
               </option>
             ))}
           </select>
@@ -266,7 +267,7 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
           {current.image && photoFailed !== current.id ? <img src={current.image} alt={`Foto de la placa ${current.name}`} referrerPolicy="no-referrer" onError={() => setPhotoFailed(current.id)} /> : <BoardDrawing board={current} />}
         </div>
         <div className="board-specs">
-          <h3>{current.name}</h3>
+          <h3>{t(current.name)}</h3>
           <dl>
             <dt>FPGA</dt>
             <dd>{current.fpga}</dd>
@@ -280,18 +281,18 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
             <dt>Multiplicadores</dt>
             <dd>{current.dsp} DSP</dd>
             <dt>Memoria en la placa</dt>
-            <dd>{current.ddr_gb > 0 ? `${memory(current.ddr_gb)}, ~${current.ddr_gbps} GB/s` : "Ninguna"}</dd>
+            <dd>{current.ddr_gb > 0 ? `${memory(current.ddr_gb)}, ~${current.ddr_gbps} GB/s` : t("Ninguna")}</dd>
             <dt>Reloj</dt>
             <dd>
-              {current.clock_mhz} MHz{current.clock_measured ? ", medido rutando el chip" : ", estimado"}
+              {current.clock_mhz} MHz, {current.clock_measured ? t("medido rutando el chip") : t("estimado")}
             </dd>
             <dt>Herramientas</dt>
-            <dd>{current.tools}</dd>
+            <dd>{t(current.tools)}</dd>
             <dt>Precio</dt>
             <dd>{current.price}</dd>
           </dl>
           <a href={current.url} target="_blank" rel="noopener noreferrer">
-            Web oficial de {current.maker} ↗
+            {t("Web oficial de")} {current.maker} ↗
           </a>
         </div>
       </article>

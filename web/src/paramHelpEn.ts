@@ -10,7 +10,7 @@ export const PARAM_HELP_EN: Record<string, string> = {
   target_tok_s: "With the model's size and the clock, sets how many multipliers are needed. With 0 you set them by hand.",
   macs_per_die: "With a single user only one die works at a time, so this value sets the speed.",
   freq_ghz: "The die's clock. Its slowest path between registers limits it: the multiplier and the adder tree (more stages shorten them) and the node's gate delay. A faster clock gives more tok/s with the same logic, but more power.",
-  die_mode: "To measure is the most efficient for one model. With all identical a single design is made, and more are connected for larger models.",
+  die_mode: "Either way it is the same chip repeated, loading its part of the model from the image. To measure sizes the die for this model's part; expandable reserves room (layers, width, vocabulary) to connect more chips for larger models. Only with the weights burnt into ROM is each die different.",
   max_layers: "The layers come from each model: Qwen3.8 has 64 and Llama 3.1 8B, 32. This limit reserves their state in each die.",
   max_hidden_size: "Largest width of the vector that runs through the layers (5,120 in Qwen3.8-27B). With identical dies, it sets the width of buffers and links for any model loaded.",
   max_vocabulary: "Distinct tokens the largest model takes (248,320 in Qwen). Sizes lm_head, the sampling unit and the tokenizer tables.",

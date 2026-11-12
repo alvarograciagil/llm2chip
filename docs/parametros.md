@@ -58,7 +58,7 @@ Reloj del die. Lo limita su camino más lento entre registros: el multiplicador 
 
 ### Tipo de dies (`die_mode`)
 
-A medida es lo más eficiente para un modelo concreto. Con todos iguales se fabrica un solo diseño y se conectan más para modelos mayores.
+En los dos casos es el mismo chip repetido, que carga su parte del modelo desde la imagen. A medida dimensiona el die para la parte de este modelo; ampliable reserva sitio (capas, ancho, vocabulario) para conectar más chips con modelos mayores. Solo con los pesos grabados en ROM es distinto cada die.
 
 *Opciones: A medida de este modelo, Todos iguales (ampliable).*
 
