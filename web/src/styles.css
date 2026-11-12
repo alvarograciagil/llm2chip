@@ -1744,6 +1744,27 @@ button.link-row {
   }
 }
 
+.timeline-track i {
+  cursor: pointer;
+}
+
+.timeline-track i.pinned,
+.timeline-track i:focus-visible {
+  z-index: 1;
+  outline: 2px solid var(--label);
+  outline-offset: 1px;
+}
+
+.stage-detail {
+  min-height: 52px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.stage-detail p {
+  margin: 0 0 2px;
+}
+
 .tl-matvec { background: var(--cat-memoria); }
 .tl-vector { background: var(--cat-vectorial); }
 .tl-embedding { background: var(--cat-calculo); }

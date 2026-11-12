@@ -23,10 +23,24 @@ const KIND_CLASS: Record<ScheduledStage["kind"], string> = {
   link: "tl-link",
 };
 
+/** What each kind of stage does in the chip, for the stage the reader points at. */
+const KIND_HELP: Record<ScheduledStage["kind"], string> = {
+  matvec: "Las celdas del die multiplican esta matriz por el vector de activación: cada celda lee sus pesos de su SRAM, los multiplica por el valor que le llega por la red de activaciones, y el árbol de sumas junta los productos de cada fila.",
+  vector: "Las unidades vectoriales trabajan elemento a elemento, carril a carril: normas, rotaciones, funciones por tabla, atención sobre la caché o la regla delta sobre su estado.",
+  embedding: "Se lee la fila del token en la tabla de embedding: es el vector con el que empiezan las capas.",
+  link: "El vector oculto pasa al die siguiente por el enlace, y allí siguen las capas.",
+};
+
 function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
+  const t = useT();
   const dies = Math.max(...schedule.stages.map((s) => s.die)) + 1;
   const [hover, setHover] = useState<ScheduledStage | null>(null);
+  const [pinned, setPinned] = useState<ScheduledStage | null>(null);
   const playhead = useRef<HTMLDivElement>(null);
+  const shown = hover ?? pinned;
+  const share = (kind: ScheduledStage["kind"]) => schedule.stages.filter((s) => s.kind === kind).reduce((sum, s) => sum + s.cycles, 0) / schedule.total_cycles;
+  const ns = (cycles: number) => (cycles / schedule.total_cycles) * schedule.token_ns;
+  const percent = (part: number) => (part > 0 && part < 1e-4 ? "< 0,01" : formatNumber(part * 100));
 
   useEffect(() => {
     const el = playhead.current;
@@ -37,8 +51,8 @@ function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
   return (
     <div className="timeline">
       <div className="timeline-head">
-        <strong>Recorrido de un token</strong>
-        <span>{hover ? `${hover.name}${hover.layer !== null ? ` · capa ${hover.layer}` : ""} · ${formatNumber(hover.cycles)} ciclos` : `${formatNumber(schedule.total_cycles)} ciclos`}</span>
+        <strong>{t("Recorrido de un token")}</strong>
+        <span>{formatNumber(schedule.total_cycles)} {t("ciclos")} · {formatNumber(schedule.token_ns / 1000)} µs</span>
       </div>
       <div className="timeline-rows" onMouseLeave={() => setHover(null)}>
         <div className="timeline-playhead" ref={playhead} />
@@ -51,9 +65,17 @@ function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
                 .map((s, i) => (
                   <i
                     key={i}
-                    className={KIND_CLASS[s.kind]}
+                    className={s === pinned ? `${KIND_CLASS[s.kind]} pinned` : KIND_CLASS[s.kind]}
                     style={{ left: `${(s.start / schedule.total_cycles) * 100}%`, width: `${Math.max(0.04, (s.cycles / schedule.total_cycles) * 100)}%` }}
+                    tabIndex={0}
+                    aria-label={`${s.name}${s.layer !== null ? `, ${t("capa")} ${s.layer}` : ""}, ${formatNumber(Math.round(s.cycles))} ${t("ciclos")}`}
                     onMouseEnter={() => setHover(s)}
+                    onFocus={() => setHover(s)}
+                    onBlur={() => setHover(null)}
+                    onClick={() => setPinned(s === pinned ? null : s)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") setPinned(s === pinned ? null : s);
+                    }}
                   />
                 ))}
             </div>
@@ -64,9 +86,22 @@ function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
         {(Object.keys(KIND_LABEL) as ScheduledStage["kind"][]).map((k) => (
           <span key={k}>
             <i className={`swatch ${KIND_CLASS[k]}`} aria-hidden="true" />
-            {KIND_LABEL[k]}
+            {t(KIND_LABEL[k])} {percent(share(k))} %
           </span>
         ))}
+      </div>
+      <div className="stage-detail" aria-live="polite">
+        {shown ? (
+          <>
+            <p>
+              <strong>{shown.name}</strong>
+              {shown.layer !== null ? ` · ${t("capa")} ${shown.layer}` : ""} · die {shown.die} · {formatNumber(Math.round(shown.cycles))} {t("ciclos")} ({percent(shown.cycles / schedule.total_cycles)} % {t("del token")}, {formatNumber(ns(shown.cycles))} ns) · {t("empieza en el ciclo")} {formatNumber(Math.round(shown.start))}
+            </p>
+            <p className="muted-text">{t(KIND_HELP[shown.kind])}</p>
+          </>
+        ) : (
+          <p className="muted-text">{t("Pasa por encima de un tramo, o púlsalo para fijarlo, y verás qué hace el die en él.")}</p>
+        )}
       </div>
     </div>
   );
