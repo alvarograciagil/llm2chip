@@ -2,7 +2,7 @@
 # Local CI: Rust tests and lints, then the web build and tests.
 #
 #   scripts/check.sh             the quick set, a couple of minutes: for every change
-#   scripts/check.sh --completa  also the whole chips on gates, about half an hour: before
+#   scripts/check.sh --completa  also the whole chips on gates, about five minutes: before
 #                                changes to the hardware go up
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"

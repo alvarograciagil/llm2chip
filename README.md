@@ -114,7 +114,7 @@ Para pasar las comprobaciones rápidas, un par de minutos:
 scripts/check.sh
 ```
 
-Y todas, con los chips completos en puertas (unos 30 minutos), antes de subir cambios del hardware:
+Y todas, con los chips completos en puertas (unos 5 minutos), antes de subir cambios del hardware:
 
 ```bash
 scripts/check.sh --completa

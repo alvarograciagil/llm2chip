@@ -1,7 +1,7 @@
 # Local CI on Windows: Rust tests and lints, then the web build and tests.
 #
 #   scripts\check.ps1             the quick set, a couple of minutes: for every change
-#   scripts\check.ps1 -Completa   also the whole chips on gates, about half an hour: before
+#   scripts\check.ps1 -Completa   also the whole chips on gates, about five minutes: before
 #                                 changes to the hardware go up
 param([switch]$Completa)
 $ErrorActionPreference = "Stop"

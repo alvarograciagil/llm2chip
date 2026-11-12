@@ -1,4 +1,6 @@
-//! Two-state, cycle-based simulation of a design, one gate at a time.
+//! Two-state, cycle-based simulation of a design, one gate at a time. Only the gates whose
+//! inputs changed are evaluated again, in their topological order: in a cycle most of a
+//! chip holds still.
 
 use crate::{Bit, Design, Dir, InstKind, Prim};
 use std::collections::{BTreeMap, HashMap};
@@ -59,6 +61,12 @@ pub struct Simulator {
     cycle: u64,
     /// Every signal's name, for `critical_trace`, when built with `with_names`.
     names: Vec<String>,
+    /// The gates each signal drives, by index into `gates`: those of signal `s` are
+    /// `fanout[fanout_start[s]..fanout_start[s + 1]]`.
+    fanout_start: Vec<u32>,
+    fanout: Vec<u32>,
+    /// Gates to evaluate again, one bit each, by index.
+    pending: Vec<u64>,
 }
 
 struct Elaborator<'a> {
@@ -165,6 +173,39 @@ impl Elaborator<'_> {
     }
 }
 
+/// The gates each signal drives, as offsets into one list.
+fn fanout_of(gates: &[Gate], signals: usize) -> (Vec<u32>, Vec<u32>) {
+    let inputs = |g: &Gate| -> [usize; 3] {
+        match g.op {
+            Op::Not => [g.a, ZERO, ZERO],
+            Op::Mux => [g.a, g.b, g.c],
+            _ => [g.a, g.b, ZERO],
+        }
+    };
+    let mut count = vec![0u32; signals + 1];
+    for g in gates {
+        for s in inputs(g) {
+            if s > ONE {
+                count[s + 1] += 1;
+            }
+        }
+    }
+    for s in 0..signals {
+        count[s + 1] += count[s];
+    }
+    let mut next = count.clone();
+    let mut fanout = vec![0u32; count[signals] as usize];
+    for (i, g) in gates.iter().enumerate() {
+        for s in inputs(g) {
+            if s > ONE {
+                fanout[next[s] as usize] = i as u32;
+                next[s] += 1;
+            }
+        }
+    }
+    (count, fanout)
+}
+
 /// Orders gates so each one runs after everything that drives it.
 fn levelize(gates: Vec<Gate>, signals: usize, names: &[String]) -> Result<Vec<Gate>, SimError> {
     let mut driver = vec![usize::MAX; signals];
@@ -257,6 +298,12 @@ impl Simulator {
         let gates = levelize(e.gates, signals, &e.names)?;
         let mut values = vec![0u8; signals];
         values[ONE] = 1;
+        let (fanout_start, fanout) = fanout_of(&gates, signals);
+        // Everything is evaluated the first time.
+        let mut pending = vec![u64::MAX; gates.len().div_ceil(64)];
+        if !gates.len().is_multiple_of(64) {
+            *pending.last_mut().unwrap() = (1u64 << (gates.len() % 64)) - 1;
+        }
         let mut sim = Self {
             values,
             gates,
@@ -266,6 +313,9 @@ impl Simulator {
             paths: e.paths,
             cycle: 0,
             names: e.names,
+            fanout_start,
+            fanout,
+            pending,
         };
         for port in top.ports.iter().filter(|p| p.dir == Dir::Input) {
             sim.set(&port.name, 0)?;
@@ -304,40 +354,66 @@ impl Simulator {
     }
 
     pub fn set_wide(&mut self, port: &str, value: u128) -> Result<(), SimError> {
-        let bits = self.ports.get(port).ok_or_else(|| SimError(format!("puerto desconocido: {port}")))?;
+        let bits = self.ports.get(port).ok_or_else(|| SimError(format!("puerto desconocido: {port}")))?.clone();
         for (i, s) in bits.iter().enumerate() {
-            self.values[*s] = (value.checked_shr(i as u32).unwrap_or(0) & 1) as u8;
+            self.drive(*s, (value.checked_shr(i as u32).unwrap_or(0) & 1) as u8);
         }
         Ok(())
+    }
+
+    /// Gives signal `s` a value, and if it changes, marks the gates it drives.
+    fn drive(&mut self, s: usize, value: u8) {
+        if self.values[s] != value {
+            self.values[s] = value;
+            self.mark_fanout(s);
+        }
+    }
+
+    fn mark_fanout(&mut self, s: usize) {
+        for &g in &self.fanout[self.fanout_start[s] as usize..self.fanout_start[s + 1] as usize] {
+            self.pending[g as usize / 64] |= 1 << (g % 64);
+        }
     }
 
     /// Sets a port of any width from 32-bit words, least significant first.
     pub fn set_words(&mut self, port: &str, words: &[u32]) -> Result<(), SimError> {
-        let bits = self.ports.get(port).ok_or_else(|| SimError(format!("puerto desconocido: {port}")))?;
+        let bits = self.ports.get(port).ok_or_else(|| SimError(format!("puerto desconocido: {port}")))?.clone();
         for (i, s) in bits.iter().enumerate() {
             let word = words.get(i / 32).copied().unwrap_or(0);
-            self.values[*s] = (word >> (i % 32) & 1) as u8;
+            self.drive(*s, (word >> (i % 32) & 1) as u8);
         }
         Ok(())
     }
 
-    /// Propagates the current inputs through the combinational logic.
+    /// Propagates the current inputs through the combinational logic: the gates marked,
+    /// in their order, and those their changes reach.
     pub fn settle(&mut self) {
-        let v = &mut self.values;
-        for g in &self.gates {
-            v[g.y] = match g.op {
-                Op::And => v[g.a] & v[g.b],
-                Op::Or => v[g.a] | v[g.b],
-                Op::Xor => v[g.a] ^ v[g.b],
-                Op::Not => 1 ^ v[g.a],
-                Op::Mux => {
-                    if v[g.c] == 1 {
-                        v[g.b]
-                    } else {
-                        v[g.a]
-                    }
+        for word in 0..self.pending.len() {
+            loop {
+                let bits = self.pending[word];
+                if bits == 0 {
+                    break;
                 }
-            };
+                let bit = bits.trailing_zeros() as usize;
+                self.pending[word] &= !(1 << bit);
+                let g = self.gates[word * 64 + bit];
+                let v = &self.values;
+                let value = match g.op {
+                    Op::And => v[g.a] & v[g.b],
+                    Op::Or => v[g.a] | v[g.b],
+                    Op::Xor => v[g.a] ^ v[g.b],
+                    Op::Not => 1 ^ v[g.a],
+                    Op::Mux => {
+                        if v[g.c] == 1 {
+                            v[g.b]
+                        } else {
+                            v[g.a]
+                        }
+                    }
+                };
+                // What it drives comes later in the order, so this one pass reaches it.
+                self.drive(g.y, value);
+            }
         }
     }
 
@@ -360,12 +436,14 @@ impl Simulator {
                 m.cells[target] = read(&self.values, &m.wdata);
             }
         }
-        for ((_, q), value) in self.flops.iter().zip(captured) {
-            self.values[*q] = value;
+        for (k, value) in captured.into_iter().enumerate() {
+            let q = self.flops[k].1;
+            self.drive(q, value);
         }
-        for (m, value) in self.memories.iter().zip(reads) {
-            for (i, s) in m.rdata.iter().enumerate() {
-                self.values[*s] = ((value >> i) & 1) as u8;
+        for (k, value) in reads.into_iter().enumerate() {
+            for i in 0..self.memories[k].rdata.len() {
+                let s = self.memories[k].rdata[i];
+                self.drive(s, ((value >> i) & 1) as u8);
             }
         }
         self.cycle += 1;
