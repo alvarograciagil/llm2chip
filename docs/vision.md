@@ -43,6 +43,11 @@ Lo que falta para hacerlo en puertas es el orden capa a capa del firmware y las 
 
 Janus-Pro-1B también genera imágenes: su modelo de lenguaje escribe 576 tokens de un libro de códigos (una rejilla de 24 × 24), guiado lejos de lo que dibujaría sin el texto, y un decodificador convolucional los convierte en píxeles. `cargo run --release -p sim --example draw -- <carpeta> "<descripción>" salida.bmp [temperatura] [semilla]`.
 
-Con `EXACTO=16` (y en la aplicación, con el modelo cargado en la aritmética del chip), las dos copias del modelo de lenguaje, con texto y sin él, corren en la aritmética entera del die: cada token de imagen vuelve a entrar como vector, como los de un codificador de imagen. La cabeza de generación y el alineador, dos capas pequeñas, y el decodificador de píxeles se quedan en coma flotante en el anfitrión.
+Con `EXACTO=16` (y en la aplicación, con el modelo cargado en la aritmética del chip), corren en la aritmética entera del die las dos copias del modelo de lenguaje, con texto y sin él, y sus dos cabezas de imagen. El compilador añade al programa de Janus una cabeza de imagen (`ImageHead`) con dos listas de operaciones:
+
+- **Puntuaciones**: del estado final, `proj_out` con su sesgo, GELU y `vision_head` con su sesgo, una puntuación por cada uno de los 16 384 códigos del libro.
+- **Entrada**: el código leído de `generation_embeddings` como la fila de un embedding, `fc1` con su sesgo, GELU y `hidden_layers.0` con su sesgo, el vector que entra en lugar del embedding del siguiente token. Es el mismo para las dos copias, así que se calcula una vez.
+
+En el anfitrión quedan la mezcla de la guía (dos contextos, dos cachés), el muestreo y el decodificador de píxeles. Un test con un Llama diminuto y cabezas aleatorias comprueba que las puntuaciones y las entradas salen del chip como en coma flotante, dentro del 2 %.
 
 Con «a red apple on a wooden table», semilla 7 y temperatura 1, la coma flotante tarda 387 s y la aritmética del chip 543 s, y las dos dibujan una manzana roja sobre madera. No son la misma imagen: con temperatura 1, una diferencia mínima en un logit cambia qué token se elige, y desde ahí el dibujo sigue otro camino. Un test comprueba que el estado oculto que lee la cabeza de imagen sale del chip igual que en coma flotante, dentro del 2 %.

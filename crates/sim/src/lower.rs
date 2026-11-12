@@ -50,13 +50,13 @@ pub fn chip_plan(program: &Program, weights: &Weights, chips: usize, context: us
 }
 
 fn all_ops(program: &Program) -> impl Iterator<Item = &Inst> {
-    program.ops.iter().chain(program.draft.iter().flat_map(|d| d.ops.iter()))
+    program.ops.iter().chain(program.draft.iter().flat_map(|d| d.ops.iter())).chain(program.image.iter().flat_map(|i| i.logits_ops.iter().chain(&i.input_ops)))
 }
 
 fn matrices_of(program: &Program, op: &Op) -> Vec<(String, usize, usize)> {
     match op {
         Op::Matvec { matrix, src, dst } => vec![(matrix.clone(), program.buffers[*dst], program.buffers[*src])],
-        Op::EmbRead { table, dst } => vec![(table.clone(), program.vocab, program.buffers[*dst])],
+        Op::EmbRead { table, dst } => vec![(table.clone(), program.table_rows(table), program.buffers[*dst])],
         Op::Moe { prefix, src, experts, intermediate, shared_intermediate, .. } => {
             let hidden = program.buffers[*src];
             vec![
@@ -237,6 +237,9 @@ fn spread_buffers(program: &Program) -> HashSet<usize> {
     let mut kept: HashSet<usize> = [program.logits, program.final_hidden].into_iter().collect();
     if let Some(draft) = &program.draft {
         kept.extend([draft.hidden_in, draft.hidden_out]);
+    }
+    if let Some(image) = &program.image {
+        kept.extend([image.logits, image.input]);
     }
     let made: HashMap<usize, &Op> = ops.iter().filter_map(|op| match op {
         Op::Matvec { dst, .. } | Op::Silu { dst, .. } | Op::Sigmoid { dst, .. } | Op::MulElem { dst, .. } | Op::Add { dst, .. } | Op::Dconv { dst, .. } => Some((*dst, *op)),
@@ -1072,7 +1075,12 @@ impl Layout {
         if self.lookup_tables.len() != 1 {
             return false;
         }
-        let name = self.lookup_tables.iter().next().cloned().expect("una tabla");
+        // The text's embedding table, the largest: an image head's codebook stays inside.
+        let text_table = program.ops.iter().find_map(|inst| match &inst.op {
+            Op::EmbRead { table, .. } if self.lookup_tables.contains(table) => Some(table.clone()),
+            _ => None,
+        });
+        let name = text_table.or_else(|| self.lookup_tables.iter().next().cloned()).expect("una tabla");
         let Some(cols) = all_ops(program).find_map(|inst| match &inst.op {
             Op::EmbRead { table, dst } if *table == name => Some(program.buffers[*dst] as u32),
             _ => None,
@@ -1080,7 +1088,7 @@ impl Layout {
             return false;
         };
         let register = self.weights[&name];
-        let rows = program.vocab as u32;
+        let rows = program.table_rows(&name) as u32;
         // A chip without this table's part of the model has nothing of it to leave out.
         if !self.setup.initial.contains_key(&(register, 0)) {
             return false;
@@ -1170,6 +1178,18 @@ impl Layout {
     /// Back to the table's own rotations everywhere.
     pub fn clear_rotations(&self) {
         self.rotations.borrow_mut().clear();
+    }
+
+    /// An image head's scores of each code, from the final hidden state the last token left.
+    pub fn run_image_logits<O: BlockOps>(&self, ops: &mut O, program: &Program) -> Result<(), String> {
+        let image = program.image.as_ref().ok_or("este modelo no dibuja")?;
+        self.run_list(ops, program, &image.logits_ops, 0.into(), 0.into(), false)
+    }
+
+    /// The vector that goes in for a drawn code, in place of a token's embedding.
+    pub fn run_image_input<O: BlockOps>(&self, ops: &mut O, program: &Program, code: O::N) -> Result<(), String> {
+        let image = program.image.as_ref().ok_or("este modelo no dibuja")?;
+        self.run_list(ops, program, &image.input_ops, code, 0.into(), false)
     }
 
     pub fn feed_draft<O: BlockOps>(&self, ops: &mut O, program: &Program, from_main: bool) {

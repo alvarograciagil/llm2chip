@@ -154,6 +154,14 @@ pub struct Janus {
 /// A language model that gives its last hidden state instead of logits.
 pub trait HiddenSteps {
     fn step_hidden(&mut self, token: u32, embedding: Option<&[f32]>) -> Result<Vec<f32>, String>;
+    /// The image head's scores of each code, when the engine runs the head itself.
+    fn image_logits(&mut self) -> Option<Result<Vec<f32>, String>> {
+        None
+    }
+    /// The vector for a drawn code, when the engine runs the aligner itself.
+    fn image_input(&mut self, _code: u32) -> Option<Result<Vec<f32>, String>> {
+        None
+    }
 }
 
 impl HiddenSteps for Engine {
@@ -165,6 +173,12 @@ impl HiddenSteps for Engine {
 impl HiddenSteps for crate::ExactEngine {
     fn step_hidden(&mut self, token: u32, embedding: Option<&[f32]>) -> Result<Vec<f32>, String> {
         crate::ExactEngine::step_hidden(self, token, embedding)
+    }
+    fn image_logits(&mut self) -> Option<Result<Vec<f32>, String>> {
+        Some(crate::ExactEngine::image_logits(self))
+    }
+    fn image_input(&mut self, code: u32) -> Option<Result<Vec<f32>, String>> {
+        Some(crate::ExactEngine::image_input(self, code))
     }
 }
 
@@ -182,7 +196,8 @@ impl Janus {
     /// own integer arithmetic at that many bits.
     fn language_model(&self, exact: Option<u32>) -> Result<Box<dyn HiddenSteps>, String> {
         let config: Value = serde_json::from_str(&std::fs::read_to_string(self.dir.join("config.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        let program = compiler::compile_model(&config["text_config"].to_string())?;
+        // The whole checkpoint's configuration, so the program carries the image heads.
+        let program = compiler::compile_model(&config.to_string())?;
         Ok(match exact {
             Some(bits) => Box::new(crate::ExactEngine::new(program, Weights::open(&self.dir)?, bits)?),
             None => Box::new(Engine::new(program, Weights::open(&self.dir)?.with_gpu(), Numeric::Float)?),
@@ -192,8 +207,9 @@ impl Janus {
     /// Draws `prompt_ids` (the text already framed by the chat template, ending in the
     /// token that opens an image): 576 codebook tokens, guided `guidance` times away from
     /// what the model would draw without the text, sampled at `temperature`.
-    /// With `exact`, the language model runs in the die's arithmetic; the generation head and
-    /// the aligner, two small layers, stay in floating point on the host.
+    /// With `exact`, the language model and its two image heads, the generation head and
+    /// the aligner, run in the die's arithmetic; the guidance's mixing, the sampling and the
+    /// pixel decoder stay on the host.
     pub fn draw(&self, prompt_ids: &[u32], temperature: f32, seed: u64, exact: Option<u32>, mut progress: impl FnMut(usize, usize)) -> Result<Vec<u32>, String> {
         let c = &self.config;
         let (mut with_text, mut without) = (self.language_model(exact)?, self.language_model(exact)?);
@@ -222,7 +238,10 @@ impl Janus {
         };
         let mut drawn = Vec::with_capacity(c.tokens);
         for i in 0..c.tokens {
-            let (guided, plain) = (scores(&hidden), scores(&empty));
+            let (guided, plain) = match (with_text.image_logits(), without.image_logits()) {
+                (Some(guided), Some(plain)) => (guided?, plain?),
+                _ => (scores(&hidden), scores(&empty)),
+            };
             let logits: Vec<f32> = guided.iter().zip(&plain).map(|(g, p)| p + c.guidance * (g - p)).collect();
             let token = if temperature <= 0.0 {
                 logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(i, _)| i)
@@ -238,9 +257,15 @@ impl Janus {
             drawn.push(token as u32);
             progress(i + 1, c.tokens);
             // The drawn token goes back in as the aligned embedding of its code.
-            let code = &embeddings[token * c.code_dim..(token + 1) * c.code_dim];
-            let up: Vec<f32> = linear(code, &fc1_w, &fc1_b).into_iter().map(gelu).collect();
-            let input = linear(&up, &fc2_w, &fc2_b);
+            // The same for both contexts, so it is made once.
+            let input = match with_text.image_input(token as u32) {
+                Some(input) => input?,
+                None => {
+                    let code = &embeddings[token * c.code_dim..(token + 1) * c.code_dim];
+                    let up: Vec<f32> = linear(code, &fc1_w, &fc1_b).into_iter().map(gelu).collect();
+                    linear(&up, &fc2_w, &fc2_b)
+                }
+            };
             if i + 1 < c.tokens {
                 hidden = with_text.step_hidden(0, Some(&input))?;
                 empty = without.step_hidden(0, Some(&input))?;

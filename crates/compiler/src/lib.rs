@@ -98,6 +98,22 @@ pub struct Program {
     /// The hidden state after the final norm, the input of a draft step.
     pub final_hidden: Buf,
     pub draft: Option<DraftProgram>,
+    /// An image generator's heads, for models that draw: see `ImageHead`.
+    pub image: Option<ImageHead>,
+}
+
+/// The two small heads with which a language model draws, as Janus-Pro does: one turns
+/// the final hidden state into the scores of each code of the image's codebook, the other
+/// turns a drawn code into the vector that goes in, in place of a token's embedding.
+#[derive(Clone, Debug, Serialize)]
+pub struct ImageHead {
+    /// From `final_hidden` to `logits`, one score per code.
+    pub logits_ops: Vec<Inst>,
+    pub logits: Buf,
+    pub codes: usize,
+    /// From the code, taken as the token, to `input`, as long as the hidden state.
+    pub input_ops: Vec<Inst>,
+    pub input: Buf,
 }
 
 /// Llama 3's lengthening of the slow rotary waves, for contexts beyond its training.
@@ -142,6 +158,14 @@ pub struct KvShape {
 }
 
 impl Program {
+    /// Rows of an embedding table: the vocabulary's, or the codebook's for an image head.
+    pub fn table_rows(&self, table: &str) -> usize {
+        match &self.image {
+            Some(image) if image.input_ops.iter().any(|i| matches!(&i.op, Op::EmbRead { table: t, .. } if t == table)) => image.codes,
+            _ => self.vocab,
+        }
+    }
+
     /// Splits the work before the logits among `dies`, cutting between layers.
     pub fn split(&self, dies: usize) -> Result<Vec<std::ops::Range<usize>>, String> {
         let dies = dies.max(1);
@@ -355,8 +379,15 @@ pub fn compile_model(config: &str) -> Result<Program, String> {
         Some("qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text") => compile_qwen3_5(config),
         Some("llama" | "mistral" | "qwen2" | "qwen3" | "gemma" | "gemma2" | "gemma3_text") => compile_llama(&value),
         Some("deepseek_v3") => compile_deepseek(&value),
-        // Janus writes text and images with the Llama in its text configuration.
-        Some("janus") => compile_model(&value["text_config"].to_string()),
+        // Janus writes text and images with the Llama in its text configuration, and draws
+        // with two small heads around it.
+        Some("janus") => {
+            let mut program = compile_model(&value["text_config"].to_string())?;
+            if let Some(vq) = value.get("vq_config") {
+                add_janus_image_head(&mut program, vq)?;
+            }
+            Ok(program)
+        }
         Some(other) => Err(format!("no hay compilador para la arquitectura «{other}»")),
         // llama2.c describes its models with its own names: they are Llamas.
         None if value.get("dim").is_some() && value.get("n_layers").is_some() => compile_llama(&llama2c_as_llama(&value)?),
@@ -680,7 +711,46 @@ fn empty_program(family: &str, vocab: usize, hidden: usize, num_layers: usize, r
         rms_epsilon: 1e-6,
         final_hidden: 0,
         draft: None,
+        image: None,
     }
+}
+
+/// Adds Janus-Pro's image heads to its language model's program, from the checkpoint's
+/// `vq_config`: the generation head (`proj_out`, GELU, `vision_head`) and the aligner
+/// (`generation_embeddings`, `fc1`, GELU, `hidden_layers.0`), each layer with its bias.
+fn add_janus_image_head(program: &mut Program, vq: &Value) -> Result<(), String> {
+    let codes = dim(vq, "num_embeddings")?;
+    let code_dim = dim(vq, "embed_dim")?;
+    let width = dim(vq, "image_token_embed_dim")?;
+    let hidden = program.hidden;
+    let buffer = |program: &mut Program, len: usize| {
+        program.buffers.push(len);
+        program.buffers.len() - 1
+    };
+    let inst = |name: &'static str, op: Op| Inst { op, layer: None, name };
+    // A product and its bias, into a buffer of its own.
+    let layer = |program: &mut Program, ops: &mut Vec<Inst>, matrix: &str, src: Buf, len: usize| -> Buf {
+        let product = buffer(program, len);
+        ops.push(inst("Producto de la cabeza de imagen", Op::Matvec { matrix: matrix.into(), src, dst: product }));
+        let biased = buffer(program, len);
+        ops.push(inst("Sumar sesgo", Op::AddWeight { src: product, weight: format!("{matrix}.bias"), dst: biased }));
+        biased
+    };
+    let mut logits_ops = Vec::new();
+    let projected = layer(program, &mut logits_ops, "model.generation_head.proj_out", program.final_hidden, hidden);
+    let active = buffer(program, hidden);
+    logits_ops.push(inst("Activación GELU", Op::Gelu { src: projected, approximate: false, dst: active }));
+    let logits = layer(program, &mut logits_ops, "model.generation_head.vision_head", active, codes);
+
+    let mut input_ops = Vec::new();
+    let code = buffer(program, code_dim);
+    input_ops.push(inst("Vector del código", Op::EmbRead { table: "model.generation_embeddings".into(), dst: code }));
+    let widened = layer(program, &mut input_ops, "model.generation_aligner.fc1", code, width);
+    let active = buffer(program, width);
+    input_ops.push(inst("Activación GELU", Op::Gelu { src: widened, approximate: false, dst: active }));
+    let input = layer(program, &mut input_ops, "model.generation_aligner.hidden_layers.0", active, hidden);
+    program.image = Some(ImageHead { logits_ops, logits, codes, input_ops, input });
+    Ok(())
 }
 
 /// Compiles a `Qwen3_5` text model, dense or with a mixture of experts. The program

@@ -134,6 +134,21 @@ impl ExactEngine {
         Ok(self.buffer(src))
     }
 
+    /// The image head's score of each code of the codebook, from the hidden state the last
+    /// `step_hidden` left, in the die's arithmetic.
+    pub fn image_logits(&mut self) -> Result<Vec<f32>, String> {
+        self.layout.run_image_logits(&mut self.vm, &self.program)?;
+        let image = self.program.image.as_ref().ok_or("este modelo no dibuja")?;
+        Ok(self.buffer(image.logits))
+    }
+
+    /// The vector the image head makes for a drawn code, to go in as the next token's.
+    pub fn image_input(&mut self, code: u32) -> Result<Vec<f32>, String> {
+        self.layout.run_image_input(&mut self.vm, &self.program, code)?;
+        let image = self.program.image.as_ref().ok_or("este modelo no dibuja")?;
+        Ok(self.buffer(image.input))
+    }
+
     pub fn step(&mut self, token: u32, want_logits: bool) -> Result<Option<Vec<f32>>, String> {
         let text = (self.position as i64 + self.rope_offset) as u64;
         self.layout.place_rotation(&self.program, self.position as u32, [text; 3], self.mrope)?;
