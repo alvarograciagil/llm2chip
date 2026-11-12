@@ -738,7 +738,9 @@ impl Layout {
         let ones = alloc(1);
         // A layer norm adds up its block with them too.
         let norm_block = all_ops(program).filter_map(|i| if let Op::LayerNorm { block, .. } = i.op { Some(block) } else { None }).max().unwrap_or(0);
-        setup.load_vector(ones, &vec![1.0; chip_tokens.unwrap_or(ONES_LENGTH).max(experts).max(norm_block).max(1)]);
+        // An image's attention adds up over every patch, which may be more than the text's tokens.
+        let patches = program.vision.as_ref().map_or(0, |v| v.patches);
+        setup.load_vector(ones, &vec![1.0; chip_tokens.unwrap_or(ONES_LENGTH).max(experts).max(norm_block).max(patches).max(1)]);
         let minus_one = alloc(1);
         setup.load_vector(minus_one, &[-1.0]);
         let epsilon = alloc(1);
@@ -808,6 +810,9 @@ impl Layout {
         if let (Some(tokens), Some(capacity)) = (chip_tokens, key_capacity) {
             if tokens as u32 > capacity {
                 return Err(format!("cada columna de claves tiene sitio para {capacity} tokens y el contexto es de {tokens}"));
+            }
+            if let Some(vision) = program.vision.as_ref().filter(|v| v.patches as u32 > capacity) {
+                return Err(format!("cada columna de claves tiene sitio para {capacity} tokens y una imagen puede tener {} parches", vision.patches));
             }
         }
         // A pass of the cells drains whole blocks: fewer cells than lanes on a unit would

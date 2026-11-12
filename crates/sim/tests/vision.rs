@@ -192,6 +192,76 @@ mod gates {
         }
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn one_die_encodes_the_picture_and_the_model_reads_it_in_gates() {
+        use sim::lower::{ENTRY_LOGITS, ENTRY_TOKEN_FROM_IMAGE, ENTRY_VISION};
+        let dir = std::env::temp_dir().join(format!("llm2chip-vision-joint-gates-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        make_checkpoint(&dir);
+        make_vision_checkpoint(&dir);
+        let tower = VisionTower::open(&dir).unwrap().unwrap();
+        let image = patches(&tower.config, &test_picture(16, 8), 16, 8).unwrap();
+        let count = image.rows * image.cols;
+        let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
+        let program = compiler::attach_vision(compiler::compile_qwen3_5(CONFIG).unwrap(), &config, count).unwrap();
+        let part = program.vision.clone().unwrap();
+        let c = DieConfig { index_bits: 10, microcode_bits: 15, ..die_config() };
+
+        // The exact machine, products added up weight by weight as these gates do.
+        let mut exact = sim::ExactEngine::new(program.clone(), sim::Weights::open_with_vision(&dir).unwrap(), 16).unwrap().with_weights_in_registers();
+        let tokens = exact.encode_image(&tower, &image).unwrap();
+        let mut expected = Vec::new();
+        for index in 0..tokens {
+            expected = exact.step_image(index as u32, [index as u64; 3], index + 1 == tokens).unwrap().unwrap_or_default();
+        }
+
+        let layout = sim::lower::Layout::new(&program, &sim::Weights::open_with_vision(&dir).unwrap(), c, Some(8)).unwrap();
+        for (patch, angles) in sim::vision::patch_angles(&tower.config, image.rows, image.cols).iter().enumerate() {
+            layout.set_rotation(patch as u32, &angles.iter().map(|a| *a as f64).collect::<Vec<_>>());
+        }
+        let code = layout.microprogram(&program).unwrap();
+        eprintln!("{} entradas, {} palabras de microcódigo", code.entries.len(), code.words.len());
+        let mut sim = Simulator::new(&die_design(c)).unwrap();
+        load_microprogram(&mut sim, &c, &code);
+        let mut initial: HashMap<(u32, u32), i64> = layout.setup().initial.clone();
+        initial.extend(layout.rotation_writes());
+        write(&mut sim, &c, initial);
+        sim.set("load_fn", 1).unwrap();
+        for (address, value) in tables(&c).iter().enumerate() {
+            sim.set("fn_addr", address as u64).unwrap();
+            sim.set("cell_data", *value as u64 & ((1 << c.cell.activation_bits) - 1)).unwrap();
+            sim.tick();
+        }
+        sim.set("load_fn", 0).unwrap();
+
+        // The encoder, routine by routine in the firmware's order, the host writing each
+        // patch's pixels and position before its embedding.
+        let size = program.buffers[part.pixels];
+        let positions = tower.positions(image.rows, image.cols).unwrap();
+        let mut inputs = image.values.chunks(size).zip(&positions);
+        let routines = part.routines();
+        for (index, (list, token, position, _)) in sim::vision_chip::routine_order(&part, count).iter().enumerate() {
+            if index < count {
+                let (values, place) = inputs.next().unwrap();
+                let mut host = host_vector(&c, layout.register_of(part.pixels), values);
+                host.extend(host_vector(&c, layout.register_of(part.position), place));
+                write(&mut sim, &c, host);
+            }
+            let entry = routines.iter().position(|r| std::ptr::eq(&part.ops[r.clone()][0], &list[0])).unwrap();
+            enter(&mut sim, &code, ENTRY_VISION + entry, *token, *position);
+        }
+        // Each token: the fusion makes it and the model reads it in place of an embedding.
+        for index in 0..tokens as u32 {
+            enter(&mut sim, &code, ENTRY_VISION + routines.len() - 1, index, index);
+            enter(&mut sim, &code, ENTRY_TOKEN_FROM_IMAGE, 0, index);
+        }
+        enter(&mut sim, &code, ENTRY_LOGITS, 0, tokens as u32 - 1);
+        let logits = layout.logits_register(&program);
+        let got: Vec<f32> = (0..program.vocab as u32).map(|i| read_block_value(&mut sim, c, logits, i).1 as f32).collect();
+        assert_eq!(got, expected);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 #[test]
