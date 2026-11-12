@@ -94,9 +94,7 @@ fn main() {
             let (code_bits, _) = layout.cell_shape(&weights).unwrap();
             let addr_bits = bits_for(depth.max(2 * groups));
             let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1).max(context as u64 * 512)).max(addr_bits);
-            // Only as many registers as the routines reach into.
-            layout.microprogram(&program).unwrap();
-            let trial = DieConfig { reg_bits: bits_for(layout.registers_needed() as u64 + 2), index_bits, cell: CellConfig { weight_bits: code_bits.max(2), addr_bits, ..roomy.cell }, ..roomy };
+            let trial = DieConfig { reg_bits: 12, index_bits, cell: CellConfig { weight_bits: code_bits.max(2), addr_bits, ..roomy.cell }, ..roomy };
             (program, weights, trial, context)
         }
         None => {
@@ -110,6 +108,10 @@ fn main() {
     // microprogram is laid out for it.
     let steps: u32 = option("--factor-steps").map_or(trial.features.factor_steps, |n| n.parse().unwrap());
     let trial = DieConfig { features: trial.features.with_factor_steps(steps), ..trial };
+    // Only as many registers as the routines reach into.
+    let roomy = Layout::with_cells(&program, &weights, trial, context).unwrap();
+    roomy.microprogram(&program).unwrap();
+    let trial = sim::chip::with_registers_needed(trial, &roomy);
     let mut layout = Layout::with_cells(&program, &weights, trial, context).unwrap();
     if !args.iter().any(|a| a == "--table-inside") && layout.table_outside(&program) {
         eprintln!("la tabla de embedding se queda en la imagen");

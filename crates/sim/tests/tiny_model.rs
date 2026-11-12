@@ -549,6 +549,35 @@ fn sliding_windows_and_biases_run_on_the_gates() {
 }
 
 #[test]
+fn a_die_with_only_the_registers_its_routines_reach_computes_the_same() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/plain/llama");
+    let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    let program = compiler::compile_model(&config).unwrap();
+    let roomy = DieConfig { index_bits: 10, microcode_bits: 18, ..die_config() };
+    let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), roomy, Some(CHIP_TOKENS)).unwrap();
+    layout.microprogram(&program).unwrap();
+    let c = sim::chip::with_registers_needed(roomy, &layout);
+    // The working registers past what the routines use are left out, and the die is smaller.
+    assert!(c.reg_bits < roomy.reg_bits, "{} registros de {} usados", layout.registers_needed(), layout.registers_used());
+    let tokens = [3u32, 1, 4];
+    let mut run = gates_after(&program, &dir, c, &tokens);
+    let mut vm = ExactEngine::new(compiler::compile_model(&config).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap().with_weights_in_registers();
+    for (position, token) in tokens.iter().enumerate() {
+        vm.step(*token, position + 1 == tokens.len()).unwrap();
+    }
+    for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer)) {
+        let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
+        for index in 0..*length as u32 {
+            assert_eq!(read_block_value(&mut run.sim, c, gates, index).0, vm.mantissa(fast, index), "búfer {buffer}, elemento {index}");
+        }
+    }
+    // A die with fewer registers than the routines reach is refused, not run wrong.
+    let short = DieConfig { reg_bits: c.reg_bits - 1, ..c };
+    let refused = Layout::new(&program, &Weights::open(&dir).unwrap(), short, Some(CHIP_TOKENS)).and_then(|l| l.microprogram(&program).map(|_| ()));
+    assert!(refused.is_err());
+}
+
+#[test]
 fn the_firmware_scores_the_draft_head_like_the_software() {
     use netlist::chip::{chip_info, ChipModel, GenerationSetup};
     use netlist::image::build_image;

@@ -644,12 +644,27 @@ impl Layout {
             }
         }
         // Working registers come last, so a die with fewer registers keeps the first of
-        // them: the routines check that they reach no further than it has.
-        let room = ((1u32 << config.reg_bits) - 3).saturating_sub(next.get()) as usize;
-        let temporaries: Vec<u32> = (0..TEMPORARIES.min(room)).map(|_| alloc(1)).collect();
-        let parts: Vec<u32> = (0..PARTS.min(room - temporaries.len())).map(|_| alloc(1)).collect();
+        // them. Those that do not fit are numbered past every register the die can name:
+        // a routine that reaches one fails to assemble.
+        let mut room = ((1u32 << config.reg_bits) - 3).saturating_sub(next.get());
+        let mut beyond = 1u32 << config.reg_bits;
+        let mut working = |count: usize| -> Vec<u32> {
+            (0..count)
+                .map(|_| {
+                    if room > 0 {
+                        room -= 1;
+                        alloc(1)
+                    } else {
+                        beyond += 1;
+                        beyond - 1
+                    }
+                })
+                .collect()
+        };
+        let temporaries = working(TEMPORARIES);
+        let parts = working(PARTS);
         let has_delta = all_ops(program).any(|i| matches!(i.op, Op::DeltaStep { .. }));
-        let delta_parts: Vec<u32> = (0..if has_delta { PARTS.min(room - temporaries.len() - parts.len()) } else { 0 }).map(|_| alloc(1)).collect();
+        let delta_parts = working(if has_delta { PARTS } else { 0 });
         let delta_outputs = all_ops(program).filter_map(|i| if let Op::DeltaStep { dst, .. } = i.op { Some(dst) } else { None }).collect();
         let spread = spread_buffers(program);
         let next = next.get();
@@ -834,23 +849,25 @@ impl Layout {
 
     /// Lays out a routine's steps, noting how far into each register they reach.
     fn assemble(&self, code: &mut DieProgram, steps: &[Step]) -> Result<(), String> {
-        code.assemble(steps);
         let mut ranges = VarRanges::new(self.tokens, self.positions);
         let lanes = 1u32 << self.config.features.lane_bits;
         register_extents(steps, &mut ranges, lanes, self.config.features.key_shift, &mut self.extents.borrow_mut(), &mut self.windows.borrow_mut());
         match self.highest_register() {
             Some(r) if r >= self.next => Err(format!("faltan registros: las rutinas llegan al {r} y el die tiene {}", self.next)),
-            _ => Ok(()),
+            _ => {
+                code.assemble(steps);
+                Ok(())
+            }
         }
     }
 
     /// The highest register the routines assembled so far use, leaving out the wide
     /// memory and the two the die keeps for itself.
     fn highest_register(&self) -> Option<u32> {
-        let reserved = (1u32 << self.config.reg_bits) - 2;
+        let reserved = [exponent_register(&self.config), (1u32 << self.config.reg_bits) - 2];
         let windows = self.windows.borrow();
         let reached = windows.iter().map(|(first, reach)| first + reach);
-        self.extents.borrow().keys().copied().chain(reached).filter(|r| *r != 0 && *r < reserved).max()
+        self.extents.borrow().keys().copied().chain(reached).filter(|r| *r != 0 && !reserved.contains(r)).max()
     }
 
     /// Registers a die needs for the routines assembled so far: every buffer, matrix and

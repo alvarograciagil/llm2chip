@@ -290,6 +290,13 @@ pub fn with_code_dictionary(config: DieConfig, code: &Microprogram) -> DieConfig
 /// The same die with memories just as large as the layout needs: the vector memory its
 /// routines reach, as many scales and biases in each cell as it has groups, and the wide
 /// memory as many rows as its sums reach.
+/// As many registers as the routines assembled on `layout` reach into, and the two the
+/// die keeps for itself: the working registers past them are left out.
+pub fn with_registers_needed(config: DieConfig, layout: &Layout) -> DieConfig {
+    let needed = layout.registers_needed() as u64 + 2;
+    DieConfig { reg_bits: u64::BITS - (needed - 1).leading_zeros(), ..config }
+}
+
 pub fn compact_die(config: DieConfig, layout: &Layout) -> DieConfig {
     let groups = layout.cell_depths().1.max(2);
     let factor_bits = u64::BITS - (groups - 1).leading_zeros();
