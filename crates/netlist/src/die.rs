@@ -349,6 +349,7 @@ const WINDOW_X_FIELD: usize = 43;
 const FIXED_A_FIELD: usize = 53;
 /// The jump target, which an immediate step's compute cycle uses as its value instead.
 const TARGET_FIELD: usize = 42;
+const FUNCTION_FIELD: usize = 5;
 const X_SPLIT_FIELD: usize = 70;
 const SHIFT_NOW_FIELD: usize = 71;
 const CELL_FEED_FIELD: usize = 72;
@@ -377,6 +378,12 @@ const OP_BITS: u32 = 4;
 const SHIFT_REG_BITS: u32 = 6;
 
 /// Each field's name and how many bits of the word it takes on this die.
+/// Address bits of the function tables: only as many tables as the highest function the
+/// microprogram uses, the rest never loaded nor built.
+pub fn function_address_bits(c: &DieConfig) -> u32 {
+    c.function_bits + c.function_select_bits.min(c.features.widths[FUNCTION_FIELD] as u32)
+}
+
 fn field_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
     full_layout(c).into_iter().zip(c.features.widths).map(|((name, width), used)| (name, width.min(used as u32))).collect()
 }
@@ -1168,7 +1175,7 @@ impl Gen {
         let vec_addr = b.input("vec_addr", addr_bits);
         let vec_data = b.input("vec_data", a);
         let load_fn = b.input("load_fn", 1)[0];
-        let fn_addr = b.input("fn_addr", c.function_bits + c.function_select_bits);
+        let fn_addr = b.input("fn_addr", function_address_bits(c));
         let cell_ports = (!cfg.fixed_weights).then(|| (b.input("load_cell", c.cells), b.input("load_scale", 1)[0], b.input("cell_addr", cfg.addr_bits)));
         let cell_data = b.input("cell_data", c.scale_bits.max(cfg.weight_bits).max(a));
         let halted = b.output("halted", 1)[0];
@@ -2133,8 +2140,8 @@ impl Gen {
             b.group("Tabla de funciones");
             let table_out = b.wire("table_out", a);
             let mut table_index: Vec<Bit> = read_a[(a - c.function_bits) as usize..].to_vec();
-            table_index.extend_from_slice(&fields["function"]);
-            b.ram2p("function_table", c.function_bits + c.function_select_bits, a, &[("raddr", table_index), ("waddr", fn_addr.clone()), ("we", vec![load_fn]), ("wdata", cell_data[..a as usize].to_vec()), ("rdata", table_out.clone())]);
+            table_index.extend_from_slice(&fields["function"][..(function_address_bits(c) - c.function_bits) as usize]);
+            b.ram2p("function_table", function_address_bits(c), a, &[("raddr", table_index), ("waddr", fn_addr.clone()), ("we", vec![load_fn]), ("wdata", cell_data[..a as usize].to_vec()), ("rdata", table_out.clone())]);
 
             // --- Result selection ---
             b.group("Selección de resultado");
@@ -2229,8 +2236,8 @@ impl Gen {
                 let shifted = self.rounded_right(&mut b, &name("product_shift"), &held_products[lane], &fields["shift"], a as usize);
                 let table = b.wire(&name("table"), a);
                 let mut index: Vec<Bit> = operand_a[(a - c.function_bits) as usize..].to_vec();
-                index.extend_from_slice(&fields["function"]);
-                b.ram2p(&name("function_table"), c.function_bits + c.function_select_bits, a, &[("raddr", index), ("waddr", fn_addr.clone()), ("we", vec![load_fn]), ("wdata", cell_data[..a as usize].to_vec()), ("rdata", table.clone())]);
+                index.extend_from_slice(&fields["function"][..(function_address_bits(c) - c.function_bits) as usize]);
+                b.ram2p(&name("function_table"), function_address_bits(c), a, &[("raddr", index), ("waddr", fn_addr.clone()), ("we", vec![load_fn]), ("wdata", cell_data[..a as usize].to_vec()), ("rdata", table.clone())]);
                 let raw_sign = operand_a[top];
                 let widened: Vec<Bit> = (0..left_bits as usize).map(|i| operand_a.get(i).copied().unwrap_or(raw_sign)).collect();
                 let moved_left = barrel_left(&mut b, &left_mux, &name("shift_left"), &widened, &shift_left);

@@ -74,11 +74,11 @@ fn run_gates(design: &netlist::Design, image: &[u32], input: &[u8], limit: u64) 
 /// Runs the whole chip in gates on the test model and checks it says what the
 /// instruction-level simulation says, in as many cycles.
 fn whole_chip_in_gates(die: netlist::DieConfig, tag: &str) -> (Simulator, u64, Layout, PathBuf) {
-    chip_in_gates(die, tag, false)
+    chip_in_gates(die, tag, false, chip_design)
 }
 
 /// The same, choosing whether the embedding table stays in the image.
-fn chip_in_gates(die: netlist::DieConfig, tag: &str, table_outside: bool) -> (Simulator, u64, Layout, PathBuf) {
+fn chip_in_gates(die: netlist::DieConfig, tag: &str, table_outside: bool, design: fn(ChipConfig) -> netlist::Design) -> (Simulator, u64, Layout, PathBuf) {
     let firmware = build_firmware().expect("firmware");
     let dir = std::env::temp_dir().join(format!("llm2chip-chip-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -121,7 +121,7 @@ fn chip_in_gates(die: netlist::DieConfig, tag: &str, table_outside: bool) -> (Si
     let at_boot = segments.iter().filter(|s| s.target != netlist::image::Target::RuntimeTable).count();
     assert_eq!(expected.iter().filter(|b| **b == b'.').count(), at_boot, "todos los segmentos deben cargar bien");
 
-    let design = chip_design(config);
+    let design = design(config);
     let start = std::time::Instant::now();
     let (output, cycles, sim) = run_gates(&design, &image, input, cpu.cycle + 4096);
     eprintln!("puertas: {cycles} ciclos en {:.1} s, salida {:?}", start.elapsed().as_secs_f64(), String::from_utf8_lossy(&output));
@@ -146,7 +146,7 @@ fn the_embedding_can_stay_in_the_image_and_come_a_row_at_a_time() {
     if build_firmware().is_none() {
         return;
     }
-    let (_, _, layout, dir) = chip_in_gates(fpga_die_config(), "fila", true);
+    let (_, _, layout, dir) = chip_in_gates(fpga_die_config(), "fila", true, chip_design);
     // The register keeps one row: the vector memory no longer holds the whole table.
     let table = layout.outside_table().expect("tabla fuera");
     assert_eq!(table.mantissas.len(), 8 * table.cols as usize);
@@ -174,6 +174,19 @@ fn text_goes_through_the_whole_chip_in_gates() {
     for (address, code) in codes.iter().enumerate() {
         assert_eq!(sim.peek_memory("/die/cell0/compute/weight_sram", address), Some((*code as u8) as u128), "peso {address}");
     }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_chip_alone_on_one_board_says_the_same_without_tests_or_chain() {
+    if build_firmware().is_none() {
+        return;
+    }
+    let die = netlist::DieConfig { microcode_bits: 15, ..cell_die_config() };
+    let (sim, _, _, dir) = chip_in_gates(die, "sola", false, netlist::chip::chip_design_alone);
+    // Its pins are those of every chip, the ones it does not use held at zero.
+    assert_eq!(sim.get("chain_tx_valid").unwrap(), 0);
+    assert_eq!(sim.get("jtag_tdo").unwrap(), 0);
     std::fs::remove_dir_all(&dir).ok();
 }
 

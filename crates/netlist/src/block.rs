@@ -71,7 +71,7 @@ pub fn tables(c: &DieConfig) -> Vec<i64> {
     // The most negative input stands for everything beyond the table's range, where
     // the sigmoid and the exponential are effectively zero.
     let lowest = 1usize << (c.function_bits - 1);
-    (0..1usize << (c.function_bits + c.function_select_bits))
+    (0..1usize << crate::die::function_address_bits(c))
         .map(|address| {
             let (function, index) = ((address >> c.function_bits) as u32, address & ((1 << c.function_bits) - 1));
             if index == lowest && matches!(function, FN_SIGMOID | FN_EXP | FN_GELU | FN_GELU_TANH) {

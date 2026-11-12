@@ -188,10 +188,12 @@ pub fn fitted_die(program: &Program, weights: &Weights, request: &ImageRequest) 
     // Words as wide as the widest code: narrower codes share them.
     let roomy = DieConfig { cell: CellConfig { weight_bits: code_bits, ..roomy.cell }, ..roomy };
     let layout = Layout::for_image(program, weights, roomy, 1)?;
+    // Only as many registers as the routines reach into.
+    layout.microprogram(program)?;
     let (depth, groups) = layout.cell_depths();
     let a = request.activation_bits;
     let cell = CellConfig { weight_bits: code_bits, accumulator_bits: (code_bits + a + bits_for(group as u64)).max(2 * a + 4), addr_bits: bits_for(depth.max(2 * groups)), ..cell };
-    Ok(DieConfig { reg_bits: bits_for(layout.registers_used() as u64 + 2), index_bits: index_bits.max(cell.addr_bits), cell, scale_bits: a + 5, ..trial })
+    Ok(DieConfig { reg_bits: bits_for(layout.registers_needed() as u64 + 2), index_bits: index_bits.max(cell.addr_bits), cell, scale_bits: a + 5, ..trial })
 }
 
 /// One boot plan per chip count, all on the same hardware.

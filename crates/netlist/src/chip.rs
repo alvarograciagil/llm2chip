@@ -46,14 +46,17 @@ pub struct ChipConfig {
     pub sampler: SamplerConfig,
 }
 
-fn chip(gen: &mut Gen, c: ChipConfig) -> String {
+/// `alone`: a chip that will always work by itself, as on one FPGA board, without the
+/// manufacturing tests (JTAG and the memories' march tests) or the chain to other chips.
+/// Its pins are the same, held at zero.
+fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
     let control = soc(gen, c.soc);
     let die = gen.die(&c.die);
     let sample = sampler(gen, c.sampler);
     let activation = c.die.cell.activation_bits as usize;
     let vector_bits = (c.die.reg_bits + c.die.index_bits) as usize;
     let cell_bits = c.die.scale_bits.max(c.die.cell.weight_bits).max(c.die.cell.activation_bits) as usize;
-    let function_address = (c.die.function_bits + c.die.function_select_bits) as usize;
+    let function_address = crate::die::function_address_bits(&c.die) as usize;
     let limit_bits = (c.sampler.entries as usize + 1).next_power_of_two().trailing_zeros() as usize;
 
     assert_eq!(c.sampler.lanes, 1, "el die reducido solo entrega un logit por ciclo");
@@ -124,11 +127,17 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
     let self_test_fail = b.output("self_test_fail", 1);
     let bist_enable = b.wire("bist_enable", 1)[0];
     let (bist_done, bist_fail) = (b.wire("bist_done", 1)[0], b.wire("bist_fail", 1)[0]);
-    let tap = gen.jtag_tap();
     let (tap_select, tap_override, tap_test) = (b.wire("tap_select", 3), b.wire("tap_override", 1)[0], b.wire("tap_test", 1)[0]);
     let debug_bus = b.wire("debug_bus", 32);
     b.group("Puerto de pruebas");
-    b.inst("jtag", &tap, &[("tck", jtag_tck), ("tms", jtag_tms), ("tdi", jtag_tdi), ("tdo", jtag_tdo), ("debug_value", debug_bus.clone()), ("test_status", vec![bist_done, bist_fail]), ("debug_select", tap_select.clone()), ("debug_override", vec![tap_override]), ("test_enable", vec![tap_test])]);
+    if alone {
+        for bit in tap_select.iter().chain(&[tap_override, tap_test, bist_done, bist_fail]).chain(&jtag_tdo) {
+            b.or_to(Bit::Zero, Bit::Zero, *bit);
+        }
+    } else {
+        let tap = gen.jtag_tap();
+        b.inst("jtag", &tap, &[("tck", jtag_tck), ("tms", jtag_tms), ("tdi", jtag_tdi), ("tdo", jtag_tdo), ("debug_value", debug_bus.clone()), ("test_status", vec![bist_done, bist_fail]), ("debug_select", tap_select.clone()), ("debug_override", vec![tap_override]), ("test_enable", vec![tap_test])]);
+    }
     b.or_to(self_test_pin, tap_test, bist_enable);
     b.or_to(bist_done, Bit::Zero, self_test_done[0]);
     b.or_to(bist_fail, Bit::Zero, self_test_fail[0]);
@@ -450,8 +459,15 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
         }
     }
     b.group("Cadena de control");
-    let chain = gen.link_endpoint(32);
-    b.inst("chain", &chain, &[
+    if alone {
+        // Nothing ever arrives and nothing can leave, so the firmware finds itself alone.
+        let held: Vec<Bit> = chain_can_send.iter().chain(&chain_has_data).chain(&chain_word).chain(&[chain_corrected, chain_failed]).chain(&chain_tx_valid).chain(&chain_tx_bits).chain(&chain_rx_ready).chain(&chain_rx_ack).copied().collect();
+        for bit in held {
+            b.or_to(Bit::Zero, Bit::Zero, bit);
+        }
+    } else {
+        let chain = gen.link_endpoint(32);
+        b.inst("chain", &chain, &[
         ("tx_send", vec![chain_send]),
         ("tx_data", bus_wdata.clone()),
         ("tx_can_send", chain_can_send),
@@ -470,7 +486,8 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
         ("rx_has_data", chain_has_data),
         ("corrected", vec![chain_corrected]),
         ("failed", vec![chain_failed]),
-    ]);
+        ]);
+    }
     b.group("Die de inferencia");
     die_pins.extend(extra_link.iter().map(|(name, bits)| (name.as_str(), bits.clone())));
     b.inst("die", &die, &die_pins);
@@ -481,8 +498,19 @@ fn chip(gen: &mut Gen, c: ChipConfig) -> String {
 
 pub fn chip_design(config: ChipConfig) -> Design {
     let mut gen = Gen { modules: BTreeMap::new() };
-    let top = chip(&mut gen, config);
+    let top = chip(&mut gen, config, false);
     crate::self_test::insert(Design { top, modules: gen.modules })
+}
+
+/// The chip for one FPGA board on its own: the same firmware runs the same way, without
+/// the JTAG port, the memories' march tests or the chain to other chips, which the board
+/// does not need and which take logic the FPGA can use for the model.
+pub fn chip_design_alone(config: ChipConfig) -> Design {
+    let mut gen = Gen { modules: BTreeMap::new() };
+    let top = chip(&mut gen, config, true);
+    let mut design = Design { top, modules: gen.modules };
+    crate::optimize::trim_top(&mut design);
+    design
 }
 
 /// Runs the die's routines at software speed, on the same registers as the gates.

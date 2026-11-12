@@ -1,7 +1,7 @@
 //! The whole chip, in Verilog, to synthesise for an FPGA: the RISC-V controller, the die
 //! with only the logic its microprogram uses, and the sampling unit.
 //!
-//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR] [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary] [--factor-steps N] [--path NET] [--groups]`
+//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR] [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary] [--factor-steps N] [--tokenizer FILE] [--chain] [--path NET] [--groups]`
 //!
 //! With `--dsp`, each one-cycle multiplier is written as a signed product so the FPGA
 //! tools put it in their multiplier blocks. Without `--model`, the chip is the one
@@ -15,7 +15,7 @@ mod common;
 
 use common::*;
 use compiler::compile_qwen3_5;
-use netlist::chip::{chip_design, ChipConfig};
+use netlist::chip::{chip_design, chip_design_alone, ChipConfig};
 use netlist::sampler::SamplerConfig;
 use netlist::soc::SocConfig;
 use netlist::{to_verilog, to_verilog_for_fpga, CellConfig, Design, DieConfig, DieFeatures, InstKind, Prim};
@@ -94,7 +94,9 @@ fn main() {
             let (code_bits, _) = layout.cell_shape(&weights).unwrap();
             let addr_bits = bits_for(depth.max(2 * groups));
             let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1).max(context as u64 * 512)).max(addr_bits);
-            let trial = DieConfig { reg_bits: bits_for(layout.registers_used() as u64 + 2), index_bits, cell: CellConfig { weight_bits: code_bits.max(2), addr_bits, ..roomy.cell }, ..roomy };
+            // Only as many registers as the routines reach into.
+            layout.microprogram(&program).unwrap();
+            let trial = DieConfig { reg_bits: bits_for(layout.registers_needed() as u64 + 2), index_bits, cell: CellConfig { weight_bits: code_bits.max(2), addr_bits, ..roomy.cell }, ..roomy };
             (program, weights, trial, context)
         }
         None => {
@@ -115,7 +117,7 @@ fn main() {
     let code = layout.microprogram(&program).unwrap();
     eprintln!("registros más largos: {:?}", layout.longest_registers(6));
     let (depth, groups) = layout.cell_depths();
-    eprintln!("{} registros, {} palabras de pesos y {} grupos de factores por celda", layout.registers_used(), depth, groups);
+    eprintln!("{} registros (2^{} en la tabla), {} palabras de pesos y {} grupos de factores por celda", layout.registers_used(), trial.reg_bits, depth, groups);
     // Only what this microprogram uses.
     let features = DieFeatures::of(&code).with_lane_bits(trial.features.lane_bits).with_cluster_bits(trial.features.cluster_bits).with_key_shift(trial.features.key_shift).with_factor_steps(steps);
     let die = sim::chip::compact_die(DieConfig { features, microcode_bits: bits_for(code.words.len() as u64), ..trial }, &layout);
@@ -123,8 +125,14 @@ fn main() {
     let distinct: std::collections::HashSet<_> = code.words.iter().map(|w| format!("{w:?}")).collect();
     eprintln!("microprograma: {} palabras, {} distintas", code.words.len(), distinct.len());
     eprintln!("memoria vectorial compacta de 2^{} palabras, frente a 2^{} sin tabla", die.features.vector_bits, die.reg_bits + die.index_bits);
-    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: bits_for(program.vocab as u64).max(4), entries: 4, lanes: 1 } };
-    let design = chip_design(config);
+    // The firmware's data, its stack and the chip's description take the first 32 KB; with
+    // `--tokenizer DIR/tokenizer.json` the CPU also keeps that model's tables, after them.
+    let tokenizer_words = option("--tokenizer").map_or(0, |path| sim::tokenizer::TokenizerTables::from_file(Path::new(&path), context as u64).unwrap().to_words().len());
+    let data_bits = (netlist::soc::TOKENIZER_WORD + tokenizer_words).next_power_of_two().ilog2();
+    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: bits_for(program.vocab as u64).max(4), entries: 4, lanes: 1 } };
+    // A board on its own needs neither the manufacturing tests nor the chain to other chips;
+    // `--chain` keeps them, for boards joined to each other.
+    let design = if args.iter().any(|a| a == "--chain") { chip_design(config) } else { chip_design_alone(config) };
     eprintln!("{:.0} equivalentes NAND2, microprograma de {} palabras", design.gate_equivalents(), code.words.len());
     let mut memories: Vec<_> = memory_bits(&design).into_iter().collect();
     memories.sort();
@@ -152,15 +160,17 @@ fn main() {
                 InstKind::Prim(_) => (g + 1, f),
             })
         }
-        let mut groups: std::collections::BTreeMap<&str, (u64, u64)> = Default::default();
-        for inst in &design.modules["llm2chip_die"].instances {
+        let mut groups: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+        // The die by its areas, and the rest of the chip by its top-level parts.
+        let parts = design.modules["llm2chip_top"].instances.iter().filter(|i| !matches!(&i.kind, InstKind::Module(m) if m == "llm2chip_die")).map(|i| (format!("chip: {}", if i.group.is_empty() { &i.name } else { &i.group }), i));
+        for (group, inst) in design.modules["llm2chip_die"].instances.iter().map(|i| (i.group.clone(), i)).chain(parts) {
             let (g, f) = match &inst.kind {
                 InstKind::Module(child) => gates(&design, child),
                 InstKind::Prim(Prim::Dff) => (0, 1),
                 InstKind::Prim(Prim::Sram { .. } | Prim::Ram2p { .. } | Prim::Rom { .. }) => (0, 0),
                 InstKind::Prim(_) => (1, 0),
             };
-            let entry = groups.entry(inst.group.as_str()).or_default();
+            let entry = groups.entry(group).or_default();
             (entry.0, entry.1) = (entry.0 + g, entry.1 + f);
         }
         let mut sorted: Vec<_> = groups.into_iter().collect();

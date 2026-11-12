@@ -643,9 +643,13 @@ impl Layout {
                 setup.load_mantissas(rope_table[index], &flat, exponent);
             }
         }
-        let temporaries: Vec<u32> = (0..TEMPORARIES).map(|_| alloc(1)).collect();
-        let parts: Vec<u32> = (0..PARTS).map(|_| alloc(1)).collect();
-        let delta_parts: Vec<u32> = (0..PARTS).map(|_| alloc(1)).collect();
+        // Working registers come last, so a die with fewer registers keeps the first of
+        // them: the routines check that they reach no further than it has.
+        let room = ((1u32 << config.reg_bits) - 3).saturating_sub(next.get()) as usize;
+        let temporaries: Vec<u32> = (0..TEMPORARIES.min(room)).map(|_| alloc(1)).collect();
+        let parts: Vec<u32> = (0..PARTS.min(room - temporaries.len())).map(|_| alloc(1)).collect();
+        let has_delta = all_ops(program).any(|i| matches!(i.op, Op::DeltaStep { .. }));
+        let delta_parts: Vec<u32> = (0..if has_delta { PARTS.min(room - temporaries.len() - parts.len()) } else { 0 }).map(|_| alloc(1)).collect();
         let delta_outputs = all_ops(program).filter_map(|i| if let Op::DeltaStep { dst, .. } = i.op { Some(dst) } else { None }).collect();
         let spread = spread_buffers(program);
         let next = next.get();
@@ -712,8 +716,7 @@ impl Layout {
         let routine = |code: &mut DieProgram, build: &mut dyn FnMut(&mut Assembly) -> Result<(), String>| {
             let mut asm = self.assembly();
             build(&mut asm)?;
-            self.assemble(code, &asm.steps);
-            Ok::<(), String>(())
+            self.assemble(code, &asm.steps)
         };
         routine(&mut code, &mut |asm| self.run_range(asm, program, 0..program.logits_from, token, position, true))?;
         code.next_entry();
@@ -760,7 +763,7 @@ impl Layout {
             let output = program.crossing(plan[die + 1].start)?;
             asm.send(self.reg(output), (program.buffers[output] as u32).into());
         }
-        self.assemble(&mut code, &asm.steps);
+        self.assemble(&mut code, &asm.steps)?;
         code.next_entry();
 
         // The logits are made on the first chip, which samples them: the last one sends it
@@ -779,7 +782,7 @@ impl Layout {
         if first {
             self.run_list(&mut asm, program, tail, token, position, false)?;
         }
-        self.assemble(&mut code, &asm.steps);
+        self.assemble(&mut code, &asm.steps)?;
         Ok(code.finish_program())
     }
 
@@ -812,7 +815,7 @@ impl Layout {
             let output = program.crossing(plan[stage + 1].start)?;
             asm.send(self.reg(output), (program.buffers[output] as u32).into());
         }
-        self.assemble(&mut code, &asm.steps);
+        self.assemble(&mut code, &asm.steps)?;
         code.next_entry();
 
         let mut asm = self.assembly();
@@ -825,16 +828,36 @@ impl Layout {
             asm.receive(self.reg(hidden), length);
             self.run_list(&mut asm, program, &program.ops[program.logits_from..], token, position, false)?;
         }
-        self.assemble(&mut code, &asm.steps);
+        self.assemble(&mut code, &asm.steps)?;
         Ok(code.finish_program())
     }
 
     /// Lays out a routine's steps, noting how far into each register they reach.
-    fn assemble(&self, code: &mut DieProgram, steps: &[Step]) {
+    fn assemble(&self, code: &mut DieProgram, steps: &[Step]) -> Result<(), String> {
         code.assemble(steps);
         let mut ranges = VarRanges::new(self.tokens, self.positions);
         let lanes = 1u32 << self.config.features.lane_bits;
         register_extents(steps, &mut ranges, lanes, self.config.features.key_shift, &mut self.extents.borrow_mut(), &mut self.windows.borrow_mut());
+        match self.highest_register() {
+            Some(r) if r >= self.next => Err(format!("faltan registros: las rutinas llegan al {r} y el die tiene {}", self.next)),
+            _ => Ok(()),
+        }
+    }
+
+    /// The highest register the routines assembled so far use, leaving out the wide
+    /// memory and the two the die keeps for itself.
+    fn highest_register(&self) -> Option<u32> {
+        let reserved = (1u32 << self.config.reg_bits) - 2;
+        let windows = self.windows.borrow();
+        let reached = windows.iter().map(|(first, reach)| first + reach);
+        self.extents.borrow().keys().copied().chain(reached).filter(|r| *r != 0 && *r < reserved).max()
+    }
+
+    /// Registers a die needs for the routines assembled so far: every buffer, matrix and
+    /// constant, and the working registers as far as the routines reach into them.
+    pub fn registers_needed(&self) -> u32 {
+        let first_working = self.temporaries.first().copied().unwrap_or(self.next);
+        first_working.max(self.highest_register().map_or(0, |r| r + 1))
     }
 
     /// How many elements of the wide memory the routines assembled so far reach: the steps
@@ -926,7 +949,7 @@ impl Layout {
         let mut asm = self.assembly();
         self.run_list(&mut asm, program, std::slice::from_ref(inst), Expr::var(Var::Token), Expr::var(Var::Position), first)?;
         let mut code = DieProgram::new(self.config);
-        self.assemble(&mut code, &asm.steps);
+        self.assemble(&mut code, &asm.steps)?;
         Ok(code.finish_program())
     }
 
