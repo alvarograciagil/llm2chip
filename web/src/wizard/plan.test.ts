@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { boardsWithin, DEFAULT_ANSWERS, fpgaParams, makers, modelParams, suggested, type FpgaBoard } from "./plan";
 
-const board = (id: string, maker: string, lut: FpgaBoard["lut"], luts_k: number, bram_mbit: number, price_usd: number): FpgaBoard => ({ id, maker, name: id, fpga: "", url: "", image: null, luts_k, lut, bram_mbit, dsp: 300, ddr_gb: 1, ddr_gbps: 3, clock_mhz: 40, clock_measured: false, price_usd, price: "", tools: "" });
+const board = (id: string, maker: string, lut: FpgaBoard["lut"], luts_k: number, bram_mbit: number, price_usd: number): FpgaBoard => ({ id, maker, name: id, fpga: "", url: "", image: null, luts_k, lut, bram_mbit, dsp: 300, ddr_gb: 1, ddr_gbps: 3, clock_mhz: 40, clock_measured: false, price_usd, price: "", tools: "", base_logic_k: lut === "LUT6" ? 25.4 : 28.6 });
 const BOARDS = [board("pequeña", "Sipeed", "LUT4", 23, 1, 35), board("mega", "Sipeed", "LUT4", 138, 6.1, 195), board("kv260", "AMD", "LUT6", 117, 23.1, 249), board("alveo", "AMD", "LUT6", 1728, 432, 9000)];
-const base = (lut: string) => (lut === "LUT6" ? 45.9 : 43.1);
 
 describe("asistente de proyecto", () => {
   it("diseña para la placa: su reloj y su memoria los pone el motor", () => {
@@ -30,11 +29,11 @@ describe("asistente de proyecto", () => {
 
 describe("placas por presupuesto", () => {
   it("con unos 250 $, la que más guarda dentro del chip es la Kria KV260", () => {
-    expect(boardsWithin(BOARDS, 250, base)[0].id).toBe("kv260");
+    expect(boardsWithin(BOARDS, 250)[0].id).toBe("kv260");
   });
 
   it("deja fuera las que no tienen lógica para el chip, y agrupa por fabricante", () => {
-    expect(boardsWithin(BOARDS, 10000, base).map((b) => b.id)).not.toContain("pequeña");
+    expect(boardsWithin(BOARDS, 10000).map((b) => b.id)).not.toContain("pequeña");
     expect(makers(BOARDS)).toEqual(["AMD", "Sipeed"]);
   });
 });

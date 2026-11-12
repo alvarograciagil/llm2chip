@@ -43,8 +43,8 @@ pub struct FpgaBoard {
 pub fn base_logic_k(board: &FpgaBoard) -> f64 {
     match board.lut {
         // A Cyclone IV has no distributed memory, only blocks that read a cycle late, so
-        // its register table stays in flip-flops, as before the table went to memory.
-        "LE" if board.fpga.contains("Cyclone IV") => 48.3,
+        // its register table stays in flip-flops (measured with synth_intel, memories aside).
+        "LE" if board.fpga.contains("Cyclone IV") => 75.3,
         // With the register table in distributed memory, counted in the look-up tables
         // it takes.
         "LUT6" => 25.4,
@@ -75,7 +75,7 @@ pub fn boards() -> &'static [FpgaBoard] {
             board!("tang-mega-138k", "Sipeed", "Sipeed Tang Mega 138K Pro", "Gowin GW5AST-138", "https://wiki.sipeed.com/hardware/en/tang/tang-mega-138k/mega-138k-pro.html", Some("https://wiki.sipeed.com/hardware/en/tang/tang-mega-138k/assets/mega_138k_pro_top.png"), 138.0, "LUT4", 6.1, 298, 1.0, 3.2, 40.0, false, 195.0, "~195 $", "Gowin EDA"),
             board!("ulx3s-85f", "Radiona", "Radiona ULX3S 85F", "Lattice ECP5 LFE5U-85F", "https://radiona.org/ulx3s/", None, 84.0, "LUT4", 3.7, 156, 0.032, 0.2, 32.1, true, 150.0, "~130-150 $", "Yosys + nextpnr, libres"),
             // The usual small boards with this chip carry 32 MB of SDRAM on 16 bits.
-            board!("cyclone-iv-ep4ce10", "Altera", "Placa con Cyclone IV EP4CE10", "Altera Cyclone IV E EP4CE10", "https://www.intel.com/content/www/us/en/products/details/fpga/cyclone/iv/e.html", None, 10.3, "LE", 0.41, 23, 0.032, 0.2, 40.0, false, 30.0, "~25-40 $", "Quartus Prime Lite (gratuito)"),
+            board!("cyclone-iv-ep4ce10", "Altera", "Placa con Cyclone IV EP4CE10", "Altera Cyclone IV E EP4CE10", "https://www.intel.com/content/www/us/en/products/details/fpga/cyclone/iv/e.html", None, 10.3, "LE", 0.41, 23, 0.008, 0.2, 40.0, false, 30.0, "~25-40 $", "Quartus Prime Lite (gratuito)"),
             board!("atum-a3-nano", "Terasic", "Terasic Atum A3 Nano", "Altera Agilex 3 A3CZ135", "https://www.terasic.com.tw/cgi-bin/page/archive.pl?Language=English&CategoryNo=44&No=1373", None, 135.0, "LE", 8.3, 368, 0.064, 0.2, 80.0, false, 180.0, "180-245 $", "Quartus Prime Pro (licencia gratuita para Agilex 3)"),
             board!("pynq-z2", "TUL", "TUL PYNQ-Z2", "Xilinx Zynq XC7Z020", "https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html", None, 53.0, "LUT6", 4.9, 220, 0.5, 2.1, 50.0, false, 200.0, "200-260 $", "Vivado (edición gratuita)"),
             board!("de10-nano", "Terasic", "Terasic DE10-Nano", "Intel Cyclone V SE 5CSEBA6", "https://www.terasic.com.tw/cgi-bin/page/archive.pl?Language=English&No=1046", None, 110.0, "LE", 5.6, 112, 1.0, 3.2, 40.0, false, 225.0, "~225 $", "Quartus Prime Lite (gratuito)"),

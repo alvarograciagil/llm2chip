@@ -196,11 +196,6 @@ function ModelList({ rows, answers, choose }: { rows: Row[]; answers: Answers; c
   );
 }
 
-/** The basic chip in look-up tables, as synthesised for each family. */
-function baseLogic(lut: string): number {
-  return lut === "LUT6" ? 45.9 : lut === "LE" ? 48.3 : 43.1;
-}
-
 /** A drawing of a board, for those whose maker's photo could not be checked. */
 function BoardDrawing({ board }: { board: FpgaBoard }) {
   return (
@@ -238,7 +233,7 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
   const current = boards.find((b) => b.id === board) ?? boards[0];
   const [photoFailed, setPhotoFailed] = useState<string | null>(null);
   const models = boards.filter((b) => b.maker === current.maker).sort((a, b) => a.price_usd - b.price_usd);
-  const logic = baseLogic(current.lut) / current.luts_k;
+  const logic = current.base_logic_k / current.luts_k;
   const memory = (mb: number) => (mb >= 1 ? `${mb} GB` : `${Math.round(mb * 1000)} MB`);
   return (
     <div className="board-picker">

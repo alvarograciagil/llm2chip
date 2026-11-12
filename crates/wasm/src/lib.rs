@@ -42,10 +42,19 @@ pub fn builtin_models() -> Result<String, JsError> {
     to_js(&list)
 }
 
-/// The FPGA boards a design can target, with what each offers.
+/// The FPGA boards a design can target, with what each offers and the logic the smallest
+/// chip takes on its family.
 #[wasm_bindgen]
 pub fn fpga_boards() -> Result<String, JsError> {
-    to_js(&arch::fpga::boards())
+    let list: Vec<serde_json::Value> = arch::fpga::boards()
+        .iter()
+        .map(|b| {
+            let mut v = serde_json::to_value(b).unwrap_or_default();
+            v["base_logic_k"] = arch::fpga::base_logic_k(b).into();
+            v
+        })
+        .collect();
+    to_js(&list)
 }
 
 #[wasm_bindgen]

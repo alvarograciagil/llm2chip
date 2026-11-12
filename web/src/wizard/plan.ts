@@ -12,6 +12,8 @@ export interface FpgaBoard {
   url: string;
   image: string | null;
   luts_k: number;
+  /** Thousands of look-up tables (or LE) the smallest chip takes on this family, as synthesised. */
+  base_logic_k: number;
   lut: "LUT4" | "LUT6" | "LE";
   bram_mbit: number;
   dsp: number;
@@ -31,8 +33,8 @@ export function makers(boards: FpgaBoard[]): string[] {
 
 /** The boards that cost at most `budget` dollars, with the one that holds the most on
  * chip first: on-chip memory is what lets a model run without waiting on the board's. */
-export function boardsWithin(boards: FpgaBoard[], budget: number, baseLogicK: (lut: string) => number): FpgaBoard[] {
-  return boards.filter((b) => b.price_usd <= budget && baseLogicK(b.lut) <= b.luts_k).sort((a, b) => b.bram_mbit - a.bram_mbit || b.ddr_gbps - a.ddr_gbps);
+export function boardsWithin(boards: FpgaBoard[], budget: number): FpgaBoard[] {
+  return boards.filter((b) => b.price_usd <= budget && b.base_logic_k <= b.luts_k).sort((a, b) => b.bram_mbit - a.bram_mbit || b.ddr_gbps - a.ddr_gbps);
 }
 
 /** The answers to the wizard's questions. Each start uses only some of them. */
