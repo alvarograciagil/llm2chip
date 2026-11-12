@@ -502,6 +502,10 @@ pub struct ChipModel<E> {
     pub sampler: SamplerModel,
     /// Cycles the die has been busy, as the chip's own counter would read.
     pub die_busy: u64,
+    /// For each routine of the microprogram, how many times it ran and its cycles.
+    pub routines: Vec<(u64, u64)>,
+    /// Tokens the sampling unit has picked, and the cycles it took.
+    pub samples: (u64, u64),
     parameters: [u32; 32],
     /// What the firmware reports of the draft head, by how far ahead it guessed.
     pub draft_hits: [u32; 4],
@@ -519,7 +523,7 @@ pub struct ChipModel<E> {
 
 impl<E: DieEngine> ChipModel<E> {
     pub fn new(engine: E, code: Microprogram, sampler: SamplerModel) -> Self {
-        Self { engine, code, sampler, die_busy: 0, parameters: [0; 32], draft_hits: [0; 4], draft_tries: [0; 4], vector_address: 0, sample_base: 0, sample_count: 0, inverse: 0, limit: 0, greedy: false, die_free_at: 0, sampler_done_at: None, sampler_token: 0 }
+        Self { engine, routines: vec![(0, 0); code.entries.len()], code, sampler, die_busy: 0, samples: (0, 0), parameters: [0; 32], draft_hits: [0; 4], draft_tries: [0; 4], vector_address: 0, sample_base: 0, sample_count: 0, inverse: 0, limit: 0, greedy: false, die_free_at: 0, sampler_done_at: None, sampler_token: 0 }
     }
 
     /// Recovers the token and position from the parameter registers.
@@ -556,6 +560,8 @@ impl<E: DieEngine> Peripheral for ChipModel<E> {
                 self.engine.run(routine, token, position);
                 let cycles = self.engine.cycles(routine, token, position);
                 self.die_busy += cycles;
+                self.routines[routine].0 += 1;
+                self.routines[routine].1 += cycles;
                 // The order reaches the die a cycle after the store.
                 self.die_free_at = cycle + 1 + cycles;
             }
@@ -576,6 +582,8 @@ impl<E: DieEngine> Peripheral for ChipModel<E> {
                 let sampled = self.sampler.sample(&logits, self.inverse, self.limit as usize, self.greedy);
                 self.sampler_token = sampled.token;
                 self.sampler_done_at = Some(cycle + sampled.stream_cycles + sampled.finish_cycles);
+                self.samples.0 += 1;
+                self.samples.1 += sampled.stream_cycles + sampled.finish_cycles;
             }
             _ => {}
         }

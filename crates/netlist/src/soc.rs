@@ -676,6 +676,8 @@ pub struct SocBus<P = NoPeripheral> {
     busy_until: Option<u64>,
     crc: u32,
     pub peripheral: P,
+    /// The CPU's last access outside its memories, for `activity::CpuProfile`.
+    pub last_access: Option<crate::activity::BusAccess>,
 }
 
 impl SocBus<NoPeripheral> {
@@ -690,7 +692,7 @@ impl<P: Peripheral> SocBus<P> {
         image[..program.len()].copy_from_slice(program);
         let mut ram = vec![0; 1 << config.data_bits];
         ram[..data.len()].copy_from_slice(data);
-        Self { program: image, ram, rx: input.iter().copied().collect(), tx: Vec::new(), image: Vec::new(), writes: Vec::new(), registers: [0; 6], now: 0, busy_until: None, crc: 0, peripheral }
+        Self { program: image, ram, rx: input.iter().copied().collect(), tx: Vec::new(), image: Vec::new(), writes: Vec::new(), registers: [0; 6], now: 0, busy_until: None, crc: 0, peripheral, last_access: None }
     }
 
     /// The state right after the load controller has copied the firmware from `image`.
@@ -734,6 +736,23 @@ impl<P: Peripheral> Rv32Bus for SocBus<P> {
     }
 
     fn read(&mut self, address: u32) -> u32 {
+        let value = self.read_from(address);
+        if address >> 28 >= 2 {
+            self.last_access = Some(crate::activity::BusAccess { address, write: false, value });
+        }
+        value
+    }
+
+    fn write(&mut self, address: u32, data: u32, strobe: u8) {
+        if address >> 28 >= 2 {
+            self.last_access = Some(crate::activity::BusAccess { address, write: true, value: data });
+        }
+        self.write_to(address, data, strobe);
+    }
+}
+
+impl<P: Peripheral> SocBus<P> {
+    fn read_from(&mut self, address: u32) -> u32 {
         match address >> 28 {
             1 => self.ram[(address as usize / 4) & (self.ram.len() - 1)],
             2 => match address & 0xC {
@@ -752,7 +771,7 @@ impl<P: Peripheral> Rv32Bus for SocBus<P> {
         }
     }
 
-    fn write(&mut self, address: u32, data: u32, strobe: u8) {
+    fn write_to(&mut self, address: u32, data: u32, strobe: u8) {
         match address >> 28 {
             1 => {
                 let slot = (address as usize / 4) & (self.ram.len() - 1);

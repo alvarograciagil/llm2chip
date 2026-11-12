@@ -1,6 +1,7 @@
 //! Hierarchical structural netlists built from logic gates, flip-flops and memories.
 //! The schematic, the simulator and the Verilog export all read this one structure.
 
+pub mod activity;
 pub mod block;
 pub mod chip;
 pub mod format;

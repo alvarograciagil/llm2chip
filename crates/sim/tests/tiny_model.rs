@@ -700,6 +700,61 @@ fn the_firmware_closes_the_reasoning_when_its_budget_runs_out() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn the_cpu_profile_adds_up_and_tells_waiting_from_work() {
+    use netlist::activity::{CpuProfile, CpuTask};
+    use netlist::chip::{chip_info, ChipModel, GenerationSetup, REG_ENTRY};
+    use netlist::image::build_image;
+    use netlist::rv32::Rv32Iss;
+    use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
+    use netlist::soc::{FirmwareImage, SocBus, SocConfig};
+    use netlist::Parameter;
+    use sim::chip::{RunnerEngine, FLOW_DRAFT_REGISTER, FLOW_INDEX_BITS, FLOW_REGISTER_BITS};
+
+    let dir = std::env::temp_dir().join(format!("llm2chip-profile-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let elf = include_bytes!("../../../firmware/prebuilt/firmware.elf");
+    let firmware = FirmwareImage::from_elf(elf).unwrap();
+    let die = DieConfig { reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, ..die_config() };
+    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }] };
+    let setup = GenerationSetup { max_new: 4, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: None, think_budget: u32::MAX };
+    let info = chip_info(&die, &code, 1, 8, &setup);
+    let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
+    let input: Vec<u8> = [3u32, 5, 6].iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect();
+    let mut engine = Engine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
+    let runner = RunnerEngine::new(&mut engine, 16, 1000);
+    let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
+    let mut bus = SocBus::booted_with(SocConfig { program_bits: 14, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
+    let mut cpu = Rv32Iss::default();
+    let mut profile = CpuProfile::from_elf(elf);
+    let mut orders = 0;
+    while !cpu.halted {
+        let pc = cpu.pc;
+        cpu.step(&mut bus);
+        let access = bus.last_access.take();
+        orders += access.is_some_and(|a| a.write && a.address == 0x4000_0000 + 4 * REG_ENTRY) as u64;
+        profile.record(pc, access, cpu.cycle);
+        assert!(cpu.cycle < 50_000_000, "el firmware no termina");
+    }
+    profile.settle();
+    let (counts, chip) = (profile.counts, &bus.peripheral);
+    // Every cycle is somewhere, and every order the CPU gave is a routine the die ran.
+    assert_eq!(counts.total_cycles(), cpu.cycle);
+    assert_eq!(chip.routines.iter().map(|r| r.0).sum::<u64>(), orders);
+    assert_eq!(chip.routines[ENTRY_TOKEN].0, 3 + 4, "un paso por token del prompt y por cada generado");
+    // The CPU waits while the die works: at most the few cycles of one poll apart per order.
+    let waited = counts.cycles_of(CpuTask::WaitDie);
+    assert!(waited.abs_diff(chip.die_busy) <= 16 * orders, "espera {waited}, die {}", chip.die_busy);
+    for task in [CpuTask::Receive, CpuTask::Order, CpuTask::Sample, CpuTask::Send] {
+        assert!(counts.cycles_of(task) > 0, "{task:?}: {:?}", counts.entries());
+    }
+    // The tokens arrive ready, so nothing is tokenized.
+    assert_eq!(counts.cycles_of(CpuTask::Tokenize), 0);
+    eprintln!("{:?}", counts.entries());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Three heads to each key head, in attention and in the delta rule: their units are laid
 /// out a power of two apart, with the units in between sitting out.
 const GROUPED: &str = r#"{

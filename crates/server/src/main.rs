@@ -659,6 +659,39 @@ fn draft_counts(counts: &[u32; 4], depth: usize) -> Vec<u32> {
     counts[..depth.min(4)].to_vec()
 }
 
+/// The die's routines the firmware starts, by their entry number.
+const ROUTINE_NAMES: [&str; 6] = ["token", "logits", "feed_from_main", "feed_from_draft", "draft", "draft_logits"];
+
+/// What the CPU, the die and the sampling unit have counted, to report what changed.
+#[derive(Clone, Default)]
+struct Activity {
+    cpu: netlist::activity::CpuCounts,
+    routines: Vec<(u64, u64)>,
+    samples: (u64, u64),
+}
+
+impl Activity {
+    fn now<E: netlist::chip::DieEngine>(profile: &netlist::activity::CpuProfile, chip: &ChipModel<E>) -> Self {
+        Self { cpu: profile.counts, routines: chip.routines.clone(), samples: chip.samples }
+    }
+
+    /// What was done since `before`: the CPU's cycles and instructions by task, and the
+    /// runs and cycles of each routine of the die and of the sampling unit.
+    fn since(&self, before: &Activity) -> serde_json::Value {
+        let cpu: serde_json::Map<String, serde_json::Value> = self.cpu.since(&before.cpu).entries().into_iter().map(|(task, cycles, instructions)| (serde_json::to_value(task).unwrap().as_str().unwrap().to_string(), serde_json::json!([cycles, instructions]))).collect();
+        let routines: serde_json::Map<String, serde_json::Value> = self
+            .routines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, now)| {
+                let was = before.routines.get(i).copied().unwrap_or_default();
+                (now.0 > was.0).then(|| (ROUTINE_NAMES.get(i).map_or_else(|| i.to_string(), |n| n.to_string()), serde_json::json!([now.0 - was.0, now.1 - was.1])))
+            })
+            .collect();
+        serde_json::json!({ "cpu": cpu, "routines": routines, "samples": [self.samples.0 - before.samples.0, self.samples.1 - before.samples.1] })
+    }
+}
+
 /// Runs the chip's real firmware at instruction level around the loaded engine.
 fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32], request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> {
     use std::sync::atomic::Ordering::Relaxed;
@@ -711,27 +744,36 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
     let soc = SocConfig { program_bits: 14, data_bits, fifo_bits: 6 };
     let mut bus = SocBus::booted_with(soc, &image, &input, ChipModel::new(runner, code, unit))?;
     let mut cpu = Rv32Iss::default();
+    // What the CPU is, for the simulator to show beside what it does.
+    let _ = sender.blocking_send(serde_json::json!({ "type": "cpu", "isa": "RV32IM", "program_bytes": 4u64 << soc.program_bits, "data_bytes": 4u64 << soc.data_bits, "firmware_bytes": 4 * firmware.program.len(), "image_bytes": 4 * image.len(), "tokenizer": use_tables }));
+    let mut profile = netlist::activity::CpuProfile::from_elf(FIRMWARE);
+    let mut last = Activity::default();
     let (mut emitted, mut reported, mut shown) = (0, 0, 0);
     let mut output: Vec<u32> = Vec::new();
     while !cpu.halted {
         if cancelled.load(Relaxed) {
             return Ok(());
         }
+        let pc = cpu.pc;
         cpu.step(&mut bus);
-        let runner = &mut bus.peripheral.engine;
-        if let Some(error) = runner.error.take() {
+        profile.record(pc, bus.last_access.take(), cpu.cycle);
+        if let Some(error) = bus.peripheral.engine.error.take() {
             return Err(error);
         }
-        while reported < runner.steps && reported < ids.len() {
+        while reported < bus.peripheral.engine.steps && reported < ids.len() {
             reported += 1;
-            let _ = sender.blocking_send(serde_json::json!({ "type": "prefill", "done": reported, "total": ids.len(), "seconds": runner.last_seconds }));
+            let now = Activity::now(&profile, &bus.peripheral);
+            let _ = sender.blocking_send(serde_json::json!({ "type": "prefill", "done": reported, "total": ids.len(), "seconds": bus.peripheral.engine.last_seconds, "cycles": cpu.cycle, "activity": now.since(&last) }));
+            last = now;
         }
         if use_tables {
             // A token's text is complete once the firmware asks for the next token's logits.
             while emitted + 1 < bus.peripheral.engine.generated {
                 emitted += 1;
                 let piece = take_text(&bus.tx, &mut shown);
-                let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth) }));
+                let now = Activity::now(&profile, &bus.peripheral);
+                let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth), "activity": now.since(&last) }));
+                last = now;
             }
             continue;
         }
@@ -741,14 +783,19 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
             emitted += 1;
             let decoded = tokenizer.decode(&output, true).map_err(|e| e.to_string())?;
             let piece = if decoded.ends_with('\u{FFFD}') { String::new() } else { let part = decoded[shown..].to_string(); shown = decoded.len(); part };
-            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "id": output[emitted - 1], "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth) }));
+            let now = Activity::now(&profile, &bus.peripheral);
+            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "id": output[emitted - 1], "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth), "activity": now.since(&last) }));
+            last = now;
         }
     }
+    profile.settle();
     if use_tables {
         let piece = take_text(&bus.tx, &mut shown);
         if !piece.is_empty() {
             emitted += 1;
-            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth) }));
+            let now = Activity::now(&profile, &bus.peripheral);
+            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth), "activity": now.since(&last) }));
+            last = now;
         }
     } else {
         emitted = output.len();
@@ -760,7 +807,8 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
     let tokenizer_match = use_tables.then(|| runner.tokens.len() >= ids.len() && runner.tokens[..ids.len()] == *ids);
     // Short of the limit, the firmware stopped by its own rules: an end token or a loop.
     let reason = if emitted >= request.max_tokens { "limit" } else { "chip" };
-    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": emitted, "reason": reason, "chip": { "cycles": cpu.cycle, "die_cycles": runner.die_cycles, "tokenizer_match": tokenizer_match } }));
+    let now = Activity::now(&profile, &bus.peripheral);
+    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": emitted, "reason": reason, "chip": { "cycles": cpu.cycle, "die_cycles": runner.die_cycles, "tokenizer_match": tokenizer_match }, "activity": now.since(&last), "totals": now.since(&Activity::default()) }));
     Ok(())
 }
 
