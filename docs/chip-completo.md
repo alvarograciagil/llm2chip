@@ -103,7 +103,7 @@ Al arrancar, el maestro envía un contador por la cadena de control. Cada chip t
 
 Una imagen lleva un plan por cada número de chips: en el mixto, los números que no forman grupos enteros se reparten por capas, y los que caben en un solo grupo, por filas.
 
-Cada palabra lleva un código que corrige un bit y detecta dos, y una señal de válido y otra de listo. No hay reintento: un error doble se cuenta, pero el dato llega mal. El reloj sigue siendo común en la simulación, así que falta el cruce entre dominios de reloj. La imagen debe traer el reparto de capas de cada número de chips admitido.
+Cada palabra lleva un número de secuencia y un código que corrige un bit y detecta dos, con una señal de válido y otra de listo. El receptor corrige los errores sueltos y, ante uno doble, pide que se repita la palabra por las señales de confirmación; el emisor guarda las palabras sin confirmar y las repite, y si la petición se pierde, vuelve a pedirla al cabo de un tiempo. La mitad receptora funciona con el reloj del emisor y entrega las palabras al reloj del chip a través de una cola con punteros Gray, así que los dos chips no necesitan el mismo reloj (`words_cross_between_two_unrelated_clocks`). En la placa simulada, los chips comparten reloj; los tests de placa inyectan bits invertidos y dobles, y exigen que cada error suelto conste como corregido y cada doble como repetido. La imagen debe traer el reparto de capas de cada número de chips admitido.
 
 ## Pesos grabados
 
