@@ -70,20 +70,21 @@ fn linear(x: &[f32], weight: &[f32], bias: &[f32]) -> Vec<f32> {
 }
 
 /// A picture as channels of rows of pixels.
-struct Planes {
-    channels: usize,
-    side: usize,
-    values: Vec<f32>,
+#[derive(Clone)]
+pub(crate) struct Planes {
+    pub(crate) channels: usize,
+    pub(crate) side: usize,
+    pub(crate) values: Vec<f32>,
 }
 
 impl Planes {
-    fn plane(&self, c: usize) -> &[f32] {
+    pub(crate) fn plane(&self, c: usize) -> &[f32] {
         &self.values[c * self.side * self.side..(c + 1) * self.side * self.side]
     }
 }
 
 /// A convolution of `kernel × kernel` (1 or 3, the latter padded by one) with bias.
-fn conv(input: &Planes, weight: &[f32], bias: &[f32], kernel: usize) -> Planes {
+pub(crate) fn conv(input: &Planes, weight: &[f32], bias: &[f32], kernel: usize) -> Planes {
     let (inputs, side) = (input.channels, input.side);
     let outputs = bias.len();
     let mut values = vec![0f32; outputs * side * side];
@@ -126,7 +127,7 @@ fn conv(input: &Planes, weight: &[f32], bias: &[f32], kernel: usize) -> Planes {
 }
 
 /// Group normalisation over 32 groups of channels, with the swish after it when asked.
-fn group_norm(input: &mut Planes, weight: &[f32], bias: &[f32], swish: bool) {
+pub(crate) fn group_norm(input: &mut Planes, weight: &[f32], bias: &[f32], swish: bool) {
     let per_group = input.channels / 32;
     let area = input.side * input.side;
     input.values.par_chunks_mut(per_group * area).enumerate().for_each(|(g, values)| {

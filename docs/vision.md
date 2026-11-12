@@ -101,3 +101,40 @@ Con `EXACTO=16` (y en la aplicación, con el modelo cargado en la aritmética de
 En el anfitrión quedan la mezcla de la guía (dos contextos, dos cachés), el muestreo y el decodificador de píxeles. Un test con un Llama diminuto y cabezas aleatorias comprueba que las puntuaciones y las entradas salen del chip como en coma flotante, dentro del 2 %.
 
 Con «a red apple on a wooden table», semilla 7 y temperatura 1, la coma flotante tarda 387 s y la aritmética del chip 543 s, y las dos dibujan una manzana roja sobre madera. No son la misma imagen: con temperatura 1, una diferencia mínima en un logit cambia qué token se elige, y desde ahí el dibujo sigue otro camino. Un test comprueba que el estado oculto que lee la cabeza de imagen sale del chip igual que en coma flotante, dentro del 2 %.
+
+## Retocar imágenes con Show-o
+
+Janus-Pro dibuja desde un texto, pero no edita. Show-o (`showlab/show-o`, 1 300 M de parámetros) sí: es un único transformador, Phi-1.5, que lee texto y rellena imágenes hechas de códigos de MAGVIT-v2 (`showlab/magvitv2`), un tokenizador convolucional. Para retocar una zona, se enmascaran sus códigos y el transformador los rellena en unos pasos. En cada uno se queda con los códigos de los que está más seguro, guiado por el texto y alejado de lo que haría sin él.
+
+`crates/sim/src/showo.rs` lo reproduce en coma flotante, tal como lo ejecuta el código original.
+
+- **MAGVIT-v2**: un codificador convolucional (bloques residuales con GroupNorm y swish, cuatro reducciones a la mitad y atención en el centro) lleva una imagen de 256 × 256 a 16 × 16 vectores de 13 valores. Cada valor da un bit según su signo, y los 13 bits forman un código de 8 192. El decodificador hace el camino inverso. Codificar y decodificar una imagen da unos 30 dB de PSNR (`crates/sim/tests/showo.rs`).
+- **Phi-1.5 con los cambios de Show-o**:
+  - atención y MLP en paralelo sobre la misma entrada normalizada;
+  - LayerNorm de cada cabeza de consultas y claves antes de rotar;
+  - la rotación sobre la mitad de cada cabeza;
+  - una atención mixta: el texto, causal; la imagen, entera en ambos sentidos y sobre todo el texto.
+
+  El texto se calcula una vez y su caché sirve para todos los pasos.
+- **El relleno**:
+  1. En cada paso, cada código desconocido se sortea de las probabilidades del modelo, con la guía `(1 + g)·con texto − g·sin texto`.
+  2. Siguen enmascarados los menos seguros, con un ruido de Gumbel cuya temperatura decrece paso a paso. Su número sigue un coseno.
+  3. La zona a retocar pasa a la rejilla de códigos con un muestreo bicúbico en sus centros y un umbral de 0,5, como en el original.
+
+Con 16 pasos, una imagen tarda unos 4 minutos en el procesador:
+
+- desde «a red apple on a wooden table», Show-o dibuja la manzana sobre la mesa;
+- retocando la zona de la manzana con «a green apple on a wooden table» y guía 5, la manzana pasa a verde y la mesa y el fondo se quedan como estaban.
+
+```
+cargo run --release -p sim --example inpaint -- <carpeta> retocar <imagen.bmp|.ppm> x0,y0,x1,y1 "<texto>" salida.bmp [pasos] [guía] [semilla]
+cargo run --release -p sim --example inpaint -- <carpeta> dibujar "<texto>" salida.bmp [pasos] [guía] [semilla]
+cargo run --release -p sim --example inpaint -- <carpeta> reconstruir <imagen> salida.bmp
+```
+
+La carpeta lleva el `pytorch_model.safetensors` y el `config.json` de Show-o. Dentro van `magvitv2` (sus pesos y su configuración) y `phi`, con el tokenizador de Phi-1.5.
+
+Pendiente:
+- llevarlo a la app, con una forma de marcar la zona;
+- Phi a la aritmética del chip: la atención bidireccional sobre los códigos de la imagen es la misma que ya usa el codificador de visión;
+- MAGVIT en el chip, que son convoluciones como las del decodificador de Janus.

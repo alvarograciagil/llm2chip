@@ -7,6 +7,7 @@ mod exec;
 pub mod image;
 pub mod janus;
 pub mod lower;
+pub mod showo;
 pub mod sizing;
 pub mod tokenizer;
 pub mod vision;
