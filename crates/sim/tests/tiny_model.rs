@@ -556,9 +556,13 @@ fn a_die_with_only_the_registers_its_routines_reach_computes_the_same() {
     let roomy = DieConfig { index_bits: 10, microcode_bits: 18, ..die_config() };
     let layout = Layout::new(&program, &Weights::open(&dir).unwrap(), roomy, Some(CHIP_TOKENS)).unwrap();
     layout.microprogram(&program).unwrap();
-    let c = sim::chip::with_registers_needed(roomy, &layout);
+    let trimmed = sim::chip::with_registers_needed(roomy, &layout);
     // The working registers past what the routines use are left out, and the die is smaller.
-    assert!(c.reg_bits < roomy.reg_bits, "{} registros de {} usados", layout.registers_needed(), layout.registers_used());
+    assert!(trimmed.reg_bits < roomy.reg_bits, "{} registros de {} usados", layout.registers_needed(), layout.registers_used());
+    // Only the logic and the function tables its microprogram uses: a Llama needs four of eight.
+    let code = Layout::new(&program, &Weights::open(&dir).unwrap(), trimmed, Some(CHIP_TOKENS)).unwrap().microprogram(&program).unwrap();
+    let c = DieConfig { features: netlist::DieFeatures::of(&code), ..trimmed };
+    assert!(netlist::die::function_address_bits(&c) < c.function_bits + c.function_select_bits, "tablas de función");
     let tokens = [3u32, 1, 4];
     let mut run = gates_after(&program, &dir, c, &tokens);
     let mut vm = ExactEngine::new(compiler::compile_model(&config).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap().with_weights_in_registers();
@@ -572,7 +576,7 @@ fn a_die_with_only_the_registers_its_routines_reach_computes_the_same() {
         }
     }
     // A die with fewer registers than the routines reach is refused, not run wrong.
-    let short = DieConfig { reg_bits: c.reg_bits - 1, ..c };
+    let short = DieConfig { reg_bits: trimmed.reg_bits - 1, ..trimmed };
     let refused = Layout::new(&program, &Weights::open(&dir).unwrap(), short, Some(CHIP_TOKENS)).and_then(|l| l.microprogram(&program).map(|_| ()));
     assert!(refused.is_err());
 }
