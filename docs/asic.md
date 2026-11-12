@@ -107,7 +107,17 @@ Para integrarla hicieron falta tres cosas:
 - Cortar las filas de celdas a 10 µm de la macro, para que las vías de sus raíles no caigan sobre la macro.
 - Darle a la macro su propia rejilla de alimentación: bandas de met4 sobre ella, con vías a sus miles de islas de alimentación en met3 y a met5, ceñidas a su contorno.
 
-El análisis de la red de alimentación de OpenROAD se deja fuera: el modelo abstracto de esta macro tiene, en dos columnas, rectángulos de `vdd` y de `gnd` solapados en met3 (por ejemplo, `vdd` en y = 109,815-110,305 y `gnd` en 109,875-110,365, en x = 214,22), y el análisis los da por cortocircuitos. Ningún diseño de ejemplo de OpenROAD usa esta macro. Antes de fabricar habría que comprobarlo sobre el GDS con un DRC y un LVS completos.
+El análisis de la red de alimentación de OpenROAD se deja fuera: el modelo abstracto de esta macro tiene, en dos columnas, rectángulos de `vdd` y de `gnd` solapados en met3 (por ejemplo, `vdd` en y = 109,815-110,305 y `gnd` en 109,875-110,365, en x = 214,22), y el análisis los da por cortocircuitos.
+
+El DRC de KLayout sobre el GDS final (`make drc`) da 522 617 violaciones:
+
+- 521 993 dentro de las celdas de bit de la macro, que siguen reglas especiales de SRAM que el juego estándar no exceptúa. Una celda sin macro de la calibración da 0.
+- 582 en la celda superior, sobre la macro: espaciados en met1-met4 entre lo que dibuja el flujo (las bandas de met4 de su rejilla, las vías a sus islas de met3 y las conexiones a sus pines) y metal del dibujo de la macro que su modelo abstracto no declara; este dice que met4 está libre.
+- 42 fuera de la macro, en vías de la red de alimentación.
+
+El LVS no se pasa: necesita la netlist CDL de la macro, que el flujo no encuentra.
+
+Así que esta macro, la que trae la imagen de OpenROAD y ningún diseño de ejemplo usa, no sirve para fabricar: su modelo abstracto está incompleto. Las cifras de área y reloj valen como medida, pero un chip real necesitaría las macros de OpenRAM para SkyWater 130 publicadas con anillos de alimentación en met4 y modelos abstractos completos, que habría que descargar aparte, y pasar el DRC y el LVS sobre ellas.
 
 ## Viabilidad antes del layout
 
