@@ -500,6 +500,11 @@ impl Simulator {
     /// The nets along the slowest combinational path, from where it starts to where it
     /// ends, each with its arrival time: to see which structure sets the clock.
     pub fn critical_trace(&self, delays: [f64; 5]) -> Vec<(String, f64)> {
+        self.trace_to(delays, |_| true)
+    }
+
+    /// The slowest path into a net whose name `ends` accepts, as `critical_trace` gives it.
+    pub fn trace_to(&self, delays: [f64; 5], ends: impl Fn(&str) -> bool) -> Vec<(String, f64)> {
         let mut arrival = vec![0f64; self.values.len()];
         let mut from = vec![usize::MAX; self.values.len()];
         let (mut worst, mut end) = (0f64, 0);
@@ -513,7 +518,7 @@ impl Simulator {
             let latest = *inputs.iter().max_by(|x, y| arrival[**x].total_cmp(&arrival[**y])).expect("puerta sin entradas");
             arrival[g.y] = arrival[latest] + delay;
             from[g.y] = latest;
-            if arrival[g.y] > worst {
+            if arrival[g.y] > worst && ends(self.names.get(g.y).map_or("", String::as_str)) {
                 (worst, end) = (arrival[g.y], g.y);
             }
         }

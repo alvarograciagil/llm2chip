@@ -105,6 +105,50 @@ fn verilog_die_matches_the_gate_simulator() {
 }
 
 #[test]
+fn an_fpga_gets_the_register_table_as_a_memory_that_does_what_the_gates_do() {
+    use netlist::die::register_table_design;
+    let design = register_table_design(4, 6, 2);
+    let fpga = netlist::to_verilog_for_fpga(&design);
+    let body = fpga.split("module register_table_4x6_r2 (").nth(1).unwrap().split("endmodule").next().unwrap();
+    assert!(body.contains("assign entry1 = entries[key1];"), "{body}");
+    if Command::new("iverilog").arg("-V").output().is_err() {
+        return;
+    }
+    // Writes and reads mixed, also reading the entry being written, which still gives
+    // its old value until the clock.
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = |bits: u32| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed & ((1 << bits) - 1)) as u128
+    };
+    let steps: Vec<TestStep> = (0..120)
+        .map(|_| TestStep { inputs: vec![("we".into(), next(1)), ("waddr".into(), next(4)), ("wdata".into(), next(6)), ("key0".into(), next(4)), ("key1".into(), next(4))] })
+        .collect();
+    let mut sim = netlist::Simulator::new(&design).unwrap();
+    let mut ours = Vec::new();
+    for step in &steps {
+        for (name, value) in &step.inputs {
+            sim.set_wide(name, *value).unwrap();
+        }
+        sim.tick();
+        ours.push(format!("{}", (sim.get("entry0").unwrap() << 6) | sim.get("entry1").unwrap()));
+    }
+    let dir = std::env::temp_dir().join(format!("llm2chip-table-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (source, binary) = (dir.join("table.v"), dir.join("table.vvp"));
+    std::fs::write(&source, format!("{fpga}\n{}", verilog_testbench(&design, &steps, "{entry0, entry1}"))).unwrap();
+    let compile = Command::new("iverilog").args(["-g2005", "-s", "testbench", "-o"]).arg(&binary).arg(&source).output().unwrap();
+    assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+    let out = Command::new("vvp").arg(&binary).output().unwrap();
+    let theirs: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().filter(|l| l.parse::<u64>().is_ok()).map(str::to_string).collect();
+    assert_eq!(theirs.len(), steps.len());
+    assert_eq!(theirs, ours);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn die_contains_every_block() {
     let design = die_design(config());
     let groups: Vec<&str> = design.modules["llm2chip_die"].instances.iter().map(|i| i.group.as_str()).collect();

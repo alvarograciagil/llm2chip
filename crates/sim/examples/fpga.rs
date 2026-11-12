@@ -1,7 +1,7 @@
 //! The whole chip, in Verilog, to synthesise for an FPGA: the RISC-V controller, the die
 //! with only the logic its microprogram uses, and the sampling unit.
 //!
-//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR] [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary] [--factor-steps N]`
+//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR] [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary] [--factor-steps N] [--path NET] [--groups]`
 //!
 //! With `--dsp`, each one-cycle multiplier is written as a signed product so the FPGA
 //! tools put it in their multiplier blocks. Without `--model`, the chip is the one
@@ -139,6 +139,50 @@ fn main() {
     let last = context as u32 - 1;
     let token = code.cycles(&die, sim::lower::ENTRY_TOKEN, 1, last) + code.cycles(&die, sim::lower::ENTRY_LOGITS, 1, last);
     eprintln!("{token} ciclos del die por token generado en la posición {last}");
+    // `--groups`: the die's gates and flip-flops by the area they are drawn in.
+    if args.iter().any(|a| a == "--groups") {
+        fn gates(design: &Design, module: &str) -> (u64, u64) {
+            design.modules[module].instances.iter().fold((0, 0), |(g, f), inst| match &inst.kind {
+                InstKind::Module(child) => {
+                    let (cg, cf) = gates(design, child);
+                    (g + cg, f + cf)
+                }
+                InstKind::Prim(Prim::Dff) => (g, f + 1),
+                InstKind::Prim(Prim::Sram { .. } | Prim::Ram2p { .. } | Prim::Rom { .. }) => (g, f),
+                InstKind::Prim(_) => (g + 1, f),
+            })
+        }
+        let mut groups: std::collections::BTreeMap<&str, (u64, u64)> = Default::default();
+        for inst in &design.modules["llm2chip_die"].instances {
+            let (g, f) = match &inst.kind {
+                InstKind::Module(child) => gates(&design, child),
+                InstKind::Prim(Prim::Dff) => (0, 1),
+                InstKind::Prim(Prim::Sram { .. } | Prim::Ram2p { .. } | Prim::Rom { .. }) => (0, 0),
+                InstKind::Prim(_) => (1, 0),
+            };
+            let entry = groups.entry(inst.group.as_str()).or_default();
+            (entry.0, entry.1) = (entry.0 + g, entry.1 + f);
+        }
+        let mut sorted: Vec<_> = groups.into_iter().collect();
+        sorted.sort_by_key(|(_, (g, _))| std::cmp::Reverse(*g));
+        for (group, (g, f)) in sorted {
+            eprintln!("  {g:8} puertas {f:7} biestables  {group}");
+        }
+    }
+    // `--path NET`: the deepest path into a net whose name has NET, in gates, as the FPGA
+    // tools start from it before packing gates into look-up tables.
+    if let Some(net) = args.iter().position(|a| a == "--path").and_then(|i| args.get(i + 1)) {
+        let trace = netlist::Simulator::with_names(&design).unwrap().trace_to([1.0; 5], |name| name.contains(net.as_str()));
+        let mut hidden = 0;
+        for (name, depth) in trace {
+            if name.starts_with('#') {
+                hidden += 1;
+                continue;
+            }
+            eprintln!("  {depth:4.0} {name}{}", if hidden > 0 { format!("  (+{hidden} sin nombre)") } else { String::new() });
+            hidden = 0;
+        }
+    }
     let text = if args.iter().any(|a| a == "--dsp") { to_verilog_for_fpga(&design) } else { to_verilog(&design) };
     std::fs::write(out, text).unwrap();
     std::fs::remove_dir_all(test_dir).ok();

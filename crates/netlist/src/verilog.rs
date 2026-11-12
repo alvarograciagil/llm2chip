@@ -213,6 +213,26 @@ fn behavioural_adder(m: &Module) -> Option<String> {
     }
 }
 
+/// A table of flip-flops read without the clock, written as a memory so the FPGA tools put
+/// it in their distributed RAM, one copy per read port, instead of selecting among
+/// thousands of flip-flops. Ports `we`, `waddr`, `wdata`, and `keyN` and `entryN` per read.
+fn behavioural_register_table(m: &Module) -> Option<String> {
+    let shape = m.name.strip_prefix("register_table_")?;
+    let (size, reads) = shape.split_once("_r")?;
+    let (addr_bits, width) = size.split_once('x')?;
+    let (addr_bits, width, reads): (u32, u32, u32) = (addr_bits.parse().ok()?, width.parse().ok()?, reads.parse().ok()?);
+    let mut text = format!("module {} (\n  input clk,\n  input we,\n  input [{a}:0] waddr,\n  input [{w}:0] wdata", m.name, a = addr_bits - 1, w = width - 1);
+    for i in 0..reads {
+        let _ = write!(text, ",\n  input [{}:0] key{i},\n  output [{}:0] entry{i}", addr_bits - 1, width - 1);
+    }
+    let _ = write!(text, "\n);\n  reg [{}:0] entries [0:{}];\n  integer i;\n  initial for (i = 0; i < {}; i = i + 1) entries[i] = 0;\n  always @(posedge clk) if (we) entries[waddr] <= wdata;\n", width - 1, (1u64 << addr_bits) - 1, 1u64 << addr_bits);
+    for i in 0..reads {
+        let _ = writeln!(text, "  assign entry{i} = entries[key{i}];");
+    }
+    text.push_str("endmodule\n\n");
+    Some(text)
+}
+
 fn write_design(design: &Design, fpga: bool) -> String {
     let mut out = String::from("// Generado por llm2chip.\n\n");
     out.push_str(LIBRARY);
@@ -233,7 +253,7 @@ fn write_design(design: &Design, fpga: bool) -> String {
     visit(design, &design.top, &mut order);
     for name in order {
         let module = &design.modules[name];
-        match fpga.then(|| behavioural_multiplier(module).or_else(|| behavioural_adder(module))).flatten() {
+        match fpga.then(|| behavioural_multiplier(module).or_else(|| behavioural_adder(module)).or_else(|| behavioural_register_table(module))).flatten() {
             Some(text) => out.push_str(&text),
             None => emit_module(&mut out, module),
         }

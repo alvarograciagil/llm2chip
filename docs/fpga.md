@@ -14,7 +14,7 @@ Es exactamente el circuito de la prueba `the_chip_sized_for_an_fpga_says_the_sam
 
 | Recurso | Cantidad |
 |---|---|
-| Lógica | ≈ 468 000 equivalentes NAND2 |
+| Lógica | ≈ 450 000 equivalentes NAND2 |
 | Memoria | 1,95 Mbit: CPU 0,8; tablas de función 0,5; microcódigo 0,5 (con diccionario; 1,3 sin él); banco vectorial 0,07, con la tabla de registros que da a cada uno solo lo que usa (sin ella serían 2,1) |
 | Reloj | El camino crítico ronda 24 retardos de sumador completo: en una FPGA de gama baja, entre 20 y 50 MHz |
 
@@ -24,10 +24,11 @@ Con `--dsp`, cada multiplicador de un ciclo se escribe como un producto con sign
 
 | Familia | LUT | Biestables | Memoria de bloque | Multiplicadores |
 |---|---|---|---|---|
-| Xilinx serie 7 | ≈ 45 900 LUT6 | ≈ 14 200 | 75 BRAM36 + 31 BRAM18 | 73 DSP48 |
-| Gowin | ≈ 48 300 LUT4 + 2 272 ALU | ≈ 14 800 | 190 BSRAM de 18 Kb | 41 MULT18×18 + 32 MULT9×9 |
+| Xilinx serie 7 | ≈ 23 500 LUT6 + 468 de memoria distribuida | ≈ 8 300 | 52 BRAM36 + 11 BRAM18 | 42 DSP48 |
+| Gowin | ≈ 24 400 LUT4 + 2 063 ALU + 432 RAM16SDP4 | ≈ 8 400 | 142 BSRAM de 18 Kb | 42 MULT18×18 + 18 MULT9×9 |
+| Lattice ECP5 (tras colocar y rutar) | 28 610 LUT4, con 432 bloques de memoria distribuida | 8 435 | 142 DP16KD | 59 MULT18×18 |
 
-La tabla de registros cuesta lógica (unas 22 000 LUT, porque se describe con biestables y se lee tres veces por ciclo) y ahorra unas 120 BSRAM; en una FPGA podría ir en memoria distribuida y costar mucho menos.
+La tabla de registros dice dónde empieza cada registro en la memoria vectorial y ahorra unas 120 BSRAM. En puertas son 512 entradas de 16 bits en biestables, leídas tres veces por ciclo: 39 700 puertas y 8 192 biestables. En el Verilog para FPGA se escribe como una memoria de lectura inmediata, que las herramientas llevan a su memoria distribuida, una copia por lectura: la lógica del chip baja a la mitad (de unas 46 000 a 24 000 LUT4 en ECP5) y desaparecen 8 000 biestables. Una prueba compara esa memoria, en iverilog, con las puertas.
 
 Sin `--dsp`, en Xilinx hacen falta unas 110 600 LUT6 y ningún DSP: los multiplicadores se convierten en puertas.
 
@@ -57,7 +58,7 @@ El asistente de proyecto («+» en la barra, «Una FPGA») tiene estas placas y 
 | Digilent Genesys 2 | Kintex-7 XC7K325T | 204 K LUT6 | 16 Mbit | 840 | 1 GB DDR3 | ~1 000 $ |
 | AMD Alveo U250 | UltraScale+ XCU250 | 1 728 K LUT6 | 432 Mbit | 12 288 | 64 GB DDR4 | ~9 000 $ |
 
-La Cyclone IV EP4CE10 es la más pequeña del catálogo: el chip más pequeño que genera el proyecto necesita unos 48 000 elementos lógicos y 1,95 Mbit de memoria interna, frente a sus 10 300 y 0,41, aunque los pesos vayan a la SDRAM de la placa. Sirve para probar piezas sueltas, como una celda de cálculo (`cargo run -p netlist --example export`) o un extremo de enlace, pero no un chip completo.
+La Cyclone IV EP4CE10 es la más pequeña del catálogo: el chip más pequeño que genera el proyecto necesita unos 26 000 elementos lógicos y 1,95 Mbit de memoria interna, frente a sus 10 300 y 0,41, aunque los pesos vayan a la SDRAM de la placa. Sirve para probar piezas sueltas, como una celda de cálculo (`cargo run -p netlist --example export`) o un extremo de enlace, pero no un chip completo.
 
 ### Recomendación por unos 200 $: Kria KV260
 
@@ -86,11 +87,12 @@ Con OSS CAD Suite (Yosys y nextpnr) el chip de juguete se coloca y se ruta en un
 | Además, los sumadores como sumas (cadenas de acarreo) y el microcódigo con diccionario | 18,2 MHz | 44 748 | 142 DP16KD | 89 |
 | Además, el multiplicador del muestreo en un bloque DSP | 20,4 MHz | 43 084 | 142 DP16KD | 91 |
 | Además, escala y sesgo en dos ciclos (`--factor-steps 2`) | 22,1 MHz | 46 699 | — | 59 |
-| Además, las órdenes de la CPU llegan al die desde registros | **26,5 MHz** | 48 501 | 142 DP16KD | 59 |
+| Además, las órdenes de la CPU llegan al die desde registros | 26,5 MHz | 48 501 | 142 DP16KD | 59 |
+| Además, la tabla de registros en memoria distribuida y las sumas de la dirección vectorial en cadenas de acarreo | **32,1 MHz** | 28 610 | 142 DP16KD | 59 |
 
-El camino crítico era la unidad de muestreo: un multiplicador de desplazamiento y suma de 16 filas, en un ciclo, que alimentaba la dirección de la tabla exponencial. Después pasó a las celdas del die: lectura del sesgo, producto por la escala (repartido en varios bloques DSP encadenados) y acumulador en un mismo ciclo, 49 ns. Con escala y sesgo en dos ciclos, el factor sale de un registro y cada ciclo multiplica la mitad de sus bits: el die gasta 11 172 ciclos por token en vez de 11 103 (un 0,6 % más) y el reloj sube a 22,1 MHz, así que los diseños para FPGA lo usan por defecto. Después fue el bus de la CPU al die: una escritura de la CPU se decodificaba, arrancaba el die y llevaba una dirección a su memoria vectorial en el mismo ciclo. Con las órdenes registradas, el reloj sube a 26,5 MHz. El camino crítico es ahora el del propio secuenciador: la palabra de microcódigo recién leída decide en el mismo ciclo la dirección de la memoria vectorial, con 27 de sus 38 ns en rutado. Es la familia más lenta de las del catálogo; en una Xilinx serie 7 o UltraScale+ el mismo circuito debería ir bastante más rápido.
+El camino crítico era la unidad de muestreo: un multiplicador de desplazamiento y suma de 16 filas, en un ciclo, que alimentaba la dirección de la tabla exponencial. Después pasó a las celdas del die: lectura del sesgo, producto por la escala (repartido en varios bloques DSP encadenados) y acumulador en un mismo ciclo, 49 ns. Con escala y sesgo en dos ciclos, el factor sale de un registro y cada ciclo multiplica la mitad de sus bits: el die gasta 11 172 ciclos por token en vez de 11 103 (un 0,6 % más) y el reloj sube a 22,1 MHz, así que los diseños para FPGA lo usan por defecto. Después fue el bus de la CPU al die: una escritura de la CPU se decodificaba, arrancaba el die y llevaba una dirección a su memoria vectorial en el mismo ciclo. Con las órdenes registradas, el reloj sube a 26,5 MHz. Después fue la dirección de la memoria vectorial: la palabra de microcódigo recién leída elegía una entrada de la tabla de registros entre 512, la desplazaba y sumaba dos veces, puerta a puerta, en el mismo ciclo, 38 ns con 27 en rutado. Con la tabla en memoria distribuida y las sumas en cadenas de acarreo, el reloj sube a 32,1 MHz con la mitad de lógica. El camino crítico es ahora el bucle del secuenciador: la palabra recién leída compara su cuenta de repeticiones, y eso elige la dirección de la siguiente en el diccionario, 31 ns con 21 en rutado. Adelantar la suma del PC no lo mejora (30,5 MHz, dentro del ruido de la colocación); acortarlo pide leer la palabra un ciclo antes, con un ciclo de retraso en los saltos. Es la familia más lenta de las del catálogo; en una Xilinx serie 7 o UltraScale+ el mismo circuito debería ir bastante más rápido.
 
-Con 26,5 MHz, el modelo de juguete daría unos 2 200-2 400 tok/s, sin valor práctico más allá de validar que el chip funciona.
+Con 32,1 MHz, el modelo de juguete daría unos 2 500-2 700 tok/s, sin valor práctico más allá de validar que el chip funciona.
 
 ### Con un modelo que escribe cuentos: stories260K
 

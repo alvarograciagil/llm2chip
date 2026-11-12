@@ -860,6 +860,42 @@ fn counter(gen: &mut Gen, b: &mut Builder, name: &str, width: u32, clear: Bit, a
 }
 
 impl Gen {
+    /// A small memory of flip-flops read without waiting for the clock: `reads` keys each
+    /// pick an entry in the same cycle, and one write a cycle stores into an entry. For an
+    /// FPGA it is written as a memory, which the tools put in their distributed RAM.
+    pub(crate) fn register_table(&mut self, addr_bits: u32, width: u32, reads: u32) -> String {
+        let name = format!("register_table_{addr_bits}x{width}_r{reads}");
+        if self.modules.contains_key(&name) {
+            return name;
+        }
+        let mut b = Builder::new(&name, "Tabla de registros", "Cada entrada, en biestables, dice dónde empieza un registro en la memoria vectorial y el paso entre los registros que recorre un bucle. Se lee por cada clave en el mismo ciclo.");
+        let we = b.input("we", 1)[0];
+        let waddr = b.input("waddr", addr_bits);
+        let wdata = b.input("wdata", width);
+        let keys: Vec<Vec<Bit>> = (0..reads).map(|i| b.input(&format!("key{i}"), addr_bits)).collect();
+        let outs: Vec<Vec<Bit>> = (0..reads).map(|i| b.output(&format!("entry{i}"), width)).collect();
+        b.group("Entradas");
+        let mut l = Logic { b: &mut b, next: 0 };
+        let entries: Vec<Vec<Bit>> = (0..1u32 << addr_bits)
+            .map(|e| {
+                let q = l.fresh_bus(width as usize);
+                let here = l.equals(&waddr, e);
+                let write = l.and(we, here);
+                let next = l.mux_bus(write, &q, &wdata);
+                l.connect_flops(&next, &q);
+                q
+            })
+            .collect();
+        l.b.group("Lectura");
+        for (key, out) in keys.iter().zip(&outs) {
+            let entry = l.select(key, &entries);
+            for (from, to) in entry.iter().zip(out) {
+                l.b.or_to(*from, Bit::Zero, *to);
+            }
+        }
+        self.add(b.finish())
+    }
+
     /// A cell plus its scale and bias path: at each group's end the raw sum is
     /// scaled, the group's activation sum times the bias is added, and both clear.
     fn scaled_cell(&mut self, c: &DieConfig) -> String {
@@ -1397,25 +1433,20 @@ impl Gen {
             let base_addr = b.input("base_addr", c.reg_bits);
             let base_data = b.input("base_data", mem_bits + BASE_SHIFT_BITS);
             b.group("Tabla de registros");
+            let table = self.register_table(c.reg_bits, entry_bits as u32, 3);
             let mut l = Logic { b: &mut b, next: 70_000 };
-            let entries: Vec<Vec<Bit>> = (0..1u32 << c.reg_bits)
-                .map(|e| {
-                    let q = l.fresh_bus(entry_bits);
-                    let here = l.equals(&base_addr, e);
-                    let write = l.and(load_base, here);
-                    let next = l.mux_bus(write, &q, &base_data);
-                    l.connect_flops(&next, &q);
-                    q
-                })
-                .collect();
             let vec_reg = vec_addr[c.index_bits as usize..].to_vec();
             let key_a = l.mux_bus(host_reads_top, &fields["reg_a"].iter().copied().chain(std::iter::repeat(Bit::Zero)).take(c.reg_bits as usize).collect::<Vec<_>>(), &vec_reg);
             let key_w = l.mux_bus(load_vec, &fields["reg_dst"].iter().copied().chain(std::iter::repeat(Bit::Zero)).take(c.reg_bits as usize).collect::<Vec<_>>(), &vec_reg);
             let key_b: Vec<Bit> = fields["reg_b"].iter().copied().chain(std::iter::repeat(Bit::Zero)).take(c.reg_bits as usize).collect();
-            [key_a, key_b, key_w].map(|key| {
-                let entry = l.select(&key, &entries);
-                (entry[..mem_bits as usize].to_vec(), entry[mem_bits as usize..].to_vec())
-            })
+            let entries = [l.fresh_bus(entry_bits), l.fresh_bus(entry_bits), l.fresh_bus(entry_bits)];
+            let mut conns = vec![("we", vec![load_base]), ("waddr", base_addr), ("wdata", base_data)];
+            let ports = [("key0", "entry0"), ("key1", "entry1"), ("key2", "entry2")];
+            for ((key, entry), (key_port, entry_port)) in [key_a, key_b, key_w].into_iter().zip(&entries).zip(ports) {
+                conns.extend([(key_port, key), (entry_port, entry.clone())]);
+            }
+            b.inst("register_table", &table, &conns);
+            entries.map(|entry| (entry[..mem_bits as usize].to_vec(), entry[mem_bits as usize..].to_vec()))
         });
         let mut first_unit = None;
         let mut unit_ports = Vec::with_capacity(clusters);
@@ -1616,6 +1647,11 @@ impl Gen {
                 // Base, plus the loop's register step, plus the index; the host gives its
                 // own register and index and no step.
                 Some([(base_a, shift_a), (base_b, shift_b), (base_w, shift_w)]) => {
+                    // The two sums are adder blocks, not loose gates, so an FPGA lays them on
+                    // its carry chains: they decide the read address in the cycle the word
+                    // arrives, and were the slowest path of the whole chip.
+                    let address_adder = self.ripple_adder(mem_bits);
+                    let mut adders = 0;
                     let mut l = Logic { b: &mut b, next: 71_000 };
                     let vec_index = &vec_addr[..c.index_bits as usize];
                     let mut physical = |base: &[Bit], shift: &[Bit], window: &[Bit], index: &[Bit], host: Bit| -> Vec<Bit> {
@@ -1629,8 +1665,14 @@ impl Gen {
                             step = l.mux_bus(*bit, &step, &moved);
                         }
                         let index: Vec<Bit> = (0..mem_bits as usize).map(|i| index.get(i).copied().unwrap_or(Bit::Zero)).collect();
-                        let start = l.adder(base, &step, Bit::Zero).0;
-                        l.adder(&start, &index, Bit::Zero).0
+                        let mut add = |l: &mut Logic, x: &[Bit], y: &[Bit]| -> Vec<Bit> {
+                            let (sum, carry) = (l.fresh_bus(mem_bits as usize), l.fresh());
+                            adders += 1;
+                            l.b.inst(&format!("address_adder{adders}"), &address_adder, &[("a", x.to_vec()), ("b", y.to_vec()), ("cin", vec![Bit::Zero]), ("sum", sum.clone()), ("cout", vec![carry])]);
+                            sum
+                        };
+                        let start = add(&mut l, base, &step);
+                        add(&mut l, &start, &index)
                     };
                     let raddr_a = physical(base_a, shift_a, &window_a, &index_a, host_reading);
                     let addr_b = physical(base_b, shift_b, &window_b, &index_b, Bit::Zero);
@@ -2723,6 +2765,14 @@ impl Gen {
 pub fn package_design(config: DieConfig, dies: u32, link_stages: u32) -> Design {
     let mut gen = Gen { modules: BTreeMap::new() };
     let top = gen.package(&config, dies, link_stages);
+    Design { top, modules: gen.modules }
+}
+
+/// The die's register table on its own: `reads` keys, each picking one of `2^addr_bits`
+/// entries of `width` bits in the same cycle.
+pub fn register_table_design(addr_bits: u32, width: u32, reads: u32) -> Design {
+    let mut gen = Gen { modules: BTreeMap::new() };
+    let top = gen.register_table(addr_bits, width, reads);
     Design { top, modules: gen.modules }
 }
 
