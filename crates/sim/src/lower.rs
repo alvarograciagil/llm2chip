@@ -12,6 +12,8 @@ use std::ops::Range;
 
 /// KV entries, convolution history and expert outputs use this fixed exponent.
 const STATE_EXPONENT: i64 = 6;
+/// The rotation table of an image encoder's patches, after the text's two.
+pub const VISION_TABLE: usize = 2;
 /// Expert outputs are small; a coarser exponent would leave them only a few bits.
 const EXPERT_EXPONENT: i64 = 2;
 /// Ones kept when the layout is not for a chip with a known context: attention adds up
@@ -50,7 +52,7 @@ pub fn chip_plan(program: &Program, weights: &Weights, chips: usize, context: us
 }
 
 fn all_ops(program: &Program) -> impl Iterator<Item = &Inst> {
-    program.ops.iter().chain(program.draft.iter().flat_map(|d| d.ops.iter())).chain(program.image.iter().flat_map(|i| i.logits_ops.iter().chain(&i.input_ops)))
+    program.ops.iter().chain(program.draft.iter().flat_map(|d| d.ops.iter())).chain(program.image.iter().flat_map(|i| i.logits_ops.iter().chain(&i.input_ops))).chain(program.vision.iter().flat_map(|v| v.ops.iter()))
 }
 
 /// Which buffers can share a register: each is alive from its first write to its last read
@@ -381,6 +383,9 @@ pub const ENTRY_FEED_FROM_MAIN: usize = 2;
 pub const ENTRY_FEED_FROM_DRAFT: usize = 3;
 pub const ENTRY_DRAFT: usize = 4;
 pub const ENTRY_DRAFT_LOGITS: usize = 5;
+/// A token that comes from an image, then the encoder's routines in `VisionPart::routines` order.
+pub const ENTRY_TOKEN_FROM_IMAGE: usize = 6;
+pub const ENTRY_VISION: usize = 7;
 
 /// Cosines and sines for one position, with the 1 that leaves the other dimensions alone.
 fn rope_row(theta: f32, scaling: Option<RopeScaling>, half: usize, position: u32) -> Vec<f64> {
@@ -466,7 +471,12 @@ pub struct Layout {
     /// Rotations written for particular positions of the cache, in place of the table's: an
     /// image's tokens under M-RoPE, and the text after it, which goes on from further on.
     /// The host writes them into the table the chip reads.
-    rotations: RefCell<HashMap<u32, Vec<f64>>>,
+    rotations: RefCell<HashMap<(usize, u32), Vec<f64>>>,
+    /// The image encoder's rotations, table 2: the register its row goes into, the table the
+    /// host writes for each patch, and half a head.
+    vision_rope: Option<(u32, u32, usize)>,
+    /// Set while laying out or running a token whose input is the image encoder's output.
+    from_image: Cell<bool>,
     /// The most tokens and positions the routines can see.
     tokens: u32,
     positions: u32,
@@ -736,13 +746,13 @@ impl Layout {
         let rope = [alloc(1), alloc(1)];
         let rope_half = all_ops(program)
             .find_map(|i| match i.op {
-                Op::Rope { rotary, .. } => Some(rotary / 2),
+                Op::Rope { rotary, table, .. } if table < VISION_TABLE => Some(rotary / 2),
                 Op::Mla { rope, .. } => Some(rope / 2),
                 _ => None,
             })
             .unwrap_or(0);
         let rope_table = [alloc(1), alloc(1)];
-        let mut rope_blocks = all_ops(program).filter_map(|i| if let Op::Rope { block, .. } = i.op { Some(block as u32) } else { None });
+        let mut rope_blocks = all_ops(program).filter_map(|i| if let Op::Rope { block, table, .. } = i.op { (table < VISION_TABLE).then_some(block as u32) } else { None });
         let rope_factors = rope_blocks.next().filter(|first| rope_blocks.all(|b| b == *first)).map(|block| (block, [(alloc(1), alloc(1)), (alloc(1), alloc(1))]));
         if let (Some(tokens), true) = (chip_tokens, rope_half > 0) {
             let tables = [(program.rope_theta, program.rope_scaling), (program.local_rope_theta.unwrap_or(program.rope_theta), None)];
@@ -757,6 +767,12 @@ impl Layout {
                 setup.load_mantissas(rope_table[index], &flat, exponent);
             }
         }
+        // The host writes a row of the encoder's table for each patch; its values reach 1.
+        let vision_rope = all_ops(program).find_map(|i| if let Op::Rope { rotary, table: VISION_TABLE, .. } = i.op { Some(rotary / 2) } else { None }).map(|half| {
+            let (row, table) = (alloc(1), alloc(1));
+            setup.load_mantissas(table, &[], 1);
+            (row, table, half)
+        });
         // Working registers come last, so a die with fewer registers keeps the first of
         // them. Those that do not fit are numbered past every register the die can name:
         // a routine that reaches one fails to assemble.
@@ -812,7 +828,7 @@ impl Layout {
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
         }
-        Ok(Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: program.vocab as u32, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside: None })
+        Ok(Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: program.vocab as u32, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside: None })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -874,7 +890,28 @@ impl Layout {
         } else {
             code.next_entry();
         }
+        if let Some(vision) = &program.vision {
+            // A token that comes from an image: the encoder's output in place of the embedding.
+            code.next_entry();
+            self.from_image.set(true);
+            let made = routine(&mut code, &mut |asm| self.run_range(asm, program, 0..program.logits_from, token, position, true));
+            self.from_image.set(false);
+            made?;
+            for (i, range) in vision.routines().into_iter().enumerate() {
+                code.next_entry();
+                let rope = i % 2 == 1 && i < 2 * vision.blocks.len();
+                routine(&mut code, &mut |asm| self.run_list(asm, program, &vision.ops[range.clone()], token, position, rope))?;
+            }
+        }
         Ok(code.finish_program())
+    }
+
+    /// A token whose input is the image encoder's last output, at `position`.
+    pub fn run_token_from_image<O: BlockOps>(&self, ops: &mut O, program: &Program, position: O::N, want_logits: bool) -> Result<(), String> {
+        self.from_image.set(true);
+        let done = self.run_token(ops, program, 0.into(), position, want_logits);
+        self.from_image.set(false);
+        done
     }
 
     /// The microprogram of one die of several: its part of the model plus the transfers.
@@ -1297,17 +1334,17 @@ impl Layout {
 
     /// One routine of a program made of several, such as an image encoder's: its operations,
     /// with `rope` loading the rotation of `position` first.
-    pub fn run_ops<O: BlockOps>(&self, ops: &mut O, program: &Program, range: Range<usize>, token: O::N, position: O::N, rope: bool) -> Result<(), String> {
-        self.run_range(ops, program, range, token, position, rope)
+    pub fn run_ops<O: BlockOps>(&self, ops: &mut O, program: &Program, list: &[Inst], token: O::N, position: O::N, rope: bool) -> Result<(), String> {
+        self.run_list(ops, program, list, token, position, rope)
     }
 
     /// A microprogram with one entry for each routine, `(operations, load the rotation)`,
     /// for a program made of several, such as an image encoder's.
-    pub fn routines_microprogram(&self, program: &Program, routines: &[(Range<usize>, bool)]) -> Result<Microprogram, String> {
+    pub fn routines_microprogram(&self, program: &Program, routines: &[(&[Inst], bool)]) -> Result<Microprogram, String> {
         let mut code = DieProgram::new(self.config);
-        for (range, rope) in routines {
+        for (list, rope) in routines {
             let mut asm = self.assembly();
-            self.run_list(&mut asm, program, &program.ops[range.clone()], Expr::var(Var::Token), Expr::var(Var::Position), *rope)?;
+            self.run_list(&mut asm, program, list, Expr::var(Var::Token), Expr::var(Var::Position), *rope)?;
             self.assemble(&mut code, &asm.steps)?;
             code.next_entry();
         }
@@ -1317,16 +1354,21 @@ impl Layout {
     /// What the host writes into the rotation table for the rows set with `set_rotation`, at
     /// the table's exponent: `(register, index)` and mantissa.
     pub fn rotation_writes(&self) -> Vec<((u32, u32), i64)> {
-        let table = self.rope_table[0];
-        let exponent = self.setup.initial.get(&(exponent_register(&self.config), table)).copied().unwrap_or(0);
         let bits = self.config.cell.activation_bits;
-        let scale = 2f64.powi(bits as i32 - 1 - exponent as i32);
         let top = (1i64 << (bits - 1)) - 1;
-        let width = 3 * self.rope_half as u32 + 1;
         self.rotations
             .borrow()
             .iter()
-            .flat_map(|(row, values)| values.iter().enumerate().map(move |(i, v)| ((table, row * width + i as u32), ((v * scale).round() as i64).clamp(-top, top))))
+            .flat_map(|((table, row), values)| {
+                let (register, half) = match (*table, self.vision_rope) {
+                    (VISION_TABLE, Some((_, register, half))) => (register, half),
+                    _ => (self.rope_table[*table], self.rope_half),
+                };
+                let exponent = self.setup.initial.get(&(exponent_register(&self.config), register)).copied().unwrap_or(0);
+                let scale = 2f64.powi(bits as i32 - 1 - exponent as i32);
+                let width = 3 * half as u32 + 1;
+                values.iter().enumerate().map(move |(i, v)| ((register, row * width + i as u32), ((v * scale).round() as i64).clamp(-top, top))).collect::<Vec<_>>()
+            })
             .collect()
     }
 
@@ -1337,7 +1379,7 @@ impl Layout {
         row.extend(angles.iter().map(|a| -a.sin()));
         row.extend(angles.iter().map(|a| a.sin()));
         row.push(1.0);
-        self.rotations.borrow_mut().insert(slot, row);
+        self.rotations.borrow_mut().insert((VISION_TABLE, slot), row);
     }
 
     fn run_range<O: BlockOps>(&self, ops: &mut O, program: &Program, range: Range<usize>, token: O::N, position: O::N, rope: bool) -> Result<(), String> {
@@ -1346,7 +1388,14 @@ impl Layout {
 
     fn run_list<O: BlockOps>(&self, ops: &mut O, program: &Program, list: &[Inst], token: O::N, position: O::N, rope: bool) -> Result<(), String> {
         if rope {
-            self.load_rope(ops, program, position);
+            match self.vision_rope.filter(|_| list.iter().any(|i| matches!(i.op, Op::Rope { table: VISION_TABLE, .. }))) {
+                // The encoder's routines rotate by the patch's row, which the host wrote.
+                Some((row, table, half)) => {
+                    let rotations = self.rotations.borrow();
+                    ops.load_row(table, position, 3 * half as u32 + 1, row, |r| rotations.get(&(VISION_TABLE, r)).cloned().unwrap_or_else(|| rope_row(1.0, None, half, 0)));
+                }
+                None => self.load_rope(ops, program, position),
+            }
         }
         for inst in list {
             self.lower_op(ops, program, &inst.op, token, position)?;
@@ -1365,7 +1414,7 @@ impl Layout {
     pub fn place_rotation(&self, program: &Program, slot: u32, positions: [u64; 3], section: Option<[usize; 3]>) -> Result<(), String> {
         let mut rotations = self.rotations.borrow_mut();
         if positions == [slot as u64; 3] {
-            rotations.remove(&slot);
+            rotations.remove(&(0, slot));
             return Ok(());
         }
         if program.local_rope_theta.is_some() {
@@ -1376,7 +1425,7 @@ impl Layout {
             None if positions[1] == positions[0] && positions[2] == positions[0] => [self.rope_half, 0, 0],
             None => return Err("tres posiciones distintas sin las secciones de M-RoPE".into()),
         };
-        rotations.insert(slot, mixed_rope_row(program.rope_theta, program.rope_scaling, self.rope_half, positions, section));
+        rotations.insert((0, slot), mixed_rope_row(program.rope_theta, program.rope_scaling, self.rope_half, positions, section));
         Ok(())
     }
 
@@ -1409,23 +1458,22 @@ impl Layout {
         }
         let (theta, scaling, half) = (program.rope_theta, program.rope_scaling, self.rope_half);
         let rotations = self.rotations.borrow();
-        ops.load_row(self.rope_table[0], position, 3 * half as u32 + 1, self.rope[0], |row| rotations.get(&row).cloned().unwrap_or_else(|| rope_row(theta, scaling, half, row)));
+        ops.load_row(self.rope_table[0], position, 3 * half as u32 + 1, self.rope[0], |row| rotations.get(&(0, row)).cloned().unwrap_or_else(|| rope_row(theta, scaling, half, row)));
         if let Some(local) = program.local_rope_theta {
             ops.load_row(self.rope_table[1], position, 3 * half as u32 + 1, self.rope[1], |row| rope_row(local, None, half, row));
         }
         // Every rotation of the token uses the same factors, so they are laid out once.
         if let Some((block, factors)) = self.rope_factors {
             for (table, (cos, sin)) in factors.iter().enumerate().take(1 + program.local_rope_theta.is_some() as usize) {
-                self.rope_factors_into(ops, self.rope[table], block, (*cos, *sin));
+                self.rope_factors_into(ops, self.rope[table], block, self.rope_half as u32, (*cos, *sin));
             }
         }
     }
 
     /// `cos` and `sin` for each element of a head of `d`: the rotated pairs take their
     /// angle's, and the elements past the rotated part are kept as they are.
-    fn rope_factors_into<O: BlockOps>(&self, ops: &mut O, rope: u32, d: u32, (cos, sin): (u32, u32)) {
+    fn rope_factors_into<O: BlockOps>(&self, ops: &mut O, rope: u32, d: u32, h: u32, (cos, sin): (u32, u32)) {
         let zero: O::N = 0.into();
-        let h = self.rope_half as u32;
         let rotary = 2 * h;
         ops.copy_part(rope, zero, cos, zero, h.into());
         ops.copy_part(rope, zero, cos, h.into(), h.into());
@@ -1517,6 +1565,12 @@ impl Layout {
         let size = |buffer: usize| -> O::N { (program.buffers[buffer] as u32).into() };
         let zero: O::N = 0.into();
         match op {
+            Op::EmbRead { dst, .. } if self.from_image.get() => {
+                let output = program.vision.as_ref().ok_or("este modelo no lee imágenes")?.output;
+                let len = program.buffers[*dst] as u32;
+                ops.copy_part(self.reg(output), zero, self.reg(*dst), zero, len.into());
+                ops.normalize(self.reg(*dst), len.into());
+            }
             Op::EmbRead { table, dst } => {
                 let len = program.buffers[*dst] as u32;
                 // A table left in the image holds just this token's row, put there by the firmware.
@@ -1678,14 +1732,17 @@ impl Layout {
             Op::Rope { buf, block, table, .. } => {
                 let reg = self.reg(*buf);
                 let total = program.buffers[*buf] as u32;
-                let (d, h, rope) = (*block as u32, self.rope_half as u32, self.rope[*table]);
+                let (d, h, rope) = match self.vision_rope {
+                    Some((row, _, half)) if *table == VISION_TABLE => (*block as u32, half as u32, row),
+                    _ => (*block as u32, self.rope_half as u32, self.rope[*table]),
+                };
                 // One table of factors for each element, so each head is one pair of sweeps.
                 let first = self.parts[0];
                 let rotary = 2 * h;
                 let (cos, sin) = match self.rope_factors {
-                    Some((block, factors)) if block == d => factors[*table],
+                    Some((block, factors)) if block == d && *table < VISION_TABLE => factors[*table],
                     _ => {
-                        self.rope_factors_into(ops, rope, d, (t[50], t[51]));
+                        self.rope_factors_into(ops, rope, d, h, (t[50], t[51]));
                         (t[50], t[51])
                     }
                 };
@@ -1709,7 +1766,7 @@ impl Layout {
                     Some(limit) => ops.window_slot(position, *limit as u32),
                     None => position,
                 };
-                let reader = program.ops.iter().chain(program.draft.iter().flat_map(|d| d.ops.iter())).find_map(|inst| match inst.op {
+                let reader = all_ops(program).find_map(|inst| match inst.op {
                     Op::AttnSum { slot: s, heads, kv_heads, head_dim, .. } if s == *slot => Some((heads, kv_heads, head_dim)),
                     _ => None,
                 });

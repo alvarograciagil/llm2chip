@@ -50,7 +50,7 @@ Cada etapa se comprueba contra la anterior en un codificador de juguete (`make_v
 | 2 | `ExactVision`: las rutinas en la aritmética exacta del die, en el orden del firmware; difiere de la coma flotante menos de un 0,5 % y el modelo de lenguaje elige el mismo token con sus tokens que con los de la referencia | Hecha |
 | 3 | Cada rutina en puertas, bit a bit igual que la máquina exacta: un microprograma con una entrada por rutina (`routines_microprogram`) y el anfitrión escribiendo píxeles, posiciones y filas de rotación (`rotation_writes`) | Hecha |
 | 4 | El firmware las ordena; simulador de instrucciones frente a puertas, de la imagen al texto | Pendiente |
-| 5 | La rutina de token del modelo de lenguaje toma la imagen como entrada, de punta a punta | Pendiente |
+| 5 | La rutina de token del modelo de lenguaje toma la imagen como entrada, de punta a punta | En la máquina exacta: `attach_vision` mete el codificador en el programa del modelo (sus búferes y ranuras de claves con los del modelo, su propia tabla de rotación, la 2), y una entrada del microcódigo lee el token desde la salida del codificador en lugar del embedding. Da los mismos logits que darle al modelo los tokens del codificador aparte. Falta en puertas, con el firmware |
 
 Cómo se ejecuta: el anfitrión escribe por cada parche sus píxeles y su posición aprendida ya interpolada, y la rotación de su fila y columna en la tabla que el die lee por posición. La rutina de embedding guarda cada parche en un almacén de filas. Cada bloque pasa dos veces por todos los parches: la primera guarda claves, valores y consulta; la segunda atiende sobre todos (con la posición en el último parche) y sigue con el resto del bloque. La fusión lee cuatro filas consecutivas del almacén como un vector.
 

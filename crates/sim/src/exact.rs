@@ -114,6 +114,25 @@ impl ExactEngine {
         Ok(want_logits.then(|| self.vm.floats(self.layout.logits_register(&self.program), self.program.vocab)))
     }
 
+    /// Runs a picture through the model's own image encoder, which the chip carries with it
+    /// (`compiler::attach_vision`), and keeps it there: gives how many tokens it makes, which
+    /// `step_image` then reads one by one.
+    pub fn encode_image(&mut self, tower: &crate::vision::VisionTower, image: &crate::vision::Patches) -> Result<usize, String> {
+        let part = self.program.vision.clone().ok_or("este modelo no lleva codificador de imágenes")?;
+        crate::vision_chip::run_encoder(&self.layout, &mut self.vm, &self.program, &part, self.bits, tower, image)
+    }
+
+    /// Token `index` of the encoded image: the encoder's fusion makes it, and the language
+    /// model reads it in place of an embedding, in the cache's next position.
+    pub fn step_image(&mut self, index: u32, positions: [u64; 3], want_logits: bool) -> Result<Option<Vec<f32>>, String> {
+        let part = self.program.vision.clone().ok_or("este modelo no lleva codificador de imágenes")?;
+        self.layout.run_ops(&mut self.vm, &self.program, &part.ops[part.merge.clone()], index, index, false)?;
+        self.layout.place_rotation(&self.program, self.position as u32, positions, self.mrope)?;
+        self.layout.run_token_from_image(&mut self.vm, &self.program, self.position as u32, want_logits)?;
+        self.position += 1;
+        Ok(want_logits.then(|| self.vm.floats(self.layout.logits_register(&self.program), self.program.vocab)))
+    }
+
     /// Runs a token, or a vector in its place, up to the product that makes the logits, and
     /// gives the vector that product would take: the last hidden state, normalised. Heads
     /// other than the text's read it, such as an image generator's.

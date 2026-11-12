@@ -143,17 +143,14 @@ mod gates {
         let mut exact = sim::vision_chip::ExactVision::new(&config, sim::Weights::open_vision(&dir).unwrap(), count, c).unwrap().with_weights_in_registers();
         let expected = exact.encode(&tower, &image).unwrap();
 
-        let vision = compiler::compile_vision(&config, count).unwrap();
-        let program = &vision.program;
+        let compiler::VisionProgram { program, vision } = compiler::compile_vision(&config, count).unwrap();
+        let program = &program;
         let layout = sim::lower::Layout::new(program, &sim::Weights::open_vision(&dir).unwrap(), c, Some(count)).unwrap();
         for (patch, angles) in sim::vision::patch_angles(&tower.config, image.rows, image.cols).iter().enumerate() {
             layout.set_rotation(patch as u32, &angles.iter().map(|a| *a as f64).collect::<Vec<_>>());
         }
-        let mut routines = vec![(vision.embed.clone(), false)];
-        for (first, rest) in &vision.blocks {
-            routines.extend([(first.clone(), true), (rest.clone(), false)]);
-        }
-        routines.push((vision.merge.clone(), false));
+        // One entry for each routine: embedding, each block's two and the fusion.
+        let routines: Vec<(&[compiler::Inst], bool)> = vision.routines().into_iter().enumerate().map(|(i, range)| (&vision.ops[range], i % 2 == 1 && i < 2 * vision.blocks.len())).collect();
         let code = layout.routines_microprogram(program, &routines).unwrap();
         eprintln!("{} rutinas, {} palabras de microcódigo", routines.len(), code.words.len());
 
@@ -195,4 +192,30 @@ mod gates {
         }
         std::fs::remove_dir_all(&dir).ok();
     }
+}
+
+#[test]
+fn a_model_that_carries_its_encoder_reads_the_picture_as_the_separate_encoder_feeds_it() {
+    let dir = std::env::temp_dir().join(format!("llm2chip-vision-joint-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    make_vision_checkpoint(&dir);
+    let tower = VisionTower::open(&dir).unwrap().unwrap();
+    let image = patches(&tower.config, &test_picture(16, 8), 16, 8).unwrap();
+    let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    // The encoder on its own, its tokens fed to the model as vectors.
+    let tokens = sim::vision_chip::ExactVision::new(&config, sim::Weights::open_vision(&dir).unwrap(), 32, roomy_die(16)).unwrap().encode(&tower, &image).unwrap();
+    let mut apart = sim::ExactEngine::new(compiler::compile_qwen3_5(CONFIG).unwrap(), sim::Weights::open(&dir).unwrap(), 16).unwrap();
+    // One model with the encoder inside, as one chip carries both.
+    let joint = compiler::attach_vision(compiler::compile_qwen3_5(CONFIG).unwrap(), &config, 32).unwrap();
+    let weights = sim::Weights::open_with_vision(&dir).unwrap();
+    let mut together = sim::ExactEngine::new(joint, weights, 16).unwrap();
+    assert_eq!(together.encode_image(&tower, &image).unwrap(), tokens.len());
+    for (index, token) in tokens.iter().enumerate() {
+        let last = index + 1 == tokens.len();
+        let a = apart.step_embedding(token, [index as u64; 3], last).unwrap();
+        let b = together.step_image(index as u32, [index as u64; 3], last).unwrap();
+        assert_eq!(a, b, "token {index}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }

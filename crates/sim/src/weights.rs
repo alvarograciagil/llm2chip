@@ -79,6 +79,11 @@ impl Weights {
         Self::open_where(dir, |name| name.starts_with("model-vision"))
     }
 
+    /// The language model's weights and its image encoder's, for a chip that carries both.
+    pub fn open_with_vision(dir: &Path) -> Result<Self, String> {
+        Self::open_where(dir, |_| true)
+    }
+
     fn open_where(dir: &Path, keep: impl Fn(&str) -> bool) -> Result<Self, String> {
         let mut paths: Vec<_> = std::fs::read_dir(dir)
             .map_err(|e| e.to_string())?

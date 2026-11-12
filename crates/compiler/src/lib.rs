@@ -112,6 +112,8 @@ pub struct Program {
     pub draft: Option<DraftProgram>,
     /// An image generator's heads, for models that draw: see `ImageHead`.
     pub image: Option<ImageHead>,
+    /// An image encoder, for models that read pictures: see `VisionPart`.
+    pub vision: Option<VisionPart>,
 }
 
 /// The two small heads with which a language model draws, as Janus-Pro does: one turns
@@ -724,6 +726,7 @@ fn empty_program(family: &str, vocab: usize, hidden: usize, num_layers: usize, r
         final_hidden: 0,
         draft: None,
         image: None,
+        vision: None,
     }
 }
 
@@ -1005,13 +1008,13 @@ mod tests {
     }
 }
 
-/// An image encoder as the chip runs it: one program whose operations form routines, and
-/// the order the firmware runs them in. A routine runs once for each patch (or merged
-/// token), with the patch as the token; the rest of an encoder block attends over every
-/// patch, so its position is the last patch.
+/// An image encoder as the chip runs it: operations that form routines, and the order the
+/// firmware runs them in. A routine runs once for each patch (or merged token), with the
+/// patch as the token; the rest of an encoder block attends over every patch, so its
+/// position is the last patch. Its buffers and key slots are the program's it belongs to.
 #[derive(Clone, Debug, Serialize)]
-pub struct VisionProgram {
-    pub program: Program,
+pub struct VisionPart {
+    pub ops: Vec<Inst>,
     /// Turns a patch's pixels, with its learned position, into the first hidden state.
     pub embed: std::ops::Range<usize>,
     /// For each block: the routine that stores the patch's keys, values and query, and
@@ -1030,19 +1033,73 @@ pub struct VisionProgram {
     pub patches: usize,
 }
 
-/// The encoder in `vision_config`, for images of at most `patches` patches.
+impl VisionPart {
+    /// Every routine in the order of its entries: embedding, each block's two, fusion.
+    pub fn routines(&self) -> Vec<std::ops::Range<usize>> {
+        std::iter::once(self.embed.clone()).chain(self.blocks.iter().flat_map(|(a, b)| [a.clone(), b.clone()])).chain([self.merge.clone()]).collect()
+    }
+}
+
+/// An image encoder on its own: a program whose only operations are the encoder's.
+#[derive(Clone, Debug, Serialize)]
+pub struct VisionProgram {
+    pub program: Program,
+    pub vision: VisionPart,
+}
+
+/// The encoder in `vision_config`, for images of at most `patches` patches, on its own.
 pub fn compile_vision(config: &str, patches: usize) -> Result<VisionProgram, String> {
     let root: Value = serde_json::from_str(config).map_err(|e| e.to_string())?;
+    let mut program = Program {
+        family: "vision".into(),
+        vocab: 1,
+        hidden: 0,
+        num_layers: 0,
+        buffers: Vec::new(),
+        logits_from: 0,
+        ops: Vec::new(),
+        logits: 0,
+        kv_slots: Vec::new(),
+        delta_slots: Vec::new(),
+        conv_slots: Vec::new(),
+        rope_theta: 10_000.0,
+        rope_scaling: None,
+        local_rope_theta: None,
+        rms_epsilon: 1e-6,
+        final_hidden: 0,
+        draft: None,
+        image: None,
+        vision: None,
+    };
+    let vision = vision_part(&root, patches, &mut program)?;
+    program.ops = vision.ops.clone();
+    program.logits_from = program.ops.len();
+    program.hidden = root["vision_config"]["hidden_size"].as_u64().unwrap_or(0) as usize;
+    program.num_layers = vision.blocks.len();
+    (program.logits, program.final_hidden) = (vision.output, vision.output);
+    Ok(VisionProgram { program, vision })
+}
+
+/// A language model that also reads images: `program` with the encoder of `config`, its
+/// buffers and key slots after the model's. Its layer norms keep their own epsilon.
+pub fn attach_vision(mut program: Program, config: &str, patches: usize) -> Result<Program, String> {
+    let root: Value = serde_json::from_str(config).map_err(|e| e.to_string())?;
+    let vision = vision_part(&root, patches, &mut program)?;
+    program.vision = Some(vision);
+    Ok(program)
+}
+
+fn vision_part(root: &Value, patches: usize, program: &mut Program) -> Result<VisionPart, String> {
     let v = &root["vision_config"];
     let number = |key: &str| v[key].as_u64().map(|n| n as usize).ok_or(format!("vision_config sin {key}"));
     let (hidden, heads, depth, intermediate) = (number("hidden_size")?, number("num_heads")?, number("depth")?, number("intermediate_size")?);
     let (patch, temporal, merge, out) = (number("patch_size")?, number("temporal_patch_size")?, number("spatial_merge_size")?, number("out_hidden_size")?);
-    let theta = v["rope_parameters"]["rope_theta"].as_f64().unwrap_or(10_000.0) as f32;
     let head_dim = hidden / heads;
     let merged = hidden * merge * merge;
     let patches = patches.next_multiple_of(merge * merge);
+    let first_slot = program.kv_slots.len();
 
-    let mut buffers: Vec<usize> = Vec::new();
+    let buffers = &mut program.buffers;
     let mut buf = |len: usize| {
         buffers.push(len);
         buffers.len() - 1
@@ -1062,7 +1119,6 @@ pub fn compile_vision(config: &str, patches: usize) -> Result<VisionProgram, Str
     let embed = 0..4;
 
     let mut blocks = Vec::new();
-    let mut kv_slots = Vec::new();
     for block in 0..depth {
         let b = |name: &str| t(&format!("blocks.{block}.{name}"));
         let layer = Some(block as u32);
@@ -1076,16 +1132,15 @@ pub fn compile_vision(config: &str, patches: usize) -> Result<VisionProgram, Str
         emit(Op::Slice { src: qkv_b, from: 0, dst: q }, "consulta", layer);
         emit(Op::Slice { src: qkv_b, from: hidden, dst: k }, "clave", layer);
         emit(Op::Slice { src: qkv_b, from: 2 * hidden, dst: v_ }, "valor", layer);
-        emit(Op::Rope { buf: q, block: head_dim, rotary: head_dim, table: 0 }, "RoPE 2D de la consulta", layer);
-        emit(Op::Rope { buf: k, block: head_dim, rotary: head_dim, table: 0 }, "RoPE 2D de la clave", layer);
-        emit(Op::KvAppend { slot: block, key: k, value: v_, window: None }, "guardar clave y valor", layer);
+        emit(Op::Rope { buf: q, block: head_dim, rotary: head_dim, table: 2 }, "RoPE 2D de la consulta", layer);
+        emit(Op::Rope { buf: k, block: head_dim, rotary: head_dim, table: 2 }, "RoPE 2D de la clave", layer);
+        emit(Op::KvAppend { slot: first_slot + block, key: k, value: v_, window: None }, "guardar clave y valor", layer);
         emit(Op::StoreRow { src: q, store: queries }, "guardar consulta", layer);
-        kv_slots.push(KvShape { head_dim, heads });
         let middle = start + 11;
         let (q2, attended, projected, projected_b, h2, h3, normed2, up, up_b, gelu, down, down_b, h4) =
             (buf(hidden), buf(hidden), buf(hidden), buf(hidden), buf(hidden), buf(hidden), buf(hidden), buf(intermediate), buf(intermediate), buf(intermediate), buf(hidden), buf(hidden), buf(hidden));
         emit(Op::LoadRow { store: queries, dst: q2 }, "leer consulta", layer);
-        emit(Op::AttnSum { slot: block, query: q2, head_dim, scale_dim: head_dim, heads, kv_heads: heads, window: None, softcap: None, dst: attended }, "atención sobre todos los parches", layer);
+        emit(Op::AttnSum { slot: first_slot + block, query: q2, head_dim, scale_dim: head_dim, heads, kv_heads: heads, window: None, softcap: None, dst: attended }, "atención sobre todos los parches", layer);
         emit(Op::Matvec { matrix: b("attn.proj"), src: attended, dst: projected }, "proyección", layer);
         emit(Op::AddWeight { src: projected, weight: b("attn.proj.bias"), dst: projected_b }, "sesgo de la proyección", layer);
         emit(Op::LoadRow { store: state, dst: h2 }, "leer parche", layer);
@@ -1113,25 +1168,6 @@ pub fn compile_vision(config: &str, patches: usize) -> Result<VisionProgram, Str
     let merge_range = start..start + 7;
     debug_assert_eq!(ops.len(), merge_range.end);
 
-    let program = Program {
-        family: "vision".into(),
-        vocab: 1,
-        hidden,
-        num_layers: depth,
-        buffers,
-        logits_from: ops.len(),
-        ops,
-        logits: output,
-        kv_slots,
-        delta_slots: Vec::new(),
-        conv_slots: Vec::new(),
-        rope_theta: theta,
-        rope_scaling: None,
-        local_rope_theta: None,
-        rms_epsilon: 1e-6,
-        final_hidden: output,
-        draft: None,
-        image: None,
-    };
-    Ok(VisionProgram { program, embed, blocks, merge: merge_range, pixels, position, output, head_dim, patches })
+    program.kv_slots.extend((0..depth).map(|_| KvShape { head_dim, heads }));
+    Ok(VisionPart { ops, embed, blocks, merge: merge_range, pixels, position, output, head_dim, patches })
 }

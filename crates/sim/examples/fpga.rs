@@ -1,7 +1,7 @@
 //! The whole chip, in Verilog, to synthesise for an FPGA: the RISC-V controller, the die
 //! with only the logic its microprogram uses, and the sampling unit.
 //!
-//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR]... [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary] [--factor-steps N] [--tokenizer FILE] [--chain] [--path NET] [--groups]`
+//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR]... [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary] [--factor-steps N] [--group N] [--tokenizer FILE] [--chain] [--path NET] [--groups]`
 //!
 //! With `--dsp`, each one-cycle multiplier is written as a signed product so the FPGA
 //! tools put it in their multiplier blocks. Without `--model`, the chip is the one
@@ -82,6 +82,11 @@ fn main() {
     let context: usize = if dirs.is_empty() { 8 } else { option("--context").map_or(128, |n| n.parse().unwrap()) };
     let (models, trial): (Vec<(compiler::Program, Weights)>, DieConfig) = if dirs.is_empty() {
         std::fs::create_dir_all(&test_dir).unwrap();
+        // `--group N`: columns that share a scale and a bias in the test model, so a cell
+        // can take up to N cycles to apply them.
+        if let Some(group) = option("--group") {
+            GROUP.with(|g| g.set(group.parse().unwrap()));
+        }
         make_checkpoint(&test_dir);
         (vec![(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&test_dir).unwrap())], fpga_die_config())
     } else {
