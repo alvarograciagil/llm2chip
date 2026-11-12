@@ -340,3 +340,35 @@ fn attention_in_verilog_matches_the_gate_simulator() {
     assert_eq!(theirs[skip..], ours[..]);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A microprogram laid out for a die with narrower jump targets than the one it runs on, as
+/// happens when the die is sized after its program: an immediate keeps its sign.
+#[test]
+fn a_negative_immediate_keeps_its_sign_on_a_die_with_wider_jump_targets() {
+    let wide = config();
+    let narrow = DieConfig { microcode_bits: 5, ..wide };
+    let mut asm = Assembly::new(&narrow);
+    asm.set_exponent(1, -15);
+    let mut program = DieProgram::new(narrow);
+    program.assemble(&asm.steps);
+    let words = program.finish();
+    let mut sim = Simulator::new(&die_design(wide)).unwrap();
+    sim.set("start", 1).unwrap();
+    sim.tick();
+    sim.set("load_code", 1).unwrap();
+    for (i, word) in words.iter().enumerate() {
+        sim.set("code_addr", i as u64).unwrap();
+        sim.set_wide("code_data", word.encode(&wide)).unwrap();
+        sim.tick();
+    }
+    sim.set("load_code", 0).unwrap();
+    sim.tick();
+    sim.set("start", 0).unwrap();
+    let mut cycles = 0;
+    while sim.get("halted").unwrap() == 0 {
+        sim.tick();
+        cycles += 1;
+        assert!(cycles < 1000, "el secuenciador no se detiene");
+    }
+    assert_eq!(gate_value(&mut sim, wide, exponent_register(&wide), 1), -15);
+}

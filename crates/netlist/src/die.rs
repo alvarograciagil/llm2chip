@@ -840,8 +840,9 @@ fn bit_linear(literals: &[u32], mask: u64, bits: u32) -> Option<Vec<(u32, u64)>>
 fn immediate_target(literal: Option<u32>, c: DieConfig) -> u32 {
     let Some(value) = literal else { return 0 };
     let shift = 32 - c.index_bits;
-    let signed = ((value << shift) as i32) >> shift;
-    signed as u32 & ((1u32 << c.microcode_bits) - 1)
+    // Kept with its whole sign: the word may go to a die whose jump targets are wider than
+    // those of the die it was laid out for, and the field takes as many bits as it has.
+    (((value << shift) as i32) >> shift) as u32
 }
 
 /// Whether `bits` holds at least `value`.

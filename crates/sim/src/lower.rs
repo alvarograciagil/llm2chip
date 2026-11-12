@@ -1144,6 +1144,13 @@ impl Layout {
     }
 
     /// Forgets the weights of every matrix that the given operations do not use.
+    /// The steps a routine of `list` assembles to, to run them on `netlist::block::Behavior`.
+    pub fn routine_steps(&self, program: &Program, list: &[Inst], rope: bool) -> Result<Vec<Step>, String> {
+        let mut asm = self.assembly();
+        self.run_list(&mut asm, program, list, Expr::var(Var::Token), Expr::var(Var::Position), rope)?;
+        Ok(asm.steps)
+    }
+
     fn assembly(&self) -> Assembly {
         let mut asm = Assembly::new(&self.config);
         asm.in_cells = self.in_cells.clone();

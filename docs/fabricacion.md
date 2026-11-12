@@ -8,26 +8,22 @@ Qué está verificado del chip, qué reglas debe cumplir la placa y qué falta p
 |---|---|---|
 | El chip entero (CPU, firmware, cargador, die, muestreador) escribe lo mismo, en los mismos ciclos, a nivel de instrucciones y de puertas | Modelos de juguete, de texto y con imagen | `crates/sim/tests/chip.rs`, `crates/sim/tests/vision_chip.rs` |
 | Un simulador ajeno, Icarus Verilog, da lo mismo que el nuestro con el netlist exportado | El chip entero con su firmware, puerta a puerta; con `LLM2CHIP_ICARUS=1` | `text_goes_through_the_whole_chip_in_icarus_verilog` (unos 40 min), `the_whole_chip_reads_a_picture_in_icarus_verilog` (horas) |
-| Un modelo real, stories260K, por el chip a nivel de instrucciones | El firmware tokeniza «Once upon a time» y escribe «, there was», lo mismo que la máquina del die dirigida desde el anfitrión y que la coma flotante | `a_real_model_writes_the_same_text_through_the_whole_chip` |
+| Un modelo real, stories260K, por el chip entero, a nivel de instrucciones y de puertas | El firmware tokeniza «Once upon a time» y escribe «, there was», lo mismo que la máquina del die dirigida desde el anfitrión y que la coma flotante; las puertas, en los mismos 1 909 169 ciclos | `a_real_model_writes_the_same_text_through_the_whole_chip` (unos 4 min), y solo el die en `a_real_model_s_token_on_the_die_matches_the_exact_machine` |
 | Bloques, die y celdas en Verilog frente al simulador de puertas | Icarus Verilog, ciclo a ciclo | `crates/netlist/tests` |
 | Síntesis y rutado para FPGA | Yosys y nextpnr (ECP5), Gowin y Cyclone IV por síntesis | `docs/fpga.md` |
 
-### Fallo abierto: stories260K en puertas
+### Un fallo que solo salía con un modelo real
 
-En puertas, el die de stories260K tal como lo construye el ejemplo FPGA no calcula. Tras guardar el primer token en la caché, el almacén de claves de la capa 0 sigue vacío, la atención da cero y todos los logits salen a cero, así que el chip escribe solo el token 0. La máquina exacta del mismo die lo hace bien. Los modelos de juguete no lo muestran, ni con 8 celdas ni con atención agrupada.
+stories260K fue el primer modelo cuyo microprograma pasa de 2^13 palabras (9 813), y en puertas su die calculaba ceros.
 
-Descartado:
-- el diccionario de microcódigo y la tabla de embedding fuera;
-- los pasos de escala y sesgo y el ancho del acumulador;
-- el ancho de los pesos (8 o 16 bits);
-- `key_shift` y las cadenas de productos;
-- la carga inicial de la memoria vectorial.
+La causa estaba en cómo viaja un inmediato:
+- **Dónde va:** un valor fijo de la instrucción viaja en el campo del destino de salto, y el die extiende su signo desde el último bit de ese campo.
+- **Por qué se rompía:** el microprograma se ensamblaba para un die de prueba con destinos de 13 bits y se cargaba en el die final, de 14. Un −15 guardado en 13 bits (0x1FF1) se leía en 14 como +8 177.
+- **Qué lo destapó:** la RoPE de cada cabeza resta 15 al exponente, así que el de las claves salía 8 192 más alto y la caché las guardaba como ceros.
 
-Las pruebas que lo reproducen están detrás de `LLM2CHIP_STORIES_GATES=1`:
-- `a_real_model_s_token_on_the_die_matches_the_exact_machine` en `tiny_model.rs`, solo el die, en segundos;
-- la comparación con puertas de `a_real_model_writes_the_same_text_through_the_whole_chip`.
+Ahora el inmediato se guarda con todo su signo y cada die toma los bits que tiene su campo (`a_negative_immediate_keeps_its_sign_on_a_die_with_wider_jump_targets`).
 
-Hasta resolverlo, **un chip para un modelo real no está verificado en puertas**.
+Por el camino salió otro fallo, este del simulador de instrucciones: con la tabla de embedding en la imagen, leía siempre la fila del token 0.
 
 ## Reglas para la placa
 
@@ -42,5 +38,4 @@ Hasta resolverlo, **un chip para un modelo real no está verificado en puertas**
 - **Colocación, reloj y rutado**, el análisis de tiempos en todas las esquinas de proceso, la potencia y la caída de tensión, y las comprobaciones DRC y LVS hasta el GDSII. Con un PDK abierto (SKY130, GF180 o IHP SG13G2), OpenROAD lo hace.
 - **Anillo de pads** con protección contra descargas, y encapsulado.
 - **Pruebas de fábrica**: hay autotest de memorias y JTAG, pero no cadenas de scan ni patrones ATPG.
-- **El fallo abierto de arriba.**
 - **Silicio**: nada se ha probado en una FPGA física ni en un chip.

@@ -1074,15 +1074,11 @@ fn two_groups_of_two_dies_run_a_token_over_their_links() {
 /// against the exact machine of the same die. The model comes from `LLM2CHIP_STORIES` or
 /// `~/.llm2chip/models`.
 ///
-/// A known open fault: in gates the first layer's attention gives zeros, as the key store
-/// stays empty after the token is stored, so every logit is zero. The test models do not
-/// show it. It runs only with `LLM2CHIP_STORIES_GATES=1`.
+/// Its microprogram is longer than 2^13 words: it found that immediates laid out for a
+/// die with narrower jump targets lost their sign on the real one.
 #[test]
-#[ignore = "lenta: un modelo real en el die, puerta a puerta; con LLM2CHIP_STORIES_GATES=1"]
+#[ignore = "lenta: un modelo real en el die, puerta a puerta"]
 fn a_real_model_s_token_on_the_die_matches_the_exact_machine() {
-    if std::env::var_os("LLM2CHIP_STORIES_GATES").is_none() {
-        return;
-    }
     use netlist::chip::DieEngine;
     use sim::chip::{fpga_chip_for, FpgaChip, FpgaOptions, VmEngine};
     let dir = std::env::var_os("LLM2CHIP_STORIES").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".llm2chip/models/stories260K"));
@@ -1149,4 +1145,3 @@ fn a_real_model_s_token_on_the_die_matches_the_exact_machine() {
     let exact: Vec<i64> = (0..program.vocab as u32).map(|i| vm.read(logits << c.index_bits | i)).collect();
     assert_eq!(gates, exact, "logits");
 }
-

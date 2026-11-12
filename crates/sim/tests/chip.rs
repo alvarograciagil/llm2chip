@@ -329,13 +329,9 @@ fn any_token_on_the_stop_list_ends_the_answer() {
 /// instruction-level chip writes what the die's own machine writes driven by the host, and
 /// what floating point writes. The model is not in the repository: it is taken from
 /// `LLM2CHIP_STORIES` or `~/.llm2chip/models`.
-///
-/// In gates this die still writes nothing: its first layer's attention gives zeros, as the
-/// key store stays empty after the token is stored (`a_real_model_s_token_on_the_die_...`
-/// in `tiny_model.rs` finds it). Until that is fixed, the gates run only with
-/// `LLM2CHIP_STORIES_GATES=1`.
+/// The gates write the same, in as many cycles.
 #[test]
-#[ignore = "lenta: un modelo real por el chip entero, millones de ciclos"]
+#[ignore = "lenta: un modelo real por el chip entero en puertas, millones de ciclos"]
 fn a_real_model_writes_the_same_text_through_the_whole_chip() {
     use netlist::chip::DieEngine;
     use sim::chip::{fpga_chip_for, FpgaChip, FpgaOptions};
@@ -418,10 +414,6 @@ fn a_real_model_writes_the_same_text_through_the_whole_chip() {
     assert_eq!(text.trim_start(), by_host.trim_start(), "el firmware escribe lo que la máquina del die");
     assert_eq!(by_host, float, "la aritmética del die elige los tokens de la coma flotante");
 
-    if std::env::var_os("LLM2CHIP_STORIES_GATES").is_none() {
-        eprintln!("puertas omitidas: fallo conocido, LLM2CHIP_STORIES_GATES=1 para probarlas");
-        return;
-    }
     let started = std::time::Instant::now();
     let (output, cycles, _) = run_gates(&design, &image, &input, cpu.cycle + 4096);
     eprintln!("puertas: {cycles} ciclos en {:.0} s", started.elapsed().as_secs_f64());
