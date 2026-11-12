@@ -120,11 +120,22 @@ impl ChipActivity {
     }
 }
 
+/// What a function of the tokenizer does: its lookups of a token's bytes serve both ways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenizerPart {
+    Encode,
+    Decode,
+    Either,
+}
+
 /// Follows the firmware instruction by instruction.
 #[derive(Clone, Debug)]
 pub struct CpuProfile {
     /// Ranges of the program that belong to the tokenizer, `[start, end)` in bytes.
-    functions: Vec<(u32, u32, CpuTask)>,
+    functions: Vec<(u32, u32, TokenizerPart)>,
+    /// Whether a token has been sampled: before, the tokenizer's lookups read the prompt;
+    /// after, they write the answer.
+    sampled: bool,
     /// Whether the CPU has touched the outside yet: before that it is starting.
     started: bool,
     /// Cycles and instructions not yet given to a task, waiting for the next access.
@@ -143,12 +154,19 @@ impl CpuProfile {
                 if !name.contains("tokenizer_rt") {
                     return None;
                 }
-                // What writes a token's bytes turns tokens into text; the rest makes tokens.
-                let writes = ["Writer", "4blob", "10blob_bytes", "10vocabulary"].iter().any(|part| name.contains(part));
-                Some((start, start + size, if writes { CpuTask::Detokenize } else { CpuTask::Tokenize }))
+                // What writes a token's bytes turns tokens into text, what reads them serves
+                // both ways, and the rest makes tokens.
+                let part = if name.contains("Writer") {
+                    TokenizerPart::Decode
+                } else if ["4blob", "10blob_bytes", "10vocabulary"].iter().any(|part| name.contains(part)) {
+                    TokenizerPart::Either
+                } else {
+                    TokenizerPart::Encode
+                };
+                Some((start, start + size, part))
             })
             .collect();
-        Self { functions, started: false, pending: (0, 0), last_cycle: 0, counts: CpuCounts::default() }
+        Self { functions, sampled: false, started: false, pending: (0, 0), last_cycle: 0, counts: CpuCounts::default() }
     }
 
     /// One retired instruction at `pc`, the access it made outside the memories if any,
@@ -156,14 +174,16 @@ impl CpuProfile {
     pub fn record(&mut self, pc: u32, access: Option<BusAccess>, cycle: u64) {
         let spent = cycle - self.last_cycle;
         self.last_cycle = cycle;
-        if let Some((_, _, task)) = self.functions.iter().find(|(start, end, _)| (*start..*end).contains(&pc)) {
-            self.add(*task, spent, 1);
+        if let Some((_, _, part)) = self.functions.iter().find(|(start, end, _)| (*start..*end).contains(&pc)) {
+            let decoding = *part == TokenizerPart::Decode || (*part == TokenizerPart::Either && self.sampled);
+            self.add(if decoding { CpuTask::Detokenize } else { CpuTask::Tokenize }, spent, 1);
             return;
         }
         self.pending = (self.pending.0 + spent, self.pending.1 + 1);
         if let Some(access) = access {
             let task = if self.started { task_of(access) } else { CpuTask::Start };
             self.started = true;
+            self.sampled |= task == CpuTask::Sample;
             let (cycles, instructions) = std::mem::take(&mut self.pending);
             self.add(task, cycles, instructions);
         }
@@ -248,7 +268,7 @@ mod tests {
 
     #[test]
     fn a_busy_status_is_waiting_and_the_rest_is_work() {
-        let mut p = CpuProfile { functions: vec![(0x100, 0x200, CpuTask::Tokenize)], started: false, pending: (0, 0), last_cycle: 0, counts: CpuCounts::default() };
+        let mut p = CpuProfile { functions: vec![(0x100, 0x200, TokenizerPart::Encode)], sampled: false, started: false, pending: (0, 0), last_cycle: 0, counts: CpuCounts::default() };
         p.record(0, Some(BusAccess { address: 0x2000_0004, write: false, value: 1 }), 3);
         p.record(4, None, 4);
         p.record(4, at(REG_ENTRY, true, 0), 5);
@@ -263,5 +283,14 @@ mod tests {
         let c = p.counts;
         assert_eq!((c.cycles_of(CpuTask::Start), c.cycles_of(CpuTask::Order), c.cycles_of(CpuTask::WaitDie), c.cycles_of(CpuTask::Tokenize), c.cycles_of(CpuTask::Send), c.cycles_of(CpuTask::Control)), (3, 7, 2, 8, 2, 3));
         assert_eq!(c.total_cycles(), 25);
+    }
+
+    #[test]
+    fn a_lookup_of_a_token_reads_the_prompt_until_the_first_sample() {
+        let mut p = CpuProfile { functions: vec![(0x100, 0x200, TokenizerPart::Either)], sampled: false, started: true, pending: (0, 0), last_cycle: 0, counts: CpuCounts::default() };
+        p.record(0x100, None, 4);
+        p.record(0, at(crate::chip::REG_SAMPLE_START, true, 1), 5);
+        p.record(0x104, None, 7);
+        assert_eq!((p.counts.cycles_of(CpuTask::Tokenize), p.counts.cycles_of(CpuTask::Detokenize)), (4, 2));
     }
 }
