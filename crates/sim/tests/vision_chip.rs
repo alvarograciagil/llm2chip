@@ -206,7 +206,7 @@ fn gates(design: &netlist::Design, image: &[u32], input: &[u8], limit: u64) -> (
     sim.set("cpu_hold", 1).unwrap();
     sim.tick();
     sim.set("reset", 0).unwrap();
-    for _ in 0..=netlist::chip::RESET_STRETCH {
+    for _ in 0..=netlist::chip::RESET_RELEASE {
         sim.tick();
     }
     let mut pending = None;
@@ -338,5 +338,30 @@ fn the_firmware_drives_a_software_die_that_reads_the_picture() {
     let (mantissas, _) = netlist::block::encode_vector(&chosen_from.iter().map(|v| *v as f64).collect::<Vec<_>>(), 16);
     let read: Vec<i64> = (0..chip.program.vocab as u32).map(|i| bus.peripheral.engine.read(1 << FLOW_INDEX_BITS | i)).collect();
     assert_eq!(read, mantissas, "los logits del último token");
+    std::fs::remove_dir_all(&chip.dir).ok();
+}
+
+/// The same in Icarus Verilog, a simulator that is not this project's, from the exported
+/// netlist.
+#[test]
+#[ignore = "muy lenta: Icarus Verilog simula el chip entero puerta a puerta, unas horas; con LLM2CHIP_ICARUS=1"]
+fn the_whole_chip_reads_a_picture_in_icarus_verilog() {
+    // Hours of simulation: only when asked for, `LLM2CHIP_ICARUS=1`.
+    if std::env::var_os("LLM2CHIP_ICARUS").is_none() {
+        eprintln!("omitida: LLM2CHIP_ICARUS=1 para simular el chip entero en Icarus Verilog");
+        return;
+    }
+    if firmware().is_none() {
+        return;
+    }
+    let chip = chip("icarus");
+    let (image, input) = image_and_input(&chip);
+    let (expected, cycles, _) = instruction_level(&chip, &image, &input);
+    let config = ChipConfig { soc: soc(), die: chip.die, sampler: sampler_config() };
+    let started = std::time::Instant::now();
+    let Some((output, simulated)) = chip_in_iverilog(&chip_design(config), &image, &input, cycles + 4096, "vision") else { return };
+    eprintln!("Icarus Verilog: {simulated} ciclos en {:.0} s", started.elapsed().as_secs_f64());
+    assert_eq!(output, expected);
+    assert_eq!(simulated, cycles, "ciclos");
     std::fs::remove_dir_all(&chip.dir).ok();
 }

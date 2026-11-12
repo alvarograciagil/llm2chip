@@ -242,3 +242,26 @@ pub fn make_vision_checkpoint(dir: &Path) {
 pub fn test_picture(width: usize, height: usize) -> Vec<u8> {
     (0..width * height * 3).map(|i| ((i * 37 + i / 3 * 11) % 251) as u8).collect()
 }
+
+/// Runs a whole chip in Icarus Verilog, from its exported netlist, as the gate tests run it
+/// in this crate's simulator: its output bytes and cycles. `None` without Icarus Verilog.
+#[allow(dead_code)]
+pub fn chip_in_iverilog(design: &netlist::Design, image: &[u32], input: &[u8], limit: u64, tag: &str) -> Option<(Vec<u8>, u64)> {
+    std::process::Command::new("iverilog").arg("-V").output().ok()?;
+    let dir = std::env::temp_dir().join(format!("llm2chip-iverilog-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let hex = |values: Vec<String>| values.join("\n") + "\n";
+    std::fs::write(dir.join("image.hex"), hex(image.iter().map(|w| format!("{w:08x}")).collect())).unwrap();
+    std::fs::write(dir.join("input.hex"), hex(input.iter().map(|b| format!("{b:02x}")).collect())).unwrap();
+    let source = dir.join("chip.v");
+    std::fs::write(&source, format!("{}\n{}", netlist::to_verilog(design), netlist::chip_testbench(design, image.len(), input.len(), limit))).unwrap();
+    let binary = dir.join("chip.vvp");
+    let compile = std::process::Command::new("iverilog").args(["-g2005", "-s", "testbench", "-o"]).arg(&binary).arg(&source).output().unwrap();
+    assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+    let run = std::process::Command::new("vvp").current_dir(&dir).arg(&binary).output().unwrap();
+    let text = String::from_utf8_lossy(&run.stdout);
+    let output = text.lines().filter_map(|l| l.strip_prefix("B ")).map(|b| b.trim().parse().unwrap()).collect();
+    let cycles = text.lines().find_map(|l| l.strip_prefix("CICLOS ")).map(|c| c.trim().parse().unwrap());
+    std::fs::remove_dir_all(&dir).ok();
+    Some((output, cycles.unwrap_or_else(|| panic!("Icarus Verilog no terminó: {}", text.lines().last().unwrap_or_default()))))
+}

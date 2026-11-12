@@ -1069,3 +1069,84 @@ fn two_groups_of_two_dies_run_a_token_over_their_links() {
     }
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// stories260K's first token on the die alone, as the FPGA chip lays it out: its logits
+/// against the exact machine of the same die. The model comes from `LLM2CHIP_STORIES` or
+/// `~/.llm2chip/models`.
+///
+/// A known open fault: in gates the first layer's attention gives zeros, as the key store
+/// stays empty after the token is stored, so every logit is zero. The test models do not
+/// show it. It runs only with `LLM2CHIP_STORIES_GATES=1`.
+#[test]
+#[ignore = "lenta: un modelo real en el die, puerta a puerta; con LLM2CHIP_STORIES_GATES=1"]
+fn a_real_model_s_token_on_the_die_matches_the_exact_machine() {
+    if std::env::var_os("LLM2CHIP_STORIES_GATES").is_none() {
+        return;
+    }
+    use netlist::chip::DieEngine;
+    use sim::chip::{fpga_chip_for, FpgaChip, FpgaOptions, VmEngine};
+    let dir = std::env::var_os("LLM2CHIP_STORIES").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".llm2chip/models/stories260K"));
+    if !dir.join("model.safetensors").exists() {
+        return;
+    }
+    let context = 32;
+    let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
+    let program = compiler::compile_model(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+    let weights = Weights::open(&dir).unwrap();
+    let base = fpga_die_config();
+    let roomy = DieConfig { reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, weight_bits: base.cell.activation_bits, ..base.cell }, features: base.features.with_key_shift(bits_for(context as u64)), ..base };
+    let (code_bits, _) = Layout::with_cells(&program, &weights, roomy, context).unwrap().cell_shape(&weights).unwrap();
+    let roomy = DieConfig { cell: netlist::CellConfig { weight_bits: code_bits, ..roomy.cell }, ..roomy };
+    let (depth, groups) = Layout::with_cells(&program, &weights, roomy, context).unwrap().cell_depths();
+    let addr_bits = bits_for(depth.max(2 * groups));
+    let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1).max(context as u64 * 512).max((program.vocab * program.hidden) as u64)).max(addr_bits);
+    let trial = DieConfig { index_bits, cell: netlist::CellConfig { addr_bits, ..roomy.cell }, ..roomy };
+    let options = FpgaOptions { factor_steps: 1, table_inside: true, dictionary: false, tokenizer_words: 0, chain: false };
+    let FpgaChip { config, models, .. } = fpga_chip_for(&[(&program, &weights)], trial, context, options).unwrap();
+    let (layout, code) = &models[0];
+    let c = config.die;
+
+    let mut sim = Simulator::new(&die_design(c)).unwrap();
+    load_microprogram(&mut sim, &c, code);
+    load_register_table(&mut sim, &c, layout);
+    load_assembly(&mut sim, &c, &layout.setup().initial);
+    sim.set("load_fn", 1).unwrap();
+    for (address, value) in tables(&c).iter().enumerate() {
+        sim.set("fn_addr", address as u64).unwrap();
+        sim.set("cell_data", *value as u64 & mask(&c)).unwrap();
+        sim.tick();
+    }
+    sim.set("load_fn", 0).unwrap();
+    let data_mask = (1u64 << c.scale_bits.max(c.cell.weight_bits).max(c.cell.activation_bits)) - 1;
+    let put = |sim: &mut Simulator, address: u64, value: i64| {
+        sim.set("cell_addr", address).unwrap();
+        sim.set("cell_data", value as u64 & data_mask).unwrap();
+        sim.tick();
+    };
+    for cell in 0..c.cells {
+        let (codes, factors) = layout.cell_contents(&weights, cell).unwrap();
+        sim.set("load_cell", 1 << cell).unwrap();
+        sim.set("load_scale", 0).unwrap();
+        for (address, code) in codes.iter().enumerate() {
+            put(&mut sim, address as u64, *code);
+        }
+        sim.set("load_scale", 1).unwrap();
+        for (group, (scale, bias)) in factors.iter().enumerate() {
+            put(&mut sim, 2 * group as u64, *scale);
+            put(&mut sim, 2 * group as u64 + 1, *bias);
+        }
+    }
+    sim.set("load_cell", 0).unwrap();
+    sim.set("load_scale", 0).unwrap();
+    enter(&mut sim, code, ENTRY_TOKEN, 1, 0);
+    enter(&mut sim, code, ENTRY_LOGITS, 1, 0);
+
+    let mut vm = VmEngine::new(program.clone(), Weights::open(&dir).unwrap(), c, context).unwrap();
+    vm.run(ENTRY_TOKEN, 1, 0);
+    vm.run(sim::lower::ENTRY_LOGITS, 1, 0);
+    let logits = layout.logits_register(&program);
+    let gates: Vec<i64> = (0..program.vocab as u32).map(|i| read_block_value(&mut sim, c, logits, i).0).collect();
+    let exact: Vec<i64> = (0..program.vocab as u32).map(|i| vm.read(logits << c.index_bits | i)).collect();
+    assert_eq!(gates, exact, "logits");
+}
+

@@ -94,7 +94,7 @@ fn main() {
         let lane_bits = option("--lanes").map_or(0, |n| n.parse::<u32>().unwrap().max(1).ilog2());
         // Room for everything first, then just the bits the layouts need, the most of any.
         let base = fpga_die_config();
-        let roomy = DieConfig { cells, reg_bits: 12, index_bits: 20, cell: CellConfig { addr_bits: 20, ..base.cell }, features: base.features.with_key_shift(bits_for(context as u64)).with_lane_bits(lane_bits), ..base };
+        let roomy = DieConfig { cells, reg_bits: 12, index_bits: 20, cell: CellConfig { addr_bits: 20, weight_bits: base.cell.activation_bits, ..base.cell }, features: base.features.with_key_shift(bits_for(context as u64)).with_lane_bits(lane_bits), ..base };
         let mut trial = DieConfig { index_bits: 1, cell: CellConfig { weight_bits: 2, addr_bits: 1, ..roomy.cell }, ..roomy };
         let models = dirs
             .iter()
@@ -102,9 +102,10 @@ fn main() {
                 let dir = Path::new(dir.as_str());
                 let program = compiler::compile_model(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
                 let weights = Weights::open(dir).unwrap();
-                let layout = Layout::with_cells(&program, &weights, roomy, context).unwrap();
-                let (depth, groups) = layout.cell_depths();
-                let (code_bits, _) = layout.cell_shape(&weights).unwrap();
+                let (code_bits, _) = Layout::with_cells(&program, &weights, roomy, context).unwrap().cell_shape(&weights).unwrap();
+                // The cells' depth with words as wide as the codes.
+                let narrow = DieConfig { cell: CellConfig { weight_bits: code_bits, ..roomy.cell }, ..roomy };
+                let (depth, groups) = Layout::with_cells(&program, &weights, narrow, context).unwrap().cell_depths();
                 let addr_bits = bits_for(depth.max(2 * groups));
                 let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1).max(context as u64 * 512)).max(addr_bits);
                 trial = DieConfig { index_bits: trial.index_bits.max(index_bits), cell: CellConfig { weight_bits: trial.cell.weight_bits.max(code_bits), addr_bits: trial.cell.addr_bits.max(addr_bits), ..trial.cell }, ..trial };

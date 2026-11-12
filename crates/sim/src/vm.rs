@@ -415,9 +415,13 @@ impl BlockOps for BlockVm {
         self.narrow(&sums, exponent, self.exp(src), dst);
     }
 
-    fn copy_row(&mut self, name: &str, _matrix: u32, row: u32, cols: u32, dst: u32) {
+    fn copy_row(&mut self, name: &str, matrix: u32, row: u32, cols: u32, dst: u32) {
         if let Some((mantissas, exponent)) = self.row_in.take() {
             return self.load_mantissas(dst, &mantissas, exponent);
+        }
+        // A table the die holds, or the row of it the firmware brought in, as the gates read it.
+        if self.registers[matrix as usize].len() >= ((row + 1) * cols) as usize {
+            return self.copy_part(matrix, row * cols, dst, 0, cols);
         }
         let weights = self.weights.clone().expect("la máquina necesita los pesos");
         let exponent = self.matrix_exponent(name, cols);

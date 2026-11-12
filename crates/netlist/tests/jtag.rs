@@ -12,15 +12,19 @@ fn chip() -> Simulator {
     Simulator::new(&chip_design(config)).unwrap()
 }
 
+/// Cycles of the chip's clock in each half of TCK: the port's pins pass through two
+/// flip-flops, so TCK must be several times slower than the chip's clock.
+const HALF_TCK: usize = 4;
+
 fn pulse(sim: &mut Simulator, tms: u64, tdi: u64) -> u64 {
     sim.set("jtag_tms", tms).unwrap();
     sim.set("jtag_tdi", tdi).unwrap();
-    sim.settle();
-    sim.tick();
-    sim.set("jtag_tck", 1).unwrap();
-    sim.tick();
-    sim.set("jtag_tck", 0).unwrap();
-    sim.tick();
+    for level in [0, 1, 0] {
+        sim.set("jtag_tck", level).unwrap();
+        for _ in 0..HALF_TCK {
+            sim.tick();
+        }
+    }
     sim.settle();
     sim.get("jtag_tdo").unwrap()
 }

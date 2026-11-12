@@ -40,6 +40,16 @@ impl Gen {
         let test_enable = b.output("test_enable", 1)[0];
         {
             let mut l = Logic { b: &mut b, next: 0 };
+            // The test port runs on its own clock: its pins pass through two flip-flops each
+            // before the chip's clock reads them, and the chip's clock must be several times
+            // faster than TCK.
+            let mut synchronized = |bit: Bit| {
+                let (first, second) = (l.fresh(), l.fresh());
+                l.connect_flops(&[bit], &[first]);
+                l.connect_flops(&[first], &[second]);
+                second
+            };
+            let (tck, tms, tdi) = (synchronized(tck), synchronized(tms), synchronized(tdi));
             let previous = l.fresh();
             l.connect_flops(&[tck], &[previous]);
             let (not_previous, not_tck) = (l.not(previous), l.not(tck));

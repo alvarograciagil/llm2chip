@@ -309,3 +309,77 @@ pub fn verilog_testbench_with_rom(design: &Design, rom: &[RomWord], steps: &[Tes
     out.push_str("    $finish;\n  end\nendmodule\n");
     out
 }
+
+/// A testbench that runs a whole chip as a board would: it serves the image a word a cycle
+/// after each request, offers the host's next byte whenever the chip can take it, prints each
+/// byte the chip sends and, when it halts, how many cycles it ran. The image and the host's
+/// bytes come from `image.hex` and `input.hex`, one word or byte a line in hex.
+pub fn chip_testbench(design: &Design, image_words: usize, input_bytes: usize, limit: u64) -> String {
+    let top = &design.modules[&design.top];
+    let mut out = String::from("`timescale 1ns/1ns\nmodule testbench;\n  reg clk = 0;\n");
+    let mut pins = vec![".clk(clk)".to_string()];
+    for p in &top.ports {
+        let kind = if p.dir == Dir::Input { "reg" } else { "wire" };
+        let init = if p.dir == Dir::Input { " = 0" } else { "" };
+        let _ = writeln!(out, "  {kind} {}{}{init};", range(top.nets[p.net].width), p.name);
+        pins.push(format!(".{}({})", p.name, p.name));
+    }
+    let _ = writeln!(out, "  {} dut ({});", top.name, pins.join(", "));
+    let (words, bytes) = (image_words.max(1), input_bytes.max(1));
+    let _ = write!(
+        out,
+        r#"  reg [31:0] image [0:{last_word}];
+  reg [7:0] input_bytes [0:{last_byte}];
+  integer sent = 0, cycle = 0, boot = 0, i;
+  reg pending_valid = 0;
+  reg [31:0] pending_data = 0;
+  task step;
+    begin
+      image_resp_valid = pending_valid;
+      image_resp_data = pending_data;
+      host_rx_valid = sent < {input_bytes};
+      host_rx_data = sent < {input_bytes} ? input_bytes[sent] : 0;
+      #1;
+      if (sent < {input_bytes} && host_rx_ready) sent = sent + 1;
+      pending_valid = image_req_valid;
+      pending_data = image_req_valid && image_req_addr < {image_words} ? image[image_req_addr] : 0;
+    end
+  endtask
+  task tick;
+    begin
+      clk = 1; #1; clk = 0; #1;
+    end
+  endtask
+  initial begin
+    $readmemh("image.hex", image);
+    if ({input_bytes} > 0) $readmemh("input.hex", input_bytes);
+    reset = 1; cpu_hold = 1;
+    #1; tick;
+    reset = 0;
+    for (i = 0; i <= {stretch}; i = i + 1) tick;
+    step;
+    while (booting) begin
+      tick; boot = boot + 1;
+      step;
+    end
+    cpu_hold = 0; host_tx_ready = 1;
+    for (cycle = 0; cycle < {limit}; cycle = cycle + 1) begin
+      step;
+      if (host_tx_valid) $display("B %0d", host_tx_data);
+      if (halted) begin
+        $display("CICLOS %0d", cycle + 1);
+        $finish;
+      end
+      tick;
+    end
+    $display("LIMITE");
+    $finish;
+  end
+endmodule
+"#,
+        last_word = words - 1,
+        last_byte = bytes - 1,
+        stretch = crate::chip::RESET_RELEASE,
+    );
+    out
+}

@@ -38,6 +38,9 @@ pub const DEBUG_LINK_CORRECTED: u64 = 4;
 pub const DEBUG_LINK_FAILED: u64 = 5;
 /// Cycles the chip keeps itself in reset after the external signal is released.
 pub const RESET_STRETCH: u64 = 15;
+/// Cycles from the release of the reset pin until the chip is out of reset: the two
+/// flip-flops that synchronize the pin, then the stretch.
+pub const RESET_RELEASE: u64 = RESET_STRETCH + 2;
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct ChipConfig {
@@ -200,6 +203,12 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
     {
         let mut l = Logic { b: &mut b, next: 0 };
         l.b.group("Reset");
+        // The reset pin changes whenever the board likes: two flip-flops in a row give a
+        // value that may have caught it halfway a cycle to settle before anything reads it.
+        let (first, synced) = (l.fresh(), l.fresh());
+        l.connect_flops(&[external_reset], &[first]);
+        l.connect_flops(&[first], &[synced]);
+        let external_reset = synced;
         // The chip leaves reset only after a fixed delay, so that every part starts together.
         let stretch = l.fresh_bus(4);
         let released = l.fresh();

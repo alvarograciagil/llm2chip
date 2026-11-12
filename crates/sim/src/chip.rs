@@ -61,6 +61,17 @@ impl VmEngine {
     }
 }
 
+impl VmEngine {
+    /// The same die with the embedding table left in the image: each token's row is what the
+    /// firmware brings into its register.
+    pub fn with_table_outside(mut self) -> Result<Self, String> {
+        if self.layout.table_outside(&self.program) {
+            self.code = self.layout.microprogram(&self.program)?;
+        }
+        Ok(self)
+    }
+}
+
 impl DieEngine for VmEngine {
     fn run(&mut self, routine: usize, token: u32, position: u32) {
         self.layout.run_routine(&mut self.vm, &self.program, routine, token, position).expect("rutina del die");

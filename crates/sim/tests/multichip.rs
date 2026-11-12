@@ -1,7 +1,7 @@
 //! Several identical chips on a simulated board: one design, told apart by its pins.
 
 use compiler::compile_qwen3_5;
-use netlist::chip::{chip_design, ChipConfig, ChipModel, GenerationSetup, DEBUG_LINK_CORRECTED, DEBUG_LINK_FAILED, RESET_STRETCH};
+use netlist::chip::{chip_design, ChipConfig, ChipModel, GenerationSetup, DEBUG_LINK_CORRECTED, DEBUG_LINK_FAILED, RESET_RELEASE};
 use netlist::image::build_plan_image;
 use netlist::rv32::Rv32Iss;
 use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
@@ -108,7 +108,7 @@ impl<'a> Board<'a> {
             chip.set("reset", 1).unwrap();
             chip.tick();
             chip.set("reset", 0).unwrap();
-            for _ in 0..=RESET_STRETCH {
+            for _ in 0..=RESET_RELEASE {
                 chip.tick();
             }
             chip.set("host_tx_ready", 1).unwrap();

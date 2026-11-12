@@ -345,6 +345,11 @@ impl Simulator {
         Ok(())
     }
 
+    /// The paths of every memory, for `peek_memory`.
+    pub fn memory_paths(&self) -> Vec<String> {
+        self.memories.iter().map(|m| m.path.clone()).collect()
+    }
+
     pub fn peek_memory(&self, path: &str, address: usize) -> Option<u128> {
         self.memories.iter().find(|m| m.path == path).and_then(|m| m.cells.get(address).copied())
     }
