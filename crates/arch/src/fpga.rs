@@ -40,8 +40,11 @@ pub struct FpgaBoard {
 
 /// The smallest chip the generator makes, synthesised with Yosys for each family: CPU,
 /// die with eight cells and one lane, and sampler.
-pub fn base_logic_k(lut: &str) -> f64 {
-    match lut {
+pub fn base_logic_k(board: &FpgaBoard) -> f64 {
+    match board.lut {
+        // A Cyclone IV has no distributed memory, only blocks that read a cycle late, so
+        // its register table stays in flip-flops, as before the table went to memory.
+        "LE" if board.fpga.contains("Cyclone IV") => 48.3,
         // With the register table in distributed memory, counted in the look-up tables
         // it takes.
         "LUT6" => 25.4,
@@ -114,7 +117,7 @@ pub fn check(report: &mut Report, p: &ChipParams, board: &FpgaBoard) {
     let weights = if p.weight_backend == WeightBackend::Sram { gb("model_weights_gb") } else { 0.0 };
     let caches = if p.kv_backend == KvBackend::Sram { gb("kv_gb") + gb("delta_state_mb") / 1000.0 } else { 0.0 };
     let memory = BASE_MEMORY_MBIT + (weights + caches) * 8000.0;
-    let logic = base_logic_k(board.lut);
+    let logic = base_logic_k(board);
     // A cell's product takes one multiplier block, as does each lane's and the sampler's.
     let multipliers = report.macs_per_die + p.vector_lanes_per_die.saturating_mul(p.vector_units_per_die.max(1)) + 2;
     let share = |used: f64, total: f64| if total > 0.0 { 100.0 * used / total } else { f64::INFINITY };
@@ -138,7 +141,7 @@ pub fn check(report: &mut Report, p: &ChipParams, board: &FpgaBoard) {
         } else if caches > 0.0 && inside(weights) && fits_outside(caches) {
             ("Lleva la caché a la memoria de la placa, o reduce el contexto.", "kv_backend", serde_json::json!("external_ddr"))
         } else {
-            let larger = boards().iter().filter(|b| b.bram_mbit >= memory && base_logic_k(b.lut) <= b.luts_k).min_by(|a, b| a.price_usd.total_cmp(&b.price_usd));
+            let larger = boards().iter().filter(|b| b.bram_mbit >= memory && base_logic_k(b) <= b.luts_k).min_by(|a, b| a.price_usd.total_cmp(&b.price_usd));
             match larger {
                 Some(b) => ("Elige una FPGA con más memoria interna, o reduce bits de peso o contexto.", "fpga_board", serde_json::json!(b.id)),
                 None => ("Ninguna placa del catálogo guarda tanto dentro: reduce bits de peso o contexto.", "context_tokens", serde_json::json!((p.context_tokens / 2).max(64))),

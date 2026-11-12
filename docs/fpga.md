@@ -58,7 +58,7 @@ El asistente de proyecto («+» en la barra, «Una FPGA») tiene estas placas y 
 | Digilent Genesys 2 | Kintex-7 XC7K325T | 204 K LUT6 | 16 Mbit | 840 | 1 GB DDR3 | ~1 000 $ |
 | AMD Alveo U250 | UltraScale+ XCU250 | 1 728 K LUT6 | 432 Mbit | 12 288 | 64 GB DDR4 | ~9 000 $ |
 
-La Cyclone IV EP4CE10 es la más pequeña del catálogo: el chip más pequeño que genera el proyecto necesita unos 26 000 elementos lógicos y 1,95 Mbit de memoria interna, frente a sus 10 300 y 0,41, aunque los pesos vayan a la SDRAM de la placa. Sirve para probar piezas sueltas, como una celda de cálculo (`cargo run -p netlist --example export`) o un extremo de enlace, pero no un chip completo.
+La Cyclone IV EP4CE10 es la más pequeña del catálogo: el chip más pequeño que genera el proyecto necesita unos 48 000 elementos lógicos y 1,95 Mbit de memoria interna, frente a sus 10 300 y 0,41 (la Cyclone IV no tiene memoria distribuida, así que su tabla de registros sigue en biestables, y solo el microcódigo ya ocupa 0,5 Mbit), aunque los pesos vayan a la SDRAM de la placa. Sirve para probar piezas sueltas, como una celda de cálculo (`cargo run -p netlist --example export`) o un extremo de enlace, pero no un chip completo.
 
 ### Recomendación por unos 200 $: Kria KV260
 
