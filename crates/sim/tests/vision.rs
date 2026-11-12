@@ -70,3 +70,129 @@ fn the_language_model_reads_the_chip_encoder_s_tokens_as_the_reference_ones() {
     assert_eq!(best(&from_chip), best(&from_reference), "{from_chip:?} frente a {from_reference:?}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+mod gates {
+    use super::*;
+    use netlist::block::{encode_vector, exponent_register, tables};
+    use netlist::demo::read_block_value;
+    use netlist::{die_design, DieConfig, Microprogram, Simulator};
+    use std::collections::HashMap;
+
+    fn write(sim: &mut Simulator, c: &DieConfig, values: impl IntoIterator<Item = ((u32, u32), i64)>) {
+        let mask = (1u64 << c.cell.activation_bits) - 1;
+        sim.set("load_vec", 1).unwrap();
+        for ((reg, index), value) in values {
+            sim.set("vec_addr", ((reg as u64) << c.index_bits) | index as u64).unwrap();
+            sim.set("vec_data", value as u64 & mask).unwrap();
+            sim.tick();
+        }
+        sim.set("load_vec", 0).unwrap();
+    }
+
+    /// A vector into a register, as the host writes it: mantissas and the exponent.
+    fn host_vector(c: &DieConfig, reg: u32, values: &[f32]) -> Vec<((u32, u32), i64)> {
+        let (mantissas, exponent) = encode_vector(&values.iter().map(|v| *v as f64).collect::<Vec<_>>(), c.cell.activation_bits);
+        mantissas.iter().enumerate().map(|(i, m)| ((reg, i as u32), *m)).chain([((exponent_register(c), reg), exponent)]).collect()
+    }
+
+    fn load_microprogram(sim: &mut Simulator, c: &DieConfig, code: &Microprogram) {
+        sim.set("start", 1).unwrap();
+        sim.tick();
+        sim.set("load_code", 1).unwrap();
+        for (i, word) in code.words.iter().enumerate() {
+            sim.set("code_addr", i as u64).unwrap();
+            sim.set_words("code_data", &word.encode_words(c)).unwrap();
+            sim.tick();
+        }
+        sim.set("load_code", 0).unwrap();
+    }
+
+    fn enter(sim: &mut Simulator, code: &Microprogram, routine: usize, token: u32, position: u32) {
+        sim.set("start", 0).unwrap();
+        sim.set("param_write", 1).unwrap();
+        for parameter in &code.parameters {
+            sim.set("param_index", parameter.register as u64).unwrap();
+            sim.set("param_data", parameter.value(token, position) as u64).unwrap();
+            sim.tick();
+        }
+        sim.set("param_write", 0).unwrap();
+        sim.set("entry", code.entries[routine] as u64).unwrap();
+        sim.set("start", 1).unwrap();
+        sim.tick();
+        sim.set("start", 0).unwrap();
+        let mut cycles = 0u64;
+        while sim.get("halted").unwrap() == 0 {
+            sim.tick();
+            cycles += 1;
+            assert!(cycles < 5_000_000, "el secuenciador no se detiene");
+        }
+    }
+
+    #[test]
+    fn each_encoder_routine_in_gates_gives_the_exact_machine_s_bits() {
+        let dir = std::env::temp_dir().join(format!("llm2chip-vision-gates-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        make_vision_checkpoint(&dir);
+        let tower = VisionTower::open(&dir).unwrap().unwrap();
+        let image = patches(&tower.config, &test_picture(16, 8), 16, 8).unwrap();
+        let count = image.rows * image.cols;
+        let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
+        let c = DieConfig { index_bits: 10, microcode_bits: 14, ..die_config() };
+
+        // The exact machine, with the products added up weight by weight as these gates do.
+        let mut exact = sim::vision_chip::ExactVision::new(&config, sim::Weights::open_vision(&dir).unwrap(), count, c).unwrap().with_weights_in_registers();
+        let expected = exact.encode(&tower, &image).unwrap();
+
+        let vision = compiler::compile_vision(&config, count).unwrap();
+        let program = &vision.program;
+        let layout = sim::lower::Layout::new(program, &sim::Weights::open_vision(&dir).unwrap(), c, Some(count)).unwrap();
+        for (patch, angles) in sim::vision::patch_angles(&tower.config, image.rows, image.cols).iter().enumerate() {
+            layout.set_rotation(patch as u32, &angles.iter().map(|a| *a as f64).collect::<Vec<_>>());
+        }
+        let mut routines = vec![(vision.embed.clone(), false)];
+        for (first, rest) in &vision.blocks {
+            routines.extend([(first.clone(), true), (rest.clone(), false)]);
+        }
+        routines.push((vision.merge.clone(), false));
+        let code = layout.routines_microprogram(program, &routines).unwrap();
+        eprintln!("{} rutinas, {} palabras de microcódigo", routines.len(), code.words.len());
+
+        let mut sim = Simulator::new(&die_design(c)).unwrap();
+        load_microprogram(&mut sim, &c, &code);
+        let mut initial: HashMap<(u32, u32), i64> = layout.setup().initial.clone();
+        initial.extend(layout.rotation_writes());
+        write(&mut sim, &c, initial);
+        sim.set("load_fn", 1).unwrap();
+        for (address, value) in tables(&c).iter().enumerate() {
+            sim.set("fn_addr", address as u64).unwrap();
+            sim.set("cell_data", *value as u64 & ((1 << c.cell.activation_bits) - 1)).unwrap();
+            sim.tick();
+        }
+        sim.set("load_fn", 0).unwrap();
+
+        let size = program.buffers[vision.pixels];
+        let positions = tower.positions(image.rows, image.cols).unwrap();
+        for (patch, (values, position)) in image.values.chunks(size).zip(&positions).enumerate() {
+            let mut host = host_vector(&c, layout.register_of(vision.pixels), values);
+            host.extend(host_vector(&c, layout.register_of(vision.position), position));
+            write(&mut sim, &c, host);
+            enter(&mut sim, &code, 0, patch as u32, patch as u32);
+        }
+        for block in 0..vision.blocks.len() {
+            for patch in 0..count as u32 {
+                enter(&mut sim, &code, 1 + 2 * block, patch, patch);
+            }
+            for patch in 0..count as u32 {
+                enter(&mut sim, &code, 2 + 2 * block, patch, count as u32 - 1);
+            }
+        }
+        let output = layout.register_of(vision.output);
+        let width = program.buffers[vision.output] as u32;
+        for (token, want) in expected.iter().enumerate() {
+            enter(&mut sim, &code, routines.len() - 1, token as u32, token as u32);
+            let got: Vec<f32> = (0..width).map(|i| read_block_value(&mut sim, c, output, i).1 as f32).collect();
+            assert_eq!(&got, want, "token {token}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

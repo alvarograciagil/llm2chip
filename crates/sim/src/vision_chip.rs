@@ -30,6 +30,12 @@ impl ExactVision {
         Ok(Self { vision, layout, vm, bits: config.cell.activation_bits, exponents: exponent_register(&config) })
     }
 
+    /// Adds up matrix products weight by weight, as a die that holds them in registers.
+    pub fn with_weights_in_registers(mut self) -> Self {
+        self.vm.compute_in_registers();
+        self
+    }
+
     /// A buffer's values as the die holds them, to look inside the encoder.
     pub fn buffer(&self, buffer: usize) -> Vec<f32> {
         self.vm.floats(self.layout.register_of(buffer), self.vision.program.buffers[buffer])

@@ -1301,6 +1301,35 @@ impl Layout {
         self.run_range(ops, program, range, token, position, rope)
     }
 
+    /// A microprogram with one entry for each routine, `(operations, load the rotation)`,
+    /// for a program made of several, such as an image encoder's.
+    pub fn routines_microprogram(&self, program: &Program, routines: &[(Range<usize>, bool)]) -> Result<Microprogram, String> {
+        let mut code = DieProgram::new(self.config);
+        for (range, rope) in routines {
+            let mut asm = self.assembly();
+            self.run_list(&mut asm, program, &program.ops[range.clone()], Expr::var(Var::Token), Expr::var(Var::Position), *rope)?;
+            self.assemble(&mut code, &asm.steps)?;
+            code.next_entry();
+        }
+        Ok(code.finish_program())
+    }
+
+    /// What the host writes into the rotation table for the rows set with `set_rotation`, at
+    /// the table's exponent: `(register, index)` and mantissa.
+    pub fn rotation_writes(&self) -> Vec<((u32, u32), i64)> {
+        let table = self.rope_table[0];
+        let exponent = self.setup.initial.get(&(exponent_register(&self.config), table)).copied().unwrap_or(0);
+        let bits = self.config.cell.activation_bits;
+        let scale = 2f64.powi(bits as i32 - 1 - exponent as i32);
+        let top = (1i64 << (bits - 1)) - 1;
+        let width = 3 * self.rope_half as u32 + 1;
+        self.rotations
+            .borrow()
+            .iter()
+            .flat_map(|(row, values)| values.iter().enumerate().map(move |(i, v)| ((table, row * width + i as u32), ((v * scale).round() as i64).clamp(-top, top))))
+            .collect()
+    }
+
     /// The rotation of `slot` by its own angles, one for each pair of a head: an image patch's
     /// row and column. The host writes it in the table the die reads by position.
     pub fn set_rotation(&self, slot: u32, angles: &[f64]) {

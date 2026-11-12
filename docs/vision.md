@@ -48,7 +48,7 @@ Cada etapa se comprueba contra la anterior en un codificador de juguete (`make_v
 | 0 | Codificador de juguete; la referencia en coma flotante lo ejecuta | Hecha |
 | 1 | `compile_vision`: el codificador como un programa con sus rutinas (embedding de parche, las dos de cada bloque y la fusión) y tres operaciones nuevas: `LayerNorm` y leer y guardar la fila de un parche (`LoadRow`, `StoreRow`) | Hecha |
 | 2 | `ExactVision`: las rutinas en la aritmética exacta del die, en el orden del firmware; difiere de la coma flotante menos de un 0,5 % y el modelo de lenguaje elige el mismo token con sus tokens que con los de la referencia | Hecha |
-| 3 | Cada rutina en puertas, bit a bit igual que la máquina exacta | Pendiente |
+| 3 | Cada rutina en puertas, bit a bit igual que la máquina exacta: un microprograma con una entrada por rutina (`routines_microprogram`) y el anfitrión escribiendo píxeles, posiciones y filas de rotación (`rotation_writes`) | Hecha |
 | 4 | El firmware las ordena; simulador de instrucciones frente a puertas, de la imagen al texto | Pendiente |
 | 5 | La rutina de token del modelo de lenguaje toma la imagen como entrada, de punta a punta | Pendiente |
 
