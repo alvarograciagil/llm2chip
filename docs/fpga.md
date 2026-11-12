@@ -26,9 +26,9 @@ Con `--dsp`, cada multiplicador de un ciclo se escribe como un producto con sign
 
 | Familia | LUT | Biestables | Memoria de bloque | Multiplicadores |
 |---|---|---|---|---|
-| Xilinx serie 7 | 11 166 LUT6 + 403 de memoria distribuida | | | 42 DSP48 |
-| Gowin | 17 961 LUT + 2 214 ALU | | 125 BSRAM | 42 MULT18×18 + 18 MULT9×9 |
-| Lattice ECP5 | 17 872 LUT4, con memoria distribuida | | 125 DP16KD | 59 MULT18×18 |
+| Xilinx serie 7 | 11 166 LUT6 + 403 de memoria distribuida | 5 443 | 42 BRAM36 + 14 BRAM18 | 42 DSP48 |
+| Gowin | 17 961 LUT + 2 214 ALU | 5 519 | 125 BSRAM | 42 MULT18×18 + 18 MULT9×9 |
+| Lattice ECP5 | 17 872 LUT4, con memoria distribuida | 5 527 | 125 DP16KD | 59 MULT18×18 |
 | Altera Cyclone IV E (memorias aparte) | 53 603 LE | 9 017 | — | — |
 
 Antes de recortar la tabla de registros, quitar lo que una placa sola no usa y ajustar las tablas de función y la memoria de la CPU eran 23 500 LUT6 en Xilinx, 24 400 LUT4 en Gowin y 28 610 LUT4 en ECP5.
@@ -143,7 +143,7 @@ stories260K usaba 464 registros, uno por búfer, uno por matriz y una reserva fi
 - Dos búferes que nunca viven a la vez dentro de un token comparten registro. Cada uno vive desde que se escribe hasta su última lectura; los productos encadenados escriben todas sus salidas en el primero, así que sus salidas viven desde ahí. Los logits, el estado final, lo que tocan las cabezas MTP y de imagen y lo que se lee antes de escribirse (lo que pasa de un token al siguiente) tienen registro propio.
 - Las matrices de las celdas solo guardan su exponente en el registro: las que tienen el mismo comparten uno.
 
-La tabla de registros pasa de 2^9 a 2^7 entradas y los campos de registro del microcódigo se estrechan: unos 75 000 equivalentes NAND2 y 0,2 Mbit de microcódigo menos en stories260K; en el modelo de prueba, de 2^9 a 2^8. Si un microprograma llegara a un registro que el die no tiene, el ensamblado falla con un error en vez de generar un chip que calcula mal. El motor exacto, el del laboratorio numérico, sigue con un registro por búfer para poder leerlos todos al acabar un token.
+La tabla de registros pasa de 2^9 a 2^7 entradas y los campos de registro del microcódigo se estrechan: unos 37 000 equivalentes NAND2 y 0,2 Mbit de microcódigo menos en stories260K (de 558 000 a 521 000); en el modelo de prueba, de 2^9 a 2^8. Si un microprograma llegara a un registro que el die no tiene, el ensamblado falla con un error en vez de generar un chip que calcula mal. El motor exacto, el del laboratorio numérico, sigue con un registro por búfer para poder leerlos todos al acabar un token.
 
 Todo esto es a medida del microprograma, que cambia con el modelo: el chip para FPGA se genera para los modelos que va a ejecutar, como ya lo eran sus operaciones, los campos de control y la memoria vectorial. Una imagen para varios chips se dimensiona con lo que usa cualquiera de ellos, en cualquiera de los repartos que guarda.
 
