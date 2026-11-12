@@ -14,6 +14,11 @@ pub struct TechNode {
     /// several, each with its own periphery. None: a compiler makes any size.
     #[serde(default)]
     pub sram_macro_max_kbit: Option<f64>,
+    /// The shortest clock period at which the process's SRAM macros deliver a word, when
+    /// that is known from a layout: OpenRAM's for SkyWater 130 give their data at the falling
+    /// edge, so a read has half the cycle. None: the macros keep up with the logic.
+    #[serde(default)]
+    pub sram_min_period_ns: Option<f64>,
     /// The process has an open PDK, so the design can be laid out with OpenROAD.
     #[serde(default)]
     pub open_pdk: bool,

@@ -361,5 +361,16 @@
    "cells": 1918,
    "drc": 35
   }
- ]
+ ],
+ "tile": {
+  "what": "tools/asic/tile.sh: celda afín de 8 bits, Wallace 3+2, con 4096 pesos en una macro sky130_sram_1rw1r_128x256_8",
+  "platform": "sky130hd",
+  "period_ns": 10,
+  "macro_um2": 722109,
+  "cells_um2": 30698.2,
+  "die_um2": 1838560,
+  "fmax_mhz": 210.92,
+  "power_w": 0.0386587,
+  "drc": 0
+ }
 }

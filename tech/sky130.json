@@ -3,6 +3,7 @@
   "label": "SkyWater 130 (abierto, fabricable, calibrado con OpenROAD)",
   "sram_cell_um2": 13.17,
   "sram_macro_max_kbit": 32,
+  "sram_min_period_ns": 4.74,
   "open_pdk": true,
   "sram_periphery_k": 3.79,
   "rom_mbit_mm2": 0.4,

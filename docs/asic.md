@@ -86,6 +86,29 @@ Con todo ello, el camino de la celda con corrección vuelve a 7,4-8,3 retardos, 
 
 Las memorias son macros de SRAM, y en los procesos abiertos solo existen pequeñas. Las de SkyWater 130 que trae OpenROAD (`sky130_sram_1rw1r_*`, de OpenRAM) llegan a 32 Kbit y ocupan 35,5 µm² por bit en 5 Kbit, 25,6 en 16 Kbit y 22,0 en 32 Kbit; el modelo las reproduce con 13,17 µm² por bit y periferia 3,79, y una memoria mayor se construye con varias de 32 Kbit. GF180 usa las de GlobalFoundries, de 4 Kbit y unos 51 µm² por bit. Antes el modelo suponía macros de cualquier tamaño, con densidades 5 veces mejores que las reales.
 
+## Una tesela con una macro SRAM real
+
+`tools/asic/tile.sh` hace el layout de una celda con su memoria de pesos en una macro SRAM real de SkyWater 130, no en biestables: la celda afín de 8 bits con Wallace en 3 + 2 etapas guarda 4096 pesos (32 Kbit) en una macro `sky130_sram_1rw1r_128x256_8` de OpenRAM. Cada palabra de 128 bits de la macro lleva 16 pesos: los bits altos de la dirección eligen la palabra, los bajos, registrados un ciclo, el peso, y una escritura solo toca su byte con la máscara de la macro.
+
+| Medida | Valor |
+|---|---|
+| Macro | 0,722 mm² (el estimador da lo mismo, dentro del 5 %) |
+| Lógica | 0,031 mm² |
+| Die | 1,84 mm² |
+| Reloj máximo | 211 MHz |
+| Potencia | 38,7 mW |
+| Violaciones tras rutar | 0 |
+
+El reloj lo pone la macro, no la lógica: entrega el dato en el flanco de bajada, así que la lectura tiene medio ciclo, y la celda sola llegaba a 367 MHz. La tecnología `sky130` lleva ahora ese periodo mínimo (`sram_min_period_ns`, 4,74 ns), y el estimador limita a él el reloj de los diseños con pesos en SRAM.
+
+Para integrarla hicieron falta tres cosas:
+
+- Conectar sus pines de alimentación, que OpenRAM llama `vdd` y `gnd`.
+- Cortar las filas de celdas a 10 µm de la macro, para que las vías de sus raíles no caigan sobre la macro.
+- Darle a la macro su propia rejilla de alimentación: bandas de met4 sobre ella, con vías a sus miles de islas de alimentación en met3 y a met5, ceñidas a su contorno.
+
+El análisis de la red de alimentación de OpenROAD se deja fuera: el modelo abstracto de esta macro tiene, en dos columnas, rectángulos de `vdd` y de `gnd` solapados en met3 (por ejemplo, `vdd` en y = 109,815-110,305 y `gnd` en 109,875-110,365, en x = 214,22), y el análisis los da por cortocircuitos. Ningún diseño de ejemplo de OpenROAD usa esta macro. Antes de fabricar habría que comprobarlo sobre el GDS con un DRC y un LVS completos.
+
 ## Viabilidad antes del layout
 
 Antes de hacer ningún layout, el inspector dice si el diseño se puede fabricar en el proceso elegido (`arch::feasibility`):
@@ -113,5 +136,5 @@ La celda que se mide es la que eligió el estimador, con todo lo que cambia sus 
 
 ## Lo siguiente
 
-- El die completo, con sus memorias como macros de SRAM en vez de biestables.
+- El die completo, con sus memorias como macros de SRAM: con las cifras de la tesela, stories260K en SkyWater 130 no cabe en una lanzadera (ver la viabilidad).
 - Afinar el factor de síntesis de la coma flotante.

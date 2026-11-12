@@ -378,6 +378,15 @@ pub fn laid_out_cell(tech: &TechNode, config: CellConfig) -> (f64, f64) {
     (cell_logic_um2(tech, config) + memory, 1.0 / (path * tech.fa_delay_ns + tech.ff_overhead_ns))
 }
 
+/// The fastest clock the weights' SRAM macros allow, when the process's are known to be
+/// slower than its logic.
+fn sram_clock_ghz(tech: &TechNode, p: &ChipParams) -> f64 {
+    match tech.sram_min_period_ns {
+        Some(period) if p.weight_backend == WeightBackend::Sram => 1.0 / period,
+        _ => f64::INFINITY,
+    }
+}
+
 /// The name of a compute cell, as a measured layout refers to it: everything that shapes its
 /// gates except the depth of its weight memory, which the layout replaces by a few words.
 pub fn cell_key(config: &CellConfig) -> String {
@@ -917,7 +926,8 @@ fn candidates_for(tech: &TechNode, p: &ChipParams, weight_bits: u32, cell_bits: 
                         fmax_ghz: match measured(&q, &cell) {
                             Some((_, ghz)) if ghz > 0.0 => ghz,
                             _ => tech.fmax_ghz.min(1.0 / (logic_ns + tech.ff_overhead_ns)),
-                        },
+                        }
+                        .min(sram_clock_ghz(tech, &q)),
                     });
                 }
             }
@@ -1151,7 +1161,8 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     let fmax = match measured(p, &cell) {
         Some((_, ghz)) if ghz > 0.0 => ghz,
         _ => tech.fmax_ghz.min(1.0 / (logic_ns + tech.ff_overhead_ns)),
-    };
+    }
+    .min(sram_clock_ghz(tech, p));
     let freq = p.freq_ghz.min(fmax);
     if p.freq_ghz > fmax {
         violations.push(Violation {
@@ -1677,10 +1688,12 @@ mod tests {
         let laid_out = estimate(&stories, &measured).unwrap().decisions[0].clone();
         assert_eq!((laid_out.multiplier, laid_out.mac_stages, laid_out.adder_stages), (estimated.multiplier, estimated.mac_stages, estimated.adder_stages));
         assert!(laid_out.area_um2 < estimated.area_um2, "{laid_out:?} {estimated:?}");
-        assert!((laid_out.fmax_ghz - 0.5).abs() < 1e-9, "{laid_out:?}");
+        // The measured clock, or the SRAM macros' if they are slower.
+        let expected = 0.5f64.min(1.0 / node("sky130").unwrap().sram_min_period_ns.unwrap());
+        assert!((laid_out.fmax_ghz - expected).abs() < 1e-9, "{laid_out:?}");
         // On another process it is not what was measured.
         let elsewhere = estimate(&stories, &ChipParams { node: "gf180".into(), ..measured }).unwrap().decisions[0].clone();
-        assert!((elsewhere.fmax_ghz - 0.5).abs() > 1e-9, "{elsewhere:?}");
+        assert!((elsewhere.fmax_ghz - expected).abs() > 1e-9, "{elsewhere:?}");
     }
 
     #[test]

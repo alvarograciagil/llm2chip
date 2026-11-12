@@ -24,3 +24,17 @@ fn the_estimate_follows_the_measured_layouts() {
         assert!(tech.fmax_ghz * 1000.0 >= m["fmax_mhz"].as_f64().unwrap(), "{name}: tope {}", tech.fmax_ghz);
     }
 }
+
+#[test]
+fn the_estimate_follows_the_tile_with_a_real_sram_macro() {
+    let golden: serde_json::Value = serde_json::from_str(include_str!("../../../tests/golden/asic.json")).unwrap();
+    let tile = &golden["tile"];
+    let tech = node("sky130").unwrap();
+    // 32 Kbit in one macro: the estimator's density for a macro that size.
+    let macro_um2 = 32.0 * 1024.0 / tech.sram_density(32.0);
+    let measured = tile["macro_um2"].as_f64().unwrap();
+    assert!((macro_um2 / measured - 1.0).abs() < 0.05, "{macro_um2} frente a {measured}");
+    // The macro, not the cell's logic, sets the clock.
+    let ghz = 1.0 / tech.sram_min_period_ns.unwrap();
+    assert!((ghz * 1000.0 / tile["fmax_mhz"].as_f64().unwrap() - 1.0).abs() < 0.01);
+}
