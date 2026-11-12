@@ -702,7 +702,7 @@ fn the_firmware_closes_the_reasoning_when_its_budget_runs_out() {
 
 #[test]
 fn the_cpu_profile_adds_up_and_tells_waiting_from_work() {
-    use netlist::activity::{CpuProfile, CpuTask};
+    use netlist::activity::{ChipActivity, CpuProfile, CpuTask};
     use netlist::chip::{chip_info, ChipModel, GenerationSetup, REG_ENTRY};
     use netlist::image::build_image;
     use netlist::rv32::Rv32Iss;
@@ -729,13 +729,35 @@ fn the_cpu_profile_adds_up_and_tells_waiting_from_work() {
     let mut cpu = Rv32Iss::default();
     let mut profile = CpuProfile::from_elf(elf);
     let mut orders = 0;
+    // The steps cut as the simulator's server cuts them: a prompt token's step ends just
+    // before the order of the next routine, an answer's when its token reaches the host.
+    let (mut last, mut prompt_steps, mut answer_steps) = (ChipActivity::default(), Vec::new(), Vec::new());
     while !cpu.halted {
+        let before = ChipActivity::of(&profile, &bus.peripheral);
         let pc = cpu.pc;
         cpu.step(&mut bus);
         let access = bus.last_access.take();
         orders += access.is_some_and(|a| a.write && a.address == 0x4000_0000 + 4 * REG_ENTRY) as u64;
         profile.record(pc, access, cpu.cycle);
+        if prompt_steps.len() < bus.peripheral.engine.steps.min(3) {
+            prompt_steps.push(before.since(&last));
+            last = before;
+        }
+        if bus.tx.len() / 4 > answer_steps.len() {
+            let now = ChipActivity::of(&profile, &bus.peripheral);
+            answer_steps.push(now.since(&last));
+            last = now;
+        }
         assert!(cpu.cycle < 50_000_000, "el firmware no termina");
+    }
+    // Each prompt step runs its own token through the layers once, and no more.
+    for (i, step) in prompt_steps.iter().enumerate() {
+        assert_eq!(step.routines[ENTRY_TOKEN], (1, 1000), "paso {i} del prompt: {:?}", step.routines);
+    }
+    // An answer's step picks it: the logits, the sampler and the host; from the second on it
+    // also runs the token before it.
+    for (i, step) in answer_steps.iter().enumerate() {
+        assert_eq!((step.routines[ENTRY_LOGITS].0, step.samples.0, step.routines[ENTRY_TOKEN].0), (1, 1, (i > 0) as u64), "respuesta {i}: {step:?}");
     }
     profile.settle();
     let (counts, chip) = (profile.counts, &bus.peripheral);

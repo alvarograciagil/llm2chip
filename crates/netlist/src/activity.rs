@@ -87,6 +87,39 @@ fn index(task: CpuTask) -> usize {
     CPU_TASKS.iter().position(|t| *t == task).unwrap()
 }
 
+/// Most routines of a microprogram a snapshot keeps.
+pub const MAX_ROUTINES: usize = 8;
+
+/// What the CPU, the die and the sampling unit have counted at one moment, cheap to copy on
+/// every instruction: the simulator cuts the run into steps by subtracting two of these.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChipActivity {
+    pub cpu: CpuCounts,
+    /// Runs and cycles of each routine of the die, by its entry number.
+    pub routines: [(u64, u64); MAX_ROUTINES],
+    /// Tokens the sampling unit picked and its cycles.
+    pub samples: (u64, u64),
+}
+
+impl ChipActivity {
+    pub fn of<E>(profile: &CpuProfile, chip: &crate::chip::ChipModel<E>) -> Self {
+        let mut routines = [(0, 0); MAX_ROUTINES];
+        for (slot, counted) in routines.iter_mut().zip(&chip.routines) {
+            *slot = *counted;
+        }
+        Self { cpu: profile.counts, routines, samples: chip.samples }
+    }
+
+    /// What was counted since `before`.
+    pub fn since(&self, before: &ChipActivity) -> ChipActivity {
+        let mut routines = self.routines;
+        for (now, was) in routines.iter_mut().zip(&before.routines) {
+            *now = (now.0 - was.0, now.1 - was.1);
+        }
+        ChipActivity { cpu: self.cpu.since(&before.cpu), routines, samples: (self.samples.0 - before.samples.0, self.samples.1 - before.samples.1) }
+    }
+}
+
 /// Follows the firmware instruction by instruction.
 #[derive(Clone, Debug)]
 pub struct CpuProfile {

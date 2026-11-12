@@ -40,7 +40,7 @@ function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
   const shown = hover ?? pinned;
   const share = (kind: ScheduledStage["kind"]) => schedule.stages.filter((s) => s.kind === kind).reduce((sum, s) => sum + s.cycles, 0) / schedule.total_cycles;
   const ns = (cycles: number) => (cycles / schedule.total_cycles) * schedule.token_ns;
-  const percent = (part: number) => (part > 0 && part < 1e-4 ? "< 0,01" : formatNumber(part * 100));
+  const percent = (part: number) => (part > 0 && part < 1e-4 ? `< ${formatNumber(0.01)}` : formatNumber(part * 100));
 
   useEffect(() => {
     const el = playhead.current;
