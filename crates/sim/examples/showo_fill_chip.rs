@@ -1,12 +1,12 @@
-//! Show-o retouches a picture as the chip's firmware does it: MaskGIT's steps in integers
-//! (`maskgit-rt`), the guidance in the die, every routine on the exact machine with the
-//! weights affine of 8 bits; MAGVIT-v2 on the host.
+//! Show-o retouches a picture as the chip does it: MaskGIT's steps in integers
+//! (`maskgit-rt`), the guidance in the die, every routine on the die as the chip addresses
+//! it, the cells keeping the weights affine of 8 bits; MAGVIT-v2 on the host.
 //!
 //! `cargo run --release -p sim --example showo_fill_chip -- <carpeta de Show-o> salida.bmp [pasos] [semilla]`
 
 use netlist::format::{WeightCoding, WeightFormat};
 use sim::showo::Magvit;
-use sim::showo_chip::{fill_on, schedule, Fill, ShowOChip};
+use sim::showo_chip::ShowOAddressed;
 use std::path::Path;
 
 fn main() -> Result<(), String> {
@@ -16,12 +16,10 @@ fn main() -> Result<(), String> {
     let seed: u32 = args.get(4).map_or(7, |s| s.parse().unwrap());
     let started = std::time::Instant::now();
     let format = WeightFormat { coding: WeightCoding::Affine, bits: 8, exponent_bits: 0, bias: true, group_size: 64, fine_scale: false, keep_source: false };
-    let mut chip = ShowOChip::exact_guided(dir, 16, Some(format), 1.75)?;
+    let mut chip = ShowOAddressed::open(dir, format, Some(1.75), 4096)?;
     let config = chip.config.clone();
     let tokenizer = tokenizers::Tokenizer::from_file(dir.join("phi/tokenizer.json")).map_err(|e| e.to_string())?;
     let text = tokenizer.encode("a yellow lemon", false).map_err(|e| e.to_string())?.get_ids().to_vec();
-    let (ids, first) = config.text_prefix(&text);
-    let (plain, plain_first) = config.text_prefix(&[]);
     // A red disc on white, its middle masked.
     let side = config.side();
     let rgb: Vec<u8> = (0..side * side)
@@ -34,10 +32,10 @@ fn main() -> Result<(), String> {
     let magvit = Magvit::open(&dir.join("magvitv2"))?;
     let codes = config.masked_codes(&magvit, &rgb, side, side, &region)?;
     eprintln!("preparado en {:.0} s", started.elapsed().as_secs_f64());
-    let plan = schedule(codes.len(), steps);
-    let fill = Fill { text: (&ids, first[0] as u32), plain: Some((&plain, plain_first[0] as u32)), schedule: &plan, seed };
-    let shape = chip.fill_shape();
-    let filled = fill_on(&mut chip, shape, &config, &codes, &fill);
+    let filled = chip.fill(&codes, &text, steps, seed as u64, |step, steps| {
+        eprintln!("paso {step} de {steps}: {:.0} s", started.elapsed().as_secs_f64());
+        Ok(())
+    })?;
     eprintln!("rellenado en {:.0} s", started.elapsed().as_secs_f64());
     let picture = magvit.decode(&filled)?;
     let row = (side * 3).next_multiple_of(4);

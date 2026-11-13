@@ -71,7 +71,7 @@ export function ImagesView() {
           </figure>
           <figure className="picture">
             {s.result ? <img src={s.result.data} width={s.result.side} height={s.result.side} alt={`Resultado: ${s.prompt}`} /> : <div className="images-empty placeholder">{s.running ? s.phase : "El resultado aparecerá aquí."}</div>}
-            <figcaption>{s.result ? `${s.result.side} × ${s.result.side} px, en ${formatNumber(s.result.seconds)} s, semilla ${s.result.seed}${s.result.chip_bits ? (s.result.magvit_on_chip ? `, todo en la aritmética del chip (${s.result.chip_bits} bits)` : `, el transformador en la aritmética del chip (${s.result.chip_bits} bits)`) : ", en coma flotante"}` : " "}</figcaption>
+            <figcaption>{s.result ? `${s.result.side} × ${s.result.side} px, en ${formatNumber(s.result.seconds)} s, semilla ${s.result.seed}${s.result.chip_bits ? (s.result.magvit_on_chip ? `, todo en la aritmética del chip (${s.result.chip_bits} bits)` : `, el transformador y el sorteo como en el chip (${s.result.chip_bits} bits)`) : ", en coma flotante"}` : " "}</figcaption>
           </figure>
         </div>
         {s.running && (
@@ -190,9 +190,9 @@ export function ImagesPanel() {
                     {selected.name} · {formatNumber(selected.size_gb)} GB
                   </p>
                 )}
-                <label className="check" title="El transformador de Show-o corre en la aritmética entera del die, con vectores de 16 bits y pesos afines de 8 bits, en el orden en que el anfitrión le da las operaciones. MAGVIT-v2 sigue en coma flotante en el anfitrión.">
+                <label className="check" title="Show-o corre como en el chip: el die con sus celdas y sus direcciones de 32 bits, pesos afines de 8 bits en las celdas, vectores de 16 bits, y el bucle del firmware, con el sorteo de MaskGIT en enteros y la guía en el die. MAGVIT-v2 sigue en coma flotante en el anfitrión.">
                   <input type="checkbox" checked={s.onChip} disabled={s.running} onChange={(e) => s.set({ onChip: e.target.checked })} />
-                  En la aritmética del chip
+                  Como en el chip
                 </label>
                 {s.onChip && (
                   <label className="check" title="MAGVIT-v2 también en la aritmética del die: codifica la imagen (unos 4 minutos) y decodifica el resultado (unos 3).">
@@ -202,7 +202,7 @@ export function ImagesPanel() {
                 )}
                 <p className="muted-text">
                   {s.onChip
-                    ? `Con pesos afines de 8 bits, cada pasada tarda unos 80 s, frente a 6 s en coma flotante. Con guía son dos por paso: con ${s.steps} pasos, unos ${formatNumber(Math.ceil((s.steps * (s.guidance > 0 ? 2 : 1) * 80) / 60))} minutos. ${s.magvitOnChip ? (s.picture ? "MAGVIT-v2 en el chip suma unos 7 minutos y medio." : "MAGVIT-v2 en el chip suma unos 3 minutos.") : "MAGVIT-v2 sigue en el anfitrión."}`
+                    ? `Cada pasada por el die tarda unos 42 s, frente a 6 s en coma flotante, y prepararlo, unos 25 s. Con guía son dos por paso: con ${s.steps} pasos, unos ${formatNumber(Math.ceil((25 + s.steps * (s.guidance > 0 ? 2 : 1) * 42) / 60))} minutos. ${s.magvitOnChip ? (s.picture ? "MAGVIT-v2 en el chip suma unos 7 minutos y medio." : "MAGVIT-v2 en el chip suma unos 3 minutos.") : "MAGVIT-v2 sigue en el anfitrión."}`
                     : "Corre en coma flotante en el anfitrión, fuera del chip. La primera vez tarda unos segundos en leer los pesos."}
                 </p>
               </>

@@ -565,6 +565,82 @@ impl ShowOChip {
     }
 }
 
+impl ShowOChip {
+    /// Fills the masked places of `codes` as the chip's firmware does (`fill_on`): MaskGIT
+    /// in integers and, if this machine was opened with guidance, the guidance in the die.
+    pub fn fill_firmware(&mut self, codes: &[Option<u32>], text: &[u32], steps: usize, seed: u64, mut progress: impl FnMut(usize, usize) -> Result<(), String>) -> Result<Vec<u32>, String> {
+        let config = self.config.clone();
+        let shape = self.fill_shape();
+        self.reset();
+        firmware_fill(self, shape, &config, codes, text, steps, seed, &mut progress)
+    }
+}
+
+/// The firmware's fill of `codes` with `text`, in `steps` steps, on any die.
+#[allow(clippy::too_many_arguments)]
+fn firmware_fill(die: &mut dyn FillDie, shape: FillShape, config: &ShowOConfig, codes: &[Option<u32>], text: &[u32], steps: usize, seed: u64, progress: &mut dyn FnMut(usize, usize) -> Result<(), String>) -> Result<Vec<u32>, String> {
+    if codes.len() != config.image_tokens {
+        return Err(format!("una imagen de Show-o tiene {} códigos", config.image_tokens));
+    }
+    let (ids, first) = config.text_prefix(text);
+    let (plain, plain_first) = config.text_prefix(&[]);
+    let plan = schedule(codes.len(), steps);
+    // The firmware's generator takes a word; the seed's two halves both count.
+    let seed = (seed ^ (seed >> 32)) as u32;
+    let fill = Fill { text: (&ids, first[0] as u32), plain: shape.guided.then_some((&plain[..], plain_first[0] as u32)), schedule: &plan, seed };
+    fill_on_with(die, shape, config, codes, &fill, progress)
+}
+
+/// Show-o on the die as a chip addresses it (`addressed_die`): the weights in its cells,
+/// the embedding table in the image, a row at a time, and the firmware's fill, MaskGIT in
+/// integers with the guidance in the die. The closest the host gets to the chip itself.
+pub struct ShowOAddressed {
+    pub config: ShowOConfig,
+    pub die: DieConfig,
+    engine: crate::chip::VmEngine,
+    layout: Layout,
+    program: Program,
+    info: netlist::chip::ShowOInfo,
+}
+
+impl ShowOAddressed {
+    /// From Show-o's folder, the weights in `format` (affine, as the cells keep it), with
+    /// `cells` cells and `guidance` in the die, if any.
+    pub fn open(dir: &Path, format: netlist::format::WeightFormat, guidance: Option<f32>, cells: u32) -> Result<Self, String> {
+        let open = || -> Result<_, String> { weights(dir, Weights::open(dir)?.with_format(Some(format))) };
+        let (shape, config, w) = open()?;
+        let program = program_guided(&shape, guidance);
+        let context = (config.max_text + 1 + shape.image_rows).next_power_of_two();
+        let base = DieConfig {
+            cells,
+            cell: netlist::CellConfig { weight_bits: format.bits, activation_bits: 16, accumulator_bits: 48, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: format.coding, exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false },
+            scale_bits: 21,
+            reg_bits: 12,
+            index_bits: 12,
+            microcode_bits: 18,
+            broadcast_stages: 1,
+            function_bits: 12,
+            function_select_bits: 3,
+            features: Default::default(),
+        };
+        let die = addressed_die(&program, &w, base, context)?;
+        let layout = Layout::with_cells_table_outside(&program, &w, die, context)?;
+        let info = firmware_info(&program, &layout, &die)?;
+        drop(w);
+        let engine = crate::chip::VmEngine::new_table_outside(program.clone(), open()?.2, die, context)?;
+        Ok(Self { config, die, engine, layout, program, info })
+    }
+
+    /// Fills as `ShowOChip::fill_firmware` does, on this die.
+    pub fn fill(&mut self, codes: &[Option<u32>], text: &[u32], steps: usize, seed: u64, mut progress: impl FnMut(usize, usize) -> Result<(), String>) -> Result<Vec<u32>, String> {
+        self.engine.reset();
+        let shape = FillShape { rows: self.info.rows, layers: self.info.layers, guided: self.info.guided != 0, bits: self.die.cell.activation_bits };
+        let config = self.config.clone();
+        let mut die = Addressed { engine: &mut self.engine, layout: &self.layout, program: &self.program, info: &self.info, bits: shape.bits };
+        firmware_fill(&mut die, shape, &config, codes, text, steps, seed, &mut progress)
+    }
+}
+
 /// What the fill needs to know of the program: the image's rows, the layers, whether the
 /// die guides, and the bits of its mantissas.
 #[derive(Clone, Copy, Debug)]
@@ -586,6 +662,12 @@ pub fn fill_on_die(engine: &mut dyn netlist::chip::DieEngine, layout: &Layout, p
 
 /// The fill on any die, as the firmware runs it.
 pub fn fill_on(die: &mut dyn FillDie, shape: FillShape, config: &ShowOConfig, codes: &[Option<u32>], fill: &Fill) -> Vec<u32> {
+    fill_on_with(die, shape, config, codes, fill, &mut |_, _| Ok(())).expect("sin nada que lo pare")
+}
+
+/// The same, telling `progress` of each step before it runs, and of the end: an error from
+/// it stops the fill with that error.
+pub fn fill_on_with(die: &mut dyn FillDie, shape: FillShape, config: &ShowOConfig, codes: &[Option<u32>], fill: &Fill, progress: &mut dyn FnMut(usize, usize) -> Result<(), String>) -> Result<Vec<u32>, String> {
     use crate::lower::{ENTRY_TOKEN, ENTRY_VISION};
     let score_routine = ENTRY_VISION + 1 + 2 * shape.layers as usize;
     let mut current = codes.to_vec();
@@ -616,7 +698,8 @@ pub fn fill_on(die: &mut dyn FillDie, shape: FillShape, config: &ShowOConfig, co
             after(die, row);
         }
     };
-    for (remaining, temperature) in fill.schedule {
+    for (step, (remaining, temperature)) in fill.schedule.iter().enumerate() {
+        progress(step, fill.schedule.len())?;
         let image: Vec<u32> = std::iter::once(config.start_of_image()).chain(current.iter().map(|c| c.map_or(config.mask_token, |c| config.first_code() + c))).chain([config.end_of_image()]).collect();
         let mut confidence = vec![i64::MAX; current.len()];
         let mut draw = |die: &mut dyn FillDie, row: u32, current: &[Option<u32>], sampled: &mut [u32], confidence: &mut [i64]| {
@@ -646,5 +729,6 @@ pub fn fill_on(die: &mut dyn FillDie, shape: FillShape, config: &ShowOConfig, co
             *code = (confidence[place] >= cut).then_some(sampled[place]);
         }
     }
-    sampled
+    progress(fill.schedule.len(), fill.schedule.len())?;
+    Ok(sampled)
 }

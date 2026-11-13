@@ -580,6 +580,9 @@ impl Matrix<'_> {
 
     /// The bits a code of this matrix takes in the cells.
     pub fn cell_code_bits(&self, cols: usize, bits: u32) -> u32 {
+        if let Some((_, code_bits)) = self.cell_recoded(cols) {
+            return code_bits;
+        }
         match &self.source {
             Source::Packed { words_per_row, .. } if self.requant(cols).is_none() => (words_per_row * 32 / cols) as u32,
             _ => bits,
@@ -588,15 +591,44 @@ impl Matrix<'_> {
 
     /// The columns that share a scale and a bias in the cells: size and number of groups.
     pub fn cell_groups(&self, cols: usize) -> (usize, usize) {
+        if let Some((recoded, _)) = self.cell_recoded(cols) {
+            return (recoded.group_size, cols / recoded.group_size);
+        }
         match &self.source {
             Source::Packed { groups, .. } if self.requant(cols).is_none() => (cols / groups, *groups),
             _ => (cols, 1),
         }
     }
 
+    /// A matrix rewritten in an affine format with bias, whole groups to a row, as the cells
+    /// keep one that came quantized: each weight's code `q` with its group's scale and bias.
+    /// Gives the codes and their bits; `None` for any other format, or when the rewrite does
+    /// not fit in memory and the cells take the rounded weights whole instead.
+    fn cell_recoded(&self, cols: usize) -> Option<(Arc<Recoded>, u32)> {
+        let (format, reference) = self.requant(cols)?;
+        let group = format.group_size as usize;
+        if format.coding != WeightCoding::Affine || !format.bias || group == 0 || cols < group || !cols.is_multiple_of(group) {
+            return None;
+        }
+        self.recoded(cols, &format, &reference).map(|r| (r, format.bits))
+    }
+
     /// One row as the cells keep it: a signed code for each weight and, for each group,
     /// a scale and a bias with `FACTOR_FRACTION` extra bits.
     pub fn cell_row(&self, index: usize, cols: usize, exponent: i64, bits: u32) -> Result<CellRow, String> {
+        if let Some((recoded, width)) = self.cell_recoded(cols) {
+            let groups = cols / recoded.group_size;
+            let middle = 1i64 << (width - 1);
+            let factor = fixed_factor(exponent, bits as i32 - 1);
+            let codes = recoded.codes[index * cols..(index + 1) * cols].iter().map(|c| recoded.table[*c as usize] as i64 - middle).collect();
+            let factors = (0..groups)
+                .map(|g| {
+                    let (scale, bias) = affine_integers(recoded.scales[index * groups + g], recoded.biases[index * groups + g], factor);
+                    (scale, bias + scale * middle)
+                })
+                .collect();
+            return Ok((codes, factors));
+        }
         if let Source::Packed { words_per_row, groups, words, scales, biases } = &self.source {
             if self.requant(cols).is_none() {
                 let group_size = cols / groups;
@@ -623,6 +655,27 @@ impl Matrix<'_> {
     /// whole sum, and the extra bits go at the end, so no weight is rounded on its own.
     pub fn cell_sums(&self, first: usize, rows: usize, x: &[i32], exponent: i64, bits: u32) -> Vec<i64> {
         let cols = x.len();
+        if let Some((recoded, _)) = self.cell_recoded(cols) {
+            let (group_size, groups) = (recoded.group_size, cols / recoded.group_size);
+            let factor = fixed_factor(exponent, bits as i32 - 1);
+            let mut sums = vec![0i64; rows];
+            sums.par_iter_mut().with_min_len(16).enumerate().for_each(|(index, out)| {
+                let r = first + index;
+                let codes = &recoded.codes[r * cols..(r + 1) * cols];
+                let mut total = 0i64;
+                for (g, (group, xs)) in codes.chunks_exact(group_size).zip(x.chunks_exact(group_size)).enumerate() {
+                    let (scale, bias) = affine_integers(recoded.scales[r * groups + g], recoded.biases[r * groups + g], factor);
+                    let (mut dot, mut sum) = (0i64, 0i64);
+                    for (code, v) in group.iter().zip(xs) {
+                        dot += recoded.table[*code as usize] as i64 * *v as i64;
+                        sum += *v as i64;
+                    }
+                    total += scale * dot + bias * sum;
+                }
+                *out = total >> AFFINE_EXTRA;
+            });
+            return sums;
+        }
         let Source::Packed { words_per_row, groups, words, scales, biases } = &self.source else {
             return self.exact_sums(first, rows, x, exponent, bits);
         };

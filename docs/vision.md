@@ -183,7 +183,7 @@ En coma flotante, una pasada tarda 6 s. Al muestreador le importa toda la distri
 
 Se ejecuta con `crates/sim/tests/showo_chip.rs`. La prueba del modelo real es lenta y se activa aparte. Con la misma semilla, el muestreo de MaskGIT se separa en cuanto un código difiere, así que la comparación se hace pasada a pasada y no sobre la imagen final.
 
-En la pantalla Imágenes, la casilla «En la aritmética del chip» hace todo el retoque así, con pesos afines de 8 bits. Con guía son dos pasadas por paso, de unos 80 s cada una: un retoque de 4 pasos tardó 21 minutos con los enteros de 16 bits.
+En la pantalla Imágenes, la casilla «Como en el chip» hace el retoque como lo haría el chip: el die direccionado (ver «El Show-o real en el die direccionado»), con los pesos afines de 8 bits en sus celdas, y el bucle del firmware. Con guía son dos pasadas por paso, de unos 42 s cada una, más unos 25 s para preparar el die: un retoque de 4 pasos tarda 360 s y usa 4,3 GB de memoria (`showo_fill_chip`).
 
 ### MAGVIT-v2 en la aritmética del chip
 
@@ -256,9 +256,9 @@ El firmware direcciona la memoria del die con 32 bits: el registro arriba y el e
 
 Comprobado:
 - **Show-o de juguete:** con la tabla en la imagen, el firmware rellena la imagen con los mismos códigos que el anfitrión (`the_firmware_fills_an_image_with_the_table_in_the_image`). Con el firmware anterior, que no cargaba la fila de la imagen, la prueba falla.
-- **Show-o real:** en una pasada sobre el die direccionado con 4 096 celdas, el mejor código coincide con la coma flotante en 61 de los 64 sitios tapados. Tarda 261 s y usa 9 GB de memoria (`cargo run --release -p sim --example showo_addressed -- <carpeta> 4096 pasada`).
+- **Show-o real:** en una pasada sobre el die direccionado con 4 096 celdas, el mejor código coincide con la coma flotante en 61 de los 64 sitios tapados (`cargo run --release -p sim --example showo_addressed -- <carpeta> 4096 pasada`).
 
-En este die las celdas guardan cada peso como una mantisa de 16 bits, con el valor ya redondeado al formato de 8 bits. Para que guarden directamente los códigos de 8 bits de unos pesos que vienen en coma flotante, como hacen con los que ya vienen cuantizados, falta enseñar a `cell_row` a leer los pesos recodificados.
+Las celdas guardan los pesos en el formato del diseño aunque vengan en coma flotante, como Show-o. Los reescribe el recodificador: para cada peso, su código de 8 bits, y para cada grupo, su escala y su sesgo, igual que con un checkpoint que ya viene cuantizado. Las puertas dan lo mismo que la máquina exacta, bit a bit, con el Show-o de juguete en celdas de 8 bits (`floating_point_weights_in_an_8_bit_format_go_into_8_bit_cells`). Con el Show-o real, la pasada sobre celdas de 8 bits acierta los mismos 61 de 64 mejores códigos y tarda unos 46 s, frente a unos 210 s con una mantisa de 16 bits por peso: la máquina exacta suma los códigos enteros por grupo en lugar de cada peso entero.
 
 ### Calidad del relleno en enteros
 
@@ -281,4 +281,4 @@ Lo que dicen las cifras:
 - **Al buscar la causa apareció un fallo real:** con distribuciones planas, el sorteo desbordaba al multiplicar en 64 bits y nunca elegía la mitad alta de los 8 192 códigos. Con la guía las puntuaciones son agudas y no llegaba a pasar, así que las cifras no cambian. Ahora multiplica en 128 bits, y `a_flat_draw_over_many_codes_is_even` lo comprueba.
 
 Pendiente:
-- que las celdas guarden los códigos de 8 bits de los pesos que vienen en coma flotante, en vez de una mantisa de 16 bits por peso (ver «El Show-o real en el die direccionado»).
+- medir la calidad con más imágenes y textos, no solo el disco rojo convertido en limón.

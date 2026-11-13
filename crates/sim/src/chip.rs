@@ -76,6 +76,12 @@ impl VmEngine {
 }
 
 impl VmEngine {
+    /// Starts the die over, as at boot: what the image loads, nothing else.
+    pub fn reset(&mut self) {
+        self.vm.clear();
+        load_initial(&mut self.vm, &self.layout.setup().initial, self.exponents);
+    }
+
     /// The same die with the embedding table left in the image: each token's row is what the
     /// firmware brings into its register.
     pub fn with_table_outside(mut self) -> Result<Self, String> {

@@ -26,7 +26,7 @@ fn main() -> Result<(), String> {
     let context = (config.max_text + 1 + shape.image_rows).next_power_of_two();
     let base = DieConfig {
         cells,
-        cell: CellConfig { weight_bits: 16, activation_bits: 16, accumulator_bits: 48, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: WeightCoding::Affine, exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false },
+        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 48, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: WeightCoding::Affine, exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false },
         scale_bits: 21,
         reg_bits: 12,
         index_bits: 12,

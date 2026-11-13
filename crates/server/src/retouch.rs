@@ -5,7 +5,7 @@
 use serde::Deserialize;
 use sim::showo::{Magvit, ShowO};
 use sim::magvit_chip::MagvitPair;
-use sim::showo_chip::ShowOChip;
+use sim::showo_chip::ShowOAddressed;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
@@ -67,8 +67,20 @@ pub struct RetouchJob {
 /// Show-o once opened, with the folder it came from: its weights take seconds to read.
 pub type Painter = Arc<Mutex<Option<(PathBuf, Arc<ShowO>)>>>;
 
-/// Show-o on the die's arithmetic, with MAGVIT-v2, for a folder and a width of the vectors.
-pub type ChipPainter = Arc<Mutex<Option<(PathBuf, u32, ShowOChip, Magvit, Option<MagvitPair>)>>>;
+/// Show-o on the die as the chip addresses it, for a folder and a guidance (its bits), with
+/// MAGVIT-v2, on the host and, once asked for, on the chip with vectors of these bits.
+pub struct ChipShowO {
+    path: PathBuf,
+    guidance: u32,
+    model: ShowOAddressed,
+    magvit: Magvit,
+    on_chip: Option<(u32, MagvitPair)>,
+}
+
+pub type ChipPainter = Arc<Mutex<Option<ChipShowO>>>;
+
+/// Cells of the die that runs Show-o: with 4 096 its addresses take 31 bits.
+const SHOWO_CELLS: u32 = 4096;
 
 /// The pixels of the region, one flag each, or why the rectangle does not fit the picture.
 pub fn region_mask(picture: &Picture) -> Result<Vec<bool>, String> {
@@ -134,30 +146,34 @@ pub fn run(request: &RetouchRequest, job: &RetouchJob, painter: &Painter, chip: 
     }))
 }
 
-/// The same with the transformer in the die's arithmetic and MAGVIT-v2 on the host.
+/// The same as the chip does it: the transformer on the die as the chip addresses it, with
+/// its weights in the cells, affine of 8 bits, and the firmware's fill, MaskGIT in integers
+/// with the guidance in the die. MAGVIT-v2 on the host, or on the chip too if asked.
 fn run_on_chip(request: &RetouchRequest, job: &RetouchJob, chip: &ChipPainter, bits: u32) -> Result<serde_json::Value, String> {
     let set_phase = |phase: &str| *job.phase.lock().unwrap() = phase.to_string();
     let dir = Path::new(&request.path);
+    let (steps, guidance) = (request.steps.clamp(1, 64), request.guidance.clamp(0.0, 10.0));
     let mut held = chip.lock().unwrap();
-    if !held.as_ref().is_some_and(|(path, b, _, _, _)| path == dir && *b == bits) {
+    // The guidance is part of the die's program, so another one needs the die anew.
+    if !held.as_ref().is_some_and(|c| c.path == dir && c.guidance == guidance.to_bits()) {
         *held = None;
-        set_phase("Preparando Show-o en la aritmética del chip");
-        // Weights in the design's usual format, affine of 8 bits in groups of 64: as good
-        // as whole ones here (`examples/showo_formats.rs`), and twice as fast.
+        set_phase("Preparando Show-o en el die del chip");
+        // The design's usual format, affine of 8 bits in groups of 64: as good as whole
+        // weights here (`examples/showo_formats.rs`), and what the cells keep.
         let format = netlist::format::WeightFormat { coding: netlist::format::WeightCoding::Affine, bits: 8, exponent_bits: 0, bias: true, group_size: 64, fine_scale: false, keep_source: false };
-        let model = ShowOChip::with_format(dir, bits, format)?;
+        let model = ShowOAddressed::open(dir, format, (guidance > 0.0).then_some(guidance), SHOWO_CELLS)?;
         let magvit = Magvit::open(&dir.join("magvitv2"))?;
-        *held = Some((dir.to_path_buf(), bits, model, magvit, None));
+        *held = Some(ChipShowO { path: dir.to_path_buf(), guidance: guidance.to_bits(), model, magvit, on_chip: None });
     }
-    let (_, _, model, magvit, on_chip) = held.as_mut().expect("recién abierto");
-    if request.magvit_on_chip && on_chip.is_none() {
+    let held = held.as_mut().expect("recién abierto");
+    if request.magvit_on_chip && !held.on_chip.as_ref().is_some_and(|(b, _)| *b == bits) {
         set_phase("Preparando MAGVIT-v2 en la aritmética del chip");
-        *on_chip = Some(MagvitPair::exact(&dir.join("magvitv2"), model.config.side(), bits)?);
+        held.on_chip = Some((bits, MagvitPair::exact(&dir.join("magvitv2"), held.model.config.side(), bits)?));
     }
-    let pair = if request.magvit_on_chip { on_chip.as_mut() } else { None };
+    let ChipShowO { model, magvit, on_chip, .. } = held;
+    let mut pair = if request.magvit_on_chip { on_chip.as_mut().map(|(_, p)| p) } else { None };
     let tokenizer = Tokenizer::from_file(dir.join("phi/tokenizer.json")).map_err(|e| format!("falta el tokenizador de Phi-1.5 en «phi»: {e}"))?;
     let text = tokenizer.encode(request.prompt.as_str(), false).map_err(|e| e.to_string())?.get_ids().to_vec();
-    let (steps, guidance) = (request.steps.clamp(1, 64), request.guidance.clamp(0.0, 10.0));
     let seed = request.seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)) & SEED_MASK;
     let started = std::time::Instant::now();
     let progress = |step: usize, steps: usize| {
@@ -168,21 +184,24 @@ fn run_on_chip(request: &RetouchRequest, job: &RetouchJob, chip: &ChipPainter, b
         set_phase(if step < steps { "El chip rellena los códigos de la imagen" } else { "El decodificador convierte los códigos en píxeles" });
         Ok(())
     };
-    let rgb = match &request.picture {
+    let config = model.config.clone();
+    let known = match &request.picture {
         Some(picture) => {
             let region = region_mask(picture)?;
             set_phase("Codificando la imagen con MAGVIT-v2");
-            match pair {
-                Some(pair) => model.inpaint_on_chip(pair, &picture.rgb, picture.width, picture.height, &region, &text, steps, guidance, seed, progress)?,
-                None => model.inpaint(magvit, &picture.rgb, picture.width, picture.height, &region, &text, steps, guidance, seed, progress)?,
+            match pair.as_mut() {
+                Some(pair) => config.masked_codes_with(|p| pair.encoder.encode(p), &picture.rgb, picture.width, picture.height, &region)?,
+                None => config.masked_codes(magvit, &picture.rgb, picture.width, picture.height, &region)?,
             }
         }
-        None => match pair {
-            Some(pair) => model.draw_on_chip(pair, &text, steps, guidance, seed, progress)?,
-            None => model.draw(magvit, &text, steps, guidance, seed, progress)?,
-        },
+        None => vec![None; config.image_tokens],
     };
-    let side = model.config.side();
+    let filled = model.fill(&known, &text, steps, seed, progress)?;
+    let rgb = match pair {
+        Some(pair) => pair.decoder.decode(&filled)?,
+        None => magvit.decode(&filled)?,
+    };
+    let side = config.side();
     Ok(serde_json::json!({
         "side": side,
         "seconds": started.elapsed().as_secs_f64(),

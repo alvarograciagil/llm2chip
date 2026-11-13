@@ -172,11 +172,13 @@ fn run_show_o(run: &mut dyn FnMut(usize, u32, u32), read: &mut dyn FnMut(u32) ->
 
 /// A die with cells as deep as Show-o's weights need, each a mantissa of the vectors'
 /// width, with as many registers as its routines reach, for `context` places in the cache.
-fn die_for(program: &compiler::Program, weights: &sim::Weights, context: usize) -> netlist::DieConfig {
+fn die_for(program: &compiler::Program, weights: &sim::Weights, context: usize, format: Option<netlist::format::WeightFormat>) -> netlist::DieConfig {
     use sim::lower::Layout;
     let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
     let base = cell_die_config();
-    let roomy = netlist::DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, weight_bits: base.cell.activation_bits, ..base.cell }, features: base.features.with_key_shift(bits_for(context as u64)), ..base };
+    // Cells as wide as the format's codes, or a whole mantissa each.
+    let (weight_bits, coding) = format.map_or((base.cell.activation_bits, base.cell.coding), |f| (f.bits, f.coding));
+    let roomy = netlist::DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, weight_bits, coding, ..base.cell }, features: base.features.with_key_shift(bits_for(context as u64)), ..base };
     let (depth, groups) = Layout::with_cells(program, weights, roomy, context).unwrap().cell_depths();
     let addr_bits = bits_for(depth.max(2 * groups));
     let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1).max(context as u64 * 512)).max(addr_bits);
@@ -189,14 +191,31 @@ fn die_for(program: &compiler::Program, weights: &sim::Weights, context: usize) 
 #[test]
 #[ignore = "lenta: Show-o de juguete en las puertas del die"]
 fn show_o_s_routines_on_the_die_s_gates_give_the_exact_machine_s_scores() {
+    gates_match_the_exact_machine(None, "gates");
+}
+
+/// The same with weights that come in floating point, rewritten in an 8-bit affine format
+/// with groups of 32: the cells keep each weight's 8-bit code and each group's scale and
+/// bias, as they keep the weights of a checkpoint that comes quantized.
+#[test]
+#[ignore = "lenta: Show-o de juguete en las puertas del die, pesos de 8 bits"]
+fn floating_point_weights_in_an_8_bit_format_go_into_8_bit_cells() {
+    gates_match_the_exact_machine(Some(EIGHT_BITS), "8bits");
+}
+
+const EIGHT_BITS: netlist::format::WeightFormat = netlist::format::WeightFormat { coding: netlist::format::WeightCoding::Affine, bits: 8, exponent_bits: 0, bias: true, group_size: 32, fine_scale: false, keep_source: false };
+
+/// Show-o's routines on the die's gates against its exact machine, with the weights in
+/// `format`, if any, and cells as wide as its codes.
+fn gates_match_the_exact_machine(format: Option<netlist::format::WeightFormat>, tag: &str) {
     use netlist::chip::DieEngine;
     use netlist::demo::read_block_value;
     use netlist::{die_design, Simulator};
     use sim::lower::Layout;
-    let dir = std::env::temp_dir().join(format!("llm2chip-showo-gates-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("llm2chip-showo-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     make_toy(&dir);
-    let open = || sim::showo_chip::weights(&dir, sim::Weights::open(&dir).unwrap()).unwrap();
+    let open = || sim::showo_chip::weights(&dir, sim::Weights::open(&dir).unwrap().with_format(format)).unwrap();
     let (shape, config, weights) = open();
     let program = sim::showo_chip::program(&shape);
     // Six words fill the text: then each token's place in the cache is its position.
@@ -207,7 +226,7 @@ fn show_o_s_routines_on_the_die_s_gates_give_the_exact_machine_s_scores() {
     let image: Vec<u32> = std::iter::once(config.start_of_image()).chain(codes).chain([config.end_of_image()]).collect();
     let context = ids.len() + image.len();
 
-    let die = die_for(&program, &weights, context);
+    let die = die_for(&program, &weights, context, format);
     let layout = Layout::with_cells(&program, &weights, die, context).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let output = layout.register_of(program.vision.as_ref().unwrap().output);
@@ -256,6 +275,11 @@ fn show_o_s_routines_on_the_die_s_gates_give_the_exact_machine_s_scores() {
     }
     sim.set("load_cell", 0).unwrap();
     sim.set("load_scale", 0).unwrap();
+    if format.is_some() {
+        let (codes, factors) = layout.cell_contents(&weights, 0).unwrap();
+        assert!(codes.iter().all(|c| (-128..128).contains(c)), "códigos de 8 bits");
+        assert!(factors.len() > 1, "una escala y un sesgo por grupo");
+    }
     let mut cycles = 0;
     let gates = {
         let sim = std::cell::RefCell::new(sim);
@@ -298,7 +322,7 @@ fn the_firmware_runs_show_o_s_pass_as_the_host_ordered_it() {
     let codes: Vec<u32> = (0..IMAGE as u32).map(|i| if i % 3 == 0 { mask_token } else { config.first_code() + (i * 5) % CODEBOOK as u32 }).collect();
     let image: Vec<u32> = std::iter::once(config.start_of_image()).chain(codes).chain([config.end_of_image()]).collect();
     let context = (first as usize + ids.len() + image.len()).next_power_of_two();
-    let die = die_for(&program, &weights, context);
+    let die = die_for(&program, &weights, context, None);
     let layout = Layout::with_cells(&program, &weights, die, context).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let showo = sim::showo_chip::firmware_info(&program, &layout, &die).unwrap();
@@ -410,7 +434,7 @@ fn fill_chip(tag: &str, steps: usize, outside: bool) -> Option<FillChip> {
     let steps = schedule(IMAGE, steps);
     let fill = Fill { text: (&text, first[0] as u32), plain: Some((&plain, plain_first[0] as u32)), schedule: &steps, seed: 7 };
     let context = (first[0] as usize + text.len() + IMAGE + 2).next_power_of_two();
-    let die = if outside { sim::showo_chip::addressed_die(&program, &weights, die_for(&program, &weights, context), context).unwrap() } else { die_for(&program, &weights, context) };
+    let die = if outside { sim::showo_chip::addressed_die(&program, &weights, die_for(&program, &weights, context, None), context).unwrap() } else { die_for(&program, &weights, context, None) };
     let layout = if outside { Layout::with_cells_table_outside(&program, &weights, die, context).unwrap() } else { Layout::with_cells(&program, &weights, die, context).unwrap() };
     assert_eq!(layout.outside_table().is_some(), outside);
     let code = layout.microprogram(&program).unwrap();

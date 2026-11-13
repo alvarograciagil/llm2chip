@@ -3,7 +3,8 @@
 //! - `flotante`: Show-o and MaskGIT in floating point, as the app runs them off the chip.
 //! - `maskgit-entero`: Show-o in floating point, MaskGIT as the firmware runs it, in integers
 //!   (`maskgit-rt`), the scores rounded to the die's 16-bit mantissas.
-//! - `chip`: MaskGIT in integers and Show-o on the exact machine, weights affine of 8 bits.
+//! - `chip`: MaskGIT in integers and Show-o on the die as the chip addresses it, its cells
+//!   keeping the weights affine of 8 bits.
 //!
 //! For each, the colour inside the retouched square: its mean, how yellow it is
 //! (`min(R, G) − B`) and how saturated.
@@ -16,7 +17,7 @@
 use netlist::format::{WeightCoding, WeightFormat};
 use sim::lower::{ENTRY_TOKEN, ENTRY_VISION};
 use sim::showo::{Magvit, ShowO, ShowOConfig};
-use sim::showo_chip::{fill_on, schedule, Fill, FillDie, FillShape, ShowOChip};
+use sim::showo_chip::{fill_on, schedule, Fill, FillDie, FillShape, ShowOAddressed};
 use std::path::Path;
 
 const GUIDANCE: f32 = 1.75;
@@ -178,12 +179,10 @@ fn main() -> Result<(), String> {
 
     if !chip_seeds.is_empty() {
         let format = WeightFormat { coding: WeightCoding::Affine, bits: 8, exponent_bits: 0, bias: true, group_size: 64, fine_scale: false, keep_source: false };
-        let mut chip = ShowOChip::exact_guided(dir, BITS, Some(format), GUIDANCE)?;
+        let mut chip = ShowOAddressed::open(dir, format, Some(GUIDANCE), 4096)?;
         for &seed in &chip_seeds {
             let started = std::time::Instant::now();
-            chip.reset();
-            let shape = chip.fill_shape();
-            let filled = fill_on(&mut chip, shape, &config, &codes, &fill(seed));
+            let filled = chip.fill(&codes, &text, steps, seed as u64, |_, _| Ok(()))?;
             report("chip", seed, &filled, started.elapsed().as_secs_f64())?;
         }
     }
