@@ -36,7 +36,7 @@ interface ImagesState {
   seed: string;
   /** Run the transformer in the die's arithmetic, much slower. */
   onChip: boolean;
-  /** MAGVIT-v2 on the chip too: some 6 minutes more. */
+  /** MAGVIT-v2 on the chip too: minutes more, to encode and to decode. */
   magvitOnChip: boolean;
   picture: SquarePicture | null;
   region: Region | null;

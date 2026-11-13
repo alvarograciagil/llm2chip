@@ -195,14 +195,14 @@ export function ImagesPanel() {
                   En la aritmética del chip
                 </label>
                 {s.onChip && (
-                  <label className="check" title="MAGVIT-v2 también en la aritmética del die: codifica la imagen y decodifica el resultado. Cada uno tarda unos 3 minutos.">
+                  <label className="check" title="MAGVIT-v2 también en la aritmética del die: codifica la imagen (unos 4 minutos) y decodifica el resultado (unos 3).">
                     <input type="checkbox" checked={s.magvitOnChip} disabled={s.running} onChange={(e) => s.set({ magvitOnChip: e.target.checked })} />
                     También MAGVIT-v2 en el chip
                   </label>
                 )}
                 <p className="muted-text">
                   {s.onChip
-                    ? `Con pesos afines de 8 bits, cada pasada tarda unos 80 s, frente a 6 s en coma flotante. Con guía son dos por paso: con ${s.steps} pasos, unos ${formatNumber(Math.ceil((s.steps * (s.guidance > 0 ? 2 : 1) * 80) / 60))} minutos. ${s.magvitOnChip ? "MAGVIT-v2 en el chip suma unos 6 minutos." : "MAGVIT-v2 sigue en el anfitrión."}`
+                    ? `Con pesos afines de 8 bits, cada pasada tarda unos 80 s, frente a 6 s en coma flotante. Con guía son dos por paso: con ${s.steps} pasos, unos ${formatNumber(Math.ceil((s.steps * (s.guidance > 0 ? 2 : 1) * 80) / 60))} minutos. ${s.magvitOnChip ? (s.picture ? "MAGVIT-v2 en el chip suma unos 7 minutos y medio." : "MAGVIT-v2 en el chip suma unos 3 minutos.") : "MAGVIT-v2 sigue en el anfitrión."}`
                     : "Corre en coma flotante en el anfitrión, fuera del chip. La primera vez tarda unos segundos en leer los pesos."}
                 </p>
               </>

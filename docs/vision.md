@@ -204,14 +204,18 @@ En la pantalla Imágenes, la casilla «En la aritmética del chip» hace todo el
 
 En el codificador, los valores cercanos a cero pueden salir con el otro signo, así que algunos bits cambian.
 
-En la pantalla Imágenes, «También MAGVIT-v2 en el chip» hace todo el retoque en la aritmética del chip.
+En la pantalla Imágenes, «También MAGVIT-v2 en el chip» hace todo el retoque en la aritmética del chip. Un retoque de un paso sin guía tardó 599 s: codificar, una pasada del transformador y decodificar.
 
 ### En las puertas del die
 
 El Show-o de juguete corre en las puertas del die, rutina a rutina, y da las mismas puntuaciones que la máquina exacta del mismo die, bit a bit: 3,1 millones de ciclos (`show_o_s_routines_on_the_die_s_gates_give_the_exact_machine_s_scores`).
 
+El alcance de esta prueba:
+- **Quién ordena las rutinas:** la propia prueba, haciendo de firmware. El RV32 no interviene.
+- **El texto llena justo su largo máximo,** así que cada token va en la posición de la caché que corresponde a su posición en la RoPE. Con un texto más corto, las posiciones van desplazadas y hay que reescribir las filas de rotación: la máquina exacta lo hace con `place_rotation`, y en el chip lo tendría que hacer el firmware, como hace con la M-RoPE de las imágenes.
+
 Al probarlo salió un fallo: la tabla de embeddings se dimensionaba con el vocabulario de la salida. En Show-o, la salida tiene 8 192 códigos y la tabla, 58 498 filas. Ahora el programa dice las filas de su tabla (`embedding_rows`).
 
 Pendiente:
-- el firmware del RV32 guiando a Show-o y el bucle de MaskGIT en la CPU del chip;
-- MAGVIT en puertas.
+- el firmware del RV32 guiando a Show-o, con las rotaciones de un texto más corto, y el bucle de MaskGIT en la CPU del chip;
+- MAGVIT en puertas: el microcódigo de `LoadRows` y `GroupNorm` aún no ha corrido en ellas.

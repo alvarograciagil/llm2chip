@@ -875,7 +875,7 @@ impl Layout {
         // The token a routine takes is a row of an embedding table, a patch, or one of the
         // vocabulary: as far as the largest of them, which is how far its registers reach.
         let table_rows = all_ops(program).filter_map(|i| match &i.op {
-            Op::EmbRead { table, .. } => weights.shape(&format!("{table}.weight")).map(|s| s[0]),
+            Op::EmbRead { table, .. } => Some(program.table_rows(table)),
             _ => None,
         });
         let token_range = table_rows.chain([program.vocab, program.vision.as_ref().map_or(0, |v| v.patches)]).max().unwrap_or(0) as u32;
