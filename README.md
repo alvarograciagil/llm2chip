@@ -1,168 +1,192 @@
 # llm2chip
 
-**Da a llm2chip un modelo de lenguaje y unos objetivos, y genera el circuito de un chip hecho a su medida.** Permite ver ese circuito, cambiar sus parámetros, ejecutar el modelo sobre él y exportarlo a Verilog y VHDL.
+**Give llm2chip a language model and a set of goals, and it generates the circuit of a chip built for that model.** You can look at the circuit, change its parameters, run the model on it with the chip's own arithmetic, and export it to Verilog and VHDL.
 
-La idea de fondo es llevar la especialización hasta el final: en vez de un acelerador genérico que mueve pesos desde una memoria externa, cada multiplicador tiene al lado los pesos que usa, y todo el chip se dimensiona para un modelo o una familia de modelos concreta.
+The idea is to take specialization all the way: instead of a general accelerator that streams weights from external memory, every multiplier sits next to the weights it uses, and the whole chip is sized for one model, or one family of models.
 
-## Para qué sirve
+> **Status.** llm2chip is a research project. Everything below runs in simulation: the generated netlists are simulated gate by gate and checked against the software models, but nothing has been built on an FPGA board or in silicon yet. Area, power and cost figures for modern nodes are estimates. See [What is verified](#what-is-verified) and [Limits](#limits).
 
-- **Explorar el diseño de un chip para LLM** sin escribir RTL: cuánta área, energía, potencia y velocidad cuesta un modelo con cada decisión.
-- **Comparar decisiones de arquitectura** con cifras: formato de los pesos, SRAM, ROM o DRAM apilada, número de multiplicadores, etapas de pipeline, chips iguales o a medida.
-- **Medir qué le pasa al modelo real** al usar la aritmética del chip: ejecuta pesos reales con los enteros exactos que usaría el silicio y compara el resultado con la coma flotante.
-- **Entender cómo funciona por dentro** un chip así, desde las capas del modelo hasta cada puerta lógica.
-- **Tener un punto de partida en RTL** para síntesis, FPGA o investigación.
+## What it is for
 
-## Cómo funciona
+- **Exploring LLM chip design without writing RTL:** how much area, energy, power and speed each decision costs for a given model.
+- **Comparing architecture choices with numbers:** weight format, SRAM, ROM or stacked DRAM, number of multipliers, pipeline stages, identical or custom chips, splitting a model across chips by layer or by tensor.
+- **Measuring what happens to a real model** with the chip's arithmetic: real weights run on the exact integers the silicon would use, compared against floating point.
+- **Understanding how such a chip works inside,** from the model's layers down to each logic gate.
+- **A starting point in RTL** for synthesis, FPGA prototyping or research.
+
+## How it works
 
 ```
-config.json + pesos          parámetros y objetivos
+config.json + weights          parameters and goals
         │                             │
         ▼                             ▼
-   grafo del modelo ──────────► generador del circuito
-                                      │  construye y mide cada variante
+   model graph ───────────────► circuit generator
+                                      │  builds and measures each variant
                                       ▼
               ┌──────────────┬────────┴───────┬──────────────┐
               ▼              ▼                ▼              ▼
-          plano y       microprograma      netlist en     Verilog
-         estimación      y firmware         puertas      y VHDL
+         floorplan and   microprogram     gate-level      Verilog
+          estimates      and firmware      netlist        and VHDL
                              │                │
                              ▼                ▼
-                     simulación con      simulación
-                       pesos reales     puerta a puerta
+                     simulation with     gate-by-gate
+                      real weights        simulation
 ```
 
-Lo que dibuja el esquemático es la misma netlist que se simula y se exporta: no hay bloques decorativos.
+What the schematic view draws is the same netlist that is simulated and exported: there are no decorative blocks.
 
-**El circuito cambia con los parámetros.** Para cada combinación, el generador construye en puertas cada forma posible de la celda de cálculo, mide su área, su conmutación y su camino crítico, y se queda con la mejor que alcanza la frecuencia pedida. Con una velocidad objetivo, el número de multiplicadores sale del tamaño del modelo.
+**The circuit follows the parameters.** For each combination, the generator builds every possible form of the compute cell in gates, measures its area, switching activity and critical path, and keeps the best one that meets the requested clock. Given a target speed, the number of multipliers follows from the size of the model.
 
-**Vale para un modelo o para muchos.** Se puede generar cada die a medida de un modelo concreto, con la máxima eficiencia, o repetir un único die y conectar más para admitir modelos mayores, hasta unos límites de capas, ancho y vocabulario. Las capas no son un valor fijo: salen del `config.json` de cada modelo.
+**One model or many.** Each die can be generated for one specific model, for maximum efficiency, or a single die can be repeated and connected to run larger models, up to limits on layers, width and vocabulary. The number of layers is not fixed: it comes from each model's `config.json`.
 
-## Qué lleva el chip
+## What the chip contains
 
-| Parte | Función |
+| Part | Role |
 |---|---|
-| Celdas de cálculo | Memoria de pesos junto a su multiplicador, con ECC o en ROM |
-| Red de activaciones | Reparte cada vector a las celdas y recoge las sumas |
-| Unidades vectoriales y de función | Atención, regla delta, SiLU, sigmoide, exponencial |
-| Secuenciador | Un microprograma fijo, con bucles y parámetros, para cualquier token |
-| CPU RV32IM | Firmware real en Rust: arranque, tokenizador y control |
-| Controlador de carga | Lleva la imagen a cada memoria y comprueba su CRC |
-| Unidad de muestreo | Top-k y temperatura, con filtro de logits en paralelo |
-| Enlaces entre chips | Datos y órdenes con corrección de errores y control de flujo |
-| Fiabilidad y depuración | Autotest de memoria, filas de reserva, contadores y puerto de depuración |
+| Compute cells | Weight memory next to its multiplier, with ECC or in ROM; weights stored as narrow codes with a scale and bias per group |
+| Activation network | Sends each vector to the cells and gathers the sums |
+| Vector and function units | Attention, the DeltaNet delta rule, SiLU, sigmoid, exponential, normalization |
+| Sequencer | One fixed microprogram, with loops and parameters, for every token |
+| RV32IM CPU | Real firmware written in Rust: boot, tokenizer, control and sampling loops |
+| Load controller | Brings the image into every memory and checks its CRC |
+| Sampling unit | Top-k and temperature, with a parallel logit filter |
+| Chip-to-chip links | Data and commands with error correction and flow control |
+| Reliability and debug | Memory self-test, spare rows, JTAG, scan chains and ATPG patterns, counters and a debug port |
 
-Todos los chips de un sistema salen de la misma netlist y leen la misma imagen. Un pin decide cuál manda; al arrancar se cuentan por la cadena de control, y cada uno toma su parte del modelo.
+All the chips in a system come from the same netlist and read the same image. One pin decides which one leads; at boot they count themselves along the control chain, and each one takes its part of the model.
 
-## La aplicación
+## The application
 
-- **Plano:** áreas del chip, con zoom desde el sistema hasta la celda.
-- **Funcionamiento:** qué operaciones hace el modelo, capa a capa.
-- **Esquemático:** el circuito real por áreas, hasta la puerta lógica, simulable paso a paso.
-- **Simulador:** escribe un texto y ejecútalo sobre el chip, eligiendo cuánto simular de cada bloque.
-- **Explorador:** barridos, frontera de Pareto, comparación de formatos y calibración.
-- **Numérico:** compara la aritmética del chip con la coma flotante, capa a capa y token a token.
-- **Modelos:** carpetas donde buscar, búsqueda y descarga desde Hugging Face, y generación de la imagen completa del chip.
+A web interface backed by a local engine (or a desktop app):
 
-### Modelos que se pueden adaptar
+- **Floorplan:** the chip's areas, zooming from the whole system down to a cell.
+- **How it works:** the operations the model performs, layer by layer, and where each one runs.
+- **Schematic:** the real circuit by area, down to each logic gate, simulated step by step.
+- **Simulator:** type a prompt and run it on the chip, choosing how much of each block to simulate.
+- **Images:** draw a picture from a text, or retouch a marked region of one, with Show-o, optionally exactly as the chip would (its cells, its addressing and its firmware's sampling loop). Janus-Pro draws from the Simulator view.
+- **Explorer:** parameter sweeps, the Pareto frontier, format comparisons and calibration.
+- **Numerics:** the chip's arithmetic against floating point, layer by layer and token by token.
+- **Models:** folders to search, search and download from Hugging Face, and building the chip's full image.
+- **New project assistant:** start from an FPGA board, a single chip, a base model or a fully custom design.
 
-| Nivel | Arquitecturas | Qué permite |
+The interface is in English, with a Spanish translation.
+
+### Supported models
+
+| Level | Architectures | What you can do |
 |---|---|---|
-| Simulable | Qwen3.5 (con y sin MoE), Llama (incluido el RoPE de Llama 3), Mistral, Qwen2, Qwen3, Gemma 1, 2 y 3, DeepSeek V3 y R1 | Diseñar su chip y ejecutar sus pesos reales |
-| Diseño aproximado | Phi-3, Granite | Estimar su chip por su forma de capas; su activación o sus normas extra no se modelan |
+| Runs | Qwen3.5 (dense and MoE), Llama (including Llama 3 RoPE), Mistral, Qwen2, Qwen3, Gemma 1, 2 and 3, DeepSeek V3 and R1 | Design their chip and run their real weights |
+| Images | Show-o (with MAGVIT-v2), Janus-Pro, the Qwen3.5 vision encoder | Run them in the chip's arithmetic |
+| Approximate design | Phi-3, Granite | Estimate their chip from the shape of their layers; their activation and extra norms are not modelled |
 
-Para diseñar un chip basta el `config.json`, así que un modelo de Hugging Face se puede evaluar sin descargar sus pesos. Si un modelo necesita algo que el chip no tiene, la aplicación dice qué es. El firmware tokeniza siguiendo las reglas del propio modelo; quedan fuera los modelos Unigram y WordPiece y los normalizadores Precompiled, BERT y NMT, que no usan los modelos de generación habituales.
+A `config.json` is enough to design a chip, so a model on Hugging Face can be evaluated without downloading its weights. If a model needs something the chip lacks, the application says what. The firmware tokenizes with each model's own rules; Unigram and WordPiece models and the Precompiled, BERT and NMT normalizers are not supported, as the usual generation models do not use them.
 
-Las descargas toman solo safetensors y metadatos, nunca archivos pickle ni código del repositorio. Se fijan a una revisión, se reanudan si se cortan y comprueban cada archivo de pesos con su SHA-256. Los modelos restringidos piden aceptar su licencia en Hugging Face y un token de lectura, que se toma de `HF_TOKEN`, de `huggingface-cli` o de la propia aplicación y se guarda solo en este equipo.
+Downloads take only safetensors and metadata, never pickle files or code from the repository. They are pinned to a revision, resume when interrupted, and check every weight file against its SHA-256. Gated models need their license accepted on Hugging Face and a read token, taken from `HF_TOKEN`, from `huggingface-cli` or from the application, and stored only on your machine.
 
-### Cuánto simular
+### How much to simulate
 
-| Perfil | Núcleo de inferencia | Resto del chip | Uso |
+| Profile | Inference core | Rest of the chip | Use |
 |---|---|---|---|
-| Rápida | Coma flotante, con GPU | Software | Probar modelos y formatos |
-| Aritmética real | Enteros exactos, con GPU | Software | Medir la calidad del diseño |
-| Flujo real | Enteros exactos, con GPU | Firmware real, unidad de muestreo y comprobación de la imagen | Ver el chip completo |
+| Fast | Floating point, on the GPU | Software | Trying models and formats |
+| Real arithmetic | Exact integers, on the GPU | Software | Measuring the quality of a design |
+| Real flow | Exact integers, on the GPU | Real firmware, sampling unit and image checks | Seeing the whole chip at work |
 
-La aceleración usa Metal en macOS y Vulkan en Windows y Linux. La simulación puerta a puerta completa se reserva para modelos diminutos.
+Acceleration uses Metal on macOS and Vulkan on Windows and Linux. Full gate-by-gate simulation is reserved for tiny models.
 
-## Empezar
+## Getting started
 
-Hace falta Rust con `wasm32-unknown-unknown` y `riscv32im-unknown-none-elf`, `wasm-pack` y Node. Icarus Verilog y Yosys son opcionales.
+You need Rust with the `wasm32-unknown-unknown` and `riscv32im-unknown-none-elf` targets, `wasm-pack` and Node. Icarus Verilog, Yosys and OpenROAD are optional.
 
 ```bash
 scripts/dev.sh
 ```
 
-Abre `http://localhost:5173`. El motor local solo escucha en `127.0.0.1`.
+Then open `http://localhost:5173`. The local engine only listens on `127.0.0.1`.
 
-Para usar la interfaz desde otros equipos de tu red:
+To use the interface from other machines on your network:
 
 ```bash
 scripts/dev.sh --lan
 ```
 
-Al arrancar muestra una dirección con una clave de acceso, que se guarda en `~/.llm2chip/lan-url`. Quien tenga esa dirección puede cargar modelos y ejecutarlos en este equipo, así que no la compartas fuera de tu red. El motor sigue escuchando solo en local; `LLM2CHIP_LAN_KEY` fija tu propia clave y `LLM2CHIP_WEB_PORT` cambia el puerto.
+It prints an address with an access key, also saved in `~/.llm2chip/lan-url`. Anyone with that address can load and run models on your machine, so do not share it outside your network. The engine itself still listens only locally; `LLM2CHIP_LAN_KEY` sets your own key and `LLM2CHIP_WEB_PORT` changes the port.
 
-Para empaquetar la aplicación de escritorio:
+To package the desktop application:
 
 ```bash
 scripts/build-app.sh
 ```
 
-Para pasar las comprobaciones rápidas, un par de minutos:
+To run the quick checks, a few minutes:
 
 ```bash
 scripts/check.sh
 ```
 
-Y todas, con los chips completos en puertas (unos 5 minutos), antes de subir cambios del hardware:
+And all of them, including the whole chips in gates and the slow tests, before changing the hardware:
 
 ```bash
-scripts/check.sh --completa
+scripts/check.sh --full
 ```
 
-Windows tiene los equivalentes `.ps1`. Los pesos no se incluyen: la aplicación busca en `~/.llm2chip/models`, `~/.mtplx/models`, la caché de Hugging Face y las carpetas que añadas en la vista Modelos.
+Windows has the equivalent `.ps1` scripts. Weights are not included: the application looks in `~/.llm2chip/models`, `~/.mtplx/models`, the Hugging Face cache and any folders you add in the Models view.
 
-## Qué está verificado
+## What is verified
 
-- La netlist de un chip completo, de bytes de entrada a bytes de salida, coincide ciclo a ciclo con la simulación rápida en un modelo Qwen3.5 diminuto.
-- Con una misma imagen, dos chips idénticos en una placa simulada, con retardos y bits invertidos en los enlaces, generan el mismo texto y los mismos logits que uno solo.
-- La máquina de enteros exactos coincide bit a bit con las puertas en todos los búferes de esos modelos.
-- Qwen3.8-27B real se ejecuta de principio a fin con el firmware del chip. El tokenizador del firmware se compila desde el `tokenizer.json` de cada modelo y coincide con la biblioteca de referencia en miles de textos difíciles, también con los archivos reales de Llama 3.2, Mistral 7B, Mistral Nemo y DeepSeek V3.
-- Todas las arquitecturas simulables con pesos aleatorios diminutos dan los mismos logits que `mlx-lm`, token a token.
-- Las celdas y los carriles vectoriales dan en puertas los mismos bits que la máquina exacta, en todos los búferes de un modelo diminuto.
-- Qwen3-0.6B real coincide con `mlx-lm` en coma flotante: 24 de 24 tokens y una diferencia máxima de 0,00005 en el logit elegido.
-- La imagen de un chip se genera desde la aplicación y comprueba el CRC de cada tensor. El firmware ejecuta la cabeza MTP y coincide con el bucle en software.
-- Cada formato de peso y cada multiplicador se comprueban contra la aritmética de referencia, y el Verilog y el VHDL exportados se ejecutan en simuladores externos.
+- **Whole chip in gates.** The netlist of a complete chip (CPU, firmware, load controller, die and sampling unit) produces the same bytes in the same cycles as the instruction-level simulation, from input to output, on a tiny Qwen3.5 model. So does a toy Show-o chip filling in an image: 12.45 million cycles.
+- **Several chips.** With one image, two identical chips on a simulated board, with delays and flipped bits on their links, generate the same text and logits as a single chip, split by layers, by rows or both.
+- **Exact arithmetic.** The exact integer machine matches the gates bit for bit in every buffer of those models; the cells and vector lanes give the same bits in gates as in the exact machine.
+- **Real models.** Real Qwen3.8-27B runs end to end with the chip's firmware. Real Qwen3-0.6B matches `mlx-lm` in floating point: 24 of 24 tokens. Every supported architecture, with tiny random weights, gives the same logits as `mlx-lm`, token by token.
+- **Tokenizer.** The firmware's tokenizer is compiled from each model's `tokenizer.json` and matches the reference library on thousands of difficult texts, including the real files of Llama 3.2, Mistral 7B, Mistral Nemo and DeepSeek V3.
+- **Images.** The real Show-o runs on the die as the chip addresses it, with its weights in 8-bit cells: in one pass, 61 of 64 masked places get the same best code as floating point. MAGVIT-v2 runs in the chip's arithmetic with 49.6 dB PSNR (decoder) and 99.3 % of bits equal (encoder).
+- **Formats and export.** Every weight format and multiplier is checked against reference arithmetic, and the exported Verilog and VHDL run in external simulators.
+- **Physical design.** The compute cell and a tile with a real SRAM macro go through OpenROAD on open PDKs, which calibrates the estimator; the FPGA version of the chip is synthesized with Yosys and placed and routed with nextpnr at 35.4 MHz on an ECP5.
 
-Los detalles y mediciones están en [`docs/`](docs) y [`tests/golden/`](tests/golden).
+Details and measurements are in [`docs/`](docs) and [`tests/golden/`](tests/golden).
 
-## Límites
+## Limits
 
-Es un diseño de arquitectura y lógica, no un layout fabricable: no hay colocación ni rutado, ni firma de temporización, ni PDK comercial. En concreto:
+This is an architecture and logic design, not a manufacturable layout: there is no full-chip place and route, timing sign-off or commercial PDK. In particular:
 
-- Área, energía y velocidad son estimaciones, parte derivadas del circuito generado y parte calibradas con chips publicados. La aplicación indica el origen de cada cifra.
-- Los modelos reales no se simulan puerta a puerta, sino con una máquina verificada contra las puertas en modelos diminutos.
-- Los microprogramas de modelos reales ya hacen sus productos matriz-vector en las celdas: en Qwen3.8 el token pasa de 124.000 M de ciclos en serie a 3 M con el contexto lleno, con 136.000 celdas, 64 unidades vectoriales y 128 carriles: unos 330 tok/s a 1 GHz. Aún está lejos de la velocidad del plano y del explorador, que salen del estimador y no de contar esos ciclos.
-- En modelos diminutos, el firmware carga las celdas por el controlador de carga, y así se comprueba en puertas con uno y dos chips. En modelos reales, la imagen ya guarda las matrices en el formato de las celdas, pero falta el paso de arranque que las lleva hasta ellas, y las tablas de embeddings siguen en registros.
-- Los paquetes de Windows y Linux y el backend de Vulkan todavía no se han ejecutado en esos sistemas.
+- **Area, energy and speed are estimates,** partly derived from the generated circuit and partly calibrated against published chips and OpenROAD runs. The application shows where each figure comes from.
+- **Real models are not simulated gate by gate,** but with an exact machine that is verified against the gates on tiny models.
+- **The microprograms of large models are still unrolled per head and per layer,** so the program grows with the number of heads; folding heads into loops is needed to fit all of Qwen3.8 in the sequencer's memory.
+- **Manufacturing tests are not complete:** there are memory self-test, JTAG, scan chains and ATPG patterns per block, but the scan chain is not in the default chip, there is no tester format (STIL or WGL), and no at-speed delay faults.
+- **Nothing has run on physical hardware.** The FPGA flow, board recommendations and the expected speed are in [`docs/fpga.md`](docs/fpga.md).
+- **The Windows and Linux packages and the Vulkan backend** have not been run on those systems yet.
 
-## Estructura
+## Documentation
 
-| Carpeta | Contenido |
+| Document | Contents |
 |---|---|
-| `crates/model-ir` | Modelo independiente del hardware, a partir de `config.json` |
-| `crates/arch` | Parámetros, tecnología, estimador y plano |
-| `crates/compiler` | Programa del modelo y calendario |
-| `crates/netlist` | Generador de circuitos, simulador de puertas, Verilog y VHDL |
-| `crates/sim` | Ejecución sobre pesos reales, máquina exacta y GPU |
-| `crates/server` | Motor local |
-| `crates/wasm` | Enlace con el navegador |
-| `firmware` | Firmware de la CPU del chip |
-| `web` | Interfaz |
-| `app` | Aplicación de escritorio |
-| `tech`, `models`, `presets` | Nodos tecnológicos, modelos y diseños de partida |
-| `tools` | Referencia en Python y comparación con Yosys |
+| [`docs/full-chip.md`](docs/full-chip.md) | The whole chip: blocks, simulation levels, several chips, the fixed microprogram |
+| [`docs/parameters.md`](docs/parameters.md) | Every parameter of the design, as the application explains it |
+| [`docs/vision.md`](docs/vision.md) | Images on the chip: the vision encoder, Janus-Pro and Show-o |
+| [`docs/fpga.md`](docs/fpga.md) | Taking the chip to an FPGA: synthesis, boards, expected speed |
+| [`docs/asic.md`](docs/asic.md) | Layout with OpenROAD and calibration of the estimator |
+| [`docs/manufacturing.md`](docs/manufacturing.md) | What is verified, board rules, scan and ATPG, what manufacturing still needs |
+| [`docs/research.md`](docs/research.md) | Published LLM chips used as references |
 
-## Licencia
+## Repository layout
 
-[MIT](LICENSE).
+| Folder | Contents |
+|---|---|
+| `crates/model-ir` | Hardware-independent model, from `config.json` |
+| `crates/arch` | Parameters, technology, estimator and floorplan |
+| `crates/compiler` | The model's program and schedule |
+| `crates/netlist` | Circuit generator, gate simulator, Verilog and VHDL, scan and ATPG |
+| `crates/sim` | Running real weights, the exact machine, the GPU, image models |
+| `crates/maskgit-rt`, `crates/tokenizer-rt` | Code shared by the firmware and the host |
+| `crates/server` | Local engine |
+| `crates/wasm` | Bindings for the browser |
+| `firmware` | Firmware of the chip's CPU |
+| `web` | Interface |
+| `app` | Desktop application |
+| `tech`, `models`, `presets` | Technology nodes, model descriptions and starting designs |
+| `tools` | Python reference, model conversion, synthesis and OpenROAD scripts |
+
+## License
+
+llm2chip is released under the [PolyForm Noncommercial License 1.0.0](LICENSE.md): you may use, modify and share it for any noncommercial purpose, including personal projects, research and education. Commercial use is not permitted under this license; for commercial licensing, open an issue to get in touch.
+
+Required Notice: Copyright 2026 Xenogears (https://github.com/Xenogears/llm2chip)

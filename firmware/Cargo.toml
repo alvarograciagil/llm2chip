@@ -2,7 +2,7 @@
 name = "llm2chip-firmware"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 
 [workspace]
 

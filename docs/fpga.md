@@ -1,161 +1,161 @@
-# Probar el chip en una FPGA
+# Testing the chip on an FPGA
 
-El objetivo es validar el proyecto en hardware real: el mismo circuito que se simula puerta a puerta, con un modelo diminuto y a poca velocidad, generando texto en una placa asequible.
+The goal is to validate the project on real hardware: the same circuit that is simulated gate by gate, with a tiny model and at low speed, generating text on an affordable board.
 
-## El chip que se lleva a la FPGA
+## The chip that goes to the FPGA
 
-`cargo run --release -p sim --example fpga -- chip.v --dsp` escribe en Verilog el chip completo para el modelo de las pruebas (un Qwen3.5 de juguete: 2 capas, una DeltaNet y una de atención, ancho 8, vocabulario de 8 letras):
+`cargo run --release -p sim --example fpga -- chip.v --dsp` writes in Verilog the whole chip for the test model (a toy Qwen3.5: 2 layers, one DeltaNet and one attention, width 8, a vocabulary of 8 letters):
 
-- CPU RISC-V RV32IM con su firmware, que arranca, carga la imagen comprobando su CRC, tokeniza, gobierna el die y muestrea.
-- Die con 8 celdas, una unidad vectorial de un carril, y solo la lógica que su microprograma usa.
-- Unidad de muestreo.
+- A RISC-V RV32IM CPU with its firmware, which boots, loads the image checking its CRC, tokenizes, drives the die and samples.
+- A die with 8 cells, a one-lane vector unit, and only the logic its microprogram uses.
+- The sampling unit.
 
-Por defecto es el chip para **una placa sola**: sin puerto JTAG, sin el autotest de memorias de fábrica y sin la cadena de órdenes hacia otros chips, que una placa sola no usa. Conserva los mismos pines, a cero, y el firmware se ve solo y sigue igual. `--chain` genera el chip completo, el que se repite cuando varias placas se unen. La prueba `a_chip_alone_on_one_board_says_the_same_without_tests_or_chain` ejecuta el chip para una placa sola en puertas, y `the_chip_sized_for_an_fpga_says_the_same_in_gates` hace lo mismo con el completo: ambos escriben lo mismo que el simulador de instrucciones, en los mismos ciclos.
+By default it is the chip for **a single board**: no JTAG port, no factory memory self-test and no command chain towards other chips, which a single board does not use. It keeps the same pins, tied to zero, and the firmware finds itself alone and carries on unchanged. `--chain` generates the complete chip, the one that is repeated when several boards are joined. The test `a_chip_alone_on_one_board_says_the_same_without_tests_or_chain` runs the single-board chip in gates, and `the_chip_sized_for_an_fpga_says_the_same_in_gates` does the same with the complete one: both write the same as the instruction-level simulator, in the same cycles.
 
-| Recurso | Cantidad |
+| Resource | Amount |
 |---|---|
-| Lógica | ≈ 355 000 equivalentes NAND2 (con escala y sesgo en dos ciclos) |
-| Memoria | 1,68 Mbit: CPU 0,52 (32 KB de programa y 32 KB de datos); tablas de función 0,26; microcódigo 0,5 (con diccionario; 1,3 sin él); banco vectorial 0,07, con la tabla de registros que da a cada uno solo lo que usa (sin ella serían 2,1) |
-| Reloj | El camino crítico ronda 24 retardos de sumador completo: en una FPGA de gama baja, entre 20 y 50 MHz |
+| Logic | ≈ 355,000 NAND2 equivalents (with scale and bias in two cycles) |
+| Memory | 1.68 Mbit: CPU 0.52 (32 KB of program and 32 KB of data); function tables 0.26; microcode 0.5 (with a dictionary; 1.3 without); vector bank 0.07, with the register table giving each register only what it uses (2.1 without it) |
+| Clock | The critical path is about 24 full-adder delays: on a low-end FPGA, between 20 and 50 MHz |
 
-## Síntesis medida con Yosys
+## Synthesis measured with Yosys
 
-Con `--dsp`, cada multiplicador de un ciclo se escribe como un producto con signo (`$signed(weight) * $signed(x)`) y la herramienta lo pone en sus bloques multiplicadores. Es la misma aritmética: las pruebas comparan cada tipo de multiplicador generado con el producto exacto, y Yosys demuestra formalmente la equivalencia del de las celdas (`equiv_make` + `equiv_induct`). El resto del chip sigue puerta a puerta.
+With `--dsp`, each single-cycle multiplier is written as a signed product (`$signed(weight) * $signed(x)`) and the tool puts it in its multiplier blocks. It is the same arithmetic: the tests compare each kind of generated multiplier with the exact product, and Yosys formally proves the cells' one equivalent (`equiv_make` + `equiv_induct`). The rest of the chip stays gate by gate.
 
-`tools/synth/families.sh` sintetiza el chip para cada familia, cada ejecución con un límite de tiempo, y la prueba lenta `the_catalog_knows_how_much_logic_the_smallest_chip_takes` hace lo mismo y comprueba que el catálogo de placas no se aleja más de un 10 % de lo que sale. Con `--dsp --factor-steps 2`, el chip para una placa sola:
+`tools/synth/families.sh` synthesizes the chip for each family, each run with a time limit, and the slow test `the_catalog_knows_how_much_logic_the_smallest_chip_takes` does the same and checks the board catalogue stays within 10 % of the result. With `--dsp --factor-steps 2`, the single-board chip:
 
-| Familia | LUT | Biestables | Memoria de bloque | Multiplicadores |
+| Family | LUT | Flip-flops | Block memory | Multipliers |
 |---|---|---|---|---|
-| Xilinx serie 7 | 11 166 LUT6 + 403 de memoria distribuida | 5 443 | 42 BRAM36 + 14 BRAM18 | 42 DSP48 |
-| Gowin | 17 961 LUT + 2 214 ALU | 5 519 | 125 BSRAM | 42 MULT18×18 + 18 MULT9×9 |
-| Lattice ECP5 | 17 872 LUT4, con memoria distribuida | 5 527 | 125 DP16KD | 59 MULT18×18 |
-| Altera Cyclone IV E (memorias aparte) | 53 603 LE | 9 017 | — | — |
+| Xilinx 7 series | 11,166 LUT6 + 403 of distributed memory | 5,443 | 42 BRAM36 + 14 BRAM18 | 42 DSP48 |
+| Gowin | 17,961 LUT + 2,214 ALU | 5,519 | 125 BSRAM | 42 MULT18×18 + 18 MULT9×9 |
+| Lattice ECP5 | 17,872 LUT4, with distributed memory | 5,527 | 125 DP16KD | 59 MULT18×18 |
+| Altera Cyclone IV E (memories apart) | 53,603 LE | 9,017 | — | — |
 
-Antes de recortar la tabla de registros, quitar lo que una placa sola no usa y ajustar las tablas de función y la memoria de la CPU eran 23 500 LUT6 en Xilinx, 24 400 LUT4 en Gowin y 28 610 LUT4 en ECP5.
+Before trimming the register table, removing what a single board does not use and fitting the function tables and the CPU's memory, it took 23,500 LUT6 on Xilinx, 24,400 LUT4 on Gowin and 28,610 LUT4 on ECP5.
 
-La tabla de registros dice dónde empieza cada registro en la memoria vectorial y ahorra unas 120 BSRAM. En puertas son 512 entradas de 16 bits en biestables, leídas tres veces por ciclo: 39 700 puertas y 8 192 biestables. En el Verilog para FPGA se escribe como una memoria de lectura inmediata, que las herramientas llevan a su memoria distribuida, una copia por lectura: la lógica del chip baja a la mitad (de unas 46 000 a 24 000 LUT4 en ECP5) y desaparecen 8 000 biestables. Una prueba compara esa memoria, en iverilog, con las puertas.
+The register table says where each register starts in the vector memory and saves about 120 BSRAM. In gates it is 512 entries of 16 bits in flip-flops, read three times per cycle: 39,700 gates and 8,192 flip-flops. In the Verilog for FPGA it is written as an asynchronous-read memory, which the tools map to their distributed memory, one copy per read: the chip's logic halves (from about 46,000 to 24,000 LUT4 on ECP5) and 8,000 flip-flops disappear. A test compares that memory, in iverilog, with the gates.
 
-Sin `--dsp`, en Xilinx hacen falta unas 110 600 LUT6 y ningún DSP: los multiplicadores se convierten en puertas.
+Without `--dsp`, Xilinx needs about 110,600 LUT6 and no DSP: the multipliers turn into gates.
 
-`synth_gowin` de Yosys mapea a la familia GW1N; la GW5A de la Tang Mega tiene bloques del mismo tamaño, pero su herramienta oficial puede empaquetarlos algo distinto. Es una estimación sólida, no un informe de colocación y rutado.
+Yosys' `synth_gowin` maps to the GW1N family; the Tang Mega's GW5A has blocks of the same size, but its official tool may pack them somewhat differently. It is a solid estimate, not a place-and-route report.
 
-## Placas
+## Boards
 
-El asistente de proyecto («+» en la barra, «Una FPGA») tiene estas placas y dice, para cada modelo, si cabe en la memoria del chip, si sus pesos tienen que ir a la memoria de la placa o si no cabe. Precios orientativos de noviembre de 2026; cambian según tienda y región.
+The project assistant ("+" in the toolbar, "An FPGA") has these boards and says, for each model, whether it fits in the chip's memory, whether its weights have to go to the board's memory, or whether it does not fit. Prices are rough, as of November 2026; they vary by shop and region.
 
-| Placa | FPGA | Lógica | Memoria en el chip | DSP | Memoria en la placa | Precio |
+| Board | FPGA | Logic | On-chip memory | DSP | On-board memory | Price |
 |---|---|---|---|---|---|---|
-| Placa con Cyclone IV EP4CE10 | Altera Cyclone IV E | 10,3 K LE | 0,41 Mbit | 23 | 8 MB SDRAM (la OMDAZZ, con EPCS16 de 16 Mbit); otras llevan 32 MB | ~25-40 $ |
-| Sipeed Tang Primer 25K | Gowin GW5A-25 | 23 K LUT4 | 1 Mbit | 28 | — | ~35 $ |
-| Sipeed Tang Mega 60K Dock | Gowin GW5AT-60 | 60 K LUT4 | 2,1 Mbit | 118 | 256 MB DDR3 | ~90 $ |
-| Sipeed Tang Mega 138K Dock | Gowin GW5AST-138 | 138 K LUT4 | 6,1 Mbit | 298 | DDR3 | ~130 $ |
-| Radiona ULX3S 85F | Lattice ECP5-85F | 84 K LUT4 | 3,7 Mbit | 156 | 32 MB SDRAM | ~130-150 $ |
-| Terasic Atum A3 Nano | Altera Agilex 3 | 135 K LE | 8,3 Mbit | 368 | 64 MB SDRAM | 180-245 $ |
-| Sipeed Tang Mega 138K Pro | Gowin GW5AST-138 | 138 K LUT4 | 6,1 Mbit | 298 | 1 GB DDR3 | ~195 $ |
-| TUL PYNQ-Z2 | Zynq XC7Z020 | 53 K LUT6 | 4,9 Mbit | 220 | 512 MB DDR3 | 200-260 $ |
-| Terasic DE10-Nano | Cyclone V SE | 110 K LE | 5,6 Mbit | 112 | 1 GB DDR3 | ~225 $ |
-| **AMD Kria KV260** | Zynq UltraScale+ K26 | 117 K LUT6 | **23,1 Mbit** (BRAM + UltraRAM) | 1 248 | **4 GB DDR4, 64 bits** | ~249 $ |
-| Digilent Arty A7-100T | XC7A100T | 63 K LUT6 | 4,9 Mbit | 240 | 256 MB DDR3 | ~250 $ |
-| Digilent Zybo Z7-20 | Zynq XC7Z020 | 53 K LUT6 | 4,9 Mbit | 220 | 1 GB DDR3 | ~300 $ |
-| AMD Kria KR260 | Zynq UltraScale+ K26 | 117 K LUT6 | 23,1 Mbit | 1 248 | 4 GB DDR4 | ~349 $ |
-| ALINX AX7202 | XC7A200T | 134 K LUT6 | 13,1 Mbit | 740 | 1 GB DDR3 | 400-500 $ |
-| Digilent Nexys Video | XC7A200T | 134 K LUT6 | 13,1 Mbit | 740 | 512 MB DDR3 | ~500 € |
-| Digilent Genesys 2 | Kintex-7 XC7K325T | 204 K LUT6 | 16 Mbit | 840 | 1 GB DDR3 | ~1 000 $ |
-| AMD Alveo U250 | UltraScale+ XCU250 | 1 728 K LUT6 | 432 Mbit | 12 288 | 64 GB DDR4 | ~9 000 $ |
+| Cyclone IV EP4CE10 board | Altera Cyclone IV E | 10.3 K LE | 0.41 Mbit | 23 | 8 MB SDRAM (the OMDAZZ, with a 16 Mbit EPCS16); others have 32 MB | ~$25-40 |
+| Sipeed Tang Primer 25K | Gowin GW5A-25 | 23 K LUT4 | 1 Mbit | 28 | — | ~$35 |
+| Sipeed Tang Mega 60K Dock | Gowin GW5AT-60 | 60 K LUT4 | 2.1 Mbit | 118 | 256 MB DDR3 | ~$90 |
+| Sipeed Tang Mega 138K Dock | Gowin GW5AST-138 | 138 K LUT4 | 6.1 Mbit | 298 | DDR3 | ~$130 |
+| Radiona ULX3S 85F | Lattice ECP5-85F | 84 K LUT4 | 3.7 Mbit | 156 | 32 MB SDRAM | ~$130-150 |
+| Terasic Atum A3 Nano | Altera Agilex 3 | 135 K LE | 8.3 Mbit | 368 | 64 MB SDRAM | $180-245 |
+| Sipeed Tang Mega 138K Pro | Gowin GW5AST-138 | 138 K LUT4 | 6.1 Mbit | 298 | 1 GB DDR3 | ~$195 |
+| TUL PYNQ-Z2 | Zynq XC7Z020 | 53 K LUT6 | 4.9 Mbit | 220 | 512 MB DDR3 | $200-260 |
+| Terasic DE10-Nano | Cyclone V SE | 110 K LE | 5.6 Mbit | 112 | 1 GB DDR3 | ~$225 |
+| **AMD Kria KV260** | Zynq UltraScale+ K26 | 117 K LUT6 | **23.1 Mbit** (BRAM + UltraRAM) | 1,248 | **4 GB DDR4, 64-bit** | ~$249 |
+| Digilent Arty A7-100T | XC7A100T | 63 K LUT6 | 4.9 Mbit | 240 | 256 MB DDR3 | ~$250 |
+| Digilent Zybo Z7-20 | Zynq XC7Z020 | 53 K LUT6 | 4.9 Mbit | 220 | 1 GB DDR3 | ~$300 |
+| AMD Kria KR260 | Zynq UltraScale+ K26 | 117 K LUT6 | 23.1 Mbit | 1,248 | 4 GB DDR4 | ~$349 |
+| ALINX AX7202 | XC7A200T | 134 K LUT6 | 13.1 Mbit | 740 | 1 GB DDR3 | $400-500 |
+| Digilent Nexys Video | XC7A200T | 134 K LUT6 | 13.1 Mbit | 740 | 512 MB DDR3 | ~€500 |
+| Digilent Genesys 2 | Kintex-7 XC7K325T | 204 K LUT6 | 16 Mbit | 840 | 1 GB DDR3 | ~$1,000 |
+| AMD Alveo U250 | UltraScale+ XCU250 | 1,728 K LUT6 | 432 Mbit | 12,288 | 64 GB DDR4 | ~$9,000 |
 
-La Cyclone IV EP4CE10 es la más pequeña del catálogo: el chip más pequeño que genera el proyecto necesita unos 54 000 elementos lógicos (medidos con Yosys, `synth_intel`, sin contar memorias) y 1,68 Mbit de memoria interna, frente a sus 10 300 y 0,41 (la Cyclone IV no tiene memoria distribuida, así que su tabla de registros sigue en biestables, y solo el microcódigo ya ocupa 0,5 Mbit), aunque los pesos vayan a la SDRAM de la placa. Su memoria SDRAM tampoco sirve hoy para los pesos: el chip los guarda en la memoria de cada celda y no tiene camino para leerlos de fuera.
+The Cyclone IV EP4CE10 is the smallest in the catalogue: the smallest chip the project generates needs about 54,000 logic elements (measured with Yosys, `synth_intel`, memories not counted) and 1.68 Mbit of internal memory, against its 10,300 and 0.41 (the Cyclone IV has no distributed memory, so its register table stays in flip-flops, and the microcode alone takes 0.5 Mbit), even with the weights in the board's SDRAM. Its SDRAM is not usable for the weights today either: the chip keeps them in each cell's memory and has no path to read them from outside.
 
-En ella cabe, en cambio, una celda de cálculo del chip detrás del puerto serie: `cargo run -p netlist --example board -- DIR` escribe el proyecto, con su banco de pruebas, el proyecto de Quartus y un guion para el ordenador que carga una matriz, la multiplica por un vector y compara cada fila con el cálculo exacto. Ocupa unos 790 LE y 280 biestables (un 10 % de la EP4CE10) y 32 Kbit de memoria. La prueba `the_cell_behind_the_serial_port_multiplies_a_matrix_exactly` lo ejecuta en iverilog. Los pines del proyecto son los habituales de estas placas y están marcados como sin verificar: hay que comprobarlos en el esquema de la placa.
+What does fit in it is one of the chip's compute cells behind the serial port: `cargo run -p netlist --example board -- DIR` writes the project, with its testbench, the Quartus project and a host script that loads a matrix, multiplies it by a vector and compares each row with the exact computation. It takes about 790 LE and 280 flip-flops (10 % of the EP4CE10) and 32 Kbit of memory. The test `the_cell_behind_the_serial_port_multiplies_a_matrix_exactly` runs it in iverilog. The project's pins are the usual ones for these boards and are marked as unverified: check them against the board's schematic.
 
-### Recomendación por unos 200 $: Kria KV260
+### Recommendation for about $200: Kria KV260
 
-Por unos 50 $ más que la Tang Mega 138K Pro, la **KV260** tiene casi cuatro veces más memoria dentro del chip (23,1 Mbit frente a 6,1), cuatro veces más multiplicadores y 4 GB de DDR4 de 64 bits, varias veces más rápida que la DDR3 de las placas baratas.
+For about $50 more than the Tang Mega 138K Pro, the **KV260** has almost four times more on-chip memory (23.1 Mbit against 6.1), four times more multipliers and 4 GB of 64-bit DDR4, several times faster than the cheap boards' DDR3.
 
-- **stories260K cabe entero dentro del chip** en todas las variantes medidas (5,4-9,0 Mbit), con sitio para más carriles y celdas. En la Tang Mega solo cabe la variante más pequeña, la de un carril.
-- La lógica básica del chip ocupa alrededor del 39 % de sus LUT.
-- Con los pesos en la DDR4 caben modelos de cientos de millones de parámetros, como stories110M o SmolLM2-135M, a la velocidad que dé la memoria.
-- Se programa con Vivado. Conviene confirmar antes de comprar que la edición gratuita de la versión que uses incluye el K26.
+- **stories260K fits entirely inside the chip** in every variant measured (5.4-9.0 Mbit), with room for more lanes and cells. On the Tang Mega only the smallest variant fits, the one-lane one.
+- The chip's basic logic takes about 39 % of its LUTs.
+- With the weights in the DDR4, models of hundreds of millions of parameters fit, such as stories110M or SmolLM2-135M, at whatever speed the memory gives.
+- It is programmed with Vivado. Before buying, check that the free edition of the version you use includes the K26.
 
-Si el límite de 200 $ es estricto, la mejor opción es la **Tang Mega 138K Pro**: cabe la lógica con margen y, con las optimizaciones de memoria, stories260K de un carril entra en su memoria interna (5,37 de 6,1 Mbit, a falta de cómo empaquete los bloques la herramienta de Gowin). La **Atum A3 Nano** tiene más memoria dentro del chip (8,3 Mbit), pero su memoria externa es una SDRAM de 64 MB, lenta.
+If the $200 limit is strict, the best option is the **Tang Mega 138K Pro**: the logic fits with margin and, with the memory optimizations, one-lane stories260K fits in its internal memory (5.37 of 6.1 Mbit, pending how Gowin's tool packs the blocks). The **Atum A3 Nano** has more on-chip memory (8.3 Mbit), but its external memory is a 64 MB SDRAM, which is slow.
 
-Fuentes: [Kria KV260](https://www.amd.com/en/products/system-on-modules/kria/k26/kv260-vision-starter-kit.html), [renovación de la KV260 en 2025](https://www.amd.com/en/blogs/2025/kria-kv260-vision-ai-starter-kit-refresh.html), [Tang Mega 138K Pro](https://en.wiki.sipeed.com/hardware/en/tang/tang-mega-138k/mega-138k-pro.html), [Tang Mega 138K Dock](https://www.cnx-software.com/2024/06/28/sipeed-tang-mega-138k-dock-is-a-lower-cost-gowin-gw5ast-fpga-risc-v-development-board/), [Atum A3 Nano](https://www.cnx-software.com/2025/05/30/atum-a3-nano-development-board-combines-agilex-3-fpga-and-usb-blaster-iii-programmer/), [PYNQ-Z2](https://www.dfrobot.com/product-1838.html), [Genesys 2](https://www.digikey.in/en/product-highlight/d/digilent/genesys-2-kintex-7-fpga-development-board), [ALINX AX7202](https://botland.store/fpga-boards-and-kits/29031-ax7202-fpga-development-board-amd-artix-7-xc7a200t-5904422389024.html).
+Sources: [Kria KV260](https://www.amd.com/en/products/system-on-modules/kria/k26/kv260-vision-starter-kit.html), [KV260 refresh in 2025](https://www.amd.com/en/blogs/2025/kria-kv260-vision-ai-starter-kit-refresh.html), [Tang Mega 138K Pro](https://en.wiki.sipeed.com/hardware/en/tang/tang-mega-138k/mega-138k-pro.html), [Tang Mega 138K Dock](https://www.cnx-software.com/2024/06/28/sipeed-tang-mega-138k-dock-is-a-lower-cost-gowin-gw5ast-fpga-risc-v-development-board/), [Atum A3 Nano](https://www.cnx-software.com/2025/05/30/atum-a3-nano-development-board-combines-agilex-3-fpga-and-usb-blaster-iii-programmer/), [PYNQ-Z2](https://www.dfrobot.com/product-1838.html), [Genesys 2](https://www.digikey.in/en/product-highlight/d/digilent/genesys-2-kintex-7-fpga-development-board), [ALINX AX7202](https://botland.store/fpga-boards-and-kits/29031-ax7202-fpga-development-board-amd-artix-7-xc7a200t-5904422389024.html).
 
-## Velocidad esperada
+## Expected speed
 
-El die gasta 11 103 ciclos por token generado con el modelo de juguete (medido en su microprograma, en la última posición del contexto); con el firmware, unos 12 000-13 000.
+The die spends 11,103 cycles per generated token with the toy model (measured on its microprogram, at the last position of the context); with the firmware, about 12,000-13,000.
 
-### Reloj medido colocando y rutando
+### Clock measured after place and route
 
-Con OSS CAD Suite (Yosys y nextpnr) el chip de juguete se coloca y se ruta en una Lattice ECP5-85F (encapsulado CABGA756, que tiene pines para todos sus puertos):
+With OSS CAD Suite (Yosys and nextpnr), the toy chip is placed and routed on a Lattice ECP5-85F (CABGA756 package, which has pins for all its ports):
 
-| Versión del Verilog para FPGA | Frecuencia máxima | LUT4 | Bloques de memoria | Multiplicadores |
+| Version of the Verilog for FPGA | Maximum frequency | LUT4 | Memory blocks | Multipliers |
 |---|---|---|---|---|
-| Productos en DSP, el resto en puertas | 15,4 MHz (estimada tras colocar) | 45 391 | 190 DP16KD | 89 |
-| Además, los sumadores como sumas (cadenas de acarreo) y el microcódigo con diccionario | 18,2 MHz | 44 748 | 142 DP16KD | 89 |
-| Además, el multiplicador del muestreo en un bloque DSP | 20,4 MHz | 43 084 | 142 DP16KD | 91 |
-| Además, escala y sesgo en dos ciclos (`--factor-steps 2`) | 22,1 MHz | 46 699 | — | 59 |
-| Además, las órdenes de la CPU llegan al die desde registros | 26,5 MHz | 48 501 | 142 DP16KD | 59 |
-| Además, la tabla de registros en memoria distribuida y las sumas de la dirección vectorial en cadenas de acarreo | 32,1 MHz | 28 610 | 142 DP16KD | 59 |
-| Para una placa sola, con registros, tablas de función y memoria de la CPU a medida | 30,7 MHz | 18 486 | 126 DP16KD | 59 |
-| Además, las sumas y comparaciones de la unidad de muestreo en cadenas de acarreo | **35,4 MHz** | 18 440 | 126 DP16KD | 59 |
-| Además, registros compartidos entre búferes que no viven a la vez | 34,5 MHz | 17 872 | 125 DP16KD | 59 |
+| Products in DSP, the rest in gates | 15.4 MHz (estimated after placement) | 45,391 | 190 DP16KD | 89 |
+| Also, adders as sums (carry chains) and the microcode with a dictionary | 18.2 MHz | 44,748 | 142 DP16KD | 89 |
+| Also, the sampler's multiplier in a DSP block | 20.4 MHz | 43,084 | 142 DP16KD | 91 |
+| Also, scale and bias in two cycles (`--factor-steps 2`) | 22.1 MHz | 46,699 | — | 59 |
+| Also, the CPU's commands reach the die from registers | 26.5 MHz | 48,501 | 142 DP16KD | 59 |
+| Also, the register table in distributed memory and the vector address sums in carry chains | 32.1 MHz | 28,610 | 142 DP16KD | 59 |
+| For a single board, with registers, function tables and CPU memory fitted | 30.7 MHz | 18,486 | 126 DP16KD | 59 |
+| Also, the sampling unit's sums and comparisons in carry chains | **35.4 MHz** | 18,440 | 126 DP16KD | 59 |
+| Also, registers shared between buffers that are never alive at once | 34.5 MHz | 17,872 | 125 DP16KD | 59 |
 
-El camino crítico era la unidad de muestreo: un multiplicador de desplazamiento y suma de 16 filas, en un ciclo, que alimentaba la dirección de la tabla exponencial. Después pasó a las celdas del die: lectura del sesgo, producto por la escala (repartido en varios bloques DSP encadenados) y acumulador en un mismo ciclo, 49 ns. Con escala y sesgo en dos ciclos, el factor sale de un registro y cada ciclo multiplica la mitad de sus bits: el die gasta 11 172 ciclos por token en vez de 11 103 (un 0,6 % más) y el reloj sube a 22,1 MHz, así que los diseños para FPGA lo usan por defecto. Después fue el bus de la CPU al die: una escritura de la CPU se decodificaba, arrancaba el die y llevaba una dirección a su memoria vectorial en el mismo ciclo. Con las órdenes registradas, el reloj sube a 26,5 MHz. Después fue la dirección de la memoria vectorial: la palabra de microcódigo recién leída elegía una entrada de la tabla de registros entre 512, la desplazaba y sumaba dos veces, puerta a puerta, en el mismo ciclo, 38 ns con 27 en rutado. Con la tabla en memoria distribuida y las sumas en cadenas de acarreo, el reloj sube a 32,1 MHz con la mitad de lógica. El camino crítico pasó entonces al bucle del secuenciador: la palabra recién leída compara su cuenta de repeticiones, y eso elige la dirección de la siguiente en el diccionario, 31 ns con 21 en rutado. Adelantar la suma del PC no lo mejora (30,5 MHz, dentro del ruido de la colocación). Con el chip para una placa sola volvió a ser la unidad de muestreo, 32,6 ns: la resta que da la diferencia de logits iba puerta a puerta y la herramienta la convertía en una cadena de 16 LUT antes del multiplicador. Con las sumas de la unidad de muestreo como sumas, en cadenas de acarreo, el reloj sube a 35,4 MHz, con los mismos ciclos. Ahora manda la celda: escala por el producto en dos bloques DSP encadenados, unos 28 ns con 18 en rutado.
+The critical path was the sampling unit: a 16-row shift-and-add multiplier, in one cycle, feeding the address of the exponential table. Then it moved to the die's cells: reading the bias, the product by the scale (split across several chained DSP blocks) and the accumulator in the same cycle, 49 ns. With scale and bias in two cycles, the factor comes from a register and each cycle multiplies half of its bits: the die spends 11,172 cycles per token instead of 11,103 (0.6 % more) and the clock rises to 22.1 MHz, so designs for FPGA use it by default. Next was the bus from the CPU to the die: a CPU write was decoded, started the die and took an address to its vector memory in the same cycle. With registered commands, the clock rises to 26.5 MHz. Next was the vector memory address: the microcode word just read chose an entry of the register table out of 512, shifted it and added twice, gate by gate, in the same cycle, 38 ns with 27 in routing. With the table in distributed memory and the sums in carry chains, the clock rises to 32.1 MHz with half the logic. The critical path then moved to the sequencer's loop: the word just read compares its repeat count, and that chooses the address of the next one in the dictionary, 31 ns with 21 in routing. Computing the PC's sum earlier does not improve it (30.5 MHz, within placement noise). With the single-board chip it was the sampling unit again, 32.6 ns: the subtraction giving the logit difference went gate by gate and the tool turned it into a chain of 16 LUTs before the multiplier. With the sampling unit's sums as sums, in carry chains, the clock rises to 35.4 MHz, with the same cycles. Now the cell rules: scale times product in two chained DSP blocks, about 28 ns with 18 in routing.
 
-En el secuenciador, medido en puertas, el camino más largo hasta la dirección de la siguiente palabra no es la cuenta de repeticiones sino el registro de índice: elegirlo, sumarle el paso y compararlo con el límite deciden si se salta. Acortarlo sin cambiar un solo ciclo pide leer el diccionario y el índice por dos puertos a la vez, es decir, duplicar esas memorias, justo lo que falta en las FPGA pequeñas; la otra vía es leer la palabra un ciclo antes con un ciclo de retraso en los saltos, lo que cambia el compilador, el modelo de ciclos y todas las pruebas que cuentan ciclos. Es la familia más lenta de las del catálogo; en una Xilinx serie 7 o UltraScale+ el mismo circuito debería ir bastante más rápido.
+In the sequencer, measured in gates, the longest path to the address of the next word is not the repeat count but the index register: choosing it, adding the step and comparing it with the limit decide whether to jump. Shortening it without changing a single cycle needs reading the dictionary and the index through two ports at once, that is, duplicating those memories, which is just what small FPGAs lack; the other way is reading the word one cycle earlier with a one-cycle delay on jumps, which changes the compiler, the cycle model and every test that counts cycles. This is the slowest family in the catalogue; on a Xilinx 7 series or UltraScale+ the same circuit should run quite a bit faster.
 
-Con 35,4 MHz, el modelo de juguete daría unos 2 700-3 000 tok/s, sin valor práctico más allá de validar que el chip funciona.
+At 35.4 MHz, the toy model would give about 2,700-3,000 tok/s, of no practical value beyond showing the chip works.
 
-### Con un modelo que escribe cuentos: stories260K
+### With a model that writes stories: stories260K
 
-[stories260K](https://huggingface.co/karpathy/tinyllamas) es un Llama de 260 000 parámetros (5 capas, ancho 64, vocabulario de 512) que escribe cuentos cortos en inglés. `tools/convert/llama2c.py` convierte su `.bin` y su tokenizador a una carpeta de Hugging Face, en float32 o con `--affine 8` en el formato afín de MLX (8 bits, escala y sesgo por grupo), que es el que lleva el chip.
+[stories260K](https://huggingface.co/karpathy/tinyllamas) is a Llama of 260,000 parameters (5 layers, width 64, a vocabulary of 512) that writes short stories in English. `tools/convert/llama2c.py` converts its `.bin` and its tokenizer to a Hugging Face folder, in float32 or, with `--affine 8`, in MLX's affine format (8 bits, scale and bias per group), which is the one the chip uses.
 
-`cargo run --release -p sim --example fpga -- chip.v --dsp --model ~/.llm2chip/models/stories260K-q8 --context 64 --cells C --lanes L --memories` dimensiona el chip para ese modelo, cuenta los ciclos del microprograma en la última posición del contexto y desglosa la memoria:
+`cargo run --release -p sim --example fpga -- chip.v --dsp --model ~/.llm2chip/models/stories260K-q8 --context 64 --cells C --lanes L --memories` sizes the chip for that model, counts the microprogram's cycles at the last position of the context and breaks down the memory:
 
-| Celdas × carriles | Ciclos por token | tok/s a 25-50 MHz | Memoria |
+| Cells × lanes | Cycles per token | tok/s at 25-50 MHz | Memory |
 |---|---|---|---|
-| 8 × 1 | 211 500 | 120-240 | 4,63 Mbit |
-| 8 × 4 | 104 800 | 240-480 | 5,62 Mbit |
-| 16 × 4 | 87 500 | 290-570 | 5,62 Mbit |
-| 32 × 8 | 52 700 | 470-950 | 6,47 Mbit |
+| 8 × 1 | 211,500 | 120-240 | 4.63 Mbit |
+| 8 × 4 | 104,800 | 240-480 | 5.62 Mbit |
+| 16 × 4 | 87,500 | 290-570 | 5.62 Mbit |
+| 32 × 8 | 52,700 | 470-950 | 6.47 Mbit |
 
-Las variantes de 8 × 1, 8 × 4 y 16 × 4 caben en los 6,1 Mbit de la Tang Mega 138K; todas caben en una XC7A200T (13,1 Mbit) y en la Kria KV260 (23,1 Mbit). Con más carriles crece sobre todo la tabla de funciones, una por carril.
+The 8 × 1, 8 × 4 and 16 × 4 variants fit in the Tang Mega 138K's 6.1 Mbit; all of them fit in an XC7A200T (13.1 Mbit) and in the Kria KV260 (23.1 Mbit). With more lanes it is mostly the function table that grows, one per lane.
 
-### Optimizaciones de memoria
+### Memory optimizations
 
-Antes de ellas, la variante de 8 × 1 necesitaba unos 10,2 Mbit. Ninguna cambia un solo ciclo, y las pruebas en puertas comprueban que el chip escribe lo mismo, en los mismos ciclos, que el simulador de instrucciones.
+Before them, the 8 × 1 variant needed about 10.2 Mbit. None changes a single cycle, and the tests in gates check the chip writes the same, in the same cycles, as the instruction-level simulator.
 
-| Cambio | Ahorro en 8 × 1 |
+| Change | Saving on 8 × 1 |
 |---|---|
-| **El embedding se queda en la imagen.** La tabla no ocupa la memoria vectorial: antes de cada token, el firmware trae su fila con el mismo cargador del arranque y la deja en un registro de una fila. La memoria vectorial pasa de 2^16 a 2^15 palabras. | ~1 Mbit |
-| **Memoria ancha a medida.** Las sumas de las celdas solo necesitan tantas entradas como filas tiene una pasada o una suma, no tantas como un registro: 2^9 entradas en vez de 2^15. | 1,7 Mbit |
-| **Tablas de función justas.** El chip solo lleva las tablas hasta la función más alta que usa su microprograma: un Llama usa cuatro de las ocho (exponencial, sigmoide, inversa y raíz inversa). | 0,26 Mbit por carril |
-| **Memoria de la CPU a medida.** Los datos del firmware, su pila y la descripción del chip caben en 32 KB; antes eran 64 KB. Con `--tokenizer DIR/tokenizer.json` la CPU tokeniza en el chip y se le suman sus tablas (con stories260K, 128 KB en total). | 0,26 Mbit |
-| **Microcódigo con diccionario.** De 9 813 palabras solo 2 018 son distintas, porque cada capa repite casi el mismo código. Cada palabra distinta se guarda una vez y, por cada PC, un índice que dice dónde están la siguiente palabra y el destino de su salto, así que el diccionario se lee en el mismo ciclo que una memoria normal y no se pierde ninguno. | 2,1 Mbit |
+| **The embedding stays in the image.** The table does not take vector memory: before each token, the firmware brings its row with the same loader used at boot and leaves it in a one-row register. The vector memory goes from 2^16 to 2^15 words. | ~1 Mbit |
+| **A wide memory sized to fit.** The cells' sums only need as many entries as a pass or a sum has rows, not as many as a register: 2^9 entries instead of 2^15. | 1.7 Mbit |
+| **Just the function tables needed.** The chip only carries the tables up to the highest function its microprogram uses: a Llama uses four of the eight (exponential, sigmoid, inverse and inverse square root). | 0.26 Mbit per lane |
+| **CPU memory sized to fit.** The firmware's data, its stack and the chip's description fit in 32 KB; it was 64 KB. With `--tokenizer DIR/tokenizer.json` the CPU tokenizes on the chip and its tables are added (with stories260K, 128 KB in all). | 0.26 Mbit |
+| **Microcode with a dictionary.** Of 9,813 words only 2,018 are distinct, because each layer repeats almost the same code. Each distinct word is stored once and, for each PC, an index says where the next word and its jump target are, so the dictionary is read in the same cycle as a plain memory and none is lost. | 2.1 Mbit |
 
-`--table-inside` y `--no-dictionary` desactivan la del embedding y la del diccionario para comparar.
+`--table-inside` and `--no-dictionary` turn off the embedding and the dictionary optimizations, for comparison.
 
-### Lógica: registros a medida
+### Logic: registers sized to fit
 
-stories260K usaba 464 registros, uno por búfer, uno por matriz y una reserva fija de 320 de trabajo. Ahora usa 118, sin cambiar un solo ciclo:
+stories260K used 464 registers, one per buffer, one per matrix and a fixed reserve of 320 working ones. Now it uses 118, without changing a single cycle:
 
-- Los registros de trabajo van al final y el die solo tiene los que alcanzan sus rutinas.
-- Dos búferes que nunca viven a la vez dentro de un token comparten registro. Cada uno vive desde que se escribe hasta su última lectura; los productos encadenados escriben todas sus salidas en el primero, así que sus salidas viven desde ahí. Los logits, el estado final, lo que tocan las cabezas MTP y de imagen y lo que se lee antes de escribirse (lo que pasa de un token al siguiente) tienen registro propio.
-- Las matrices de las celdas solo guardan su exponente en el registro: las que tienen el mismo comparten uno.
+- The working registers go at the end and the die only has those its routines reach.
+- Two buffers that are never alive at the same time within a token share a register. Each lives from when it is written until its last read; chained products write all their outputs into the first, so their outputs live from there. The logits, the final state, whatever the MTP and image heads touch, and whatever is read before being written (what passes from one token to the next) get their own register.
+- The cells' matrices only keep their exponent in the register: those with the same one share it.
 
-La tabla de registros pasa de 2^9 a 2^7 entradas y los campos de registro del microcódigo se estrechan: unos 37 000 equivalentes NAND2 y 0,2 Mbit de microcódigo menos en stories260K (de 558 000 a 521 000); en el modelo de prueba, de 2^9 a 2^8. Si un microprograma llegara a un registro que el die no tiene, el ensamblado falla con un error en vez de generar un chip que calcula mal. El motor exacto, el del laboratorio numérico, sigue con un registro por búfer para poder leerlos todos al acabar un token.
+The register table goes from 2^9 to 2^7 entries and the microcode's register fields narrow: about 37,000 NAND2 equivalents and 0.2 Mbit of microcode less in stories260K (from 558,000 to 521,000); in the test model, from 2^9 to 2^8. If a microprogram ever reached a register the die does not have, assembly fails with an error instead of generating a chip that computes wrongly. The exact engine, the one in the numerics lab, keeps one register per buffer so it can read them all at the end of a token.
 
-Todo esto es a medida del microprograma, que cambia con el modelo: el chip para FPGA se genera para los modelos que va a ejecutar, como ya lo eran sus operaciones, los campos de control y la memoria vectorial. Una imagen para varios chips se dimensiona con lo que usa cualquiera de ellos, en cualquiera de los repartos que guarda.
+All of this follows the microprogram, which changes with the model: the chip for FPGA is generated for the models it will run, as its operations, control fields and vector memory already were. An image for several chips is sized for what any of them uses, in any of the splits it holds.
 
-### Un chip para varios modelos
+### One chip for several models
 
-El microcódigo, el diccionario, la tabla de registros, las tablas de función y los pesos llegan con la imagen al arrancar, así que un mismo chip puede ejecutar varios modelos si se construye para todos: con `--model` repetido, el ejemplo `fpga` junta la lógica que usa cualquiera de sus microprogramas y da a cada memoria lo que necesita el que más. Cada modelo arranca después desde su propia imagen, con los mismos ciclos que en un chip solo suyo. Con stories260K en coma flotante y en 8 bits, el chip para los dos es el del primero (518 000 NAND2 y 6,73 Mbit), frente a 478 000 y 4,63 Mbit del de 8 bits solo. La prueba `one_chip_runs_either_of_two_models_from_its_image` ejecuta en puertas dos versiones del modelo de prueba, con códigos de 4 y de 2 bits, en el mismo chip.
+The microcode, the dictionary, the register table, the function tables and the weights arrive with the image at boot, so the same chip can run several models if it is built for all of them: with `--model` repeated, the `fpga` example gathers the logic any of their microprograms uses and gives each memory what the largest needs. Each model then boots from its own image, with the same cycles as on a chip of its own. With stories260K in floating point and in 8 bits, the chip for both is the first one's (518,000 NAND2 and 6.73 Mbit), against 478,000 and 4.63 Mbit for the 8-bit one alone. The test `one_chip_runs_either_of_two_models_from_its_image` runs in gates two versions of the test model, with 4-bit and 2-bit codes, on the same chip.
 
-## Pasos para la prueba
+## Steps for the test
 
-1. Generar el Verilog con el ejemplo `fpga` y la imagen con el mismo die.
-2. Sustituir las memorias genéricas (`llm2chip_sram`, `llm2chip_ram2p`, `llm2chip_rom`) por bloques de la FPGA; Yosys ya las infiere.
-3. Conectar el puerto de host a una UART (por USB) y la petición de imagen a la flash de la placa o a la propia UART.
-4. Enviar un prompt y comparar la salida con la simulación: deben coincidir byte a byte.
+1. Generate the Verilog with the `fpga` example and the image with the same die.
+2. Replace the generic memories (`llm2chip_sram`, `llm2chip_ram2p`, `llm2chip_rom`) with the FPGA's blocks; Yosys already infers them.
+3. Connect the host port to a UART (over USB) and the image request to the board's flash or to the UART itself.
+4. Send a prompt and compare the output with the simulation: they must match byte for byte.
 
-Fuentes de precios y especificaciones: [Tang Mega 138K Pro](https://en.wiki.sipeed.com/hardware/en/tang/tang-mega-138k/mega-138k-pro.html), [CNX sobre la Tang Mega](https://cnx-software.com/2023/10/01/sipeed-tang-mega-138k-pro-dock-features-gowin-gw5ast-fpga-risc-v-soc), [Tang Primer 25K](https://cnx-software.com/?p=123307), [ALINX AX7202](https://boards.fpgadeveloper.com/boards/AX7202), [Nexys Video](https://www.digikey.co.uk/en/products/detail/digilent-inc/410-316/5456481), [Arty A7](https://pcbsync.com/xilinx-fpga-buying-guide/). Los precios cambian según tienda y región: son orientativos.
+Sources for prices and specifications: [Tang Mega 138K Pro](https://en.wiki.sipeed.com/hardware/en/tang/tang-mega-138k/mega-138k-pro.html), [CNX on the Tang Mega](https://cnx-software.com/2023/10/01/sipeed-tang-mega-138k-pro-dock-features-gowin-gw5ast-fpga-risc-v-soc), [Tang Primer 25K](https://cnx-software.com/?p=123307), [ALINX AX7202](https://boards.fpgadeveloper.com/boards/AX7202), [Nexys Video](https://www.digikey.co.uk/en/products/detail/digilent-inc/410-316/5456481), [Arty A7](https://pcbsync.com/xilinx-fpga-buying-guide/). Prices vary by shop and region: they are only a guide.

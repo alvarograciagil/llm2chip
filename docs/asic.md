@@ -1,48 +1,48 @@
-# Layout de chip con OpenROAD
+# Chip layout with OpenROAD
 
-El Verilog que genera llm2chip se puede llevar hasta un layout fabricable (GDSII) con herramientas abiertas: síntesis con Yosys y floorplan, colocación, árbol de reloj, rutado y comprobaciones con OpenROAD, sobre PDK abiertos que se fabrican de verdad en lanzaderas multiproyecto.
+The Verilog that llm2chip generates can be taken all the way to a manufacturable layout (GDSII) with open tools: synthesis with Yosys, and floorplan, placement, clock tree, routing and checks with OpenROAD, on open PDKs that are really manufactured on multi-project shuttles.
 
-| PDK | Qué es | Se fabrica |
+| PDK | What it is | Manufactured |
 |---|---|---|
-| SkyWater 130 (`sky130hd`) | 130 nm, 5 metales | Sí: lanzaderas abiertas como las de Efabless y Tiny Tapeout |
-| GlobalFoundries 180 (`gf180`) | 180 nm, 5 V | Sí, en lanzaderas abiertas |
-| IHP SG13G2 (`ihp-sg13g2`) | 130 nm BiCMOS | Sí, en las lanzaderas de IHP |
-| ASAP7 (`asap7`) | 7 nm predictivo | No: sirve para ver cómo sería en un nodo avanzado |
+| SkyWater 130 (`sky130hd`) | 130 nm, 5 metal layers | Yes: open shuttles such as Tiny Tapeout (and formerly Efabless) |
+| GlobalFoundries 180 (`gf180`) | 180 nm, 5 V | Yes, on open shuttles |
+| IHP SG13G2 (`ihp-sg13g2`) | 130 nm BiCMOS | Yes, on IHP's shuttles |
+| ASAP7 (`asap7`) | 7 nm predictive | No: it shows what the design would look like in an advanced node |
 
-Los nodos N6, N5 y N3 no tienen PDK abierto: el estimador los modela, pero no se puede sacar su layout.
+The N6, N5 and N3 nodes have no open PDK: the estimator models them, but no layout can be made for them.
 
-## Cómo se lanza
+## How to run it
 
-Hace falta Docker con la imagen `openroad/orfs` (OpenROAD-flow-scripts, unos 6,5 GB; en un Mac con Apple Silicon corre emulada, más despacio).
+You need Docker with the `openroad/orfs` image (OpenROAD-flow-scripts, about 6.5 GB; on an Apple Silicon Mac it runs emulated, more slowly).
 
 ```bash
-tools/asic/flow.sh diseño.v MODULO sky130hd 10
+tools/asic/flow.sh design.v MODULE sky130hd 10
 ```
 
-Deja en `~/.llm2chip/asic/MODULO-plataforma/` el GDS, las imágenes del layout y `resumen.json` con el área, la frecuencia máxima, la potencia y las violaciones de reglas.
+It leaves in `~/.llm2chip/asic/MODULE-platform/` the GDS, images of the layout and `summary.json` with the area, maximum frequency, power and rule violations.
 
-## Primera medida: la celda de cálculo
+## First measurement: the compute cell
 
-La celda que repite el die miles de veces (producto de un peso afín de 8 bits por una activación de 16, multiplicador Wallace, escala, sesgo y acumulador), exportada con `cargo run -p netlist --example export -- affine 8 0 wallace`:
+The cell the die repeats thousands of times (an 8-bit affine weight times a 16-bit activation, Wallace multiplier, scale, bias and accumulator), exported with `cargo run -p netlist --example export -- affine 8 0 wallace`:
 
-| PDK | Área de celdas | Frecuencia máxima | Potencia | Violaciones |
+| PDK | Cell area | Maximum frequency | Power | Violations |
 |---|---|---|---|---|
-| SkyWater 130 | 8 911 µm² (1 110 celdas) | 119 MHz | 1,19 mW a 100 MHz | 0 |
-| GF180 | 41 614 µm² (1 101 celdas) | 125 MHz | 26,6 mW a 67 MHz | 0 |
+| SkyWater 130 | 8,911 µm² (1,110 cells) | 119 MHz | 1.19 mW at 100 MHz | 0 |
+| GF180 | 41,614 µm² (1,101 cells) | 125 MHz | 26.6 mW at 67 MHz | 0 |
 
-## Calibración del estimador
+## Calibrating the estimator
 
-`tools/asic/calibrate.sh` hace el layout de cinco celdas distintas (las de `tools/asic/cells.json`: afín de 8 bits con Wallace sin segmentar y segmentado, con Booth segmentado, entera de 4 bits con multiplicador en array, y coma flotante de 8 bits) en los tres procesos abiertos, dos a la vez, y guarda lo medido en `tests/golden/asic.json`.
+`tools/asic/calibrate.sh` lays out five different cells (those in `tools/asic/cells.json`: 8-bit affine with an unpipelined and a pipelined Wallace multiplier and with a pipelined Booth multiplier, 4-bit integer with an array multiplier, and 8-bit floating point) on the three open processes, two at a time, and stores what it measures in `tests/golden/asic.json`.
 
-Cómo se mide:
+How it measures:
 
-- Cada celda lleva 4 palabras de pesos en biestables, sin ECC.
-- El reloj objetivo es fijo por proceso (4 ns en SkyWater 130, 6 ns en GF180, 500 ps en ASAP7, cuyas bibliotecas cuentan picosegundos), cerca de lo que el proceso da de sí, para que OpenROAD optimice la temporización sin inflar el área.
-- La frecuencia máxima es la que OpenROAD calcula tras rutar, con el margen que sobra o falta.
+- Each cell holds 4 words of weights in flip-flops, without ECC.
+- The target clock is fixed per process (4 ns on SkyWater 130, 6 ns on GF180, 500 ps on ASAP7, whose libraries count picoseconds), close to what the process can do, so OpenROAD optimizes timing without inflating the area.
+- The maximum frequency is the one OpenROAD computes after routing, with the slack left over or missing.
 
-`cargo run -p arch --example calibrate` compara cada medida con lo que espera el estimador de esa misma celda, contando sus 4 palabras como biestables con su multiplexor, y ajusta por mínimos cuadrados el retardo de un sumador completo y el del biestable de cada proceso:
+`cargo run -p arch --example calibrate` compares each measurement with what the estimator expects for that same cell, counting its 4 words as flip-flops with their multiplexer, and fits by least squares the delay of a full adder and of a flip-flop for each process:
 
-| Celda | Proceso | Área medida µm² | Estimada | Relación | Reloj medido MHz | Estimado | Relación |
+| Cell | Process | Measured area µm² | Estimated | Ratio | Measured clock MHz | Estimated | Ratio |
 |---|---|---|---|---|---|---|---|
 | affine8-wallace-1+1 | sky130hd | 11830 | 11048 | 0.93 | 149 | 141 | 0.95 |
 | affine8-wallace-1+1 | gf180 | 49127 | 40586 | 0.83 | 145 | 130 | 0.90 |
@@ -60,91 +60,91 @@ Cómo se mide:
 | float8-wallace-2+1 | gf180 | 71537 | 44567 | 0.62 | 152 | 166 | 1.10 |
 | float8-wallace-2+1 | asap7 | 212 | 169 | 0.79 | 1560 | 1746 | 1.12 |
 
-| Proceso | Sumador completo | Biestable | Tope de reloj | Áreas de puerta |
+| Process | Full adder | Flip-flop | Clock ceiling | Gate areas |
 |---|---|---|---|---|
-| SkyWater 130 | 0,41 ns | 0,51 ns | 400 MHz | `sky130_fd_sc_hd` |
-| GF180 | 0,38 ns | 1,58 ns | 300 MHz | `gf180mcu_fd_sc_mcu9t5v0`, la de 9 pistas que usa OpenROAD (antes se tomaba otra, con la mitad de área) |
-| ASAP7 | 0,038 ns | 0,13 ns | 3 GHz | `asap7sc7p5t` |
+| SkyWater 130 | 0.41 ns | 0.51 ns | 400 MHz | `sky130_fd_sc_hd` |
+| GF180 | 0.38 ns | 1.58 ns | 300 MHz | `gf180mcu_fd_sc_mcu9t5v0`, the 9-track library OpenROAD uses (another one, with half the area, was used before) |
+| ASAP7 | 0.038 ns | 0.13 ns | 3 GHz | `asap7sc7p5t` |
 
-El reloj queda a menos del 12 % en las quince celdas. El área queda entre el 62 % y el 112 % de la medida; la coma flotante es la que más se aleja, porque el factor de síntesis de Yosys se midió sobre multiplicadores enteros. El test `crates/arch/tests/asic.rs` comprueba esos márgenes con las medidas guardadas, sin Docker.
+The clock is within 12 % on all fifteen cells. The area is between 62 % and 112 % of the measurement; floating point strays the most, because Yosys' synthesis factor was measured on integer multipliers. The test `crates/arch/tests/asic.rs` checks those margins against the stored measurements, without Docker.
 
-Las celdas cuyo reloj objetivo no se alcanza terminan con unas decenas de violaciones de reglas en el rutado detallado; las que lo alcanzan, con ninguna. El área y la frecuencia no cambian por ello.
+Cells whose target clock is not met end up with a few dozen rule violations in detailed routing; those that meet it, with none. Area and frequency do not change because of it.
 
-## La corrección de errores en el camino de lectura
+## Error correction on the read path
 
-Con SRAM, cada celda guarda sus pesos en palabras de unos 64 bits con bits de comprobación, y corrige el peso que lee. El estimador medía el reloj de la celda con una memoria de una sola palabra, sin corrector, y el layout también. Con el corrector, el camino crítico pasaba de unos 8 retardos de sumador completo a 35: una celda de 16 bits en N6 no superaba 0,62 GHz, frente a los más de 2 GHz estimados.
+With SRAM, each cell keeps its weights in words of about 64 bits with check bits, and corrects the weight it reads. The estimator measured the cell's clock with a single-word memory, without a corrector, and so did the layout. With the corrector, the critical path went from about 8 full-adder delays to 35: a 16-bit cell in N6 could not go above 0.62 GHz, against the more than 2 GHz estimated.
 
-Tres cambios lo arreglan:
+Three changes fix it:
 
-- Las paridades, el recuento de bits del síndrome y la comprobación de carril eran cadenas lineales de puertas; ahora son árboles equilibrados, con la misma lógica.
-- El peso corregido se registra antes del multiplicador, y la activación con él: la corrección tiene su propio ciclo, y la latencia de la celda sube en uno. Sin ese registro, la celda sería entre un 35 y un 55 % más lenta.
-- El estimador mide el reloj, y el layout se hace, con la memoria más pequeña que conserva la corrección de la celda real (`timed_cell`). Por encima de ese tamaño el camino ya no crece.
+- The parities, the bit count of the syndrome and the lane check were linear chains of gates; now they are balanced trees, with the same logic.
+- The corrected weight is registered before the multiplier, and the activation with it: correction gets its own cycle, and the cell's latency goes up by one. Without that register, the cell would be between 35 and 55 % slower.
+- The estimator measures the clock, and the layout is made, with the smallest memory that keeps the real cell's correction (`timed_cell`). Above that size the path no longer grows.
 
-Con todo ello, el camino de la celda con corrección vuelve a 7,4-8,3 retardos, lo mismo que sin ella.
+With all of it, the path of the cell with correction is back to 7.4-8.3 delays, the same as without it.
 
-## Memorias
+## Memories
 
-Las memorias son macros de SRAM, y en los procesos abiertos solo existen pequeñas. Las de SkyWater 130 que trae OpenROAD (`sky130_sram_1rw1r_*`, de OpenRAM) llegan a 32 Kbit y ocupan 35,5 µm² por bit en 5 Kbit, 25,6 en 16 Kbit y 22,0 en 32 Kbit; el modelo las reproduce con 13,17 µm² por bit y periferia 3,79, y una memoria mayor se construye con varias de 32 Kbit. GF180 usa las de GlobalFoundries, de 4 Kbit y unos 51 µm² por bit. Antes el modelo suponía macros de cualquier tamaño, con densidades 5 veces mejores que las reales.
+Memories are SRAM macros, and on the open processes only small ones exist. The SkyWater 130 ones that come with OpenROAD (`sky130_sram_1rw1r_*`, from OpenRAM) reach 32 Kbit and take 35.5 µm² per bit at 5 Kbit, 25.6 at 16 Kbit and 22.0 at 32 Kbit; the model reproduces them with 13.17 µm² per bit and a periphery of 3.79, and a larger memory is built from several 32 Kbit ones. GF180 uses GlobalFoundries' own, of 4 Kbit and about 51 µm² per bit. Before, the model assumed macros of any size, with densities 5 times better than the real ones.
 
-## Una tesela con una macro SRAM real
+## A tile with a real SRAM macro
 
-`tools/asic/tile.sh` hace el layout de una celda con su memoria de pesos en una macro SRAM real de SkyWater 130, no en biestables: la celda afín de 8 bits con Wallace en 3 + 2 etapas guarda 4096 pesos (32 Kbit) en una macro `sky130_sram_1rw1r_128x256_8` de OpenRAM. Cada palabra de 128 bits de la macro lleva 16 pesos: los bits altos de la dirección eligen la palabra, los bajos, registrados un ciclo, el peso, y una escritura solo toca su byte con la máscara de la macro.
+`tools/asic/tile.sh` lays out a cell with its weight memory in a real SkyWater 130 SRAM macro, not in flip-flops: the 8-bit affine cell with a Wallace multiplier in 3 + 2 stages keeps 4096 weights (32 Kbit) in an OpenRAM `sky130_sram_1rw1r_128x256_8` macro. Each 128-bit word of the macro holds 16 weights: the high address bits choose the word, the low ones, registered for a cycle, the weight, and a write only touches its byte through the macro's mask.
 
-| Medida | Valor |
+| Measurement | Value |
 |---|---|
-| Macro | 0,722 mm² (el estimador da lo mismo, dentro del 5 %) |
-| Lógica | 0,031 mm² |
-| Die | 1,84 mm² |
-| Reloj máximo | 211 MHz |
-| Potencia | 38,7 mW |
-| Violaciones tras rutar | 0 |
+| Macro | 0.722 mm² (the estimator gives the same, within 5 %) |
+| Logic | 0.031 mm² |
+| Die | 1.84 mm² |
+| Maximum clock | 211 MHz |
+| Power | 38.7 mW |
+| Violations after routing | 0 |
 
-El reloj lo pone la macro, no la lógica: entrega el dato en el flanco de bajada, así que la lectura tiene medio ciclo, y la celda sola llegaba a 367 MHz. La tecnología `sky130` lleva ahora ese periodo mínimo (`sram_min_period_ns`, 4,74 ns), y el estimador limita a él el reloj de los diseños con pesos en SRAM.
+The clock is set by the macro, not the logic: it delivers the data on the falling edge, so the read gets half a cycle, and the cell alone reached 367 MHz. The `sky130` technology now carries that minimum period (`sram_min_period_ns`, 4.74 ns), and the estimator limits the clock of designs with weights in SRAM to it.
 
-Para integrarla hicieron falta tres cosas:
+Integrating it took three things:
 
-- Conectar sus pines de alimentación, que OpenRAM llama `vdd` y `gnd`.
-- Cortar las filas de celdas a 10 µm de la macro, para que las vías de sus raíles no caigan sobre la macro.
-- Darle a la macro su propia rejilla de alimentación: bandas de met4 sobre ella, con vías a sus miles de islas de alimentación en met3 y a met5, ceñidas a su contorno.
+- Connecting its power pins, which OpenRAM calls `vdd` and `gnd`.
+- Cutting the rows of cells 10 µm away from the macro, so the vias of their rails do not land on the macro.
+- Giving the macro its own power grid: met4 stripes over it, with vias to its thousands of met3 power islands and to met5, kept to its outline.
 
-El análisis de la red de alimentación de OpenROAD se deja fuera: el modelo abstracto de esta macro tiene, en dos columnas, rectángulos de `vdd` y de `gnd` solapados en met3 (por ejemplo, `vdd` en y = 109,815-110,305 y `gnd` en 109,875-110,365, en x = 214,22), y el análisis los da por cortocircuitos.
+OpenROAD's power grid analysis is left out: this macro's abstract model has, in two columns, overlapping `vdd` and `gnd` rectangles in met3 (for instance `vdd` at y = 109.815-110.305 and `gnd` at 109.875-110.365, at x = 214.22), and the analysis takes them for shorts.
 
-El DRC de KLayout sobre el GDS final (`make drc`) da 522 617 violaciones:
+KLayout's DRC on the final GDS (`make drc`) gives 522,617 violations:
 
-- 521 993 dentro de las celdas de bit de la macro, que siguen reglas especiales de SRAM que el juego estándar no exceptúa. Una celda sin macro de la calibración da 0.
-- 582 en la celda superior, sobre la macro: espaciados en met1-met4 entre lo que dibuja el flujo (las bandas de met4 de su rejilla, las vías a sus islas de met3 y las conexiones a sus pines) y metal del dibujo de la macro que su modelo abstracto no declara; este dice que met4 está libre.
-- 42 fuera de la macro, en vías de la red de alimentación.
+- 521,993 inside the macro's bit cells, which follow special SRAM rules the standard deck does not exempt. A calibration cell with no macro gives 0.
+- 582 in the top cell, over the macro: met1-met4 spacings between what the flow draws (its grid's met4 stripes, the vias to its met3 islands and the connections to its pins) and metal in the macro's drawing that its abstract model does not declare; the model says met4 is free.
+- 42 outside the macro, on vias of the power network.
 
-El LVS no se pasa: necesita la netlist CDL de la macro, que el flujo no encuentra.
+LVS is not run: it needs the macro's CDL netlist, which the flow does not find.
 
-Así que esta macro, la que trae la imagen de OpenROAD y ningún diseño de ejemplo usa, no sirve para fabricar: su modelo abstracto está incompleto. Las cifras de área y reloj valen como medida, pero un chip real necesitaría las macros de OpenRAM para SkyWater 130 publicadas con anillos de alimentación en met4 y modelos abstractos completos, que habría que descargar aparte, y pasar el DRC y el LVS sobre ellas.
+So this macro, the one that comes with the OpenROAD image and that no example design uses, is not fit for manufacturing: its abstract model is incomplete. Its area and clock figures are valid as measurements, but a real chip would need the OpenRAM macros for SkyWater 130 published with met4 power rings and complete abstract models, downloaded separately, and would have to pass DRC and LVS with them.
 
-## Viabilidad antes del layout
+## Feasibility before the layout
 
-Antes de hacer ningún layout, el inspector dice si el diseño se puede fabricar en el proceso elegido (`arch::feasibility`):
+Before any layout, the inspector says whether the design can be manufactured on the chosen process (`arch::feasibility`):
 
-- **Qué lo impide**, con cifras: cuánto necesita cada die frente a lo que admite el proceso, y los tres bloques que más ocupan; los errores del estimador; y, para el layout, si el proceso tiene PDK abierto y si las memorias que usa el diseño existen en él (solo SRAM).
-- **Cómo hacerlo viable**: prueba cambios de parámetros (repartir en más chips, dimensionar para el modelo, contexto nativo, menos bits de peso o de caché KV, menos multiplicadores o carriles, tablas de función más pequeñas, todo el die del proceso, otro proceso abierto que se fabrique) y solo ofrece los que, estimados de nuevo, pasan la comprobación. Si ninguno basta solo, busca una combinación cambio a cambio, y después otra con el menor número de chips sin aceptar pérdidas grandes de calidad. Cada propuesta indica sus chips, su área, sus tok/s y lo que arriesga.
-- **Qué significa el número de chips**: cuántos encapsulados y placas hacen falta (unos 16 encapsulados por placa para chips grandes, 64 para chips pequeños de lanzadera), el tiempo que cada token pasa en los enlaces, y que los chips son una misma netlist repetida que carga su parte del modelo desde la imagen, así que con pesos en SRAM basta un diseño; solo con pesos grabados en ROM cada die es distinto. Cada chip lleva su CPU, la memoria de la CPU, las tablas del tokenizador y el muestreo, aunque solo el primero los use.
-- **Enlaces de una lanzadera abierta**: cada die llega en su propio encapsulado y solo tiene sus pines de E/S para hablar con los demás. En automático, SkyWater 130 y GF180 usan enlaces por pines (16 pines por sentido a 50 MHz, unos 60 ns por salto), y los tok/s cuentan lo que tarda el vector en cruzarlos.
+- **What stops it,** with figures: how much each die needs against what the process allows, and the three largest blocks; the estimator's errors; and, for the layout, whether the process has an open PDK and whether the memories the design uses exist on it (SRAM only).
+- **How to make it feasible:** it tries parameter changes (splitting across more chips, sizing for the model, the native context, fewer weight or KV cache bits, fewer multipliers or lanes, smaller function tables, the whole die the process allows, another open process that is manufactured) and only offers those that, estimated again, pass the check. If no single change is enough, it looks for a combination change by change, and then for another with the fewest chips without accepting large losses of quality. Each proposal shows its chips, its area, its tok/s and what it risks.
+- **What the number of chips means:** how many packages and boards are needed (about 16 packages per board for large chips, 64 for small shuttle chips), the time each token spends on the links, and that the chips are one netlist repeated that loads its part of the model from the image, so with weights in SRAM one design is enough; only with weights burnt into ROM is each die different. Every chip has its CPU, the CPU's memory, the tokenizer tables and sampling, even though only the first one uses them.
+- **Links on an open shuttle:** each die arrives in its own package and only has its I/O pins to talk to the others. In automatic mode, SkyWater 130 and GF180 use pin links (16 pins per direction at 50 MHz, about 60 ns per hop), and the tok/s count the time the vector takes to cross them.
 
-La búsqueda hace unas cien estimaciones, y tarda menos de dos segundos en nativo: las celdas generadas, sus caminos críticos y su conmutación se guardan, porque se repiten de una estimación a otra.
+The search makes about a hundred estimates and takes under two seconds natively: the generated cells, their critical paths and their switching are cached, because they repeat from one estimate to the next.
 
-Al cambiar de modelo, el diseño se dimensiona para él: sus límites (parámetros, capas, ancho, vocabulario) pasan a ser los del modelo, el contexto no supera el nativo, y los multiplicadores, carriles vectoriales y unidades de función siguen la proporción del diseño por defecto, o la velocidad pedida si la hay.
+When the model changes, the design is sized for it: its limits (parameters, layers, width, vocabulary) become the model's, the context does not exceed the native one, and the multipliers, vector lanes and function units follow the default design's proportion, or the requested speed if there is one.
 
-El botón de layout queda desactivado mientras el diseño no sea viable.
+The layout button stays disabled while the design is not feasible.
 
-Ejemplo: stories260K en SkyWater 130 no cabe en un die de 10 mm² (la memoria de pesos sola ocupa más de 45 mm²). La propuesta con menos chips lo reparte en 42 dies de 10 mm² con contexto de 512 tokens y caché KV de 8 bits.
+Example: stories260K on SkyWater 130 does not fit in a 10 mm² die (the weight memory alone takes more than 45 mm²). The proposal with the fewest chips splits it into 42 dies of 10 mm² with a 512-token context and an 8-bit KV cache.
 
-## Desde la aplicación
+## From the application
 
-Con el destino «Chip propio» en SkyWater 130, GF180 o ASAP7, el inspector tiene el apartado **Layout real de la celda**. «Hacer el layout» toma la celda que el generador eligió para el diseño (codificación, bits, multiplicador y etapas), la pasa por OpenROAD en segundo plano y muestra la imagen del layout con su área, frecuencia máxima, potencia, número de celdas y violaciones de reglas, al lado de lo que estimaba el modelo. El trabajo queda en `~/.llm2chip/asic/`.
+With the "Custom chip" target on SkyWater 130, GF180 or ASAP7, the inspector has a **Real layout of the cell** section. "Make the layout" takes the cell the generator chose for the design (coding, bits, multiplier and stages), runs it through OpenROAD in the background and shows the image of the layout with its area, maximum frequency, power, number of cells and rule violations, next to what the model estimated. The work stays in `~/.llm2chip/asic/`.
 
-«Usar las cifras medidas» guarda en el diseño el área y la frecuencia medidas (`measured_cell`, `measured_cell_um2`, `measured_cell_fmax_ghz`). El estimador las usa en lugar de las suyas solo para esa misma celda en ese mismo proceso: si cambian el circuito o el proceso, vuelve a la estimación. Las memorias, la red de activaciones y el resto del die siguen estimándose.
+"Use the measured figures" stores the measured area and frequency in the design (`measured_cell`, `measured_cell_um2`, `measured_cell_fmax_ghz`). The estimator uses them instead of its own only for that same cell on that same process: if the circuit or the process changes, it goes back to estimating. The memories, the activation network and the rest of the die are still estimated.
 
-La celda que se mide es la que eligió el estimador, con todo lo que cambia sus puertas (codificación, bits, acumulador, multiplicador, etapas, ECC, salto de ceros); solo la profundidad de la memoria se reduce a 4 palabras.
+The cell measured is the one the estimator chose, with everything that changes its gates (coding, bits, accumulator, multiplier, stages, ECC, zero skipping); only the depth of the memory is reduced to 4 words.
 
-## Lo siguiente
+## Next
 
-- El die completo, con sus memorias como macros de SRAM: con las cifras de la tesela, stories260K en SkyWater 130 no cabe en una lanzadera (ver la viabilidad).
-- Afinar el factor de síntesis de la coma flotante.
+- The whole die, with its memories as SRAM macros: with the tile's figures, stories260K on SkyWater 130 does not fit on a shuttle (see feasibility).
+- Refining the synthesis factor for floating point.

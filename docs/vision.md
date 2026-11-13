@@ -1,284 +1,292 @@
-# Imágenes en el chip
+# Images on the chip
 
-Qwen3.5 lee imágenes con un codificador propio (un ViT) que convierte cada imagen en tokens que el modelo de lenguaje lee en lugar de `<|image_pad|>`. Este documento describe ese codificador tal como lo reproduce llm2chip, lo que ya funciona y cómo se llevará al circuito.
+Qwen3.5 reads images with an encoder of its own (a ViT) that turns each image into tokens the language model reads in place of `<|image_pad|>`. This document describes that encoder as llm2chip reproduces it, what already works and how it is taken to the circuit. It also covers the two image models that run on the chip: Janus-Pro, which draws, and Show-o, which draws and retouches.
 
-## El codificador de Qwen3.8-27B
+## The Qwen3.8-27B encoder
 
-Sale de `vision_config` y de `model-vision.safetensors` (pesos en BF16, unos 460 M de parámetros).
+It comes from `vision_config` and `model-vision.safetensors` (BF16 weights, about 460 M parameters).
 
-| Paso | Qué hace | Tamaño en Qwen3.8-27B |
+| Step | What it does | Size in Qwen3.8-27B |
 |---|---|---|
-| Preprocesado | Redimensiona a lados múltiplos de 32 px (entre 256×256 y 16 M de píxeles), normaliza a [−1, 1] y corta parches de 16×16 en dos fotogramas iguales | 1 536 valores por parche |
-| Embedding de parche | Una convolución 3D que equivale a una matriz por parche, con sesgo | 1 536 → 1 152 |
-| Posición aprendida | Una tabla de 48×48 interpolada bilinealmente a la rejilla de la imagen | 1 152 por parche |
-| 27 bloques | LayerNorm, atención bidireccional con RoPE 2D (la mitad de las frecuencias sigue la fila y la otra mitad la columna), LayerNorm y MLP con GELU tanh; todo con sesgos | 16 cabezas de 72 |
-| Fusión | LayerNorm y, por cada 2×2 parches vecinos, 4 608 → 4 608 → 5 120 con GELU | 1 token por 4 parches |
+| Preprocessing | Resizes to sides that are multiples of 32 px (between 256×256 and 16 M pixels), normalizes to [−1, 1] and cuts 16×16 patches in two identical frames | 1,536 values per patch |
+| Patch embedding | A 3D convolution equivalent to one matrix per patch, with a bias | 1,536 → 1,152 |
+| Learned position | A 48×48 table interpolated bilinearly to the image's grid | 1,152 per patch |
+| 27 blocks | LayerNorm, bidirectional attention with 2D RoPE (half the frequencies follow the row and the other half the column), LayerNorm and an MLP with tanh GELU; all with biases | 16 heads of 72 |
+| Merger | LayerNorm and, for each 2×2 group of neighbouring patches, 4,608 → 4,608 → 5,120 with GELU | 1 token per 4 patches |
 
-Los parches van ordenados por bloques de 2×2, así que cada token del modelo de lenguaje es la concatenación de cuatro parches consecutivos.
+Patches are ordered in 2×2 blocks, so each token of the language model is the concatenation of four consecutive patches.
 
-En el modelo de lenguaje, cada token tiene tres posiciones (tiempo, fila, columna) para la RoPE: de las 32 frecuencias rotadas, las de índice 1, 4, 7… (hasta 33) siguen la fila, las de índice 2, 5, 8… (hasta 30) la columna y el resto el tiempo (`mrope_section` [11, 11, 10], intercalado). El texto tiene las tres iguales, por eso los modelos sin imágenes no notan la diferencia. Tras una imagen de h×w tokens que empieza en la posición p, todos sus tokens tienen tiempo p, filas p…p+h−1 y columnas p…p+w−1, y el texto sigue en p + max(h, w).
+In the language model each token has three positions (time, row, column) for RoPE: of the 32 rotated frequencies, those with index 1, 4, 7… (up to 33) follow the row, those with index 2, 5, 8… (up to 30) the column, and the rest the time (`mrope_section` [11, 11, 10], interleaved). Text has all three equal, which is why models without images do not notice the difference. After an image of h×w tokens starting at position p, all its tokens have time p, rows p…p+h−1 and columns p…p+w−1, and the text carries on at p + max(h, w).
 
-## Lo que ya funciona
+## What already works
 
-- **Referencia en coma flotante** (`crates/sim/src/vision.rs`): preprocesado, codificador completo y fusión, contra los pesos reales.
-- **Modelo de lenguaje con imágenes** (`Engine::step_embedding`, `set_mrope`, `continue_text_at`): los tokens de imagen entran como vectores con sus tres posiciones, y el texto siguiente continúa donde toca.
-- **Con la aritmética del chip** (`ExactEngine`, lo mismo): cada vector se carga en el formato del die donde iría la fila del embedding, y su rotación es una fila propia de la tabla de RoPE para esa posición de la caché, compuesta con las de sus tres posiciones (tiempo, fila y columna) según las secciones de M-RoPE. En el chip, el anfitrión escribe esas filas en la tabla que el die ya lee por posición, igual que trae las filas del embedding; el texto que sigue a la imagen se rota desde su propia posición. Un test lo compara con la coma flotante en un modelo de juguete con toda la cabeza rotada.
-- **Ejemplo** `cargo run --release -p sim --example see -- <modelo> rojo`: dibuja una figura de color, se la enseña al Qwen real y le pregunta de qué color es.
-- **Estimador**: con «Incluir visión», el área cuenta todos los pesos del codificador (bloques, embeddings y fusión) y aparece el tiempo de procesar una imagen de 512×512 en los multiplicadores de un die.
+- **Floating-point reference** (`crates/sim/src/vision.rs`): preprocessing, the whole encoder and the merger, against the real weights.
+- **Language model with images** (`Engine::step_embedding`, `set_mrope`, `continue_text_at`): image tokens go in as vectors with their three positions, and the following text carries on where it should.
+- **With the chip's arithmetic** (`ExactEngine`, the same): each vector is loaded in the die's format where the embedding row would go, and its rotation is a row of its own in the RoPE table for that cache position, composed from its three positions (time, row and column) according to the M-RoPE sections. On the chip, the host writes those rows into the table the die already reads by position, just as it brings the embedding rows; the text following the image is rotated from its own position. A test compares this with floating point on a toy model with the whole head rotated.
+- **Example** `cargo run --release -p sim --example see -- <model> red`: draws a coloured shape, shows it to the real Qwen and asks what colour it is.
+- **Estimator:** with "Include vision", the area counts all the encoder's weights (blocks, embeddings and merger), and the time to process a 512×512 image on one die's multipliers is shown.
 
-## Cómo se llevará al circuito
+## How it is taken to the circuit
 
-Casi todo se compone con operaciones que el die ya tiene:
+Almost everything is built from operations the die already has:
 
-1. **Embedding de parche y fusión**: productos matriz-vector en las celdas, con sus sesgos (`AddWeight`) y GELU por tabla (`FN_GELU_TANH`, `FN_GELU`).
-2. **LayerNorm**: la media es una suma con el registro de unos, escalada; después, la misma norma que RMSNorm sobre el vector centrado, y el sesgo.
-3. **Atención bidireccional**: la misma atención del modelo de lenguaje sobre un almacén de claves y valores de la imagen, pero sin máscara causal. Exige recorrer el codificador capa a capa: primero todas las claves y valores de un bloque, después todas las consultas. El firmware lo ordena con dos rutinas por bloque (`VIT_QKV` y `VIT_RESTO`) y un índice de parche, y guarda el estado de cada parche entre bloques en un almacén como el de la caché KV.
-4. **RoPE 2D**: el firmware escribe para cada parche su fila y su columna; las dos tablas de cosenos y senos ya existen para la RoPE del texto.
-5. **M-RoPE en el texto**: hecho en la aritmética del chip, con filas de rotación escritas por el anfitrión para las posiciones de la imagen (ver arriba).
-6. **Entrada de imagen**: la rutina de token del modelo de lenguaje acepta como entrada un registro en lugar del embedding, igual que ya acepta la salida de la cabeza MTP.
+1. **Patch embedding and merger:** matrix-vector products in the cells, with their biases (`AddWeight`) and GELU from a table (`FN_GELU_TANH`, `FN_GELU`).
+2. **LayerNorm:** the mean is a sum with the register of ones, scaled; then the same norm as RMSNorm on the centred vector, and the bias.
+3. **Bidirectional attention:** the same attention as the language model's over a store of the image's keys and values, but without a causal mask. It requires going through the encoder layer by layer: first all the keys and values of a block, then all the queries. The firmware orders it with two routines per block (`VIT_QKV` and `VIT_REST`) and a patch index, and keeps each patch's state between blocks in a store like the KV cache.
+4. **2D RoPE:** the firmware writes each patch's row and column; the two tables of cosines and sines already exist for the text's RoPE.
+5. **M-RoPE in the text:** done in the chip's arithmetic, with rotation rows written by the host for the image's positions (see above).
+6. **Image input:** the language model's token routine takes a register as input instead of the embedding, just as it already takes the MTP head's output.
 
-Lo que falta para hacerlo en puertas es el orden capa a capa del firmware y las rutinas del codificador; la aritmética ya está.
+## Status, stage by stage
 
-## Estado, etapa a etapa
+Each stage is checked against the previous one on a toy encoder (`make_vision_checkpoint` in the tests: width 8 in 2 heads of 4, 2 blocks, 2×2-pixel patches in 2 frames, 2×2 patches per token of width 8, that of the toy language model), with the tests in `crates/sim/tests/vision.rs`.
 
-Cada etapa se comprueba contra la anterior en un codificador de juguete (`make_vision_checkpoint` en las pruebas: ancho 8 en 2 cabezas de 4, 2 bloques, parches de 2×2 píxeles en 2 fotogramas, 2×2 parches por token de ancho 8, el del modelo de lenguaje de juguete), con las pruebas de `crates/sim/tests/vision.rs`.
-
-| Etapa | Qué | Estado |
+| Stage | What | Status |
 |---|---|---|
-| 0 | Codificador de juguete; la referencia en coma flotante lo ejecuta | Hecha |
-| 1 | `compile_vision`: el codificador como un programa con sus rutinas (embedding de parche, las dos de cada bloque y la fusión) y tres operaciones nuevas: `LayerNorm` y leer y guardar la fila de un parche (`LoadRow`, `StoreRow`) | Hecha |
-| 2 | `ExactVision`: las rutinas en la aritmética exacta del die, en el orden del firmware; difiere de la coma flotante menos de un 0,5 % y el modelo de lenguaje elige el mismo token con sus tokens que con los de la referencia | Hecha |
-| 3 | Cada rutina en puertas, bit a bit igual que la máquina exacta: un microprograma con una entrada por rutina (`routines_microprogram`) y el anfitrión escribiendo píxeles, posiciones y filas de rotación (`rotation_writes`) | Hecha |
-| 4 | El firmware las ordena; simulador de instrucciones frente a puertas, de la imagen al texto | Hecha: ver «El firmware con una imagen» |
-| 5 | La rutina de token del modelo de lenguaje toma la imagen como entrada, de punta a punta | En la máquina exacta: `attach_vision` mete el codificador en el programa del modelo (sus búferes y ranuras de claves con los del modelo, su propia tabla de rotación, la 2), y una entrada del microcódigo lee el token desde la salida del codificador en lugar del embedding. Da los mismos logits que darle al modelo los tokens del codificador aparte. En puertas, con el anfitrión ordenando las rutinas, un mismo die codifica la imagen y el modelo la lee, con los logits bit a bit iguales a la máquina exacta |
+| 0 | Toy encoder; the floating-point reference runs it | Done |
+| 1 | `compile_vision`: the encoder as a program with its routines (patch embedding, the two of each block and the merger) and three new operations: `LayerNorm`, and reading and storing a patch's row (`LoadRow`, `StoreRow`) | Done |
+| 2 | `ExactVision`: the routines in the die's exact arithmetic, in the firmware's order; it differs from floating point by less than 0.5 % and the language model picks the same token with its tokens as with the reference's | Done |
+| 3 | Each routine in gates, bit for bit the same as the exact machine: a microprogram with one entry per routine (`routines_microprogram`) and the host writing pixels, positions and rotation rows (`rotation_writes`) | Done |
+| 4 | The firmware orders them; instruction-level simulator against gates, from the image to the text | Done: see "The firmware with an image" |
+| 5 | The language model's token routine takes the image as input, end to end | On the exact machine: `attach_vision` puts the encoder in the model's program (its buffers and key slots alongside the model's, its own rotation table, number 2), and a microcode entry reads the token from the encoder's output instead of the embedding. It gives the same logits as giving the model the encoder's tokens separately. In gates, with the host ordering the routines, one die encodes the image and the model reads it, with logits bit for bit equal to the exact machine |
 
-Cómo se ejecuta: el anfitrión escribe por cada parche sus píxeles y su posición aprendida ya interpolada, y la rotación de su fila y columna en la tabla que el die lee por posición. La rutina de embedding guarda cada parche en un almacén de filas. Cada bloque pasa dos veces por todos los parches: la primera guarda claves, valores y consulta; la segunda atiende sobre todos (con la posición en el último parche) y sigue con el resto del bloque. El último bloque aplica ya la LayerNorm de la fusión, que es de cada parche por separado, y la fusión lee cuatro filas consecutivas del almacén y las junta en un vector.
+How it runs: the host writes, for each patch, its pixels and its learned position already interpolated, and the rotation of its row and column into the table the die reads by position. The embedding routine keeps each patch in a row store. Each block goes twice over all the patches: the first pass stores keys, values and the query; the second attends over all of them (with the position at the last patch) and carries on with the rest of the block. The last block already applies the merger's LayerNorm, which is per patch, and the merger reads four consecutive rows of the store and joins them into one vector.
 
-### Exponentes por fila
+### Exponents per row
 
-En el codificador real, el estado de los parches crece de unas pocas unidades a casi 300 a partir del bloque 10, y tras el último bloque llega a 4 828 en un canal: el canal atípico de los ViT. Las consultas, claves y valores no pasan de 14. Un exponente fijo para todo el almacén no sirve: por debajo de 64 satura el canal atípico (error del 440 %), y por debajo de 8 192 se lleva la precisión del resto de filas (51 % a 16 bits).
+In the real encoder, the patches' state grows from a few units to almost 300 from block 10 on, and after the last block reaches 4,828 in one channel: the ViTs' outlier channel. Queries, keys and values stay below 14. A single exponent for the whole store does not work: below 64 it saturates the outlier channel (440 % error), and below 8,192 it takes away the precision of the other rows (51 % at 16 bits).
 
-Por eso cada fila de un almacén guarda su propio exponente, como lo tiene cada registro: `StoreRow` copia las mantisas tal cual y anota el exponente del vector en un registro aparte, en la posición de la fila; `LoadRow` las copia de vuelta y recupera el exponente. Son dos operaciones nuevas del juego (`save_exponent` y `restore_exponent`), un movimiento del ALU escalar entre el registro de exponentes y un elemento, sin hardware nuevo. Cuando la fusión junta cuatro filas, se alinean al mayor de sus exponentes; por eso la LayerNorm de la fusión va antes, en el último bloque: así una fila con el canal atípico no ahoga los valores pequeños de sus vecinas.
+So each row of a store keeps its own exponent, as each register does: `StoreRow` copies the mantissas as they are and notes the vector's exponent in a separate register, at the row's position; `LoadRow` copies them back and restores the exponent. These are two new operations of the instruction set (`save_exponent` and `restore_exponent`), a move of the scalar ALU between the exponent register and an element, with no new hardware. When the merger joins four rows, they are aligned to the largest of their exponents; that is why the merger's LayerNorm comes earlier, in the last block: that way a row with the outlier channel does not drown its neighbours' small values.
 
-Con el codificador real de Qwen3.8-27B y una imagen de 256×256 (256 parches, 64 tokens), los tokens del die difieren de la coma flotante un 1,5 % con vectores de 16 bits y un 0,9 % con 20 bits (`cargo run --release -p sim --example see_exact -- <modelo> [bits]`). Con todo en la aritmética del die, codificador y modelo de lenguaje, el Qwen3.8-27B ve el disco rojo y responde «Rojo» (`--example see -- <modelo> rojo "<pregunta>" 3 chip`, unos 8 minutos).
+With the real Qwen3.8-27B encoder and a 256×256 image (256 patches, 64 tokens), the die's tokens differ from floating point by 1.5 % with 16-bit vectors and by 0.9 % with 20 bits (`cargo run --release -p sim --example see_exact -- <model> [bits]`). With everything in the die's arithmetic, encoder and language model, Qwen3.8-27B sees the red disc and answers "Red" (`--example see -- <model> red "<question>" 3 chip`, about 8 minutes).
 
-### En la app
+### In the application
 
-Con «Aritmética del die», un modelo con codificador lo lleva dentro del chip (`attach_vision`, hasta 256 parches; una imagen mayor se reduce hasta caber). La imagen pasa por el codificador en esa aritmética y el modelo lee sus tokens desde la salida del codificador; la app indica dónde se codificó. En coma flotante, el anfitrión la codifica como antes. Con «El chip completo», el firmware real recibe la imagen por el puerto del anfitrión y ordena sus rutinas (ver abajo); el die, que la app simula como un motor de software, codifica y lee la imagen igual que en «Aritmética del die». Con la cabeza MTP no se admiten imágenes.
+With "Die arithmetic", a model with an encoder carries it inside the chip (`attach_vision`, up to 256 patches; a larger image is reduced until it fits). The image goes through the encoder in that arithmetic and the model reads its tokens from the encoder's output; the application says where it was encoded. In floating point, the host encodes it as before. With "The whole chip", the real firmware receives the image through the host port and orders its routines (see below); the die, which the application simulates as a software engine, encodes and reads the image as in "Die arithmetic". Images are not accepted with the MTP head.
 
-## El firmware con una imagen
+## The firmware with an image
 
-Un chip que lleva el codificador lo dice en su descripción (`INFO_VISION`, `add_vision`): cuántos parches admite, el token que la imagen sustituye, los bloques, dónde van los píxeles, la posición y la fila de rotación de cada parche, y dónde está la tabla de rotaciones del texto. El CPU puede escribir la memoria vectorial: escribe la dirección en `REG_VECTOR_ADDRESS` y el valor en `REG_VECTOR_DATA`, que entra por el puerto de carga del die un ciclo después, con el die parado y sin logits en camino. Solo lo tiene un chip con visión (`DieFeatures::host_writes`); los de solo texto no cambian.
+A chip that carries the encoder says so in its description (`INFO_VISION`, `add_vision`): how many patches it takes, the token the image replaces, the blocks, where the pixels, the position and the rotation row of each patch go, and where the text's rotation table is. The CPU can write the vector memory: it writes the address to `REG_VECTOR_ADDRESS` and the value to `REG_VECTOR_DATA`, which goes in through the die's load port one cycle later, with the die stopped and no logits on their way. Only a chip with vision has it (`DieFeatures::host_writes`); text-only chips do not change.
 
-El protocolo, antes del prompt (`vision_chip::picture_bytes`, cada número en 4 bytes little-endian):
+The protocol, before the prompt (`vision_chip::picture_bytes`, each number in 4 little-endian bytes):
 
-1. Número de parches (0 si no hay imagen), filas y columnas de la rejilla.
-2. Por cada parche: el exponente y los elementos de sus píxeles, ya normalizados y en el formato del die; lo mismo de su posición aprendida, ya interpolada; y su fila de la tabla de rotaciones del codificador.
+1. Number of patches (0 if there is no image), rows and columns of the grid.
+2. For each patch: the exponent and the elements of its pixels, already normalized and in the die's format; the same for its learned position, already interpolated; and its row of the encoder's rotation table.
 
-Es la parte del anfitrión, como la de un controlador de cámara. El firmware escribe cada parche y ejecuta su embedding, luego cada bloque dos veces sobre todos los parches, y espera el prompt. Cuando llega el token de la imagen, por cada token de imagen ejecuta la fusión, compone su rotación M-RoPE y lo lee en lugar de un embedding.
+This is the host's part, like a camera driver's. The firmware writes each patch and runs its embedding, then each block twice over all the patches, and waits for the prompt. When the image's token arrives, for each image token it runs the merger, composes its M-RoPE rotation and reads it instead of an embedding.
 
-**Rotaciones sin coma flotante en el CPU.** La fila de rotación de un token de imagen en (tiempo p, fila p + r, columna p + c) toma cada frecuencia de la fila de la tabla de la posición que le toca: la de p, la de p + r o la de p + c, según las secciones de M-RoPE. El firmware la compone copiando esos elementos con el controlador de carga desde la imagen del chip, donde la tabla está entera y nunca se escribe. El texto que sigue va max(h, w) posiciones después del inicio de la imagen, no h × w: antes de cada token en el hueco s de la caché, el firmware trae desde la imagen la fila s − (h × w − max(h, w)). Como la fuente es siempre la imagen, reescribir filas de la tabla del die no estropea las que se leen después.
+**Rotations without floating point on the CPU.** The rotation row of an image token at (time p, row p + r, column p + c) takes each frequency from the table row of the position it needs: that of p, of p + r or of p + c, according to the M-RoPE sections. The firmware composes it by copying those elements with the load controller from the chip's image, where the table is whole and never written. The following text goes max(h, w) positions after the start of the image, not h × w: before each token in cache slot s, the firmware brings from the image row s − (h × w − max(h, w)). As the source is always the image, rewriting rows of the die's table does not spoil those read later.
 
-Se comprueba en `crates/sim/tests/vision_chip.rs`, con el modelo de juguete y una imagen de 8 × 4 parches (2 × 4 tokens, filas distintas de columnas), texto antes y después y tres tokens generados:
+It is checked in `crates/sim/tests/vision_chip.rs`, with the toy model and an image of 8 × 4 patches (2 × 4 tokens, rows different from columns), text before and after and three generated tokens:
 
-- El firmware, sobre la máquina exacta del die, escribe los mismos tokens que el anfitrión ordenando las mismas rutinas y escribiendo las rotaciones calculadas desde las tres posiciones.
-- El chip entero en puertas da los mismos bytes en los mismos ciclos que el simulador de instrucciones (prueba lenta, 1,3 millones de ciclos en minuto y medio).
-- El firmware, sobre el die de software que usa la app, escribe los mismos tokens con los mismos logits que el anfitrión llamando a `step_image` con las tres posiciones.
+- The firmware, on the die's exact machine, writes the same tokens as the host ordering the same routines and writing the rotations computed from the three positions.
+- The whole chip in gates gives the same bytes in the same cycles as the instruction-level simulator (slow test, 1.3 million cycles in a minute and a half).
+- The firmware, on the software die the application uses, writes the same tokens with the same logits as the host calling `step_image` with the three positions.
 
-Las pruebas detectan una rotación M-RoPE mal compuesta o un texto sin desplazar: los logits cambian.
+The tests catch a badly composed M-RoPE rotation or text that is not shifted: the logits change.
 
-**Pesos sin cuantizar en las celdas.** Los pesos del codificador real vienen en BF16 y los del de juguete en coma flotante. Sin un formato de pesos, una matriz así entra en las celdas como una mantisa del ancho de los vectores por peso (16 bits), y las celdas deben guardar pesos de ese ancho. Antes, unas celdas de 8 bits los truncaban en silencio y solo la máquina exacta multiplicaba bien; ahora el `Layout` da un error que pide un formato de pesos o celdas más anchas. El modelo de lenguaje no lo nota porque llega ya cuantizado.
+**Unquantized weights in the cells.** The real encoder's weights come in BF16 and the toy one's in floating point. Without a weight format, such a matrix goes into the cells as one mantissa of the vectors' width per weight (16 bits), and the cells must hold weights that wide. Before, 8-bit cells truncated them silently and only the exact machine multiplied correctly; now the `Layout` gives an error asking for a weight format or wider cells. With an affine format, the cells keep the codes, as described under "The real Show-o on the addressed die". The language model does not notice, as it arrives already quantized.
 
-## Dibujar con Janus-Pro
+## Drawing with Janus-Pro
 
-Janus-Pro-1B también genera imágenes: su modelo de lenguaje escribe 576 tokens de un libro de códigos (una rejilla de 24 × 24), guiado lejos de lo que dibujaría sin el texto, y un decodificador convolucional los convierte en píxeles. `cargo run --release -p sim --example draw -- <carpeta> "<descripción>" salida.bmp [temperatura] [semilla]`.
+Janus-Pro-1B also generates images: its language model writes 576 tokens from a codebook (a 24 × 24 grid), guided away from what it would draw without the text, and a convolutional decoder turns them into pixels. `cargo run --release -p sim --example draw -- <folder> "<description>" output.bmp [temperature] [seed]`.
 
-Con `EXACTO=16` (y en la aplicación, con el modelo cargado en la aritmética del chip), corren en la aritmética entera del die las dos copias del modelo de lenguaje, con texto y sin él, y sus dos cabezas de imagen. El compilador añade al programa de Janus una cabeza de imagen (`ImageHead`) con dos listas de operaciones:
+With `EXACT=16` (and in the application, with the model loaded in the chip's arithmetic), the two copies of the language model, with and without text, and their two image heads run in the die's integer arithmetic. The compiler adds to Janus' program an image head (`ImageHead`) with two lists of operations:
 
-- **Puntuaciones**: del estado final, `proj_out` con su sesgo, GELU y `vision_head` con su sesgo, una puntuación por cada uno de los 16 384 códigos del libro.
-- **Entrada**: el código leído de `generation_embeddings` como la fila de un embedding, `fc1` con su sesgo, GELU y `hidden_layers.0` con su sesgo, el vector que entra en lugar del embedding del siguiente token. Es el mismo para las dos copias, así que se calcula una vez.
+- **Scores:** from the final state, `proj_out` with its bias, GELU and `vision_head` with its bias, one score for each of the codebook's 16,384 codes.
+- **Input:** the code read from `generation_embeddings` like an embedding row, `fc1` with its bias, GELU and `hidden_layers.0` with its bias: the vector that goes in instead of the next token's embedding. It is the same for both copies, so it is computed once.
 
-En el anfitrión quedan la mezcla de la guía (dos contextos, dos cachés), el muestreo y el decodificador de píxeles. Un test con un Llama diminuto y cabezas aleatorias comprueba que las puntuaciones y las entradas salen del chip como en coma flotante, dentro del 2 %.
+The host keeps the guidance mix (two contexts, two caches), sampling and the pixel decoder. A test with a tiny Llama and random heads checks that the scores and inputs come out of the chip as in floating point, within 2 %.
 
-Con «a red apple on a wooden table», semilla 7 y temperatura 1, la coma flotante tarda 387 s y la aritmética del chip 543 s, y las dos dibujan una manzana roja sobre madera. No son la misma imagen: con temperatura 1, una diferencia mínima en un logit cambia qué token se elige, y desde ahí el dibujo sigue otro camino. Un test comprueba que el estado oculto que lee la cabeza de imagen sale del chip igual que en coma flotante, dentro del 2 %.
+With "a red apple on a wooden table", seed 7 and temperature 1, floating point takes 387 s and the chip's arithmetic 543 s, and both draw a red apple on wood. They are not the same picture: at temperature 1, a minimal difference in one logit changes which token is chosen, and from there the drawing takes another path. A test checks that the hidden state the image head reads comes out of the chip as in floating point, within 2 %.
 
-## Retocar imágenes con Show-o
+## Retouching images with Show-o
 
-Janus-Pro dibuja desde un texto, pero no edita. Show-o (`showlab/show-o`, 1 300 M de parámetros) sí: es un único transformador, Phi-1.5, que lee texto y rellena imágenes hechas de códigos de MAGVIT-v2 (`showlab/magvitv2`), un tokenizador convolucional. Para retocar una zona, se enmascaran sus códigos y el transformador los rellena en unos pasos. En cada uno se queda con los códigos de los que está más seguro, guiado por el texto y alejado de lo que haría sin él.
+Janus-Pro draws from a text, but does not edit. Show-o (`showlab/show-o`, 1,300 M parameters) does: it is a single transformer, Phi-1.5, that reads text and fills in images made of MAGVIT-v2 codes (`showlab/magvitv2`), a convolutional tokenizer. To retouch a region, its codes are masked and the transformer fills them in over a few steps. At each one it keeps the codes it is surest of, guided by the text and away from what it would do without it.
 
-`crates/sim/src/showo.rs` lo reproduce en coma flotante, tal como lo ejecuta el código original.
+`crates/sim/src/showo.rs` reproduces it in floating point, as the original code runs it.
 
-- **MAGVIT-v2**: un codificador convolucional (bloques residuales con GroupNorm y swish, cuatro reducciones a la mitad y atención en el centro) lleva una imagen de 256 × 256 a 16 × 16 vectores de 13 valores. Cada valor da un bit según su signo, y los 13 bits forman un código de 8 192. El decodificador hace el camino inverso. Codificar y decodificar una imagen da unos 30 dB de PSNR (`crates/sim/tests/showo.rs`).
-- **Phi-1.5 con los cambios de Show-o**:
-  - atención y MLP en paralelo sobre la misma entrada normalizada;
-  - LayerNorm de cada cabeza de consultas y claves antes de rotar;
-  - la rotación sobre la mitad de cada cabeza;
-  - una atención mixta: el texto, causal; la imagen, entera en ambos sentidos y sobre todo el texto.
+- **MAGVIT-v2:** a convolutional encoder (residual blocks with GroupNorm and swish, four halvings and attention in the middle) takes a 256 × 256 image to 16 × 16 vectors of 13 values. Each value gives one bit by its sign, and the 13 bits make a code out of 8,192. The decoder goes the other way. Encoding and decoding an image gives about 30 dB of PSNR (`crates/sim/tests/showo.rs`).
+- **Phi-1.5 with Show-o's changes:**
+  - attention and MLP in parallel on the same normalized input;
+  - LayerNorm on each query and key head before rotating;
+  - rotation on half of each head;
+  - mixed attention: the text, causal; the image, whole in both directions and over all the text.
 
-  El texto se calcula una vez y su caché sirve para todos los pasos.
-- **El relleno**:
-  1. En cada paso, cada código desconocido se sortea de las probabilidades del modelo, con la guía `(1 + g)·con texto − g·sin texto`.
-  2. Siguen enmascarados los menos seguros, con un ruido de Gumbel cuya temperatura decrece paso a paso. Su número sigue un coseno.
-  3. La zona a retocar pasa a la rejilla de códigos con un muestreo bicúbico en sus centros y un umbral de 0,5, como en el original.
+  The text is computed once and its cache serves every step.
+- **Filling in:**
+  1. At each step, each unknown code is drawn from the model's probabilities, with the guidance `(1 + g)·with text − g·without text`.
+  2. The least sure stay masked, with Gumbel noise whose temperature decreases step by step. Their number follows a cosine.
+  3. The region to retouch is taken to the code grid with bicubic sampling at their centres and a threshold of 0.5, as in the original.
 
-Con 16 pasos, una imagen tarda unos 4 minutos en el procesador:
+With 16 steps, an image takes about 4 minutes on the processor:
 
-- desde «a red apple on a wooden table», Show-o dibuja la manzana sobre la mesa;
-- retocando la zona de la manzana con «a green apple on a wooden table» y guía 5, la manzana pasa a verde y la mesa y el fondo se quedan como estaban.
+- from "a red apple on a wooden table", Show-o draws the apple on the table;
+- retouching the apple's region with "a green apple on a wooden table" and guidance 5, the apple turns green and the table and background stay as they were.
 
 ```
-cargo run --release -p sim --example inpaint -- <carpeta> retocar <imagen.bmp|.ppm> x0,y0,x1,y1 "<texto>" salida.bmp [pasos] [guía] [semilla]
-cargo run --release -p sim --example inpaint -- <carpeta> dibujar "<texto>" salida.bmp [pasos] [guía] [semilla]
-cargo run --release -p sim --example inpaint -- <carpeta> reconstruir <imagen> salida.bmp
+cargo run --release -p sim --example inpaint -- <folder> retouch <image.bmp|.ppm> x0,y0,x1,y1 "<text>" output.bmp [steps] [guidance] [seed]
+cargo run --release -p sim --example inpaint -- <folder> draw "<text>" output.bmp [steps] [guidance] [seed]
+cargo run --release -p sim --example inpaint -- <folder> reconstruct <image> output.bmp
 ```
 
-La carpeta lleva el `pytorch_model.safetensors` y el `config.json` de Show-o. Dentro van `magvitv2` (sus pesos y su configuración) y `phi`, con el tokenizador de Phi-1.5.
+The folder holds Show-o's `pytorch_model.safetensors` and `config.json`. Inside go `magvitv2` (its weights and configuration) and `phi`, with Phi-1.5's tokenizer.
 
-### En la app
+### In the application
 
-La pantalla **Imágenes** usa el Show-o que encuentre en las carpetas de modelos:
+The **Images** screen uses the Show-o it finds in the model folders:
 
-- **Sin imagen**, dibuja una nueva a partir del texto.
-- **Con imagen**, se recorta su cuadrado central y se arrastra sobre ella para marcar la zona que cambia. La zona debe cubrir al menos un código, 1/16 del lado.
-- **Seguir retocando** toma el resultado como nueva imagen de partida, para cambiar otra zona.
+- **With no image,** it draws a new one from the text.
+- **With an image,** its central square is cropped and you drag over it to mark the region that changes. The region must cover at least one code, 1/16 of the side.
+- **Keep retouching** takes the result as the new starting image, to change another region.
 
-En el panel se eligen los pasos, la guía y la semilla; con la misma semilla, el mismo texto y la misma zona dan el mismo resultado.
+The panel sets the steps, the guidance and the seed; the same seed, text and region give the same result.
 
-El motor lo ejecuta en segundo plano (`/api/retouch`), un trabajo a la vez, con su progreso paso a paso, y se puede detener entre pasos. Corre en el anfitrión, fuera del chip.
+The engine runs it in the background (`/api/retouch`), one job at a time, with its progress step by step, and it can be stopped between steps.
 
-### En la aritmética del chip
+### In the chip's arithmetic
 
-`crates/sim/src/showo_chip.rs` lleva el transformador de Show-o a las operaciones del chip y lo ejecuta en la máquina exacta, en el orden en que se las da el anfitrión:
+`crates/sim/src/showo_chip.rs` takes Show-o's transformer to the chip's operations and runs it on the die, in the order the host or the firmware gives them:
 
-- **El texto** entra como tokens normales, cada uno viendo los anteriores. El relleno a la izquierda no se envía: nada lo lee.
-- **La imagen** se ve entera en los dos sentidos, así que pasa cada capa en dos vueltas sobre sus filas, como el codificador de visión:
-  1. cada fila guarda su clave y su valor en la caché de la capa, detrás de los del texto, y su consulta;
-  2. cada fila atiende sobre el texto y todas las filas de la imagen y hace el resto de la capa.
+- **The text** goes in as normal tokens, each seeing the previous ones. The padding on the left is not sent: nothing reads it.
+- **The image** is seen whole in both directions, so it goes through each layer in two passes over its rows, like the vision encoder:
+  1. each row stores its key and value in the layer's cache, after the text's, and its query;
+  2. each row attends over the text and all the image's rows and does the rest of the layer.
 
-  La atención y la MLP van en paralelo sobre la misma entrada normalizada, que en la segunda vuelta se vuelve a calcular.
-- **Las piezas de Phi** son operaciones que el chip ya tenía:
-  - LayerNorm con sesgo, también por cabeza en consultas y claves;
-  - la RoPE sobre la mitad de cada cabeza;
-  - GELU con tangente;
-  - sesgos en todas las proyecciones.
-- **Las puntuaciones** salen de las filas de los códigos de la salida, con sus sesgos.
-- **MAGVIT-v2** sigue en coma flotante en el anfitrión.
+  Attention and the MLP run in parallel on the same normalized input, which is recomputed in the second pass.
+- **Phi's pieces** are operations the chip already had:
+  - LayerNorm with a bias, also per head on queries and keys;
+  - RoPE on half of each head;
+  - GELU with tanh;
+  - biases on every projection.
+- **The scores** come from the output's rows for the codes, with their biases.
 
-Comprobado con una pasada sobre la misma imagen tapada, frente a la coma flotante:
+Checked with one pass over the same masked image, against floating point:
 
-| Modelo | Diferencia mayor | Mejor código igual |
+| Model | Largest difference | Same best code |
 |---|---|---|
-| Show-o de juguete (2 capas) | 0,06 % | 8 de 8 |
-| Show-o real, vectores de 16 bits | 1,04 % | 61 de 64 |
+| Toy Show-o (2 layers) | 0.06 % | 8 of 8 |
+| Real Show-o, 16-bit vectors | 1.04 % | 61 of 64 |
 
-Con el modelo real, según el formato de los pesos (`cargo run --release -p sim --example showo_formats -- <carpeta>`):
+With the real model, by weight format (`cargo run --release -p sim --example showo_formats -- <folder>`):
 
-| Pesos | Diferencia mayor | Mejor código igual | KL media (nats) | Probabilidad del mejor del chip, frente al mejor | Segundos por pasada |
+| Weights | Largest difference | Same best code | Mean KL (nats) | Probability of the chip's best, against the best | Seconds per pass |
 |---|---|---|---|---|---|
-| enteros de 16 bits | 1,04 % | 61 de 64 | 0,0007 | 99,9 % | 156 |
-| afín de 8 bits, grupos de 64 | 1,32 % | 61 de 64 | 0,0010 | 99,9 % | 77 |
-| afín de 4 bits, grupos de 32 | 7,36 % | 37 de 64 | 0,066 | 90,5 % | 73 |
+| 16-bit integers | 1.04 % | 61 of 64 | 0.0007 | 99.9 % | 156 |
+| 8-bit affine, groups of 64 | 1.32 % | 61 of 64 | 0.0010 | 99.9 % | 77 |
+| 4-bit affine, groups of 32 | 7.36 % | 37 of 64 | 0.066 | 90.5 % | 73 |
 
-En coma flotante, una pasada tarda 6 s. Al muestreador le importa toda la distribución, no solo el mejor código, y la divergencia KL dice que con 8 bits apenas se mueve. Con 4 bits ya se nota.
+In floating point a pass takes 6 s. The sampler cares about the whole distribution, not just the best code, and the KL divergence says it barely moves with 8 bits. With 4 bits it shows.
 
-Se ejecuta con `crates/sim/tests/showo_chip.rs`. La prueba del modelo real es lenta y se activa aparte. Con la misma semilla, el muestreo de MaskGIT se separa en cuanto un código difiere, así que la comparación se hace pasada a pasada y no sobre la imagen final.
+These run in `crates/sim/tests/showo_chip.rs`. The test with the real model is slow and runs separately. With the same seed, MaskGIT's sampling diverges as soon as one code differs, so the comparison is made pass by pass and not on the final image. (The seconds per pass in this table were measured on the exact machine with 16-bit mantissas per weight; with the weights in 8-bit cells, a pass takes about 42 s.)
 
-En la pantalla Imágenes, la casilla «Como en el chip» hace el retoque como lo haría el chip: el die direccionado (ver «El Show-o real en el die direccionado»), con los pesos afines de 8 bits en sus celdas, y el bucle del firmware. Con guía son dos pasadas por paso, de unos 42 s cada una, más unos 25 s para preparar el die: un retoque de 4 pasos tarda 360 s y usa 4,3 GB de memoria (`showo_fill_chip`).
+On the Images screen, the "As on the chip" option retouches as the chip would: the addressed die (see "The real Show-o on the addressed die"), with the 8-bit affine weights in its cells, and the firmware's loop. With guidance there are two passes per step, about 42 s each, plus about 25 s to prepare the die: a 4-step retouch takes 360 s and uses 4.3 GB of memory (`showo_fill_chip`).
 
-### MAGVIT-v2 en la aritmética del chip
+### MAGVIT-v2 in the chip's arithmetic
 
-`crates/sim/src/magvit_chip.rs` lleva el codificador y el decodificador de MAGVIT-v2 a las operaciones del chip, también sobre la máquina exacta guiada desde el anfitrión.
+`crates/sim/src/magvit_chip.rs` takes MAGVIT-v2's encoder and decoder to the chip's operations, also on the exact machine driven from the host.
 
-- **Los mapas** son almacenes de filas, una por píxel con todos sus canales, con un borde de filas a cero. Así, las ocho vecinas de un píxel son filas a distancias fijas, sea cual sea el píxel. Una convolución 3 × 3 es un producto de las nueve filas puestas en fila (`LoadRows`) por el núcleo reordenado igual. La reducción a la mitad lee las vecinas píxel sí, píxel no, y el borde hace de relleno.
-- **GroupNorm** necesita la media y la dispersión de cada grupo en todo el mapa:
-  1. cada píxel escribe sus sumas por grupo y las de sus cuadrados, con un producto por una matriz de unos en los acumuladores anchos de las celdas;
-  2. esas filas se suman por parejas, un nivel cada vez, hasta que una tiene los totales;
-  3. la operación `GroupNorm` normaliza cada píxel con ellos.
-- **La atención del centro** va en dos pasadas sobre los píxeles, como la imagen de Show-o.
-- **Duplicar el lado** copia cada fila a sus cuatro sitios.
+- **Feature maps** are row stores, one row per pixel with all its channels, with a border of zero rows. That way a pixel's eight neighbours are rows at fixed distances, whatever the pixel. A 3 × 3 convolution is a product of the nine rows laid in a row (`LoadRows`) by the kernel reordered the same way. Halving reads every other pixel's neighbours, and the border does the padding.
+- **GroupNorm** needs the mean and spread of each group over the whole map:
+  1. each pixel writes its sums per group and those of their squares, with a product by a matrix of ones in the cells' wide accumulators;
+  2. those rows are added in pairs, one level at a time, until one holds the totals;
+  3. the `GroupNorm` operation normalizes each pixel with them.
+- **The attention in the middle** goes in two passes over the pixels, like Show-o's image.
+- **Doubling the side** copies each row to its four places.
 
-| Pieza | Juguete | MAGVIT-v2 real | Tiempo real |
+| Piece | Toy | Real MAGVIT-v2 | Real time |
 |---|---|---|---|
-| Decodificador | 62,5 dB de PSNR frente a la coma flotante | 49,6 dB | 195 s |
-| Codificador | 208 de 208 bits iguales | 3 306 de 3 328 bits (99,3 %), 236 de 256 códigos | 254 s |
+| Decoder | 62.5 dB PSNR against floating point | 49.6 dB | 195 s |
+| Encoder | 208 of 208 bits equal | 3,306 of 3,328 bits (99.3 %), 236 of 256 codes | 254 s |
 
-En el codificador, los valores cercanos a cero pueden salir con el otro signo, así que algunos bits cambian.
+In the encoder, values close to zero can come out with the other sign, so some bits change.
 
-El decodificador lee los ±1 de cada código de una tabla, como un embedding, así que todo su trabajo son rutinas del chip. Su calendario (`decoder_calls`) lo siguen igual la máquina exacta y las puertas. El de juguete corre en las puertas del die y da los mismos colores que la máquina exacta, bit a bit: 664 rutinas y 2,65 millones de ciclos (`magvit_s_decoder_on_the_die_s_gates_gives_the_exact_machine_s_pixels`). Así quedan comprobados en puertas `LoadRows`, `GroupNorm`, la atención, el ampliado y el atajo. Quien ordena las rutinas es la prueba, haciendo de firmware. El codificador de juguete también da en puertas los mismos valores que la máquina exacta, con la convolución que reduce a la mitad incluida: 2,36 millones de ciclos (`magvit_s_encoder_on_the_die_s_gates_gives_the_exact_machine_s_values`). El anfitrión escribe los colores de cada píxel en el die, quieto entre rutina y rutina, como hace el firmware con los parches de una imagen.
+The decoder reads each code's ±1 values from a table, like an embedding, so all its work is the chip's routines. Its schedule (`decoder_calls`) is followed alike by the exact machine and the gates. The toy one runs on the die's gates and gives the same colours as the exact machine, bit for bit: 664 routines and 2.65 million cycles (`magvit_s_decoder_on_the_die_s_gates_gives_the_exact_machine_s_pixels`). That checks `LoadRows`, `GroupNorm`, the attention, the upsampling and the shortcut in gates. The routines are ordered by the test itself, acting as the firmware. The toy encoder also gives in gates the same values as the exact machine, halving convolution included: 2.36 million cycles (`magvit_s_encoder_on_the_die_s_gates_gives_the_exact_machine_s_values`). The host writes each pixel's colours into the die, idle between routines, as the firmware does with an image's patches.
 
-En la pantalla Imágenes, «También MAGVIT-v2 en el chip» hace todo el retoque en la aritmética del chip. Un retoque de un paso sin guía tardó 599 s: codificar, una pasada del transformador y decodificar.
+On the Images screen, "Also MAGVIT-v2 on the chip" does the whole retouch in the chip's arithmetic. A one-step retouch without guidance took 599 s: encoding, one pass of the transformer and decoding.
 
-### En las puertas del die
+### On the die's gates
 
-El Show-o de juguete corre en las puertas del die, rutina a rutina, y da las mismas puntuaciones que la máquina exacta del mismo die, bit a bit: 3,1 millones de ciclos (`show_o_s_routines_on_the_die_s_gates_give_the_exact_machine_s_scores`).
+The toy Show-o runs on the die's gates, routine by routine, and gives the same scores as the exact machine of the same die, bit for bit: 3.1 million cycles (`show_o_s_routines_on_the_die_s_gates_give_the_exact_machine_s_scores`).
 
-El alcance de esta prueba:
-- **Quién ordena las rutinas:** la propia prueba, haciendo de firmware. El RV32 no interviene.
-- **El texto llena justo su largo máximo,** así que cada token va en la posición de la caché que corresponde a su posición en la RoPE. Con un texto más corto, las posiciones van desplazadas y hay que reescribir las filas de rotación: la máquina exacta lo hace con `place_rotation`, y en el chip lo tendría que hacer el firmware, como hace con la M-RoPE de las imágenes.
+The scope of this test:
+- **Who orders the routines:** the test itself, acting as the firmware. The RV32 does not take part.
+- **The text fills exactly its maximum length,** so each token goes in the cache slot matching its RoPE position. With a shorter text, the positions shift and the rotation rows must be rewritten: the exact machine does it with `place_rotation`, and on the chip the firmware does it, as it does with images' M-RoPE.
 
-Al probarlo salió un fallo: la tabla de embeddings se dimensionaba con el vocabulario de la salida. En Show-o, la salida tiene 8 192 códigos y la tabla, 58 498 filas. Ahora el programa dice las filas de su tabla (`embedding_rows`).
+Testing it found a bug: the embedding table was sized from the output's vocabulary. In Show-o the output has 8,192 codes and the table 58,498 rows. Now the program states its table's rows (`embedding_rows`).
 
-### Con el firmware del chip
+### With the chip's firmware
 
-El firmware tiene un modo Show-o. La imagen del chip lleva su descripción (`ShowOInfo`): filas de la imagen, capas, dónde están las puntuaciones y la tabla de rotaciones. El anfitrión envía el texto, la posición de su primer token y los tokens de la imagen, y el firmware:
-1. coloca la rotación de cada token en su sitio de la caché, copiando desde la imagen la fila de su posición real: un texto más corto que el máximo empieza más adelante;
-2. ejecuta el texto, las dos pasadas de cada capa y la puntuación de cada fila;
-3. devuelve, para cada sitio de la imagen, su exponente y las mantisas de sus puntuaciones.
+The firmware has a Show-o mode. The chip's image carries its description (`ShowOInfo`): the image's rows, the layers, where the scores and the rotation table are. The host sends the text, the position of its first token and the image's tokens, and the firmware:
+1. puts each token's rotation in its place in the cache, copying from the image the row of its real position: a text shorter than the maximum starts further on;
+2. runs the text, the two passes of each layer and the scoring of each row;
+3. returns, for each place in the image, its exponent and the mantissas of its scores.
 
-En la CPU a nivel de instrucción, con el die en software y un texto corto, devuelve las mismas puntuaciones que el anfitrión ordenando las mismas rutinas en la misma máquina: 3,66 millones de ciclos de CPU (`the_firmware_runs_show_o_s_pass_as_the_host_ordered_it`).
+On the CPU at instruction level, with the die in software and a short text, it returns the same scores as the host ordering the same routines on the same machine: 3.66 million CPU cycles (`the_firmware_runs_show_o_s_pass_as_the_host_ordered_it`).
 
-### MaskGIT en la CPU del chip
+### MaskGIT on the chip's CPU
 
-El chip también rellena la imagen él solo. El firmware hace los pasos de MaskGIT con `maskgit-rt`, una biblioteca sin memoria dinámica que también usa el anfitrión, así que los dos dan los mismos códigos. Todo va en enteros:
-- **El sorteo de cada código tapado** sigue el softmax de sus puntuaciones: pesos de `2^x` en punto fijo, desde una tabla, y un generador xorshift.
-- **Su confianza** es su log-probabilidad, con `log2` en tabla, más el ruido de Gumbel, que se enfría paso a paso.
-- **Los menos seguros** siguen tapados. El calendario de cuántos quedan en cada paso y la temperatura los envía el anfitrión, calculados como en Show-o.
-- **La guía la hace el die**, con dos rutinas más:
-  1. en la pasada con texto, una guarda el estado final de cada fila, ya normalizado;
-  2. en la pasada sin texto, otra lo combina, `(1 + g)·con texto − g·sin texto`, y puntúa el resultado.
+The chip also fills in the image by itself. The firmware runs MaskGIT's steps with `maskgit-rt`, a library without dynamic memory that the host uses too, so both give the same codes. Everything is in integers:
+- **Each masked code's draw** follows the softmax of its scores: weights of `2^x` in fixed point, from a table, and a xorshift generator.
+- **Its confidence** is its log-probability, with `log2` from a table, plus Gumbel noise that cools down step by step.
+- **The least sure** stay masked. The schedule of how many remain at each step and the temperature are sent by the host, computed as in Show-o.
+- **The die does the guidance,** with two more routines:
+  1. in the pass with the text, one stores each row's final state, already normalized;
+  2. in the pass without the text, another combines it, `(1 + g)·with text − g·without text`, and scores the result.
 
-  Como el cabezal de códigos es afín, da lo mismo que combinar las puntuaciones: `(1 + g)·(W·a + b) − g·(W·c + b) = W·((1 + g)·a − g·c) + b`. El estado de una fila ocupa la cuarta parte que sus puntuaciones (2 048 frente a 8 192 en el Show-o real), y es lo que deja caber el almacén en las direcciones del die. La CPU solo lee las puntuaciones combinadas.
+  Since the code head is affine, this is the same as combining the scores: `(1 + g)·(W·a + b) − g·(W·c + b) = W·((1 + g)·a − g·c) + b`. A row's state takes a quarter of its scores (2,048 against 8,192 in the real Show-o), and that is what lets the store fit in the die's addresses. The CPU only reads the combined scores.
 
-Comprobado:
-- **Frente a la coma flotante:** las confianzas quedan a menos de 0,02 nats y las frecuencias de los sorteos, a menos de un 1 % (`crates/sim/tests/maskgit_rt.rs`).
-- **En el chip a nivel de instrucción:** el Show-o de juguete rellena una imagen de 16 sitios, la mitad conocidos, con guía y 4 pasos, en 24,1 millones de ciclos de CPU. Da los mismos códigos que el anfitrión ordenando la misma máquina (`the_firmware_fills_an_image_as_the_host_ordered_it`).
-- **El chip entero en puertas,** CPU, firmware, cargador y die, rellena la imagen de juguete con dos pasos. Envía los mismos bytes en los mismos ciclos que a nivel de instrucción: 12,45 millones de ciclos, 1 156 s (`the_whole_chip_fills_an_image_in_gates_as_at_instruction_level`).
-- **Con el Show-o real:** el mismo bucle (`fill_on`), sobre la máquina exacta con la guía en el die y pesos afines de 8 bits, retoca el disco rojo con «a yellow lemon» en 4 pasos y 367 s (`cargo run --release -p sim --example showo_fill_chip`). Sale un limón con su textura.
+Checked:
+- **Against floating point:** confidences within 0.02 nats and draw frequencies within 1 % (`crates/sim/tests/maskgit_rt.rs`).
+- **On the chip at instruction level:** the toy Show-o fills in an image of 16 places, half of them known, with guidance and 4 steps, in 24.1 million CPU cycles. It gives the same codes as the host ordering the same machine (`the_firmware_fills_an_image_as_the_host_ordered_it`).
+- **The whole chip in gates,** CPU, firmware, loader and die, fills in the toy image with two steps. It sends the same bytes in the same cycles as at instruction level: 12.45 million cycles, 1,156 s (`the_whole_chip_fills_an_image_in_gates_as_at_instruction_level`).
+- **With the real Show-o:** the same loop (`fill_on`), on the addressed die with the guidance in the die and 8-bit affine weights in its cells, retouches the red disc with "a yellow lemon" in 4 steps and 360 s (`cargo run --release -p sim --example showo_fill_chip`). A lemon comes out, with its texture.
 
-### El Show-o real en el die direccionado
+### The real Show-o on the addressed die
 
-El firmware direcciona la memoria del die con 32 bits: el registro arriba y el elemento abajo. Al principio el Show-o real no cabía por tres motivos, ya resueltos:
-- **La tabla de embeddings** tiene 120 millones de elementos (27 bits de elemento). Ahora se queda en la imagen desde el principio (`Layout::with_cells_table_outside`, `VmEngine::new_table_outside`). Antes de cada rutina que la lee, el cargador trae la fila del token, como ya hacía el firmware con stories260K. En Show-o la leen el texto y también la entrada de cada fila de la imagen, así que el firmware la carga también antes de esa rutina. El anfitrión hace lo mismo en `fill_on_die`.
-- **Los almacenes de filas de la imagen** se suponían tan largos como el vocabulario, porque se indexan con el mismo campo que el token. Con la tabla fuera, ese campo solo llega a las filas de la imagen.
-- **El almacén de la guía** guardaba las puntuaciones de cada fila (258 × 8 192, 22 bits). Ahora guarda el estado final (258 × 2 048, 20 bits); da lo mismo, ver arriba.
+The firmware addresses the die's memory with 32 bits: the register on top and the element below. At first the real Show-o did not fit, for three reasons, now solved:
+- **The embedding table** has 120 million elements (27 bits of element). Now it stays in the image from the start (`Layout::with_cells_table_outside`, `VmEngine::new_table_outside`). Before each routine that reads it, the loader brings the token's row, as the firmware already did with stories260K. In Show-o both the text and the input of each image row read it, so the firmware also loads it before that routine. The host does the same in `fill_on_die`.
+- **The image's row stores** were assumed to be as long as the vocabulary, because they are indexed with the same field as the token. With the table outside, that field only reaches the image's rows.
+- **The guidance store** kept each row's scores (258 × 8,192, 22 bits). Now it keeps the final state (258 × 2,048, 20 bits); it gives the same, see above.
 
-`showo_chip::addressed_die` dimensiona el die: cada memoria tan grande como la usan las rutinas, y la profundidad de las celdas a partir de su número. Si registro y elemento no caben en 32 bits, da error. Con 4 096 celdas el Show-o real queda en 11 bits de registro y 20 de elemento, 31 en total; con 1 024 celdas, en 32 justos (`the_real_show_o_fits_the_addressed_die_with_its_table_in_the_image`).
+`showo_chip::addressed_die` sizes the die: each memory as large as the routines use, and the depth of the cells from their number. If register and element do not fit in 32 bits, it gives an error. With 4,096 cells the real Show-o takes 11 bits of register and 20 of element, 31 in all; with 1,024 cells, exactly 32 (`the_real_show_o_fits_the_addressed_die_with_its_table_in_the_image`).
 
-Comprobado:
-- **Show-o de juguete:** con la tabla en la imagen, el firmware rellena la imagen con los mismos códigos que el anfitrión (`the_firmware_fills_an_image_with_the_table_in_the_image`). Con el firmware anterior, que no cargaba la fila de la imagen, la prueba falla.
-- **Show-o real:** en una pasada sobre el die direccionado con 4 096 celdas, el mejor código coincide con la coma flotante en 61 de los 64 sitios tapados (`cargo run --release -p sim --example showo_addressed -- <carpeta> 4096 pasada`).
+Checked:
+- **Toy Show-o:** with the table in the image, the firmware fills in the image with the same codes as the host (`the_firmware_fills_an_image_with_the_table_in_the_image`). With the previous firmware, which did not load the image's row, the test fails.
+- **Real Show-o:** in one pass over the addressed die with 4,096 cells, the best code matches floating point in 61 of the 64 masked places (`cargo run --release -p sim --example showo_addressed -- <folder> 4096 pass`).
 
-Las celdas guardan los pesos en el formato del diseño aunque vengan en coma flotante, como Show-o. Los reescribe el recodificador: para cada peso, su código de 8 bits, y para cada grupo, su escala y su sesgo, igual que con un checkpoint que ya viene cuantizado. Las puertas dan lo mismo que la máquina exacta, bit a bit, con el Show-o de juguete en celdas de 8 bits (`floating_point_weights_in_an_8_bit_format_go_into_8_bit_cells`). Con el Show-o real, la pasada sobre celdas de 8 bits acierta los mismos 61 de 64 mejores códigos y tarda unos 46 s, frente a unos 210 s con una mantisa de 16 bits por peso: la máquina exacta suma los códigos enteros por grupo en lugar de cada peso entero.
+The cells keep the weights in the design's format even when they come in floating point, as Show-o's do. The recoder rewrites them: for each weight, its 8-bit code, and for each group, its scale and bias, just as with a checkpoint that comes quantized. The gates give the same as the exact machine, bit for bit, with the toy Show-o in 8-bit cells (`floating_point_weights_in_an_8_bit_format_go_into_8_bit_cells`). With the real Show-o, the pass over 8-bit cells gets the same 61 of 64 best codes and takes about 46 s, against about 210 s with a 16-bit mantissa per weight: the exact machine adds the integer codes per group instead of each whole weight.
 
-### Calidad del relleno en enteros
+### Quality of the integer fill
 
-`showo_fill_compare` hace el mismo retoque (el disco rojo, «a yellow lemon», guía 1,75, 4 pasos) de tres formas:
-1. todo en coma flotante;
-2. el modelo en coma flotante con el MaskGIT entero del firmware, con las puntuaciones redondeadas a mantisas de 16 bits;
-3. el chip: el MaskGIT entero y el transformador en la máquina exacta, con pesos afines de 8 bits.
+`showo_fill_compare` makes the same retouch (the red disc, guidance 1.75, 4 steps) in three ways:
+1. all in floating point;
+2. the model in floating point with the firmware's integer MaskGIT, the scores rounded to 16-bit mantissas;
+3. the chip: integer MaskGIT and the transformer in the chip's arithmetic, with 8-bit affine weights.
 
-Mide el color dentro del cuadrado retocado. Con 24 semillas:
+It measures the colour inside the retouched square. With "a yellow lemon" and 24 seeds:
 
-| Forma | Semillas | Amarillo, `min(R, G) − B` (media ± error) | Mediana | Saturación |
+| Way | Seeds | Yellow, `min(R, G) − B` (mean ± error) | Median | Saturation |
 |---|---|---|---|---|
-| Coma flotante | 24 | 95,1 ± 4,1 | 91,3 | 0,635 |
-| MaskGIT entero | 24 | 86,9 ± 2,3 | 86,3 | 0,619 |
-| Chip | 4 | 84,5 ± 5,6 | 81,2 | 0,622 |
+| Floating point | 24 | 95.1 ± 4.1 | 91.3 | 0.635 |
+| Integer MaskGIT | 24 | 86.9 ± 2.3 | 86.3 | 0.619 |
+| Chip | 4 | 84.5 ± 5.6 | 81.2 | 0.622 |
 
-Lo que dicen las cifras:
-- **El chip sigue al MaskGIT entero semilla a semilla** (100,7 frente a 93,4; 80,8 frente a 77,2; 75,1 frente a 76,9; 81,6 frente a 79,2). Los pesos de 8 bits y la aritmética del die no cambian el resultado de forma apreciable.
-- **Entre el MaskGIT entero y el de coma flotante** la diferencia está dentro del ruido de las semillas. Con las 8 primeras parecía clara (105,6 frente a 84,7), pero con 16 más queda en 89,9 frente a 88,0. Lo que sí se ve es más dispersión en coma flotante: unas pocas semillas salen muy amarillas, hasta 143,9. La primera impresión de que el chip sale más pálido venía de la semilla elegida.
-- **Al buscar la causa apareció un fallo real:** con distribuciones planas, el sorteo desbordaba al multiplicar en 64 bits y nunca elegía la mitad alta de los 8 192 códigos. Con la guía las puntuaciones son agudas y no llegaba a pasar, así que las cifras no cambian. Ahora multiplica en 128 bits, y `a_flat_draw_over_many_codes_is_even` lo comprueba.
+With three other texts, 8 seeds each (mean colour ± error):
 
-Pendiente:
-- medir la calidad con más imágenes y textos, no solo el disco rojo convertido en limón.
+| Text | Way | R | G | B | Saturation |
+|---|---|---|---|---|---|
+| "a green apple" | Floating point | 213.6 ± 3.5 | 187.1 ± 7.2 | 99.3 ± 8.5 | 0.601 |
+| | Integer MaskGIT | 208.6 ± 4.2 | 182.3 ± 8.5 | 99.1 ± 5.8 | 0.601 |
+| "an orange" | Floating point | 251.3 ± 0.6 | 164.5 ± 2.2 | 97.1 ± 1.5 | 0.616 |
+| | Integer MaskGIT | 251.0 ± 0.8 | 160.7 ± 2.3 | 89.3 ± 2.8 | 0.647 |
+| "a blue ball" | Floating point | 146.0 ± 4.1 | 139.9 ± 3.8 | 175.7 ± 4.8 | 0.575 |
+| | Integer MaskGIT | 145.8 ± 3.7 | 142.9 ± 2.2 | 182.6 ± 4.1 | 0.602 |
+
+What the figures say:
+- **The chip follows the integer MaskGIT seed by seed** (100.7 against 93.4; 80.8 against 77.2; 75.1 against 76.9; 81.6 against 79.2). The 8-bit weights and the die's arithmetic do not change the result appreciably.
+- **Between the integer and the floating-point MaskGIT,** the difference is within the seeds' noise, and saturation comes out equal or slightly higher with integers. With the first 8 lemon seeds it looked clear (105.6 against 84.7), but with 16 more it is 89.9 against 88.0. What does show is more spread in floating point: a few seeds come out very yellow, up to 143.9. The first impression that the chip came out paler came from the seed chosen.
+- **Looking for the cause turned up a real bug:** with flat distributions, the draw overflowed when multiplying in 64 bits and never chose the upper half of the 8,192 codes. With guidance the scores are sharp and it did not happen, so the figures do not change. Now it multiplies in 128 bits, and `a_flat_draw_over_many_codes_is_even` checks it.
+
+Still to do:
+- measure the quality on real photographs, not only on a synthetic disc.
