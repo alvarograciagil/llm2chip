@@ -540,20 +540,28 @@ impl Layout {
     /// and a RoPE table for that many tokens go into registers for the gates; otherwise
     /// the weights stay in the checkpoint and RoPE is computed directly.
     pub fn new(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: Option<usize>) -> Result<Self, String> {
-        Self::build(program, weights, config, chip_tokens, true, false)
+        Self::build(program, weights, config, chip_tokens, true, false, false)
     }
 
     /// For the gates: matrices compute in the cells and only lookup tables stay in registers.
     pub fn with_cells(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: usize) -> Result<Self, String> {
-        Self::build(program, weights, config, Some(chip_tokens), true, true)
+        Self::build(program, weights, config, Some(chip_tokens), true, true, false)
+    }
+
+    /// The same with the embedding table left in the image from the start, as
+    /// `table_outside` leaves it, without ever holding it in the vector memory: a table
+    /// larger than the die's addresses reach, such as Show-o's, can only go this way.
+    pub fn with_cells_table_outside(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: usize) -> Result<Self, String> {
+        Self::build(program, weights, config, Some(chip_tokens), true, true, true)
     }
 
     /// As a real chip is laid out: matrices live in the cells, not in vector registers.
     pub fn for_image(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: usize) -> Result<Self, String> {
-        Self::build(program, weights, config, Some(chip_tokens), false, true)
+        Self::build(program, weights, config, Some(chip_tokens), false, true, false)
     }
 
-    fn build(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: Option<usize>, matrices_in_registers: bool, cells: bool) -> Result<Self, String> {
+    fn build(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: Option<usize>, matrices_in_registers: bool, cells: bool, table_out: bool) -> Result<Self, String> {
+        let mut outside: Option<OutsideTable> = None;
         let next = Cell::new(1u32);
         let alloc = |count: u32| next.replace(next.get() + count);
         // A real chip shares registers among buffers that are never alive at once; the
@@ -624,7 +632,23 @@ impl Layout {
                         reg
                     }
                 };
-                if chip_tokens.is_some() && matrices_in_registers && (!cells || table) && in_registers.insert(name.clone()) {
+                if table_out && table && in_registers.insert(name.clone()) {
+                    if outside.as_ref().is_some_and(|t| t.name != name) {
+                        return Err("solo una tabla de embedding puede quedarse en la imagen".into());
+                    }
+                    if cols > 1 << config.index_bits {
+                        return Err(format!("una fila de {name} tiene {cols} elementos y el direccionamiento solo llega a {}", 1usize << config.index_bits));
+                    }
+                    let matrix = weights.matrix(&name)?;
+                    let exponent = matrix.exponent(cols);
+                    let mut mantissas = Vec::with_capacity(rows * cols);
+                    for r in 0..rows {
+                        mantissas.extend(matrix.fixed_row(r, cols, exponent, config.cell.activation_bits)?);
+                    }
+                    // The register holds one row, the one the firmware brings before each token.
+                    setup.load_mantissas(reg, &mantissas[..cols], exponent);
+                    outside = Some(OutsideTable { name: name.clone(), register: reg, cols: cols as u32, mantissas });
+                } else if chip_tokens.is_some() && matrices_in_registers && (!cells || table) && in_registers.insert(name.clone()) {
                     if rows * cols > 1 << config.index_bits {
                         return Err(format!("la matriz {name} tiene {} elementos y el direccionamiento solo llega a {}", rows * cols, 1usize << config.index_bits));
                     }
@@ -879,7 +903,7 @@ impl Layout {
             _ => None,
         });
         let token_range = table_rows.chain([program.vocab, program.vision.as_ref().map_or(0, |v| v.patches)]).max().unwrap_or(0) as u32;
-        Ok(Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: token_range, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside: None })
+        Ok(Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: if outside.is_some() { program.vision.as_ref().map_or(program.vocab, |v| v.patches) as u32 } else { token_range }, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -1354,6 +1378,9 @@ impl Layout {
         }
         let mantissas = (0..rows * cols).map(|i| self.setup.initial.remove(&(register, i)).unwrap_or(0)).collect();
         self.outside = Some(OutsideTable { name, register, cols, mantissas });
+        // Nothing reads by the token past its row now: what remains taken by it, the image's
+        // rows with an image part, reaches only as far as those.
+        self.tokens = program.vision.as_ref().map_or(program.vocab, |v| v.patches) as u32;
         true
     }
 

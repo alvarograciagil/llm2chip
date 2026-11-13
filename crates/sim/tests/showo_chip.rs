@@ -369,6 +369,18 @@ struct FillChip {
     image: Vec<u32>,
     input: Vec<u8>,
     expected: Vec<u32>,
+    /// The embedding table stays in the image and the loader brings each token's row.
+    outside: bool,
+}
+
+/// The die's exact machine for a fill chip, with its table where the chip keeps it.
+fn fill_engine(dir: &Path, program: &compiler::Program, die: netlist::DieConfig, context: usize, outside: bool) -> sim::chip::VmEngine {
+    let weights = sim::showo_chip::weights(dir, sim::Weights::open(dir).unwrap()).unwrap().2;
+    if outside {
+        sim::chip::VmEngine::new_table_outside(program.clone(), weights, die, context).unwrap()
+    } else {
+        sim::chip::VmEngine::new(program.clone(), weights, die, context).unwrap()
+    }
 }
 
 fn fill_soc() -> netlist::soc::SocConfig {
@@ -379,7 +391,7 @@ fn fill_sampler() -> netlist::sampler::SamplerConfig {
     netlist::sampler::SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }
 }
 
-fn fill_chip(tag: &str, steps: usize) -> Option<FillChip> {
+fn fill_chip(tag: &str, steps: usize, outside: bool) -> Option<FillChip> {
     use netlist::chip::{add_showo, chip_info, GenerationSetup};
     use netlist::image::build_image;
     use sim::lower::Layout;
@@ -398,13 +410,14 @@ fn fill_chip(tag: &str, steps: usize) -> Option<FillChip> {
     let steps = schedule(IMAGE, steps);
     let fill = Fill { text: (&text, first[0] as u32), plain: Some((&plain, plain_first[0] as u32)), schedule: &steps, seed: 7 };
     let context = (first[0] as usize + text.len() + IMAGE + 2).next_power_of_two();
-    let die = die_for(&program, &weights, context);
-    let layout = Layout::with_cells(&program, &weights, die, context).unwrap();
+    let die = if outside { sim::showo_chip::addressed_die(&program, &weights, die_for(&program, &weights, context), context).unwrap() } else { die_for(&program, &weights, context) };
+    let layout = if outside { Layout::with_cells_table_outside(&program, &weights, die, context).unwrap() } else { Layout::with_cells(&program, &weights, die, context).unwrap() };
+    assert_eq!(layout.outside_table().is_some(), outside);
     let code = layout.microprogram(&program).unwrap();
     let showo = sim::showo_chip::firmware_info(&program, &layout, &die).unwrap();
     assert_eq!(showo.guided, 1);
 
-    let mut vm = sim::chip::VmEngine::new(program.clone(), open().2, die, context).unwrap();
+    let mut vm = fill_engine(&dir, &program, die, context, outside);
     let expected = fill_on_die(&mut vm, &layout, &program, &showo, &config, die.cell.activation_bits, &codes, &fill);
     for (place, known) in codes.iter().enumerate() {
         if let Some(code) = known {
@@ -427,7 +440,7 @@ fn fill_chip(tag: &str, steps: usize) -> Option<FillChip> {
     words.extend(steps.iter().flat_map(|(remaining, temperature)| [*remaining as u32, *temperature as u32]));
     words.extend(codes.iter().map(|c| c.unwrap_or(u32::MAX)));
     let input = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-    Some(FillChip { dir, program, die, context, code, image, input, expected })
+    Some(FillChip { dir, program, die, context, code, image, input, expected, outside })
 }
 
 /// The chip at instruction level, its die in software: what it sends and its cycles.
@@ -436,7 +449,7 @@ fn fill_on_iss(chip: &FillChip) -> (Vec<u8>, u64) {
     use netlist::rv32::Rv32Iss;
     use netlist::sampler::{exponential_table, SamplerModel};
     use netlist::soc::SocBus;
-    let engine = sim::chip::VmEngine::new(chip.program.clone(), sim::showo_chip::weights(&chip.dir, sim::Weights::open(&chip.dir).unwrap()).unwrap().2, chip.die, chip.context).unwrap();
+    let engine = fill_engine(&chip.dir, &chip.program, chip.die, chip.context, chip.outside);
     let model = ChipModel::new(engine, chip.code.clone(), SamplerModel { config: fill_sampler(), rng: 0, table: exponential_table() });
     let mut bus = SocBus::booted_with(fill_soc(), &chip.image, &chip.input, model).unwrap();
     let mut cpu = Rv32Iss::default();
@@ -458,9 +471,20 @@ fn sent_codes(bytes: &[u8]) -> Vec<u32> {
 /// the same draws on the same machine.
 #[test]
 fn the_firmware_fills_an_image_as_the_host_ordered_it() {
-    let Some(chip) = fill_chip("iss", 4) else { return };
+    let Some(chip) = fill_chip("iss", 4, false) else { return };
     let (sent, cycles) = fill_on_iss(&chip);
     eprintln!("relleno en el chip: {cycles} ciclos de CPU, códigos {:?}", sent_codes(&sent));
+    assert_eq!(sent_codes(&sent), chip.expected, "los códigos del relleno");
+    std::fs::remove_dir_all(&chip.dir).ok();
+}
+
+/// The same with the embedding table left in the image, as the real Show-o needs it: the
+/// firmware's loader brings each row, the text's and the image's, before the routine that
+/// reads it, as the host does.
+#[test]
+fn the_firmware_fills_an_image_with_the_table_in_the_image() {
+    let Some(chip) = fill_chip("fuera", 4, true) else { return };
+    let (sent, _) = fill_on_iss(&chip);
     assert_eq!(sent_codes(&sent), chip.expected, "los códigos del relleno");
     std::fs::remove_dir_all(&chip.dir).ok();
 }
@@ -469,7 +493,7 @@ fn the_firmware_fills_an_image_as_the_host_ordered_it() {
 #[test]
 #[ignore = "lenta: el chip entero en puertas rellena una imagen de juguete, millones de ciclos"]
 fn the_whole_chip_fills_an_image_in_gates_as_at_instruction_level() {
-    let Some(chip) = fill_chip("gates", 2) else { return };
+    let Some(chip) = fill_chip("gates", 2, false) else { return };
     let (expected, cycles) = fill_on_iss(&chip);
     assert_eq!(sent_codes(&expected), chip.expected);
     let config = netlist::chip::ChipConfig { soc: fill_soc(), die: chip.die, sampler: fill_sampler() };
@@ -479,4 +503,27 @@ fn the_whole_chip_fills_an_image_in_gates_as_at_instruction_level() {
     assert_eq!(output, expected);
     assert_eq!(gate_cycles, cycles, "ciclos");
     std::fs::remove_dir_all(&chip.dir).ok();
+}
+
+/// The real Show-o fits the firmware's 32-bit addresses with its embedding table left in
+/// the image and the guidance kept as the final state: 4 096 cells of 16-bit weights.
+#[test]
+#[ignore = "lenta: lee los 1 300 M de pesos del Show-o real para repartirlos en las celdas"]
+fn the_real_show_o_fits_the_addressed_die_with_its_table_in_the_image() {
+    let dir = std::env::var_os("LLM2CHIP_SHOWO").map(std::path::PathBuf::from).unwrap_or_else(|| Path::new(&std::env::var("HOME").unwrap()).join(".llm2chip/models/Show-o"));
+    if !dir.join("config.json").exists() {
+        eprintln!("no está Show-o en {}: se omite", dir.display());
+        return;
+    }
+    let (shape, config, weights) = sim::showo_chip::weights(&dir, sim::Weights::open(&dir).unwrap()).unwrap();
+    let program = sim::showo_chip::program_guided(&shape, Some(1.75));
+    let context = (config.max_text + 1 + shape.image_rows).next_power_of_two();
+    let base = die_config();
+    let base = netlist::DieConfig { cells: 4096, cell: netlist::CellConfig { weight_bits: 16, accumulator_bits: 48, ..base.cell }, scale_bits: 21, ..base };
+    let die = sim::showo_chip::addressed_die(&program, &weights, base, context).unwrap();
+    eprintln!("{} bits de registro y {} de elemento", die.reg_bits, die.index_bits);
+    assert!(die.reg_bits + die.index_bits <= 32);
+    let layout = sim::lower::Layout::with_cells_table_outside(&program, &weights, die, context).unwrap();
+    let table = layout.outside_table().expect("la tabla en la imagen");
+    assert_eq!((table.cols as usize, table.mantissas.len()), (shape.hidden, shape.vocab * shape.hidden));
 }

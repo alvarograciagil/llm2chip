@@ -250,8 +250,9 @@ fn load_row(token: u32) {
 
 /// Starts one routine of this chip's die, without waiting for it.
 fn start_die(routine: u32, token: u32, position: u32) {
-    // Only these routines read a token's row of the table.
-    if routine == ROUTINE_TOKEN || routine == ROUTINE_DRAFT {
+    // Only these routines read a token's row of the table: with Show-o, the image's
+    // embedding too, which reads the same table.
+    if routine == ROUTINE_TOKEN || routine == ROUTINE_DRAFT || (routine == ROUTINE_VISION && info(INFO_SHOWO) != 0) {
         load_row(token);
     }
     for p in 0..info(INFO_PARAMETER_COUNT) as usize {

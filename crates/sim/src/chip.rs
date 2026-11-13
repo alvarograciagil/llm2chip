@@ -50,12 +50,22 @@ pub struct VmEngine {
 
 impl VmEngine {
     pub fn new(program: Program, weights: Weights, config: DieConfig, chip_tokens: usize) -> Result<Self, String> {
+        Self::build(program, weights, config, chip_tokens, false)
+    }
+
+    /// The die with the embedding table in the image from the start
+    /// (`Layout::with_cells_table_outside`): each token's row is what the firmware brings.
+    pub fn new_table_outside(program: Program, weights: Weights, config: DieConfig, chip_tokens: usize) -> Result<Self, String> {
+        Self::build(program, weights, config, chip_tokens, true)
+    }
+
+    fn build(program: Program, weights: Weights, config: DieConfig, chip_tokens: usize, table_outside: bool) -> Result<Self, String> {
         // The die's addresses put the register above the element in 32 bits.
         if config.reg_bits + config.index_bits > 32 {
             return Err(format!("{} bits de registro y {} de elemento no caben en una dirección de 32 bits", config.reg_bits, config.index_bits));
         }
         let weights = Arc::new(weights);
-        let layout = Layout::with_cells(&program, &weights, config, chip_tokens)?;
+        let layout = if table_outside { Layout::with_cells_table_outside(&program, &weights, config, chip_tokens)? } else { Layout::with_cells(&program, &weights, config, chip_tokens)? };
         let exponents = exponent_register(&config);
         let mut vm = BlockVm::new(&config, layout.registers_used() as usize + 8, Some(weights));
         vm.compute_in_cells();

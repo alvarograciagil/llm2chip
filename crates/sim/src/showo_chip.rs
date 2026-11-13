@@ -226,25 +226,29 @@ pub fn program_guided(s: &Shape, guidance: Option<f32>) -> Program {
     let score_start = e.ops.len();
     let h = e.buf(s.hidden);
     e.op("leer fila", Op::LoadRow { store: state, dst: h });
-    let (_, scores) = code_scores(&mut e, s, h);
+    let (normed, scores) = code_scores(&mut e, s, h);
     let score = score_start..e.ops.len();
-    // With guidance, two more routines: one keeps a row's scores with the text, the other
-    // combines them with those without it, `(1 + g) · with − g · without`, by the row.
+    // With guidance, two more routines: one keeps a row's final state with the text, the
+    // other combines it with the one without, `(1 + g) · with − g · without`, by the row,
+    // and scores that. The code head is affine, so that gives the same as combining the
+    // scores, `(1 + g) · (W·a + b) − g · (W·c + b)`; a row's state is a quarter of its
+    // scores, and the whole image's fits the die's addresses where its scores do not.
     let mut extra = Vec::new();
     if let Some(g) = guidance {
-        let kept = e.buf(rows * s.codebook);
+        let kept = e.buf(rows * s.hidden);
         let start = e.ops.len();
-        e.op("guardar puntuaciones con texto", Op::StoreRow { src: scores, store: kept });
+        e.op("guardar estado con texto", Op::StoreRow { src: normed, store: kept });
         extra.push(start..e.ops.len());
         let start = e.ops.len();
-        let (with, without, difference, pushed, combined) = (e.buf(s.codebook), e.buf(s.codebook), e.buf(s.codebook), e.buf(s.codebook), e.buf(s.codebook));
-        e.op("leer puntuaciones con texto", Op::LoadRow { store: kept, dst: with });
-        e.op("cambiar de signo", Op::Scale { src: scores, factor: -1.0, dst: without });
+        let (with, without, difference, pushed, combined) = (e.buf(s.hidden), e.buf(s.hidden), e.buf(s.hidden), e.buf(s.hidden), e.buf(s.hidden));
+        e.op("leer estado con texto", Op::LoadRow { store: kept, dst: with });
+        e.op("cambiar de signo", Op::Scale { src: normed, factor: -1.0, dst: without });
         e.op("diferencia", Op::Add { a: with, b: without, dst: difference });
         e.op("guía", Op::Scale { src: difference, factor: g, dst: pushed });
-        e.op("puntuaciones guiadas", Op::Add { a: with, b: pushed, dst: combined });
+        e.op("estado guiado", Op::Add { a: with, b: pushed, dst: combined });
+        let scored = e.linear("puntuaciones guiadas", CODE_HEAD.into(), combined, s.codebook);
         extra.push(start..e.ops.len());
-        guided = Some(combined);
+        guided = Some(scored);
     }
     let image_ops = std::mem::take(&mut e.ops);
     let unused = e.buf(1);
@@ -432,6 +436,34 @@ pub fn firmware_info(program: &Program, layout: &Layout, die: &DieConfig) -> Res
     })
 }
 
+/// A die with cells for Show-o's `program`, addressed as the firmware addresses it, with
+/// `base`'s cells and arithmetic. The embedding table stays in the image and the loader
+/// brings each token's row, the text's and the image's: with the real Show-o it alone would
+/// take 27 bits of element. Every other memory is just as large as the routines reach, so
+/// that register and element fit together in the CPU's 32-bit addresses; if they do not,
+/// more cells make each one's weights shallower.
+pub fn addressed_die(program: &Program, weights: &Weights, base: DieConfig, context: usize) -> Result<DieConfig, String> {
+    let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
+    let layout = |die: DieConfig| Layout::with_cells_table_outside(program, weights, die, context);
+    let roomy = DieConfig { microcode_bits: 20, reg_bits: 12, index_bits: 30, cell: netlist::CellConfig { addr_bits: 30, ..base.cell }, features: base.features.with_key_shift(bits_for(context as u64)), ..base };
+    let reach = layout(roomy)?;
+    let (depth, groups) = reach.cell_depths();
+    // A product seeks its weights by the element's field, so it holds the cells' depth too.
+    let addr_bits = bits_for(depth.max(2 * groups));
+    reach.microprogram(program)?;
+    let furthest = reach.longest_registers(1).first().map_or(1, |(_, extent)| *extent as u64);
+    let initial = reach.setup().initial.keys().map(|(_, index)| *index as u64 + 1).max().unwrap_or(1);
+    let index_bits = bits_for(furthest.max(initial)).max(addr_bits);
+    let sized = DieConfig { index_bits, cell: netlist::CellConfig { addr_bits, ..roomy.cell }, ..roomy };
+    let wide = layout(sized)?;
+    let code = wide.microprogram(program)?;
+    let die = DieConfig { microcode_bits: bits_for(code.words.len() as u64), ..crate::chip::with_registers_needed(sized, &wide) };
+    if die.reg_bits + die.index_bits > 32 {
+        return Err(format!("{} bits de registro y {} de elemento no caben en 32: hacen falta más celdas", die.reg_bits, die.index_bits));
+    }
+    Ok(die)
+}
+
 /// A MaskGIT fill as the chip's firmware runs it.
 pub struct Fill<'a> {
     /// The text's tokens and the position of the first, and the same without the text
@@ -478,6 +510,13 @@ pub struct Addressed<'a> {
 
 impl FillDie for Addressed<'_> {
     fn run(&mut self, routine: usize, token: u32, position: u32) {
+        // With the embedding table left in the image, its row goes into the table's
+        // register first, as the firmware's loader brings it, for the text and the image.
+        if let Some(table) = self.layout.outside_table().filter(|_| routine == crate::lower::ENTRY_TOKEN || routine == crate::lower::ENTRY_VISION) {
+            let base = table.register << self.layout.config().index_bits;
+            let row = &table.mantissas[(token * table.cols) as usize..][..table.cols as usize];
+            row.iter().enumerate().for_each(|(i, value)| self.engine.write(base + i as u32, *value));
+        }
         self.engine.run(routine, token, position);
     }
 

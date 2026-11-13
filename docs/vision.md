@@ -234,10 +234,10 @@ El chip también rellena la imagen él solo. El firmware hace los pasos de MaskG
 - **Su confianza** es su log-probabilidad, con `log2` en tabla, más el ruido de Gumbel, que se enfría paso a paso.
 - **Los menos seguros** siguen tapados. El calendario de cuántos quedan en cada paso y la temperatura los envía el anfitrión, calculados como en Show-o.
 - **La guía la hace el die**, con dos rutinas más:
-  1. en la pasada con texto, una guarda las puntuaciones de cada fila;
-  2. en la pasada sin texto, otra las combina: `(1 + g)·con texto − g·sin texto`.
+  1. en la pasada con texto, una guarda el estado final de cada fila, ya normalizado;
+  2. en la pasada sin texto, otra lo combina, `(1 + g)·con texto − g·sin texto`, y puntúa el resultado.
 
-  La CPU solo lee las puntuaciones combinadas.
+  Como el cabezal de códigos es afín, da lo mismo que combinar las puntuaciones: `(1 + g)·(W·a + b) − g·(W·c + b) = W·((1 + g)·a − g·c) + b`. El estado de una fila ocupa la cuarta parte que sus puntuaciones (2 048 frente a 8 192 en el Show-o real), y es lo que deja caber el almacén en las direcciones del die. La CPU solo lee las puntuaciones combinadas.
 
 Comprobado:
 - **Frente a la coma flotante:** las confianzas quedan a menos de 0,02 nats y las frecuencias de los sorteos, a menos de un 1 % (`crates/sim/tests/maskgit_rt.rs`).
@@ -245,7 +245,20 @@ Comprobado:
 - **El chip entero en puertas,** CPU, firmware, cargador y die, rellena la imagen de juguete con dos pasos. Envía los mismos bytes en los mismos ciclos que a nivel de instrucción: 12,28 millones de ciclos, 903 s (`the_whole_chip_fills_an_image_in_gates_as_at_instruction_level`).
 - **Con el Show-o real:** el mismo bucle (`fill_on`), sobre la máquina exacta con la guía en el die y pesos afines de 8 bits, retoca el disco rojo con «a yellow lemon» en 4 pasos y 367 s (`cargo run --release -p sim --example showo_fill_chip`). Sale un limón con su textura, más pálido que en coma flotante.
 
-Para el Show-o real, el die direccionado (`VmEngine`) no sirve tal cual. Su tabla de embeddings tiene 120 millones de elementos, y registro y elemento no caben juntos en las direcciones de 32 bits. El chip la dejaría en la imagen y leería cada fila por el cargador, como ya hace el firmware con stories260K. La máquina del die ahora rechaza esas configuraciones en vez de corromper los datos.
+### El Show-o real en el die direccionado
+
+El firmware direcciona la memoria del die con 32 bits: el registro arriba y el elemento abajo. Al principio el Show-o real no cabía por tres motivos, ya resueltos:
+- **La tabla de embeddings** tiene 120 millones de elementos (27 bits de elemento). Ahora se queda en la imagen desde el principio (`Layout::with_cells_table_outside`, `VmEngine::new_table_outside`). Antes de cada rutina que la lee, el cargador trae la fila del token, como ya hacía el firmware con stories260K. En Show-o la leen el texto y también la entrada de cada fila de la imagen, así que el firmware la carga también antes de esa rutina. El anfitrión hace lo mismo en `fill_on_die`.
+- **Los almacenes de filas de la imagen** se suponían tan largos como el vocabulario, porque se indexan con el mismo campo que el token. Con la tabla fuera, ese campo solo llega a las filas de la imagen.
+- **El almacén de la guía** guardaba las puntuaciones de cada fila (258 × 8 192, 22 bits). Ahora guarda el estado final (258 × 2 048, 20 bits); da lo mismo, ver arriba.
+
+`showo_chip::addressed_die` dimensiona el die: cada memoria tan grande como la usan las rutinas, y la profundidad de las celdas a partir de su número. Si registro y elemento no caben en 32 bits, da error. Con 4 096 celdas el Show-o real queda en 11 bits de registro y 20 de elemento, 31 en total; con 1 024 celdas, en 32 justos (`the_real_show_o_fits_the_addressed_die_with_its_table_in_the_image`).
+
+Comprobado:
+- **Show-o de juguete:** con la tabla en la imagen, el firmware rellena la imagen con los mismos códigos que el anfitrión (`the_firmware_fills_an_image_with_the_table_in_the_image`). Con el firmware anterior, que no cargaba la fila de la imagen, la prueba falla.
+- **Show-o real:** en una pasada sobre el die direccionado con 4 096 celdas, el mejor código coincide con la coma flotante en 61 de los 64 sitios tapados. Tarda 261 s y usa 9 GB de memoria (`cargo run --release -p sim --example showo_addressed -- <carpeta> 4096 pasada`).
+
+En este die las celdas guardan cada peso como una mantisa de 16 bits, con el valor ya redondeado al formato de 8 bits. Para que guarden directamente los códigos de 8 bits de unos pesos que vienen en coma flotante, como hacen con los que ya vienen cuantizados, falta enseñar a `cell_row` a leer los pesos recodificados.
 
 Pendiente:
 - medir con más imágenes y semillas cuánto se aparta el relleno en enteros del de coma flotante: en la prueba sale más desvaído;
