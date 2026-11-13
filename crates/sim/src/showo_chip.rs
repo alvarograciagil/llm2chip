@@ -288,8 +288,13 @@ pub struct ShowOChip {
 impl ShowOChip {
     /// From Show-o's folder, on a die like `die` with vectors of its activation bits.
     pub fn open(dir: &Path, weights: Weights, die: DieConfig) -> Result<Self, String> {
+        Self::open_guided(dir, weights, die, None)
+    }
+
+    /// The same with `guidance` in the die (`program_guided`).
+    pub fn open_guided(dir: &Path, weights: Weights, die: DieConfig, guidance: Option<f32>) -> Result<Self, String> {
         let (shape, config, weights) = self::weights(dir, weights)?;
-        let program = program(&shape);
+        let program = program_guided(&shape, guidance);
         let weights = Arc::new(weights);
         let layout = Layout::new(&program, &weights, die, None)?;
         let mut vm = BlockVm::new(&die, layout.registers_used() as usize + 8, Some(weights));
@@ -303,6 +308,17 @@ impl ShowOChip {
         let base = crate::exact::exact_config(bits);
         let die = DieConfig { cell: netlist::CellConfig { weight_bits: bits, accumulator_bits: 2 * bits + 8, ..base.cell }, ..base };
         Self::open(dir, Weights::open(dir)?, die)
+    }
+
+    /// On the exact machine's die with vectors of `bits` bits, the weights in `format` (or
+    /// whole, in cells as wide as the vectors), and `guidance` in the die.
+    pub fn exact_guided(dir: &Path, bits: u32, format: Option<netlist::format::WeightFormat>, guidance: f32) -> Result<Self, String> {
+        let base = crate::exact::exact_config(bits);
+        let die = match format {
+            Some(_) => base,
+            None => DieConfig { cell: netlist::CellConfig { weight_bits: bits, accumulator_bits: 2 * bits + 8, ..base.cell }, ..base },
+        };
+        Self::open_guided(dir, Weights::open(dir)?.with_format(format), die, Some(guidance))
     }
 
     /// On the exact machine's die, with vectors of `bits` bits and the weights in `format`,
@@ -442,68 +458,148 @@ pub fn schedule(places: usize, steps: usize) -> Vec<(i64, i64)> {
         .collect()
 }
 
-/// The firmware's MaskGIT fill, ordered from the host on any die: the same routines, the
-/// same draws and the same choices. `codes` are the image's places, `None` where masked;
-/// `bits` are the die's mantissas'. Gives every place's code.
+/// What a fill needs from a die: run its routines, rotate a place of the cache as another
+/// position, and read the scores the scores' routine leaves, as signed mantissas with their
+/// exponent.
+pub trait FillDie {
+    fn run(&mut self, routine: usize, token: u32, position: u32);
+    fn rotate(&mut self, slot: u32, position: u32);
+    fn scores(&mut self) -> (i32, Vec<i32>);
+}
+
+/// A die addressed as the firmware addresses it, through a `DieEngine`.
+pub struct Addressed<'a> {
+    pub engine: &'a mut dyn netlist::chip::DieEngine,
+    pub layout: &'a Layout,
+    pub program: &'a Program,
+    pub info: &'a netlist::chip::ShowOInfo,
+    pub bits: u32,
+}
+
+impl FillDie for Addressed<'_> {
+    fn run(&mut self, routine: usize, token: u32, position: u32) {
+        self.engine.run(routine, token, position);
+    }
+
+    fn rotate(&mut self, slot: u32, position: u32) {
+        let width = 3 * self.info.rope_half + 1;
+        let row = self.layout.text_rotation(self.program, [position as u64; 3], [self.info.rope_half as usize, 0, 0]);
+        row.iter().enumerate().for_each(|(i, value)| self.engine.write(self.info.rope + slot * width + i as u32, *value));
+    }
+
+    fn scores(&mut self) -> (i32, Vec<i32>) {
+        let bits = self.bits;
+        let signed = |v: i64| ((v as u32) << (32 - bits)) as i32 >> (32 - bits);
+        let exponent = signed(self.engine.read(self.info.scores.1));
+        (exponent, (0..self.info.codebook).map(|c| signed(self.engine.read(self.info.scores.0 + c))).collect())
+    }
+}
+
+impl FillDie for ShowOChip {
+    fn run(&mut self, routine: usize, token: u32, position: u32) {
+        self.layout.run_routine(&mut self.vm, &self.program, routine, token, position).expect("rutina de Show-o");
+    }
+
+    fn rotate(&mut self, slot: u32, position: u32) {
+        self.layout.place_rotation(&self.program, slot, [position as u64; 3], None).expect("rotación");
+    }
+
+    fn scores(&mut self) -> (i32, Vec<i32>) {
+        let part = self.program.vision.as_ref().expect("la imagen");
+        let (reg, width) = (self.layout.register_of(part.output), self.program.buffers[part.output] as u32);
+        (self.vm.register_exponent(reg) as i32, (0..width).map(|i| self.vm.mantissa(reg, i) as i32).collect())
+    }
+}
+
+impl ShowOChip {
+    /// Starts the machine over, as before a fill.
+    pub fn reset(&mut self) {
+        self.vm.clear();
+        crate::chip::load_initial(&mut self.vm, &self.layout.setup().initial, self.exponents);
+        self.layout.clear_rotations();
+    }
+
+    /// The shape of a fill on this machine: its rows, layers, codes and whether it guides.
+    pub fn fill_shape(&self) -> FillShape {
+        let part = self.program.vision.as_ref().expect("la imagen");
+        FillShape { rows: part.patches as u32, layers: part.blocks.len() as u32, guided: !part.extra.is_empty(), bits: self.layout.config().cell.activation_bits }
+    }
+}
+
+/// What the fill needs to know of the program: the image's rows, the layers, whether the
+/// die guides, and the bits of its mantissas.
+#[derive(Clone, Copy, Debug)]
+pub struct FillShape {
+    pub rows: u32,
+    pub layers: u32,
+    pub guided: bool,
+    pub bits: u32,
+}
+
+/// The firmware's MaskGIT fill, ordered from the host on an addressed die: the same
+/// routines, the same draws and the same choices. `codes` are the image's places, `None`
+/// where masked; `bits` are the die's mantissas'. Gives every place's code.
 #[allow(clippy::too_many_arguments)]
 pub fn fill_on_die(engine: &mut dyn netlist::chip::DieEngine, layout: &Layout, program: &Program, info: &netlist::chip::ShowOInfo, config: &ShowOConfig, bits: u32, codes: &[Option<u32>], fill: &Fill) -> Vec<u32> {
+    let shape = FillShape { rows: info.rows, layers: info.layers, guided: info.guided != 0, bits };
+    fill_on(&mut Addressed { engine, layout, program, info, bits }, shape, config, codes, fill)
+}
+
+/// The fill on any die, as the firmware runs it.
+pub fn fill_on(die: &mut dyn FillDie, shape: FillShape, config: &ShowOConfig, codes: &[Option<u32>], fill: &Fill) -> Vec<u32> {
     use crate::lower::{ENTRY_TOKEN, ENTRY_VISION};
-    let width = 3 * info.rope_half + 1;
-    let signed = |v: i64| ((v as u32) << (32 - bits)) as i32 >> (32 - bits);
-    let score_routine = ENTRY_VISION + 1 + 2 * info.layers as usize;
+    let score_routine = ENTRY_VISION + 1 + 2 * shape.layers as usize;
     let mut current = codes.to_vec();
     let mut sampled: Vec<u32> = codes.iter().map(|c| c.unwrap_or(0)).collect();
     let mut rng = maskgit_rt::Rng(fill.seed | 1);
-    let rows = info.rows;
-    let pass = |engine: &mut dyn netlist::chip::DieEngine, (ids, first): (&[u32], u32), image: &[u32], after: &mut dyn FnMut(&mut dyn netlist::chip::DieEngine, u32)| {
+    let rows = shape.rows;
+    let pass = |die: &mut dyn FillDie, (ids, first): (&[u32], u32), image: &[u32], after: &mut dyn FnMut(&mut dyn FillDie, u32)| {
         let text = ids.len() as u32;
         for slot in 0..text + rows {
-            let row = layout.text_rotation(program, [(first + slot) as u64; 3], [info.rope_half as usize, 0, 0]);
-            row.iter().enumerate().for_each(|(i, value)| engine.write(info.rope + slot * width + i as u32, *value));
+            die.rotate(slot, first + slot);
         }
         for (slot, id) in ids.iter().enumerate() {
-            engine.run(ENTRY_TOKEN, *id, slot as u32);
+            die.run(ENTRY_TOKEN, *id, slot as u32);
         }
-        for layer in 0..info.layers as usize {
+        for layer in 0..shape.layers as usize {
             for row in 0..rows {
                 if layer == 0 {
-                    engine.run(ENTRY_VISION, image[row as usize], 0);
+                    die.run(ENTRY_VISION, image[row as usize], 0);
                 }
-                engine.run(ENTRY_VISION + 1 + 2 * layer, row, text + row);
+                die.run(ENTRY_VISION + 1 + 2 * layer, row, text + row);
             }
             for row in 0..rows {
-                engine.run(ENTRY_VISION + 2 + 2 * layer, row, text + rows - 1);
+                die.run(ENTRY_VISION + 2 + 2 * layer, row, text + rows - 1);
             }
         }
         for row in 1..rows - 1 {
-            engine.run(score_routine, row, 0);
-            after(engine, row);
+            die.run(score_routine, row, 0);
+            after(die, row);
         }
     };
     for (remaining, temperature) in fill.schedule {
         let image: Vec<u32> = std::iter::once(config.start_of_image()).chain(current.iter().map(|c| c.map_or(config.mask_token, |c| config.first_code() + c))).chain([config.end_of_image()]).collect();
         let mut confidence = vec![i64::MAX; current.len()];
-        let mut draw = |engine: &mut dyn netlist::chip::DieEngine, row: u32, current: &[Option<u32>], sampled: &mut [u32], confidence: &mut [i64]| {
+        let mut draw = |die: &mut dyn FillDie, row: u32, current: &[Option<u32>], sampled: &mut [u32], confidence: &mut [i64]| {
             let place = row as usize - 1;
             if let Some(code) = current[place] {
                 sampled[place] = code;
                 return;
             }
-            let exponent = signed(engine.read(info.scores.1));
-            let scores: Vec<i32> = (0..info.codebook).map(|c| signed(engine.read(info.scores.0 + c))).collect();
-            let (code, sure) = maskgit_rt::draw(info.codebook, &|c| scores[c as usize], exponent, bits, *temperature, &mut rng);
+            let (exponent, scores) = die.scores();
+            let (code, sure) = maskgit_rt::draw(scores.len() as u32, &|c| scores[c as usize], exponent, shape.bits, *temperature, &mut rng);
             sampled[place] = code;
             confidence[place] = sure;
         };
-        match fill.plain {
-            None => pass(engine, fill.text, &image, &mut |engine, row| draw(engine, row, &current, &mut sampled, &mut confidence)),
-            Some(plain) => {
-                pass(engine, fill.text, &image, &mut |engine, row| engine.run(score_routine + 1, row, 0));
-                pass(engine, plain, &image, &mut |engine, row| {
-                    engine.run(score_routine + 2, row, 0);
-                    draw(engine, row, &current, &mut sampled, &mut confidence)
+        match (fill.plain, shape.guided) {
+            (Some(plain), true) => {
+                pass(die, fill.text, &image, &mut |die, row| die.run(score_routine + 1, row, 0));
+                pass(die, plain, &image, &mut |die, row| {
+                    die.run(score_routine + 2, row, 0);
+                    draw(die, row, &current, &mut sampled, &mut confidence)
                 });
             }
+            _ => pass(die, fill.text, &image, &mut |die, row| draw(die, row, &current, &mut sampled, &mut confidence)),
         }
         let unknown = current.iter().filter(|c| c.is_none()).count();
         let cut = maskgit_rt::cut(&confidence, maskgit_rt::masked(*remaining, unknown));

@@ -50,6 +50,10 @@ pub struct VmEngine {
 
 impl VmEngine {
     pub fn new(program: Program, weights: Weights, config: DieConfig, chip_tokens: usize) -> Result<Self, String> {
+        // The die's addresses put the register above the element in 32 bits.
+        if config.reg_bits + config.index_bits > 32 {
+            return Err(format!("{} bits de registro y {} de elemento no caben en una dirección de 32 bits", config.reg_bits, config.index_bits));
+        }
         let weights = Arc::new(weights);
         let layout = Layout::with_cells(&program, &weights, config, chip_tokens)?;
         let exponents = exponent_register(&config);
