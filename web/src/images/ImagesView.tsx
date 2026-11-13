@@ -209,7 +209,7 @@ export function ImagesPanel() {
             </label>
             <label title="La misma semilla, con el mismo texto y la misma zona, da el mismo resultado.">
               Semilla (vacía, una nueva cada vez)
-              <input type="text" inputMode="numeric" value={s.seed} disabled={s.running} onChange={(e) => s.set({ seed: e.target.value.replace(/[^0-9]/g, "") })} />
+              <input type="text" inputMode="numeric" value={s.seed} disabled={s.running} onChange={(e) => s.set({ seed: e.target.value.replace(/[^0-9]/g, "").slice(0, 15) })} />
             </label>
           </div>
 

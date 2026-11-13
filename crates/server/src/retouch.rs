@@ -25,6 +25,9 @@ pub struct RetouchRequest {
     pub picture: Option<Picture>,
 }
 
+/// The largest integer a JavaScript number holds exactly.
+const SEED_MASK: u64 = (1 << 53) - 1;
+
 fn default_steps() -> usize {
     16
 }
@@ -88,7 +91,8 @@ pub fn run(request: &RetouchRequest, job: &RetouchJob, painter: &Painter) -> Res
     let text = tokenizer.encode(request.prompt.as_str(), false).map_err(|e| e.to_string())?.get_ids().to_vec();
     let steps = request.steps.clamp(1, 64);
     let guidance = request.guidance.clamp(0.0, 10.0);
-    let seed = request.seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64));
+    // Within 2^53, so the browser, whose numbers are doubles, gives the seed back intact.
+    let seed = request.seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)) & SEED_MASK;
     let started = std::time::Instant::now();
     let progress = |step: usize, steps: usize| {
         if job.cancel.load(Relaxed) {
