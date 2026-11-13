@@ -170,12 +170,28 @@ fn run_show_o(run: &mut dyn FnMut(usize, u32, u32), read: &mut dyn FnMut(u32) ->
         .collect()
 }
 
+/// A die with cells as deep as Show-o's weights need, each a mantissa of the vectors'
+/// width, with as many registers as its routines reach, for `context` places in the cache.
+fn die_for(program: &compiler::Program, weights: &sim::Weights, context: usize) -> netlist::DieConfig {
+    use sim::lower::Layout;
+    let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
+    let base = cell_die_config();
+    let roomy = netlist::DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, weight_bits: base.cell.activation_bits, ..base.cell }, features: base.features.with_key_shift(bits_for(context as u64)), ..base };
+    let (depth, groups) = Layout::with_cells(program, weights, roomy, context).unwrap().cell_depths();
+    let addr_bits = bits_for(depth.max(2 * groups));
+    let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1).max(context as u64 * 512)).max(addr_bits);
+    let roomy = netlist::DieConfig { index_bits, cell: netlist::CellConfig { addr_bits, ..roomy.cell }, ..roomy };
+    let wide = Layout::with_cells(program, weights, roomy, context).unwrap();
+    wide.microprogram(program).unwrap();
+    sim::chip::with_registers_needed(roomy, &wide)
+}
+
 #[test]
 #[ignore = "lenta: Show-o de juguete en las puertas del die"]
 fn show_o_s_routines_on_the_die_s_gates_give_the_exact_machine_s_scores() {
     use netlist::chip::DieEngine;
     use netlist::demo::read_block_value;
-    use netlist::{die_design, DieConfig, Simulator};
+    use netlist::{die_design, Simulator};
     use sim::lower::Layout;
     let dir = std::env::temp_dir().join(format!("llm2chip-showo-gates-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -191,17 +207,7 @@ fn show_o_s_routines_on_the_die_s_gates_give_the_exact_machine_s_scores() {
     let image: Vec<u32> = std::iter::once(config.start_of_image()).chain(codes).chain([config.end_of_image()]).collect();
     let context = ids.len() + image.len();
 
-    // Cells as deep as the weights need, each a mantissa of the vectors' width.
-    let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
-    let base = cell_die_config();
-    let roomy = DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, weight_bits: base.cell.activation_bits, ..base.cell }, features: base.features.with_key_shift(5), ..base };
-    let (depth, groups) = Layout::with_cells(&program, &weights, roomy, context).unwrap().cell_depths();
-    let addr_bits = bits_for(depth.max(2 * groups));
-    let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1).max(context as u64 * 512)).max(addr_bits);
-    let roomy = DieConfig { index_bits, cell: netlist::CellConfig { addr_bits, ..roomy.cell }, ..roomy };
-    let wide = Layout::with_cells(&program, &weights, roomy, context).unwrap();
-    wide.microprogram(&program).unwrap();
-    let die = sim::chip::with_registers_needed(roomy, &wide);
+    let die = die_for(&program, &weights, context);
     let layout = Layout::with_cells(&program, &weights, die, context).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let output = layout.register_of(program.vision.as_ref().unwrap().output);
@@ -263,5 +269,91 @@ fn show_o_s_routines_on_the_die_s_gates_give_the_exact_machine_s_scores() {
     };
     eprintln!("Show-o de juguete en puertas: {cycles} ciclos");
     assert_eq!(gates, exact, "puntuaciones de los códigos");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The chip's firmware runs a pass of Show-o on the instruction-level CPU, driving the
+/// software die: the host sends a text shorter than the longest, whose tokens the firmware
+/// rotates as their real positions, and the image's tokens; the scores it sends back are
+/// those of the host ordering the same routines on the same machine.
+#[test]
+fn the_firmware_runs_show_o_s_pass_as_the_host_ordered_it() {
+    use netlist::chip::{add_showo, chip_info, ChipModel, DieEngine, GenerationSetup};
+    use netlist::image::build_image;
+    use netlist::rv32::Rv32Iss;
+    use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
+    use netlist::soc::{SocBus, SocConfig};
+    use sim::lower::{Layout, ENTRY_TOKEN, ENTRY_VISION};
+    let Some(firmware) = common::firmware() else { return };
+    let dir = std::env::temp_dir().join(format!("llm2chip-showo-firmware-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_toy(&dir);
+    let open = || sim::showo_chip::weights(&dir, sim::Weights::open(&dir).unwrap()).unwrap();
+    let (shape, config, weights) = open();
+    let program = sim::showo_chip::program(&shape);
+    let (ids, positions) = config.text_prefix(&[5, 17, 23]);
+    let first = positions[0] as u32;
+    assert!(first > 0, "un texto corto empieza más adelante");
+    let mask_token = config.mask_token;
+    let codes: Vec<u32> = (0..IMAGE as u32).map(|i| if i % 3 == 0 { mask_token } else { config.first_code() + (i * 5) % CODEBOOK as u32 }).collect();
+    let image: Vec<u32> = std::iter::once(config.start_of_image()).chain(codes).chain([config.end_of_image()]).collect();
+    let context = (first as usize + ids.len() + image.len()).next_power_of_two();
+    let die = die_for(&program, &weights, context);
+    let layout = Layout::with_cells(&program, &weights, die, context).unwrap();
+    let code = layout.microprogram(&program).unwrap();
+    let showo = sim::showo_chip::firmware_info(&program, &layout, &die).unwrap();
+    let mask_bits = |v: i64| v as u32 & ((1u32 << die.cell.activation_bits) - 1);
+
+    // The host's order: each token rotated as its position, then the routines.
+    let mut vm = sim::chip::VmEngine::new(program.clone(), open().2, die, context).unwrap();
+    let width = 3 * showo.rope_half + 1;
+    let (text, rows) = (ids.len() as u32, image.len() as u32);
+    for slot in 0..text + rows {
+        let row = layout.text_rotation(&program, [(first + slot) as u64; 3], [showo.rope_half as usize, 0, 0]);
+        row.iter().enumerate().for_each(|(i, value)| vm.write(showo.rope + slot * width + i as u32, *value));
+    }
+    for (slot, id) in ids.iter().enumerate() {
+        vm.run(ENTRY_TOKEN, *id, slot as u32);
+    }
+    for layer in 0..shape.layers {
+        for row in 0..rows {
+            if layer == 0 {
+                vm.run(ENTRY_VISION, image[row as usize], 0);
+            }
+            vm.run(ENTRY_VISION + 1 + 2 * layer, row, text + row);
+        }
+        for row in 0..rows {
+            vm.run(ENTRY_VISION + 2 + 2 * layer, row, text + rows - 1);
+        }
+    }
+    let mut expected = Vec::new();
+    for row in 1..rows - 1 {
+        vm.run(ENTRY_VISION + 1 + 2 * shape.layers, row, 0);
+        expected.push(mask_bits(vm.read(showo.scores.1)));
+        expected.extend((0..showo.codebook).map(|i| mask_bits(vm.read(showo.scores.0 + i))));
+    }
+
+    // The firmware's order, on the instruction-level chip.
+    let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
+    let mut info = chip_info(&die, &code, layout.logits_register(&program), program.vocab as u32, &setup);
+    add_showo(&mut info, &showo);
+    let mut segments = sim::chip::image_segments(&die, &code, &layout);
+    segments.extend(sim::chip::cell_segments(&die, &layout, &weights).unwrap());
+    let chip_image = build_image(&firmware.program, &firmware.data, &info, &[], &segments).unwrap();
+    let input: Vec<u8> = [text, first].into_iter().chain(ids.iter().copied()).chain(image.iter().copied()).flat_map(|w| w.to_le_bytes()).collect();
+    let engine = sim::chip::VmEngine::new(program.clone(), open().2, die, context).unwrap();
+    let model = ChipModel::new(engine, code.clone(), SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() });
+    let mut bus = SocBus::booted_with(SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, &chip_image, &input, model).unwrap();
+    let mut cpu = Rv32Iss::default();
+    while !cpu.halted {
+        cpu.step(&mut bus);
+        assert!(cpu.cycle < 500_000_000, "el firmware no termina");
+    }
+    // Each segment loaded at boot reports a dot first.
+    let start = bus.tx.iter().position(|b| *b != b'.').unwrap_or(bus.tx.len());
+    let sent: Vec<u32> = bus.tx[start..].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).map(|w| w & ((1u32 << die.cell.activation_bits) - 1)).collect();
+    eprintln!("firmware: {} ciclos de CPU, {} palabras", cpu.cycle, sent.len());
+    assert_eq!(sent.len(), expected.len());
+    assert_eq!(sent, expected, "puntuaciones de los códigos");
     std::fs::remove_dir_all(&dir).ok();
 }

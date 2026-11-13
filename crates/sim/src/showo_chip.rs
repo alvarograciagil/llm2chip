@@ -374,3 +374,18 @@ impl ShowOChip {
         magvit.decode(&filled)
     }
 }
+
+/// What the firmware needs to run a pass of `program`, Show-o's, laid out by `layout`.
+pub fn firmware_info(program: &Program, layout: &Layout, die: &DieConfig) -> Result<netlist::chip::ShowOInfo, String> {
+    let part = program.vision.as_ref().ok_or("no es el programa de Show-o")?;
+    let (rope, rope_half) = layout.rope_table().ok_or("la tabla de rotaciones no está en registros")?;
+    let scores = layout.register_of(part.output);
+    Ok(netlist::chip::ShowOInfo {
+        rows: part.patches as u32,
+        layers: part.blocks.len() as u32,
+        codebook: program.buffers[part.output] as u32,
+        scores: (scores << die.index_bits, exponent_register(die) << die.index_bits | scores),
+        rope,
+        rope_half,
+    })
+}

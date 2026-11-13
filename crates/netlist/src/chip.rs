@@ -681,7 +681,8 @@ pub const INFO_TABLE_ADDRESS: usize = 22;
 pub const INFO_TABLE_COLS: usize = 23;
 /// Where the description of the chip's image encoder starts, if it carries one; zero if not.
 pub const INFO_VISION: usize = 24;
-pub const INFO_PARAMETERS: usize = 25;
+pub const INFO_SHOWO: usize = 25;
+pub const INFO_PARAMETERS: usize = 26;
 
 /// What the firmware needs to run the image encoder a chip carries, in the order of its
 /// words: see `VisionInfo`.
@@ -715,6 +716,27 @@ impl VisionInfo {
     fn words(&self) -> [u32; VISION_WORDS] {
         [self.patches, self.image_token, self.merge, self.blocks, self.pixels.0, self.pixels.1, self.pixels.2, self.position.0, self.position.1, self.position.2, self.patch_rope.0, self.patch_rope.1, self.rope, self.rope_half, self.mrope_rows, self.mrope_cols]
     }
+}
+
+/// What the firmware needs to run Show-o's pass over an image: its rows (start, codes and
+/// end), its layers, the codes' scores it reads back, and the text's rotation table, whose
+/// rows it moves to each token's real position.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShowOInfo {
+    pub rows: u32,
+    pub layers: u32,
+    pub codebook: u32,
+    /// The scores' first element and their exponent's address.
+    pub scores: (u32, u32),
+    /// The rotation table's row 0, and half its rotated elements.
+    pub rope: u32,
+    pub rope_half: u32,
+}
+
+/// Adds Show-o's description to a chip's.
+pub fn add_showo(info: &mut Vec<u32>, showo: &ShowOInfo) {
+    info[INFO_SHOWO] = info.len() as u32;
+    info.extend([showo.rows, showo.layers, showo.codebook, showo.scores.0, showo.scores.1, showo.rope, showo.rope_half]);
 }
 
 /// Adds the image encoder's description to a chip's.

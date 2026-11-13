@@ -218,6 +218,15 @@ El alcance de esta prueba:
 
 Al probarlo salió un fallo: la tabla de embeddings se dimensionaba con el vocabulario de la salida. En Show-o, la salida tiene 8 192 códigos y la tabla, 58 498 filas. Ahora el programa dice las filas de su tabla (`embedding_rows`).
 
+### Con el firmware del chip
+
+El firmware tiene un modo Show-o. La imagen del chip lleva su descripción (`ShowOInfo`): filas de la imagen, capas, dónde están las puntuaciones y la tabla de rotaciones. El anfitrión envía el texto, la posición de su primer token y los tokens de la imagen, y el firmware:
+1. coloca la rotación de cada token en su sitio de la caché, copiando desde la imagen la fila de su posición real: un texto más corto que el máximo empieza más adelante;
+2. ejecuta el texto, las dos pasadas de cada capa y la puntuación de cada fila;
+3. devuelve, para cada sitio de la imagen, su exponente y las mantisas de sus puntuaciones.
+
+En la CPU a nivel de instrucción, con el die en software y un texto corto, devuelve las mismas puntuaciones que el anfitrión ordenando las mismas rutinas en la misma máquina: 3,66 millones de ciclos de CPU (`the_firmware_runs_show_o_s_pass_as_the_host_ordered_it`).
+
 Pendiente:
-- el firmware del RV32 guiando a Show-o, con las rotaciones de un texto más corto, y el bucle de MaskGIT en la CPU del chip;
+- el bucle de MaskGIT en la CPU del chip, que sortea los códigos y elige los que se quedan;
 - el codificador de MAGVIT en puertas: el anfitrión escribe los colores de cada píxel, como hace con los parches de una imagen.

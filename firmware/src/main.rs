@@ -64,7 +64,8 @@ const INFO_TABLE_SOURCE: usize = 21;
 const INFO_TABLE_ADDRESS: usize = 22;
 const INFO_TABLE_COLS: usize = 23;
 const INFO_VISION: usize = 24;
-const INFO_PARAMETERS: usize = 25;
+const INFO_SHOWO: usize = 25;
+const INFO_PARAMETERS: usize = 26;
 const TARGET_VECTOR: u32 = 3;
 
 /// The tokenizer's tables, which the image builder leaves after the segment table.
@@ -491,6 +492,83 @@ fn read_picture() -> Option<Picture> {
     Some(Picture { tokens: count / (merge * merge), width: cols / merge, height: rows / merge })
 }
 
+/// The words of Show-o's description, from `INFO_SHOWO`.
+const S_ROWS: usize = 0;
+const S_LAYERS: usize = 1;
+const S_CODEBOOK: usize = 2;
+const S_SCORES: usize = 3;
+const S_SCORES_EXPONENT: usize = 4;
+const S_ROPE: usize = 5;
+const S_ROPE_HALF: usize = 6;
+
+fn showo(field: usize) -> u32 {
+    info(info(INFO_SHOWO) as usize + field)
+}
+
+fn send_word(word: u32) {
+    for byte in word.to_le_bytes() {
+        send(byte);
+    }
+}
+
+/// The rotation of the cache's position `slot` from the table's row for `from`, in a table
+/// at `base` with `half` rotated pairs a row.
+fn rotate_in(base: u32, half: u32, slot: u32, from: u32) {
+    let width = 3 * half + 1;
+    copy_from_image(base + from * width, base + slot * width, width);
+}
+
+/// One pass of Show-o over an image, as the host asks:
+/// - the text, as its tokens after a count and the position of the first: each goes in the
+///   cache's next place, rotated as its real position;
+/// - the image's tokens (its start, codes or the mask, and its end);
+/// - each layer in two passes over the image's rows, the first after the text in the cache;
+/// - each code's score at every place of the image, sent back as each place's exponent and
+///   then its mantissas.
+fn showo_pass() {
+    let (text, first) = (receive_word(), receive_word());
+    let (rows, base, half) = (showo(S_ROWS), showo(S_ROPE), showo(S_ROPE_HALF));
+    let rotate = |slot: u32, position: u32| {
+        if position != slot {
+            rotate_in(base, half, slot, position);
+        }
+    };
+    for slot in 0..text {
+        let token = receive_word();
+        rotate(slot, first + slot);
+        run_die(ROUTINE_TOKEN, token, slot);
+    }
+    // The image's tokens are kept to read their embeddings before the first layer.
+    let mut image = [0u32; 512];
+    for row in 0..rows as usize {
+        image[row] = receive_word();
+    }
+    for row in 0..rows {
+        rotate(text + row, first + text + row);
+    }
+    for layer in 0..showo(S_LAYERS) {
+        for row in 0..rows {
+            if layer == 0 {
+                run_die(ROUTINE_VISION, image[row as usize], 0);
+            }
+            run_die(ROUTINE_VISION + 1 + 2 * layer, row, text + row);
+        }
+        for row in 0..rows {
+            run_die(ROUTINE_VISION + 2 + 2 * layer, row, text + rows - 1);
+        }
+    }
+    let score = ROUTINE_VISION + 1 + 2 * showo(S_LAYERS);
+    for row in 1..rows - 1 {
+        run_die(score, row, 0);
+        peripheral_write(REG_VECTOR_ADDRESS, showo(S_SCORES_EXPONENT));
+        send_word(peripheral_read(REG_VECTOR_DATA));
+        for code in 0..showo(S_CODEBOOK) {
+            peripheral_write(REG_VECTOR_ADDRESS, showo(S_SCORES) + code);
+            send_word(peripheral_read(REG_VECTOR_DATA));
+        }
+    }
+}
+
 /// The rotation of the cache's position `slot`: the table's own row for `from`.
 fn rotate_as(slot: u32, from: u32) {
     let width = 3 * vision(V_ROPE_HALF) + 1;
@@ -567,6 +645,11 @@ extern "C" fn main() {
         serve_chain(id);
     }
     peripheral_write(REG_SAMPLE_SEED, info(INFO_SEED));
+    // A chip that carries Show-o fills images instead of writing text.
+    if info(INFO_SHOWO) != 0 {
+        showo_pass();
+        return;
+    }
     let (entry_token, entry_logits) = (ROUTINE_TOKEN, ROUTINE_LOGITS);
     let depth = (info(INFO_DRAFT_DEPTH) as usize).min(MAX_DRAFT_DEPTH);
     let (mut last, mut position, mut draft_position) = (0, 0, 0u32);

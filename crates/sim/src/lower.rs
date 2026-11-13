@@ -1459,6 +1459,12 @@ impl Layout {
 
     /// What the firmware needs to run the encoder this layout carries, for a die whose
     /// rotation table is in its registers.
+    /// The text's rotation table, its row 0's address, and half the rotated elements of a
+    /// row: only a table in registers, which the firmware can rewrite.
+    pub fn rope_table(&self) -> Option<(u32, u32)> {
+        self.setup.initial.contains_key(&(self.rope_table[0], 0)).then(|| (self.rope_table[0] << self.config.index_bits, self.rope_half as u32))
+    }
+
     pub fn vision_info(&self, program: &Program, config: &crate::vision::VisionConfig) -> Option<netlist::chip::VisionInfo> {
         let part = program.vision.as_ref()?;
         let (_, patch_table, patch_half) = self.vision_rope?;
