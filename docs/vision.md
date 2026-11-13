@@ -242,8 +242,8 @@ El chip también rellena la imagen él solo. El firmware hace los pasos de MaskG
 Comprobado:
 - **Frente a la coma flotante:** las confianzas quedan a menos de 0,02 nats y las frecuencias de los sorteos, a menos de un 1 % (`crates/sim/tests/maskgit_rt.rs`).
 - **En el chip a nivel de instrucción:** el Show-o de juguete rellena una imagen de 16 sitios, la mitad conocidos, con guía y 4 pasos, en 24,1 millones de ciclos de CPU. Da los mismos códigos que el anfitrión ordenando la misma máquina (`the_firmware_fills_an_image_as_the_host_ordered_it`).
-- **El chip entero en puertas,** CPU, firmware, cargador y die, rellena la imagen de juguete con dos pasos. Envía los mismos bytes en los mismos ciclos que a nivel de instrucción: 12,28 millones de ciclos, 903 s (`the_whole_chip_fills_an_image_in_gates_as_at_instruction_level`).
-- **Con el Show-o real:** el mismo bucle (`fill_on`), sobre la máquina exacta con la guía en el die y pesos afines de 8 bits, retoca el disco rojo con «a yellow lemon» en 4 pasos y 367 s (`cargo run --release -p sim --example showo_fill_chip`). Sale un limón con su textura, más pálido que en coma flotante.
+- **El chip entero en puertas,** CPU, firmware, cargador y die, rellena la imagen de juguete con dos pasos. Envía los mismos bytes en los mismos ciclos que a nivel de instrucción: 12,45 millones de ciclos, 1 156 s (`the_whole_chip_fills_an_image_in_gates_as_at_instruction_level`).
+- **Con el Show-o real:** el mismo bucle (`fill_on`), sobre la máquina exacta con la guía en el die y pesos afines de 8 bits, retoca el disco rojo con «a yellow lemon» en 4 pasos y 367 s (`cargo run --release -p sim --example showo_fill_chip`). Sale un limón con su textura.
 
 ### El Show-o real en el die direccionado
 
@@ -260,5 +260,25 @@ Comprobado:
 
 En este die las celdas guardan cada peso como una mantisa de 16 bits, con el valor ya redondeado al formato de 8 bits. Para que guarden directamente los códigos de 8 bits de unos pesos que vienen en coma flotante, como hacen con los que ya vienen cuantizados, falta enseñar a `cell_row` a leer los pesos recodificados.
 
+### Calidad del relleno en enteros
+
+`showo_fill_compare` hace el mismo retoque (el disco rojo, «a yellow lemon», guía 1,75, 4 pasos) de tres formas:
+1. todo en coma flotante;
+2. el modelo en coma flotante con el MaskGIT entero del firmware, con las puntuaciones redondeadas a mantisas de 16 bits;
+3. el chip: el MaskGIT entero y el transformador en la máquina exacta, con pesos afines de 8 bits.
+
+Mide el color dentro del cuadrado retocado. Con 24 semillas:
+
+| Forma | Semillas | Amarillo, `min(R, G) − B` (media ± error) | Mediana | Saturación |
+|---|---|---|---|---|
+| Coma flotante | 24 | 95,1 ± 4,1 | 91,3 | 0,635 |
+| MaskGIT entero | 24 | 86,9 ± 2,3 | 86,3 | 0,619 |
+| Chip | 4 | 84,5 ± 5,6 | 81,2 | 0,622 |
+
+Lo que dicen las cifras:
+- **El chip sigue al MaskGIT entero semilla a semilla** (100,7 frente a 93,4; 80,8 frente a 77,2; 75,1 frente a 76,9; 81,6 frente a 79,2). Los pesos de 8 bits y la aritmética del die no cambian el resultado de forma apreciable.
+- **Entre el MaskGIT entero y el de coma flotante** la diferencia está dentro del ruido de las semillas. Con las 8 primeras parecía clara (105,6 frente a 84,7), pero con 16 más queda en 89,9 frente a 88,0. Lo que sí se ve es más dispersión en coma flotante: unas pocas semillas salen muy amarillas, hasta 143,9. La primera impresión de que el chip sale más pálido venía de la semilla elegida.
+- **Al buscar la causa apareció un fallo real:** con distribuciones planas, el sorteo desbordaba al multiplicar en 64 bits y nunca elegía la mitad alta de los 8 192 códigos. Con la guía las puntuaciones son agudas y no llegaba a pasar, así que las cifras no cambian. Ahora multiplica en 128 bits, y `a_flat_draw_over_many_codes_is_even` lo comprueba.
+
 Pendiente:
-- medir con más imágenes y semillas cuánto se aparta el relleno en enteros del de coma flotante: en la prueba sale más desvaído;
+- que las celdas guarden los códigos de 8 bits de los pesos que vienen en coma flotante, en vez de una mantisa de 16 bits por peso (ver «El Show-o real en el die direccionado»).
