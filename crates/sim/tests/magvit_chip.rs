@@ -214,45 +214,46 @@ fn the_real_magvit_encodes_a_picture_as_in_floating_point() {
     assert!(same * 100 >= total * 95, "{same} de {total}");
 }
 
-#[test]
-#[ignore = "lenta: el decodificador de MAGVIT-v2 de juguete en las puertas del die"]
-fn magvit_s_decoder_on_the_die_s_gates_gives_the_exact_machine_s_pixels() {
+/// A call the host makes, after writing a vector into the die when it has one: its
+/// register, mantissas and exponent.
+type Scheduled = (Option<(u32, Vec<i64>, i64)>, sim::magvit_chip::Call);
+
+/// Runs a MAGVIT chip's routines on the gates of a die sized for it, as `schedule` orders
+/// them, and on the exact machine of the same die. `build` makes the chip for a die,
+/// `exact` gives its outputs on the machine. Gives the outputs read in gates (`width`
+/// values each), the machine's, and the gates' cycles.
+#[allow(clippy::type_complexity)]
+fn on_gates(build: &dyn Fn(netlist::DieConfig) -> MagvitChip, schedule: &dyn Fn(&MagvitChip) -> Vec<Scheduled>, exact: &dyn Fn(&mut MagvitChip) -> Vec<Vec<i64>>, width: u32) -> (Vec<Vec<i64>>, Vec<Vec<i64>>, u64) {
     use netlist::demo::read_block_value;
     use netlist::{die_design, DieConfig, Simulator};
-    let dir = std::env::temp_dir().join(format!("llm2chip-magvit-gates-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    make_decoder(&dir, 32, 64);
-    let grid = 2;
-    let codes: Vec<u32> = vec![0x1A2B, 0x0F0F, 0x1234, 0x0777];
-    let tokens = grid * grid;
+    let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
     // Cells as deep as the weights need, each a mantissa of the vectors' width, as many
     // registers as the routines reach, and key columns as long as the rows the maps reach.
-    let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
     let base = cell_die_config();
     let roomy = DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, weight_bits: base.cell.activation_bits, ..base.cell }, features: base.features.with_key_shift(6), ..base };
-    let probe = MagvitChip::decoder_on(&dir, grid, roomy, Some(tokens)).unwrap();
+    let probe = build(roomy);
     let (program, layout, _) = probe.parts();
     let (depth, groups) = layout.cell_depths();
     let addr_bits = bits_for(depth.max(2 * groups));
     let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1)).max(addr_bits);
     let sized = DieConfig { index_bits, cell: netlist::CellConfig { addr_bits, ..roomy.cell }, ..roomy };
-    let calls = probe.decoder_calls(&codes).unwrap();
     let mut routines: Vec<std::ops::Range<usize>> = Vec::new();
-    for call in &calls {
+    for (_, call) in schedule(&probe) {
         if !routines.contains(&call.routine) {
             routines.push(call.routine.clone());
         }
     }
     let lists = |program: &compiler::Program| -> Vec<Vec<compiler::Inst>> { routines.iter().map(|r| program.vision.as_ref().unwrap().ops[r.clone()].to_vec()).collect() };
-    let wide = MagvitChip::decoder_on(&dir, grid, sized, Some(tokens)).unwrap();
+    let wide = build(sized);
     {
         let (program, layout, _) = wide.parts();
         let lists = lists(program);
         layout.routines_microprogram(program, &lists.iter().map(|l| (l.as_slice(), false)).collect::<Vec<_>>()).unwrap();
     }
     let die = sim::chip::with_registers_needed(sized, wide.parts().1);
-    let mut chip = MagvitChip::decoder_on(&dir, grid, die, Some(tokens)).unwrap();
-    let exact = chip.decode_mantissas(&codes).unwrap();
+    let mut chip = build(die);
+    let machine = exact(&mut chip);
+    let calls = schedule(&chip);
     let (program, layout, weights) = chip.parts();
     let lists = lists(program);
     let code = layout.routines_microprogram(program, &lists.iter().map(|l| (l.as_slice(), false)).collect::<Vec<_>>()).unwrap();
@@ -289,16 +290,64 @@ fn magvit_s_decoder_on_the_die_s_gates_gives_the_exact_machine_s_pixels() {
     }
     sim.set("load_cell", 0).unwrap();
     sim.set("load_scale", 0).unwrap();
+    let exponents = netlist::block::exponent_register(&die);
     let mut cycles = 0;
     let mut gates = Vec::new();
-    for call in &calls {
+    for (write, call) in &calls {
+        if let Some((register, mantissas, exponent)) = write {
+            // The host writes the vector while the die is idle, as the firmware does.
+            let mut values: std::collections::HashMap<(u32, u32), i64> = mantissas.iter().enumerate().map(|(i, m)| ((*register, i as u32), *m)).collect();
+            values.insert((exponents, *register), *exponent);
+            load_assembly(&mut sim, &die, &values);
+        }
         let index = routines.iter().position(|r| *r == call.routine).unwrap();
         cycles += enter(&mut sim, &code, index, call.token, call.position);
         if call.read {
-            gates.push((0..3).map(|i| read_block_value(&mut sim, die, output, i).0).collect::<Vec<i64>>());
+            gates.push((0..width).map(|i| read_block_value(&mut sim, die, output, i).0).collect::<Vec<i64>>());
         }
     }
-    eprintln!("MAGVIT-v2 de juguete en puertas: {} rutinas, {cycles} ciclos", calls.len());
+    (gates, machine, cycles)
+}
+
+#[test]
+#[ignore = "lenta: el decodificador de MAGVIT-v2 de juguete en las puertas del die"]
+fn magvit_s_decoder_on_the_die_s_gates_gives_the_exact_machine_s_pixels() {
+    let dir = std::env::temp_dir().join(format!("llm2chip-magvit-gates-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_decoder(&dir, 32, 64);
+    let grid = 2;
+    let codes: Vec<u32> = vec![0x1A2B, 0x0F0F, 0x1234, 0x0777];
+    let (gates, exact, cycles) = on_gates(
+        &|die| MagvitChip::decoder_on(&dir, grid, die, Some(grid * grid)).unwrap(),
+        &|chip| chip.decoder_calls(&codes).unwrap().into_iter().map(|c| (None, c)).collect(),
+        &|chip| chip.decode_mantissas(&codes).unwrap(),
+        3,
+    );
+    eprintln!("decodificador de juguete en puertas: {cycles} ciclos");
     assert_eq!(gates, exact, "colores de los píxeles");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+#[ignore = "lenta: el codificador de MAGVIT-v2 de juguete en las puertas del die"]
+fn magvit_s_encoder_on_the_die_s_gates_gives_the_exact_machine_s_values() {
+    let dir = std::env::temp_dir().join(format!("llm2chip-magvit-encoder-gates-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_toy_encoder(&dir);
+    let side = 4;
+    let planes: Vec<f32> = (0..3 * side * side).map(|i| ((i * 37 % 101) as f32 / 50.0 - 1.0) * 0.9).collect();
+    let grid = side / 2;
+    let (gates, exact, cycles) = on_gates(
+        &|die| MagvitChip::encoder_on(&dir, side, die, Some(grid * grid)).unwrap(),
+        &|chip| {
+            let (register, values, inputs) = chip.encoder_inputs(&planes);
+            let written = values.into_iter().zip(inputs).map(|((m, e), call)| (Some((register, m, e)), call));
+            written.chain(chip.encoder_calls().into_iter().map(|c| (None, c))).collect()
+        },
+        &|chip| chip.encode_mantissas(&planes).unwrap(),
+        13,
+    );
+    eprintln!("codificador de juguete en puertas: {cycles} ciclos");
+    assert_eq!(gates, exact, "valores de los códigos");
     std::fs::remove_dir_all(&dir).ok();
 }

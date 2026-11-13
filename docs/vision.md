@@ -204,7 +204,7 @@ En la pantalla Imágenes, la casilla «En la aritmética del chip» hace todo el
 
 En el codificador, los valores cercanos a cero pueden salir con el otro signo, así que algunos bits cambian.
 
-El decodificador lee los ±1 de cada código de una tabla, como un embedding, así que todo su trabajo son rutinas del chip. Su calendario (`decoder_calls`) lo siguen igual la máquina exacta y las puertas. El de juguete corre en las puertas del die y da los mismos colores que la máquina exacta, bit a bit: 664 rutinas y 2,65 millones de ciclos (`magvit_s_decoder_on_the_die_s_gates_gives_the_exact_machine_s_pixels`). Así quedan comprobados en puertas `LoadRows`, `GroupNorm`, la atención, el ampliado y el atajo. Quien ordena las rutinas es la prueba, haciendo de firmware.
+El decodificador lee los ±1 de cada código de una tabla, como un embedding, así que todo su trabajo son rutinas del chip. Su calendario (`decoder_calls`) lo siguen igual la máquina exacta y las puertas. El de juguete corre en las puertas del die y da los mismos colores que la máquina exacta, bit a bit: 664 rutinas y 2,65 millones de ciclos (`magvit_s_decoder_on_the_die_s_gates_gives_the_exact_machine_s_pixels`). Así quedan comprobados en puertas `LoadRows`, `GroupNorm`, la atención, el ampliado y el atajo. Quien ordena las rutinas es la prueba, haciendo de firmware. El codificador de juguete también da en puertas los mismos valores que la máquina exacta, con la convolución que reduce a la mitad incluida: 2,36 millones de ciclos (`magvit_s_encoder_on_the_die_s_gates_gives_the_exact_machine_s_values`). El anfitrión escribe los colores de cada píxel en el die, quieto entre rutina y rutina, como hace el firmware con los parches de una imagen.
 
 En la pantalla Imágenes, «También MAGVIT-v2 en el chip» hace todo el retoque en la aritmética del chip. Un retoque de un paso sin guía tardó 599 s: codificar, una pasada del transformador y decodificar.
 
@@ -242,7 +242,7 @@ El chip también rellena la imagen él solo. El firmware hace los pasos de MaskG
 Comprobado:
 - **Frente a la coma flotante:** las confianzas quedan a menos de 0,02 nats y las frecuencias de los sorteos, a menos de un 1 % (`crates/sim/tests/maskgit_rt.rs`).
 - **En el chip a nivel de instrucción:** el Show-o de juguete rellena una imagen de 16 sitios, la mitad conocidos, con guía y 4 pasos, en 23,8 millones de ciclos de CPU. Da los mismos códigos que el anfitrión ordenando la misma máquina (`the_firmware_fills_an_image_as_the_host_ordered_it`).
+- **El chip entero en puertas,** CPU, firmware, cargador y die, rellena la imagen de juguete con dos pasos. Envía los mismos bytes en los mismos ciclos que a nivel de instrucción: 12,28 millones de ciclos, 903 s (`the_whole_chip_fills_an_image_in_gates_as_at_instruction_level`).
 
 Pendiente:
-- el relleno en el chip con el Show-o real y una imagen de verdad, y el chip entero con el relleno en puertas;
-- el codificador de MAGVIT en puertas: el anfitrión escribe los colores de cada píxel, como hace con los parches de una imagen.
+- el relleno con el Show-o real y una imagen de verdad;

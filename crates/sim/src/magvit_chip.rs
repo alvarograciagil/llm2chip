@@ -360,6 +360,9 @@ pub struct Call {
     pub read: bool,
 }
 
+/// A vector in the die's format: its mantissas and its exponent.
+pub type Vector = (Vec<i64>, i64);
+
 /// An output read: its mantissas, as the die holds them, and its values.
 type Read = (Vec<i64>, Vec<f32>);
 
@@ -436,6 +439,12 @@ impl MagvitChip {
     /// MAGVIT-v2's encoder from its folder, for pictures of `side` × `side`, on a die like
     /// `die` with vectors of its activation bits.
     pub fn encoder(dir: &Path, side: usize, die: DieConfig) -> Result<Self, String> {
+        Self::encoder_on(dir, side, die, None)
+    }
+
+    /// The same with the weights in the die's cells and the attention's cache for `tokens`
+    /// places, when `tokens` is given.
+    pub fn encoder_on(dir: &Path, side: usize, die: DieConfig, tokens: Option<usize>) -> Result<Self, String> {
         let weights = Weights::open(dir)?;
         let mut b = Builder { weights: &weights, buffers: Vec::new(), ops: Vec::new(), passes: Vec::new(), derived: Vec::new(), stores: HashMap::new(), rows: HashMap::new() };
         // The pixels' colours, a row each, into the first map.
@@ -477,7 +486,7 @@ impl MagvitChip {
             output = b.product("encoder.quant_conv", quant, out, bits, "códigos");
         });
         let Builder { buffers, ops, passes, derived, .. } = b;
-        Self::finish(weights, (buffers, ops, passes, derived), "encoder.mid.attn_1", (input, None, input_routine, side), (output, output_routine, side_now), die, None)
+        Self::finish(weights, (buffers, ops, passes, derived), "encoder.mid.attn_1", (input, None, input_routine, side), (output, output_routine, side_now), die, tokens)
     }
 
     /// The program from what `b` built, its layout and its machine.
@@ -654,21 +663,41 @@ impl MagvitChip {
     /// `Magvit::encode` takes it: each pixel of the grid's 13 values, their signs the bits.
     /// The host writes each pixel's colours, as it does a picture's patches.
     pub fn encode(&mut self, planes: &[f32]) -> Result<Vec<u32>, String> {
+        Ok(self.encode_reads(planes)?.iter().map(|(_, values)| values.iter().fold(0u32, |code, v| (code << 1) | (*v > 0.0) as u32)).collect())
+    }
+
+    /// The encoder's output mantissas for a picture, a place of the grid after another, as
+    /// the die holds them: what its gates must give too.
+    pub fn encode_mantissas(&mut self, planes: &[f32]) -> Result<Vec<Vec<i64>>, String> {
+        Ok(self.encode_reads(planes)?.into_iter().map(|(m, _)| m).collect())
+    }
+
+    /// What the host writes for each pixel before the input's routine: the register, the
+    /// mantissas and exponent of each pixel's colours, and the routine with its token.
+    pub fn encoder_inputs(&self, planes: &[f32]) -> (u32, Vec<Vector>, Vec<Call>) {
         let area = self.grid * self.grid;
-        if planes.len() != 3 * area {
+        let values = (0..area).map(|i| encode_vector(&(0..3).map(|c| planes[c * area + i] as f64).collect::<Vec<_>>(), self.bits)).collect();
+        let calls = (0..area).map(|i| Call { routine: self.input_routine.clone(), token: padded(i / self.grid, i % self.grid, self.grid) as u32, position: 0, read: false }).collect();
+        (self.layout.register_of(self.input), values, calls)
+    }
+
+    /// Everything the encoder runs once its pixels are in.
+    pub fn encoder_calls(&self) -> Vec<Call> {
+        self.pass_calls().into_iter().chain(self.output_calls()).collect()
+    }
+
+    fn encode_reads(&mut self, planes: &[f32]) -> Result<Vec<Read>, String> {
+        if planes.len() != 3 * self.grid * self.grid {
             return Err(format!("el codificador espera una imagen de {} × {}", self.grid, self.grid));
         }
         self.reset();
-        let reg = self.layout.register_of(self.input);
-        let routine = self.input_routine.clone();
-        for i in 0..area {
-            let values: Vec<f64> = (0..3).map(|c| planes[c * area + i] as f64).collect();
-            let (mantissas, exponent) = encode_vector(&values, self.bits);
-            self.vm.load_mantissas(reg, &mantissas, exponent);
-            self.run(&routine, padded(i / self.grid, i % self.grid, self.grid), 0)?;
+        let (reg, values, calls) = self.encoder_inputs(planes);
+        for ((mantissas, exponent), call) in values.iter().zip(&calls) {
+            self.vm.load_mantissas(reg, mantissas, *exponent);
+            self.run(&call.routine, call.token as usize, 0)?;
         }
-        let calls: Vec<Call> = self.pass_calls().into_iter().chain(self.output_calls()).collect();
-        Ok(self.run_calls(&calls)?.iter().map(|(_, values)| values.iter().fold(0u32, |code, v| (code << 1) | (*v > 0.0) as u32)).collect())
+        let calls = self.encoder_calls();
+        self.run_calls(&calls)
     }
 }
 

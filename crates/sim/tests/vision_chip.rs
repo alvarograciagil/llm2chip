@@ -12,7 +12,7 @@ use netlist::image::build_image;
 use netlist::rv32::Rv32Iss;
 use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
 use netlist::soc::{SocBus, SocConfig};
-use netlist::{DieConfig, Microprogram, Simulator};
+use netlist::{DieConfig, Microprogram};
 use sim::chip::{cell_segments, image_segments, VmEngine};
 use sim::lower::{Layout, ENTRY_LOGITS, ENTRY_TOKEN, ENTRY_TOKEN_FROM_IMAGE, ENTRY_VISION};
 use sim::vision::{patches, Patches, VisionTower};
@@ -197,58 +197,6 @@ fn the_firmware_reads_the_picture_and_the_model_answers_as_the_host_ordered_it()
     assert_eq!(tokens_of(&output), expected);
     assert_eq!(logits, last_logits, "los logits del último token");
     std::fs::remove_dir_all(&chip.dir).ok();
-}
-
-/// Runs the whole chip in gates, the host sending a byte whenever the chip can take it.
-fn gates(design: &netlist::Design, image: &[u32], input: &[u8], limit: u64) -> (Vec<u8>, u64) {
-    let mut sim = Simulator::new(design).unwrap();
-    sim.set("reset", 1).unwrap();
-    sim.set("cpu_hold", 1).unwrap();
-    sim.tick();
-    sim.set("reset", 0).unwrap();
-    for _ in 0..=netlist::chip::RESET_RELEASE {
-        sim.tick();
-    }
-    let mut pending = None;
-    let mut sent = 0;
-    let mut step = |sim: &mut Simulator, pending: &mut Option<u32>| {
-        sim.set("image_resp_valid", pending.is_some() as u64).unwrap();
-        sim.set("image_resp_data", pending.unwrap_or(0) as u64).unwrap();
-        let offer = sent < input.len();
-        sim.set("host_rx_valid", offer as u64).unwrap();
-        sim.set("host_rx_data", input.get(sent).copied().unwrap_or(0) as u64).unwrap();
-        sim.settle();
-        if offer && sim.get("host_rx_ready").unwrap() == 1 {
-            sent += 1;
-        }
-        *pending = (sim.get("image_req_valid").unwrap() == 1).then(|| image[sim.get("image_req_addr").unwrap() as usize]);
-    };
-    let mut boot = 0;
-    loop {
-        step(&mut sim, &mut pending);
-        if sim.get("booting").unwrap() == 0 {
-            break;
-        }
-        sim.tick();
-        boot += 1;
-        assert!(boot < 1_000_000, "el arranque no termina");
-    }
-    sim.set("cpu_hold", 0).unwrap();
-    sim.set("host_tx_ready", 1).unwrap();
-    let mut output = Vec::new();
-    for cycle in 0..limit {
-        step(&mut sim, &mut pending);
-        if sim.get("host_tx_valid").unwrap() == 1 {
-            output.push(sim.get("host_tx_data").unwrap() as u8);
-        }
-        if sim.get("halted").unwrap() == 1 {
-            return (output, cycle + 1);
-        }
-        sim.tick();
-    }
-    sim.set("debug_select", netlist::chip::DEBUG_CPU_PC).unwrap();
-    sim.settle();
-    panic!("el firmware no terminó en {limit} ciclos: salida {output:?}, CPU en {:#x}, {sent} de {} bytes enviados", sim.get("debug_value").unwrap(), input.len());
 }
 
 #[test]
