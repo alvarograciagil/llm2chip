@@ -2794,6 +2794,14 @@ pub fn register_table_design(addr_bits: u32, width: u32, reads: u32) -> Design {
 }
 
 /// The complete reduced die.
+/// The die's compute cells by vector unit, as `die_design` names them: the groups that
+/// `scan::insert_scan_parallel` gives a test wrapper each.
+pub fn cell_groups(config: DieConfig) -> Vec<Vec<String>> {
+    let clusters = 1usize << config.features.cluster_bits;
+    let per_unit = (config.cells as usize / clusters).max(1);
+    (0..clusters).map(|unit| (0..per_unit).map(|row| unit * per_unit + row).filter(|i| *i < config.cells as usize).map(|i| format!("cell{i}")).collect()).filter(|g: &Vec<String>| !g.is_empty()).collect()
+}
+
 pub fn die_design(config: DieConfig) -> Design {
     let mut gen = Gen { modules: BTreeMap::new() };
     let top = gen.die(&config);

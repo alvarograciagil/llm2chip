@@ -78,9 +78,35 @@ Los bloques son la celda de pesos de 4 bits y activaciones de 16 con 32 pesos, l
 
 Una prueba de scan escribe en las memorias al desplazar, igual que el autotest de marcha, así que se hace antes de cargar la imagen.
 
-**Para el die entero**, el plan es no aplanarlo en una sola lista de fallos. Las celdas son idénticas: sus patrones se envían a la vez a cadenas paralelas, una por celda, y se comparan sus salidas. Así, el tiempo de prueba es el de una celda y no la suma de todos los biestables. El secuenciador, la unidad vectorial y la CPU llevan sus propias cadenas.
+**El die entero** no se prueba aplanado en una sola lista de fallos: sus celdas son idénticas y se prueban a la vez (`scan::insert_scan_parallel`).
+- **Celda comprobable:** cada celda pasa a una versión cuyas entradas, en modo de prueba, salen de un envoltorio: un registro por unidad vectorial, compartido por sus celdas, con tantos biestables como bits de entrada tiene la celda.
+- **Cadenas paralelas:** salen todas de `scan_cells_in`, tras el envoltorio, así que el mismo desplazamiento carga todas las celdas igual.
+  - `scan_cells_out` da la cadena de la primera celda.
+  - `scan_cells_differ` sube si la de alguna otra difiere de ella.
+- **La salida de la celda** ya es un registro (`total_reg`) dentro de su cadena: no necesita envoltorio de salida.
+- **Los patrones** se generan sobre una porción: el envoltorio y la celda comprobable, encadenados como en el die.
 
-Las cuatro señales son ahora pines propios. La alternativa que ahorra pines es manejar la cadena desde el TAP JTAG con instrucciones de scan interno.
+En el die de prueba (tres celdas):
+
+| | |
+|---|---|
+| Cadena principal (el resto del die) | 1 304 biestables |
+| Cadena de cada celda | 367 biestables, 51 de ellos del envoltorio |
+| Fallos de la celda | 101 486, cobertura de prueba del 98,0 % con 571 patrones |
+
+Comprobado en el simulador de puertas, con los patrones de la celda aplicados a las tres a la vez:
+- sin fallos, la primera celda da lo previsto y ninguna difiere;
+- con un fallo en la tercera celda, sube la diferencia;
+- con un fallo en la primera, además, su salida no es la prevista.
+
+Con las cadenas apagadas, el die hace lo mismo ciclo a ciclo.
+
+**El coste**:
+- **Por celda:** un multiplexor por bit de entrada (51) y uno por biestable de la cadena. No hay biestables nuevos en la celda, salvo las sombras de sus memorias.
+- **Por unidad vectorial:** 51 biestables del envoltorio.
+- **El tiempo de prueba de cada patrón** es lo que tarda en desplazarse la cadena más larga: unos 1 300 ciclos aquí, haya las celdas que haya. Con una sola cadena en serie, un die de 100 000 celdas de unos 300 biestables cada una necesitaría unos 30 millones de ciclos por patrón.
+
+Las señales de prueba son ahora pines propios. La alternativa que ahorra pines es manejar la cadena desde el TAP JTAG con instrucciones de scan interno.
 
 ## Lo que falta para fabricar
 
@@ -89,7 +115,7 @@ Las cuatro señales son ahora pines propios. La alternativa que ahorra pines es 
 - **Anillo de pads** con protección contra descargas, y encapsulado.
 - **Pruebas de fábrica**:
   - hay autotest de memorias, JTAG, cadena de scan y patrones ATPG por bloque;
-  - falta meter la cadena en el chip por defecto, con sus pines o detrás del TAP, y montar las cadenas paralelas por celda;
+  - falta meter la cadena en el chip por defecto, con sus pines o detrás del TAP;
   - falta el formato de los probadores, STIL o WGL;
   - faltan los fallos de retardo (transición) a velocidad de reloj.
 - **Silicio**: nada se ha probado en una FPGA física ni en un chip.

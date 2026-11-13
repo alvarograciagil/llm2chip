@@ -244,3 +244,121 @@ fn the_scanned_verilog_runs_the_patterns_as_the_gate_simulator() {
     let length = report.chain_length;
     assert_eq!(ours[length..], theirs[length..]);
 }
+
+fn small_die() -> netlist::DieConfig {
+    netlist::DieConfig {
+        cells: 3,
+        cell: CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 4, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false },
+        scale_bits: 16,
+        reg_bits: 3,
+        index_bits: 4,
+        microcode_bits: 9,
+        broadcast_stages: 2,
+        function_bits: 8,
+        function_select_bits: 3,
+        features: netlist::DieFeatures::without_register_windows(),
+    }
+}
+
+#[test]
+fn with_the_parallel_chains_idle_the_die_works_as_before() {
+    let plain = netlist::die_design(small_die());
+    let parallel = netlist::scan::insert_scan_parallel(plain.clone(), &netlist::cell_groups(small_die())).unwrap();
+    let (mut a, mut b) = (Simulator::new(&plain).unwrap(), Simulator::new(&parallel.design).unwrap());
+    let mut rng = Rng(23);
+    for cycle in 0..300 {
+        for (name, width) in ports(&plain, Dir::Input) {
+            let value: Vec<u32> = (0..width.div_ceil(32)).map(|_| rng.next() as u32).collect();
+            a.set_words(&name, &value).unwrap();
+            b.set_words(&name, &value).unwrap();
+        }
+        a.tick();
+        b.tick();
+        for (name, _) in ports(&plain, Dir::Output) {
+            assert_eq!(a.get_words(&name), b.get_words(&name), "{name} en el ciclo {cycle}");
+        }
+    }
+}
+
+/// Runs a cell's pattern on every cell of the die at once: shifts it in from `scan_cells_in`,
+/// captures, and shifts out. Whether the first cell gave what the pattern expects, and
+/// whether any cell differed from it.
+fn replay_on_cells(sim: &mut Simulator, p: &TestPattern) -> (bool, bool) {
+    let length = p.load.len();
+    sim.set("test_mode", 1).unwrap();
+    sim.set("scan_enable", 1).unwrap();
+    for i in (0..length).rev() {
+        sim.set("scan_cells_in", p.load[i] as u64).unwrap();
+        sim.tick();
+    }
+    sim.set("scan_enable", 0).unwrap();
+    sim.tick();
+    sim.set("scan_enable", 1).unwrap();
+    let (mut matched, mut differed) = (true, false);
+    for i in (0..length).rev() {
+        differed |= sim.get("scan_cells_differ").unwrap() == 1;
+        if let Some(e) = p.unload[i] {
+            matched &= (sim.get("scan_cells_out").unwrap() == 1) == e;
+        }
+        sim.tick();
+    }
+    (matched, differed)
+}
+
+#[test]
+#[ignore = "lenta: genera los patrones de la celda del die (unos 2 min) y los aplica a las tres celdas"]
+fn a_cell_s_patterns_test_every_cell_of_the_die_at_once() {
+    let die = netlist::die_design(small_die());
+    let groups = netlist::cell_groups(small_die());
+    assert_eq!(groups.concat().len(), 3);
+    let parallel = netlist::scan::insert_scan_parallel(die, &groups).unwrap();
+    let report = atpg::generate(&parallel.slice, 200).unwrap();
+    assert_eq!(report.chain_length, parallel.cell_length);
+    eprintln!(
+        "die: {} biestables en la cadena principal, {} en la de cada celda ({} del envoltorio); celda: {} fallos, cobertura de prueba {:.2} %, {} patrones",
+        parallel.length, parallel.cell_length, parallel.wrapper_width, report.faults, report.test_coverage() * 100.0, report.patterns.len()
+    );
+    assert!(report.test_coverage() > 0.97, "{}", report.test_coverage());
+    let patterns: Vec<_> = report.patterns.iter().step_by(report.patterns.len() / 12 + 1).collect();
+    let mut sim = Simulator::new(&parallel.design).unwrap();
+    for (i, p) in patterns.iter().enumerate() {
+        assert_eq!(replay_on_cells(&mut sim, p), (true, false), "patrón {i}");
+    }
+    // Faults the patterns find, put in the last cell and in the first, at their source.
+    let names = atpg::describe(&parallel.slice, &report.outcomes.iter().map(|(f, _)| *f).collect::<Vec<_>>()).unwrap();
+    let inside: Vec<(String, String, usize, bool)> = report
+        .outcomes
+        .iter()
+        .zip(&names)
+        .filter(|((f, o), name)| *o == atpg::Outcome::Detected && matches!(f.site, Site::Stem(_)) && name.starts_with("/celda/"))
+        .filter_map(|((f, _), name)| {
+            let place = name.split(' ').next()?;
+            let (path, rest) = place.rsplit_once('/')?;
+            let (net, bit) = rest.split_once('#')?;
+            let bit = bit.split_once('[')?.1.trim_end_matches(']').parse().ok()?;
+            Some((path.to_string(), net.to_string(), bit, f.stuck))
+        })
+        .collect();
+    assert!(inside.len() > 100);
+    let all: Vec<&TestPattern> = report.patterns.iter().collect();
+    for (path, net, bit, stuck) in inside.iter().step_by(inside.len() / 8) {
+        for (cell, expect_out_wrong) in [("cell2", false), ("cell0", true)] {
+            let mut faulty = Simulator::new(&parallel.design).unwrap();
+            let signal = faulty.signal(&path.replacen("/celda", &format!("/{cell}"), 1), net, *bit).unwrap_or_else(|| panic!("{path}/{net}[{bit}]"));
+            faulty.stick_signal(signal, *stuck);
+            let (mut wrong, mut differed) = (false, false);
+            for p in &all {
+                let (m, d) = replay_on_cells(&mut faulty, p);
+                wrong |= !m;
+                differed |= d;
+                if differed && (wrong || !expect_out_wrong) {
+                    break;
+                }
+            }
+            assert!(differed, "{cell}{path}/{net}[{bit}] a {stuck}: ninguna celda difiere");
+            if expect_out_wrong {
+                assert!(wrong, "{cell}{path}/{net}[{bit}] a {stuck}: la primera celda da lo previsto");
+            }
+        }
+    }
+}

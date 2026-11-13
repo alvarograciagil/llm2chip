@@ -377,6 +377,12 @@ impl Simulator {
         Ok(sim)
     }
 
+    /// The number of bit `bit` of net `net` in the module instance at `path` (`""` for the
+    /// top), as `stick_signal` takes it.
+    pub fn signal(&self, path: &str, net: &str, bit: usize) -> Option<usize> {
+        self.paths.get(path)?.get(net)?.get(bit).copied()
+    }
+
     /// Holds signal `s`, numbered as `atpg` numbers them, at `value` from now on: a stuck-at
     /// fault on the wire, to check that the test patterns find it.
     #[doc(hidden)]
