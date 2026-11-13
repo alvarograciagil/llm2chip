@@ -138,7 +138,10 @@ fn run_on_chip(request: &RetouchRequest, job: &RetouchJob, chip: &ChipPainter, b
     if !held.as_ref().is_some_and(|(path, b, _, _)| path == dir && *b == bits) {
         *held = None;
         set_phase("Preparando Show-o en la aritmética del chip");
-        let model = ShowOChip::exact(dir, bits)?;
+        // Weights in the design's usual format, affine of 8 bits in groups of 64: as good
+        // as whole ones here (`examples/showo_formats.rs`), and twice as fast.
+        let format = netlist::format::WeightFormat { coding: netlist::format::WeightCoding::Affine, bits: 8, exponent_bits: 0, bias: true, group_size: 64, fine_scale: false, keep_source: false };
+        let model = ShowOChip::with_format(dir, bits, format)?;
         let magvit = Magvit::open(&dir.join("magvitv2"))?;
         *held = Some((dir.to_path_buf(), bits, model, magvit));
     }

@@ -190,13 +190,13 @@ export function ImagesPanel() {
                     {selected.name} · {formatNumber(selected.size_gb)} GB
                   </p>
                 )}
-                <label className="check" title="El transformador de Show-o corre en la aritmética entera del die, con vectores de 16 bits, en el orden en que el anfitrión le da las operaciones. MAGVIT-v2 sigue en coma flotante en el anfitrión.">
+                <label className="check" title="El transformador de Show-o corre en la aritmética entera del die, con vectores de 16 bits y pesos afines de 8 bits, en el orden en que el anfitrión le da las operaciones. MAGVIT-v2 sigue en coma flotante en el anfitrión.">
                   <input type="checkbox" checked={s.onChip} disabled={s.running} onChange={(e) => s.set({ onChip: e.target.checked })} />
                   En la aritmética del chip
                 </label>
                 <p className="muted-text">
                   {s.onChip
-                    ? `Cada pasada tarda unos 7 minutos, frente a 6 s en coma flotante. Con guía son dos por paso: con ${s.steps} pasos, unos ${formatNumber(s.steps * (s.guidance > 0 ? 2 : 1) * 6.6)} minutos. MAGVIT-v2 sigue en el anfitrión.`
+                    ? `Con pesos afines de 8 bits, cada pasada tarda unos 80 s, frente a 6 s en coma flotante. Con guía son dos por paso: con ${s.steps} pasos, unos ${formatNumber(Math.ceil((s.steps * (s.guidance > 0 ? 2 : 1) * 80) / 60))} minutos. MAGVIT-v2 sigue en el anfitrión.`
                     : "Corre en coma flotante en el anfitrión, fuera del chip. La primera vez tarda unos segundos en leer los pesos."}
                 </p>
               </>

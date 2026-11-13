@@ -255,6 +255,12 @@ impl ShowOChip {
         Self::open(dir, Weights::open(dir)?, die)
     }
 
+    /// On the exact machine's die, with vectors of `bits` bits and the weights in `format`,
+    /// as the design keeps them in its cells.
+    pub fn with_format(dir: &Path, bits: u32, format: netlist::format::WeightFormat) -> Result<Self, String> {
+        Self::open(dir, Weights::open(dir)?.with_format(Some(format)), crate::exact::exact_config(bits))
+    }
+
     /// The same as `ShowO::scores`, in the die's arithmetic: each code's score at every
     /// place of the image (the codes' rows of the output, a place after another), after
     /// `text`. The image is the model's tokens, a code's or the mask.

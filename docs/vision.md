@@ -166,16 +166,25 @@ El motor lo ejecuta en segundo plano (`/api/retouch`), un trabajo a la vez, con 
 
 Comprobado con una pasada sobre la misma imagen tapada, frente a la coma flotante:
 
-| Modelo | Diferencia mayor | Mejor código igual | Tiempo por pasada |
-|---|---|---|---|
-| Show-o de juguete (2 capas) | 0,06 % | 8 de 8 | instantáneo |
-| Show-o real, vectores de 16 bits | 1,04 % | 61 de 64 | 395 s (6 s en coma flotante) |
+| Modelo | Diferencia mayor | Mejor código igual |
+|---|---|---|
+| Show-o de juguete (2 capas) | 0,06 % | 8 de 8 |
+| Show-o real, vectores de 16 bits | 1,04 % | 61 de 64 |
+
+Con el modelo real, según el formato de los pesos (`cargo run --release -p sim --example showo_formats -- <carpeta>`):
+
+| Pesos | Diferencia mayor | Mejor código igual | KL media (nats) | Probabilidad del mejor del chip, frente al mejor | Segundos por pasada |
+|---|---|---|---|---|---|
+| enteros de 16 bits | 1,04 % | 61 de 64 | 0,0007 | 99,9 % | 156 |
+| afín de 8 bits, grupos de 64 | 1,32 % | 61 de 64 | 0,0010 | 99,9 % | 77 |
+| afín de 4 bits, grupos de 32 | 7,36 % | 37 de 64 | 0,066 | 90,5 % | 73 |
+
+En coma flotante, una pasada tarda 6 s. Al muestreador le importa toda la distribución, no solo el mejor código, y la divergencia KL dice que con 8 bits apenas se mueve. Con 4 bits ya se nota.
 
 Se ejecuta con `crates/sim/tests/showo_chip.rs`. La prueba del modelo real es lenta y se activa aparte. Con la misma semilla, el muestreo de MaskGIT se separa en cuanto un código difiere, así que la comparación se hace pasada a pasada y no sobre la imagen final.
 
-En la pantalla Imágenes, la casilla «En la aritmética del chip» hace todo el retoque así. Con guía son dos pasadas por paso: unos 7 minutos cada una.
+En la pantalla Imágenes, la casilla «En la aritmética del chip» hace todo el retoque así, con pesos afines de 8 bits. Con guía son dos pasadas por paso, de unos 80 s cada una: un retoque de 4 pasos tardó 21 minutos con los enteros de 16 bits.
 
 Pendiente:
 - MAGVIT en el chip, que son convoluciones como las del decodificador de Janus;
 - el firmware y las puertas: aquí es la máquina exacta guiada desde el anfitrión;
-- los pesos en el formato del diseño, en lugar de enteros en celdas de 16 bits, para medir lo que se pierde.
