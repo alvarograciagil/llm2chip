@@ -4,7 +4,7 @@
 #![no_main]
 
 use core::arch::global_asm;
-use core::ptr::{read_volatile, write_volatile};
+use core::ptr::{addr_of_mut, read_volatile, write_volatile};
 use tokenizer_rt::{Decoding, LoopWatch, Tokenizer, F_ARENA_WORDS, F_TEXT, F_TEXT_BYTES};
 
 const HOST_RX_DATA: *const u32 = 0x2000_0000 as *const u32;
@@ -500,6 +500,13 @@ const S_SCORES: usize = 3;
 const S_SCORES_EXPONENT: usize = 4;
 const S_ROPE: usize = 5;
 const S_ROPE_HALF: usize = 6;
+const S_GUIDED: usize = 7;
+/// The most image rows, text tokens and steps a fill takes.
+const MAX_ROWS: usize = 520;
+const MAX_TEXT: usize = 160;
+const MAX_STEPS: usize = 64;
+/// A masked place.
+const MASKED: u32 = u32::MAX;
 
 fn showo(field: usize) -> u32 {
     info(info(INFO_SHOWO) as usize + field)
@@ -526,6 +533,11 @@ fn rotate_in(base: u32, half: u32, slot: u32, from: u32) {
 /// - each code's score at every place of the image, sent back as each place's exponent and
 ///   then its mantissas.
 fn showo_pass() {
+    let steps = receive_word();
+    if steps != 0 {
+        showo_fill(steps as usize);
+        return;
+    }
     let (text, first) = (receive_word(), receive_word());
     let (rows, base, half) = (showo(S_ROWS), showo(S_ROPE), showo(S_ROPE_HALF));
     let rotate = |slot: u32, position: u32| {
@@ -566,6 +578,139 @@ fn showo_pass() {
             peripheral_write(REG_VECTOR_ADDRESS, showo(S_SCORES) + code);
             send_word(peripheral_read(REG_VECTOR_DATA));
         }
+    }
+}
+
+/// A mantissa or exponent of the die, as a signed number of the vectors' width.
+fn die_value(address: u32) -> i32 {
+    peripheral_write(REG_VECTOR_ADDRESS, address);
+    let unused = 32 - info(INFO_ACTIVATION_BITS);
+    ((peripheral_read(REG_VECTOR_DATA) as i32) << unused) >> unused
+}
+
+/// A text the host sent: its tokens and the position of the first.
+struct Text {
+    tokens: [u32; MAX_TEXT],
+    count: u32,
+    first: u32,
+}
+
+fn receive_text() -> Text {
+    let (count, first) = (receive_word(), receive_word());
+    let mut tokens = [0u32; MAX_TEXT];
+    for token in tokens.iter_mut().take(count as usize) {
+        *token = receive_word();
+    }
+    Text { tokens, count, first }
+}
+
+static mut CURRENT: [u32; MAX_ROWS] = [0; MAX_ROWS];
+static mut SAMPLED: [u32; MAX_ROWS] = [0; MAX_ROWS];
+static mut CONFIDENCE: [i64; MAX_ROWS] = [0; MAX_ROWS];
+
+/// One pass over the image with `text`: its tokens, then each layer twice over the rows,
+/// then each place's scores and `after` for it. The image's rows are its start, `current`
+/// as codes (or the mask) and its end.
+fn fill_pass(text: &Text, current: &[u32], markers: (u32, u32, u32, u32), after: &mut dyn FnMut(u32)) {
+    let (start, end, mask, first_code) = markers;
+    let (rows, base, half) = (showo(S_ROWS), showo(S_ROPE), showo(S_ROPE_HALF));
+    for slot in 0..text.count + rows {
+        if text.first + slot != slot {
+            rotate_in(base, half, slot, text.first + slot);
+        }
+    }
+    for slot in 0..text.count {
+        run_die(ROUTINE_TOKEN, text.tokens[slot as usize], slot);
+    }
+    let token = |row: u32| -> u32 {
+        if row == 0 {
+            return start;
+        }
+        if row == rows - 1 {
+            return end;
+        }
+        match current[row as usize - 1] {
+            MASKED => mask,
+            code => first_code + code,
+        }
+    };
+    for layer in 0..showo(S_LAYERS) {
+        for row in 0..rows {
+            if layer == 0 {
+                run_die(ROUTINE_VISION, token(row), 0);
+            }
+            run_die(ROUTINE_VISION + 1 + 2 * layer, row, text.count + row);
+        }
+        for row in 0..rows {
+            run_die(ROUTINE_VISION + 2 + 2 * layer, row, text.count + rows - 1);
+        }
+    }
+    let score = ROUTINE_VISION + 1 + 2 * showo(S_LAYERS);
+    for row in 1..rows - 1 {
+        run_die(score, row, 0);
+        after(row);
+    }
+}
+
+/// Show-o's MaskGIT fill, the steps in the chip: the host sends the image's markers (its
+/// start, end, the mask and the first code), the text and, when the die guides, the empty
+/// text, a seed, each step's masked count and noise temperature, and each place's code or
+/// `MASKED`. Each step draws a code for every masked place and keeps the surest; at the
+/// end the chip sends every place's code.
+fn showo_fill(steps: usize) {
+    let markers = (receive_word(), receive_word(), receive_word(), receive_word());
+    let text = receive_text();
+    let guided = showo(S_GUIDED) != 0;
+    let plain = if guided { Some(receive_text()) } else { None };
+    let mut rng = maskgit_rt::Rng(receive_word() | 1);
+    let mut schedule = [(0i64, 0i64); MAX_STEPS];
+    for slot in schedule.iter_mut().take(steps) {
+        *slot = (receive_word() as i32 as i64, receive_word() as i32 as i64);
+    }
+    let places = showo(S_ROWS) as usize - 2;
+    let bits = info(INFO_ACTIVATION_BITS);
+    // SAFETY: the firmware runs on one core and nothing else touches these.
+    let (current, sampled, confidence) = unsafe { (&mut (&mut *addr_of_mut!(CURRENT))[..places], &mut (&mut *addr_of_mut!(SAMPLED))[..places], &mut (&mut *addr_of_mut!(CONFIDENCE))[..places]) };
+    for place in 0..places {
+        current[place] = receive_word();
+        sampled[place] = if current[place] == MASKED { 0 } else { current[place] };
+    }
+    let score = ROUTINE_VISION + 1 + 2 * showo(S_LAYERS);
+    for &(remaining, temperature) in schedule.iter().take(steps) {
+        confidence.fill(i64::MAX);
+        {
+            let now: &[u32] = current;
+            let mut draw = |row: u32| {
+                let place = row as usize - 1;
+                if now[place] != MASKED {
+                    sampled[place] = now[place];
+                    return;
+                }
+                let exponent = die_value(showo(S_SCORES_EXPONENT));
+                let base = showo(S_SCORES);
+                let (code, sure) = maskgit_rt::draw(showo(S_CODEBOOK), &|c| die_value(base + c), exponent, bits, temperature, &mut rng);
+                sampled[place] = code;
+                confidence[place] = sure;
+            };
+            match &plain {
+                None => fill_pass(&text, now, markers, &mut draw),
+                Some(plain) => {
+                    fill_pass(&text, now, markers, &mut |row| run_die(score + 1, row, 0));
+                    fill_pass(plain, now, markers, &mut |row| {
+                        run_die(score + 2, row, 0);
+                        draw(row);
+                    });
+                }
+            }
+        }
+        let unknown = current.iter().filter(|c| **c == MASKED).count();
+        let cut = maskgit_rt::cut(confidence, maskgit_rt::masked(remaining, unknown));
+        for place in 0..places {
+            current[place] = if confidence[place] >= cut { sampled[place] } else { MASKED };
+        }
+    }
+    for code in sampled.iter() {
+        send_word(*code);
     }
 }
 

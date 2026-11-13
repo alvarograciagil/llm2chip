@@ -1044,12 +1044,15 @@ pub struct VisionPart {
     pub head_dim: usize,
     /// The most patches an image may have, which sizes the stores.
     pub patches: usize,
+    /// Routines of its own after the merge, each with an entry: Show-o keeps the scores
+    /// with the text and combines them with those without it.
+    pub extra: Vec<std::ops::Range<usize>>,
 }
 
 impl VisionPart {
     /// Every routine in the order of its entries: embedding, each block's two, fusion.
     pub fn routines(&self) -> Vec<std::ops::Range<usize>> {
-        std::iter::once(self.embed.clone()).chain(self.blocks.iter().flat_map(|(a, b)| [a.clone(), b.clone()])).chain([self.merge.clone()]).collect()
+        std::iter::once(self.embed.clone()).chain(self.blocks.iter().flat_map(|(a, b)| [a.clone(), b.clone()])).chain([self.merge.clone()]).chain(self.extra.iter().cloned()).collect()
     }
 }
 
@@ -1200,5 +1203,5 @@ fn vision_part(root: &Value, patches: usize, program: &mut Program) -> Result<Vi
     debug_assert_eq!(ops.len(), merge_range.end);
 
     program.kv_slots.extend((0..depth).map(|_| KvShape { head_dim, heads }));
-    Ok(VisionPart { ops, embed, blocks, merge: merge_range, pixels, position, output, head_dim, patches })
+    Ok(VisionPart { ops, embed, blocks, merge: merge_range, pixels, position, output, head_dim, patches, extra: Vec::new() })
 }

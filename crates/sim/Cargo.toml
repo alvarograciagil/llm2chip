@@ -19,6 +19,7 @@ serde_json.workspace = true
 regex-syntax = "0.8"
 crc32fast = "1"
 tokenizer-rt = { path = "../tokenizer-rt" }
+maskgit-rt = { path = "../maskgit-rt" }
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 unicode-normalization-alignments = "0.1"
 

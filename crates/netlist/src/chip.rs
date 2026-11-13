@@ -731,12 +731,15 @@ pub struct ShowOInfo {
     /// The rotation table's row 0, and half its rotated elements.
     pub rope: u32,
     pub rope_half: u32,
+    /// Whether the die guides the scores: after the scores' routine, one that keeps them
+    /// with the text and one that combines them with those without it.
+    pub guided: u32,
 }
 
 /// Adds Show-o's description to a chip's.
 pub fn add_showo(info: &mut Vec<u32>, showo: &ShowOInfo) {
     info[INFO_SHOWO] = info.len() as u32;
-    info.extend([showo.rows, showo.layers, showo.codebook, showo.scores.0, showo.scores.1, showo.rope, showo.rope_half]);
+    info.extend([showo.rows, showo.layers, showo.codebook, showo.scores.0, showo.scores.1, showo.rope, showo.rope_half, showo.guided]);
 }
 
 /// Adds the image encoder's description to a chip's.

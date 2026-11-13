@@ -971,6 +971,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc04a4c58212d57930a24bf47d3fa87485264a3a054e9c10e042eb373573ad3c"
 
 [[package]]
+name = "maskgit-rt"
+version = "0.1.0"
+
+[[package]]
 name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1761,6 +1765,7 @@ dependencies = [
  "crc32fast",
  "half",
  "libm",
+ "maskgit-rt",
  "memmap2",
  "multiversion",
  "naga",

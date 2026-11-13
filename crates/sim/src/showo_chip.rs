@@ -172,6 +172,13 @@ fn code_head(weights: &Weights, s: &Shape) -> Result<Vec<Tensor>, String> {
 /// `merge` stores it in the image's rows (run with the row); each block's two routines and
 /// the last one, which scores the codes, take the row.
 pub fn program(s: &Shape) -> Program {
+    program_guided(s, None)
+}
+
+/// The same with `guidance` in the die: after the merge, a routine that keeps a row's scores
+/// with the text, and one that gives in `output` the guided ones from those without it.
+pub fn program_guided(s: &Shape, guidance: Option<f32>) -> Program {
+    let mut guided = None;
     let mut e = Emit { buffers: Vec::new(), ops: Vec::new(), layer: None };
     let mut x = e.buf(s.hidden);
     e.op("leer embedding", Op::EmbRead { table: "showo.model.embed_tokens".into(), dst: x });
@@ -221,6 +228,24 @@ pub fn program(s: &Shape) -> Program {
     e.op("leer fila", Op::LoadRow { store: state, dst: h });
     let (_, scores) = code_scores(&mut e, s, h);
     let score = score_start..e.ops.len();
+    // With guidance, two more routines: one keeps a row's scores with the text, the other
+    // combines them with those without it, `(1 + g) · with − g · without`, by the row.
+    let mut extra = Vec::new();
+    if let Some(g) = guidance {
+        let kept = e.buf(rows * s.codebook);
+        let start = e.ops.len();
+        e.op("guardar puntuaciones con texto", Op::StoreRow { src: scores, store: kept });
+        extra.push(start..e.ops.len());
+        let start = e.ops.len();
+        let (with, without, difference, pushed, combined) = (e.buf(s.codebook), e.buf(s.codebook), e.buf(s.codebook), e.buf(s.codebook), e.buf(s.codebook));
+        e.op("leer puntuaciones con texto", Op::LoadRow { store: kept, dst: with });
+        e.op("cambiar de signo", Op::Scale { src: scores, factor: -1.0, dst: without });
+        e.op("diferencia", Op::Add { a: with, b: without, dst: difference });
+        e.op("guía", Op::Scale { src: difference, factor: g, dst: pushed });
+        e.op("puntuaciones guiadas", Op::Add { a: with, b: pushed, dst: combined });
+        extra.push(start..e.ops.len());
+        guided = Some(combined);
+    }
     let image_ops = std::mem::take(&mut e.ops);
     let unused = e.buf(1);
 
@@ -246,7 +271,7 @@ pub fn program(s: &Shape) -> Program {
         image: None,
         // The image's routines, as the chip numbers them: the embedding (by the token), each
         // layer's two passes (by the row), and the codes' scores (by the row).
-        vision: Some(VisionPart { ops: image_ops, embed, blocks, merge: score, pixels: unused, position: unused, output: scores, head_dim: s.head_dim(), patches: rows }),
+        vision: Some(VisionPart { ops: image_ops, embed, blocks, merge: score, pixels: unused, position: unused, output: guided.unwrap_or(scores), head_dim: s.head_dim(), patches: rows, extra }),
     }
 }
 
@@ -387,5 +412,104 @@ pub fn firmware_info(program: &Program, layout: &Layout, die: &DieConfig) -> Res
         scores: (scores << die.index_bits, exponent_register(die) << die.index_bits | scores),
         rope,
         rope_half,
+        guided: !part.extra.is_empty() as u32,
     })
+}
+
+/// A MaskGIT fill as the chip's firmware runs it.
+pub struct Fill<'a> {
+    /// The text's tokens and the position of the first, and the same without the text
+    /// when the die guides: `ShowOConfig::text_prefix` gives them.
+    pub text: (&'a [u32], u32),
+    pub plain: Option<(&'a [u32], u32)>,
+    /// For each step, how many places the schedule leaves masked and the noise's
+    /// temperature, with `maskgit_rt::FRACTION` fractional bits.
+    pub schedule: &'a [(i64, i64)],
+    pub seed: u32,
+}
+
+/// The schedule of `steps` steps for `places` places as Show-o's: masked along a cosine,
+/// the noise cooling as the steps go.
+pub fn schedule(places: usize, steps: usize) -> Vec<(i64, i64)> {
+    let mut temperature = 1f64;
+    (0..steps)
+        .map(|step| {
+            let ratio = (step + 1) as f64 / steps as f64;
+            let remaining = (places as f64 * (ratio * std::f64::consts::FRAC_PI_2).cos()).floor() as i64;
+            temperature *= 1.0 - ratio;
+            (remaining, (temperature * (1u64 << maskgit_rt::FRACTION) as f64).round() as i64)
+        })
+        .collect()
+}
+
+/// The firmware's MaskGIT fill, ordered from the host on any die: the same routines, the
+/// same draws and the same choices. `codes` are the image's places, `None` where masked;
+/// `bits` are the die's mantissas'. Gives every place's code.
+#[allow(clippy::too_many_arguments)]
+pub fn fill_on_die(engine: &mut dyn netlist::chip::DieEngine, layout: &Layout, program: &Program, info: &netlist::chip::ShowOInfo, config: &ShowOConfig, bits: u32, codes: &[Option<u32>], fill: &Fill) -> Vec<u32> {
+    use crate::lower::{ENTRY_TOKEN, ENTRY_VISION};
+    let width = 3 * info.rope_half + 1;
+    let signed = |v: i64| ((v as u32) << (32 - bits)) as i32 >> (32 - bits);
+    let score_routine = ENTRY_VISION + 1 + 2 * info.layers as usize;
+    let mut current = codes.to_vec();
+    let mut sampled: Vec<u32> = codes.iter().map(|c| c.unwrap_or(0)).collect();
+    let mut rng = maskgit_rt::Rng(fill.seed | 1);
+    let rows = info.rows;
+    let pass = |engine: &mut dyn netlist::chip::DieEngine, (ids, first): (&[u32], u32), image: &[u32], after: &mut dyn FnMut(&mut dyn netlist::chip::DieEngine, u32)| {
+        let text = ids.len() as u32;
+        for slot in 0..text + rows {
+            let row = layout.text_rotation(program, [(first + slot) as u64; 3], [info.rope_half as usize, 0, 0]);
+            row.iter().enumerate().for_each(|(i, value)| engine.write(info.rope + slot * width + i as u32, *value));
+        }
+        for (slot, id) in ids.iter().enumerate() {
+            engine.run(ENTRY_TOKEN, *id, slot as u32);
+        }
+        for layer in 0..info.layers as usize {
+            for row in 0..rows {
+                if layer == 0 {
+                    engine.run(ENTRY_VISION, image[row as usize], 0);
+                }
+                engine.run(ENTRY_VISION + 1 + 2 * layer, row, text + row);
+            }
+            for row in 0..rows {
+                engine.run(ENTRY_VISION + 2 + 2 * layer, row, text + rows - 1);
+            }
+        }
+        for row in 1..rows - 1 {
+            engine.run(score_routine, row, 0);
+            after(engine, row);
+        }
+    };
+    for (remaining, temperature) in fill.schedule {
+        let image: Vec<u32> = std::iter::once(config.start_of_image()).chain(current.iter().map(|c| c.map_or(config.mask_token, |c| config.first_code() + c))).chain([config.end_of_image()]).collect();
+        let mut confidence = vec![i64::MAX; current.len()];
+        let mut draw = |engine: &mut dyn netlist::chip::DieEngine, row: u32, current: &[Option<u32>], sampled: &mut [u32], confidence: &mut [i64]| {
+            let place = row as usize - 1;
+            if let Some(code) = current[place] {
+                sampled[place] = code;
+                return;
+            }
+            let exponent = signed(engine.read(info.scores.1));
+            let scores: Vec<i32> = (0..info.codebook).map(|c| signed(engine.read(info.scores.0 + c))).collect();
+            let (code, sure) = maskgit_rt::draw(info.codebook, &|c| scores[c as usize], exponent, bits, *temperature, &mut rng);
+            sampled[place] = code;
+            confidence[place] = sure;
+        };
+        match fill.plain {
+            None => pass(engine, fill.text, &image, &mut |engine, row| draw(engine, row, &current, &mut sampled, &mut confidence)),
+            Some(plain) => {
+                pass(engine, fill.text, &image, &mut |engine, row| engine.run(score_routine + 1, row, 0));
+                pass(engine, plain, &image, &mut |engine, row| {
+                    engine.run(score_routine + 2, row, 0);
+                    draw(engine, row, &current, &mut sampled, &mut confidence)
+                });
+            }
+        }
+        let unknown = current.iter().filter(|c| c.is_none()).count();
+        let cut = maskgit_rt::cut(&confidence, maskgit_rt::masked(*remaining, unknown));
+        for (place, code) in current.iter_mut().enumerate() {
+            *code = (confidence[place] >= cut).then_some(sampled[place]);
+        }
+    }
+    sampled
 }

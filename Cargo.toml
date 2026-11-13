@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/model-ir", "crates/arch", "crates/netlist", "crates/compiler", "crates/sim", "crates/server", "crates/wasm", "crates/tokenizer-rt"]
+members = ["crates/model-ir", "crates/arch", "crates/netlist", "crates/compiler", "crates/sim", "crates/server", "crates/wasm", "crates/tokenizer-rt", "crates/maskgit-rt"]
 
 [workspace.package]
 license = "MIT"

@@ -6,8 +6,13 @@ version = 4
 name = "llm2chip-firmware"
 version = "0.1.0"
 dependencies = [
+ "maskgit-rt",
  "tokenizer-rt",
 ]
+
+[[package]]
+name = "maskgit-rt"
+version = "0.1.0"
 
 [[package]]
 name = "tokenizer-rt"

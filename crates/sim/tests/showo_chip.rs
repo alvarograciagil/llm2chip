@@ -340,7 +340,7 @@ fn the_firmware_runs_show_o_s_pass_as_the_host_ordered_it() {
     let mut segments = sim::chip::image_segments(&die, &code, &layout);
     segments.extend(sim::chip::cell_segments(&die, &layout, &weights).unwrap());
     let chip_image = build_image(&firmware.program, &firmware.data, &info, &[], &segments).unwrap();
-    let input: Vec<u8> = [text, first].into_iter().chain(ids.iter().copied()).chain(image.iter().copied()).flat_map(|w| w.to_le_bytes()).collect();
+    let input: Vec<u8> = [0, text, first].into_iter().chain(ids.iter().copied()).chain(image.iter().copied()).flat_map(|w| w.to_le_bytes()).collect();
     let engine = sim::chip::VmEngine::new(program.clone(), open().2, die, context).unwrap();
     let model = ChipModel::new(engine, code.clone(), SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() });
     let mut bus = SocBus::booted_with(SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, &chip_image, &input, model).unwrap();
@@ -355,5 +355,75 @@ fn the_firmware_runs_show_o_s_pass_as_the_host_ordered_it() {
     eprintln!("firmware: {} ciclos de CPU, {} palabras", cpu.cycle, sent.len());
     assert_eq!(sent.len(), expected.len());
     assert_eq!(sent, expected, "puntuaciones de los códigos");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The chip fills an image itself: its firmware runs MaskGIT's steps on the CPU, with
+/// guidance in the die, and gives the codes the host gets ordering the same routines and
+/// the same draws on the same machine.
+#[test]
+fn the_firmware_fills_an_image_as_the_host_ordered_it() {
+    use netlist::chip::{add_showo, chip_info, ChipModel, GenerationSetup};
+    use netlist::image::build_image;
+    use netlist::rv32::Rv32Iss;
+    use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
+    use netlist::soc::{SocBus, SocConfig};
+    use sim::lower::Layout;
+    use sim::showo_chip::{fill_on_die, schedule, Fill};
+    let Some(firmware) = common::firmware() else { return };
+    let dir = std::env::temp_dir().join(format!("llm2chip-showo-fill-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_toy(&dir);
+    let open = || sim::showo_chip::weights(&dir, sim::Weights::open(&dir).unwrap()).unwrap();
+    let (shape, config, weights) = open();
+    let program = sim::showo_chip::program_guided(&shape, Some(1.75));
+    let (text, first) = config.text_prefix(&[5, 17, 23]);
+    let (plain, plain_first) = config.text_prefix(&[]);
+    // Half the image known, half to fill.
+    let codes: Vec<Option<u32>> = (0..IMAGE as u32).map(|i| (i % 2 == 1).then_some((i * 7) % CODEBOOK as u32)).collect();
+    let steps = schedule(IMAGE, 4);
+    let fill = Fill { text: (&text, first[0] as u32), plain: Some((&plain, plain_first[0] as u32)), schedule: &steps, seed: 7 };
+    let context = (first[0] as usize + text.len() + IMAGE + 2).next_power_of_two();
+    let die = die_for(&program, &weights, context);
+    let layout = Layout::with_cells(&program, &weights, die, context).unwrap();
+    let code = layout.microprogram(&program).unwrap();
+    let showo = sim::showo_chip::firmware_info(&program, &layout, &die).unwrap();
+    assert_eq!(showo.guided, 1);
+
+    let mut vm = sim::chip::VmEngine::new(program.clone(), open().2, die, context).unwrap();
+    let expected = fill_on_die(&mut vm, &layout, &program, &showo, &config, die.cell.activation_bits, &codes, &fill);
+    for (place, known) in codes.iter().enumerate() {
+        if let Some(code) = known {
+            assert_eq!(expected[place], *code, "un código conocido se queda");
+        }
+    }
+
+    let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
+    let mut info = chip_info(&die, &code, layout.logits_register(&program), program.vocab as u32, &setup);
+    add_showo(&mut info, &showo);
+    let mut segments = sim::chip::image_segments(&die, &code, &layout);
+    segments.extend(sim::chip::cell_segments(&die, &layout, &weights).unwrap());
+    let chip_image = build_image(&firmware.program, &firmware.data, &info, &[], &segments).unwrap();
+    let mut words = vec![steps.len() as u32, config.start_of_image(), config.end_of_image(), config.mask_token, config.first_code()];
+    for (ids, first) in [(&text, first[0] as u32), (&plain, plain_first[0] as u32)] {
+        words.extend([ids.len() as u32, first]);
+        words.extend(ids.iter());
+    }
+    words.push(fill.seed);
+    words.extend(steps.iter().flat_map(|(remaining, temperature)| [*remaining as u32, *temperature as u32]));
+    words.extend(codes.iter().map(|c| c.unwrap_or(u32::MAX)));
+    let input: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let engine = sim::chip::VmEngine::new(program.clone(), open().2, die, context).unwrap();
+    let model = ChipModel::new(engine, code.clone(), SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() });
+    let mut bus = SocBus::booted_with(SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, &chip_image, &input, model).unwrap();
+    let mut cpu = Rv32Iss::default();
+    while !cpu.halted {
+        cpu.step(&mut bus);
+        assert!(cpu.cycle < 2_000_000_000, "el firmware no termina");
+    }
+    let start = bus.tx.iter().position(|b| *b != b'.').unwrap_or(bus.tx.len());
+    let filled: Vec<u32> = bus.tx[start..].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    eprintln!("relleno en el chip: {} ciclos de CPU, códigos {filled:?}", cpu.cycle);
+    assert_eq!(filled, expected, "los códigos del relleno");
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -227,6 +227,22 @@ El firmware tiene un modo Show-o. La imagen del chip lleva su descripción (`Sho
 
 En la CPU a nivel de instrucción, con el die en software y un texto corto, devuelve las mismas puntuaciones que el anfitrión ordenando las mismas rutinas en la misma máquina: 3,66 millones de ciclos de CPU (`the_firmware_runs_show_o_s_pass_as_the_host_ordered_it`).
 
+### MaskGIT en la CPU del chip
+
+El chip también rellena la imagen él solo. El firmware hace los pasos de MaskGIT con `maskgit-rt`, una biblioteca sin memoria dinámica que también usa el anfitrión, así que los dos dan los mismos códigos. Todo va en enteros:
+- **El sorteo de cada código tapado** sigue el softmax de sus puntuaciones: pesos de `2^x` en punto fijo, desde una tabla, y un generador xorshift.
+- **Su confianza** es su log-probabilidad, con `log2` en tabla, más el ruido de Gumbel, que se enfría paso a paso.
+- **Los menos seguros** siguen tapados. El calendario de cuántos quedan en cada paso y la temperatura los envía el anfitrión, calculados como en Show-o.
+- **La guía la hace el die**, con dos rutinas más:
+  1. en la pasada con texto, una guarda las puntuaciones de cada fila;
+  2. en la pasada sin texto, otra las combina: `(1 + g)·con texto − g·sin texto`.
+
+  La CPU solo lee las puntuaciones combinadas.
+
+Comprobado:
+- **Frente a la coma flotante:** las confianzas quedan a menos de 0,02 nats y las frecuencias de los sorteos, a menos de un 1 % (`crates/sim/tests/maskgit_rt.rs`).
+- **En el chip a nivel de instrucción:** el Show-o de juguete rellena una imagen de 16 sitios, la mitad conocidos, con guía y 4 pasos, en 23,8 millones de ciclos de CPU. Da los mismos códigos que el anfitrión ordenando la misma máquina (`the_firmware_fills_an_image_as_the_host_ordered_it`).
+
 Pendiente:
-- el bucle de MaskGIT en la CPU del chip, que sortea los códigos y elige los que se quedan;
+- el relleno en el chip con el Show-o real y una imagen de verdad, y el chip entero con el relleno en puertas;
 - el codificador de MAGVIT en puertas: el anfitrión escribe los colores de cada píxel, como hace con los parches de una imagen.
