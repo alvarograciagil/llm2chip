@@ -13,6 +13,7 @@ const VIEWS: [View, string][] = [
   ["funcionamiento", "Funcionamiento"],
   ["esquematico", "Esquemático"],
   ["simulador", "Simulador"],
+  ["imagenes", "Imágenes"],
   ["explorador", "Explorador"],
   ["numerico", "Numérico"],
   ["modelos", "Modelos"],

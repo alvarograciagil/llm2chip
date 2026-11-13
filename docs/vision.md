@@ -134,7 +134,18 @@ cargo run --release -p sim --example inpaint -- <carpeta> reconstruir <imagen> s
 
 La carpeta lleva el `pytorch_model.safetensors` y el `config.json` de Show-o. Dentro van `magvitv2` (sus pesos y su configuración) y `phi`, con el tokenizador de Phi-1.5.
 
+### En la app
+
+La pantalla **Imágenes** usa el Show-o que encuentre en las carpetas de modelos:
+
+- **Sin imagen**, dibuja una nueva a partir del texto.
+- **Con imagen**, se recorta su cuadrado central y se arrastra sobre ella para marcar la zona que cambia. La zona debe cubrir al menos un código, 1/16 del lado.
+- **Seguir retocando** toma el resultado como nueva imagen de partida, para cambiar otra zona.
+
+En el panel se eligen los pasos, la guía y la semilla; con la misma semilla, el mismo texto y la misma zona dan el mismo resultado.
+
+El motor lo ejecuta en segundo plano (`/api/retouch`), un trabajo a la vez, con su progreso paso a paso, y se puede detener entre pasos. Corre en el anfitrión, fuera del chip.
+
 Pendiente:
-- llevarlo a la app, con una forma de marcar la zona;
 - Phi a la aritmética del chip: la atención bidireccional sobre los códigos de la imagen es la misma que ya usa el codificador de visión;
 - MAGVIT en el chip, que son convoluciones como las del decodificador de Janus.

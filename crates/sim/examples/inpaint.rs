@@ -102,7 +102,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokenizer = Tokenizer::from_file(dir.join("phi/tokenizer.json")).map_err(|e| e.to_string())?;
     let text = |t: &str| tokenizer.encode(t, false).map(|e| e.get_ids().to_vec()).map_err(|e| e.to_string());
     let number = |i: usize, default: f64| args.get(i).map_or(default, |v| v.parse().unwrap());
-    let progress = |step: usize, steps: usize| eprintln!("paso {step} de {steps}, {:.0} s", started.elapsed().as_secs_f64());
+    let progress = |step: usize, steps: usize| {
+        eprintln!("paso {step} de {steps}, {:.0} s", started.elapsed().as_secs_f64());
+        Ok(())
+    };
     let (rgb, out) = match args[2].as_str() {
         "reconstruir" => {
             let (rgb, width, height) = picture(&args[3])?;

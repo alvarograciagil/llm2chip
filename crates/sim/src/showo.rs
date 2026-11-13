@@ -297,8 +297,9 @@ impl ShowO {
     }
 
     /// Fills the masked places of `codes` (`None`), guided by `text`, in `steps` steps.
-    /// `guidance` pushes the model's scores away from those without the text.
-    pub fn fill(&self, codes: &[Option<u32>], text: &[u32], steps: usize, guidance: f32, seed: u64, mut progress: impl FnMut(usize, usize)) -> Result<Vec<u32>, String> {
+    /// `guidance` pushes the model's scores away from those without the text. `progress` hears
+    /// of each step before it runs, and an error from it stops the filling with that error.
+    pub fn fill(&self, codes: &[Option<u32>], text: &[u32], steps: usize, guidance: f32, seed: u64, mut progress: impl FnMut(usize, usize) -> Result<(), String>) -> Result<Vec<u32>, String> {
         let c = &self.config;
         if codes.len() != c.image_tokens {
             return Err(format!("una imagen de Show-o tiene {} códigos", c.image_tokens));
@@ -316,7 +317,7 @@ impl ShowO {
         let mut sampled: Vec<u32> = codes.iter().map(|c| c.unwrap_or(0)).collect();
         let mut temperature = 1f32;
         for step in 0..steps {
-            progress(step, steps);
+            progress(step, steps)?;
             let tokens: Vec<u32> = current.iter().map(|code| code.map_or(c.mask_token, |code| c.first_code() + code)).collect();
             let mut scores = self.code_scores(&with_text, &tokens);
             if let Some(without) = &without_text {
@@ -371,7 +372,7 @@ impl ShowO {
                 }
             }
         }
-        progress(steps, steps);
+        progress(steps, steps)?;
         Ok(sampled)
     }
 
@@ -379,7 +380,7 @@ impl ShowO {
     /// describes: the picture is resized and cropped to the model's square, and the result is
     /// that square, RGB, a row after another.
     #[allow(clippy::too_many_arguments)]
-    pub fn inpaint(&self, rgb: &[u8], width: usize, height: usize, region: &[bool], text: &[u32], steps: usize, guidance: f32, seed: u64, progress: impl FnMut(usize, usize)) -> Result<Vec<u8>, String> {
+    pub fn inpaint(&self, rgb: &[u8], width: usize, height: usize, region: &[bool], text: &[u32], steps: usize, guidance: f32, seed: u64, progress: impl FnMut(usize, usize) -> Result<(), String>) -> Result<Vec<u8>, String> {
         let side = self.config.side();
         let picture = square(&rgb.iter().map(|v| *v as f32 / 127.5 - 1.0).collect::<Vec<_>>(), 3, width, height, side, -0.5);
         let codes = self.tokenizer.encode(&picture)?;
@@ -393,7 +394,7 @@ impl ShowO {
     }
 
     /// A new picture from `text` alone: every code masked.
-    pub fn draw(&self, text: &[u32], steps: usize, guidance: f32, seed: u64, progress: impl FnMut(usize, usize)) -> Result<Vec<u8>, String> {
+    pub fn draw(&self, text: &[u32], steps: usize, guidance: f32, seed: u64, progress: impl FnMut(usize, usize) -> Result<(), String>) -> Result<Vec<u8>, String> {
         let filled = self.fill(&vec![None; self.config.image_tokens], text, steps, guidance, seed, progress)?;
         self.tokenizer.decode(&filled)
     }

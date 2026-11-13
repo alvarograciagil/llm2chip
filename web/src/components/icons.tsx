@@ -33,6 +33,14 @@ const ICONS = {
   // A logic gate.
   esquematico: <path d="M4 5h5a5 5 0 0 1 0 10H4zM1.5 8H4M1.5 12H4M14 10h4.5" {...line} />,
   simulador: <path d="M6 4.5v11l9-5.5z" {...line} />,
+  // A framed picture: a mountain under the sun.
+  imagenes: (
+    <>
+      <rect x="3" y="4" width="14" height="12" rx="2" {...line} />
+      <circle cx="13" cy="8" r="1.4" {...line} />
+      <path d="M3.5 14 8 9.5l3.5 3.5 2-2 3 3" {...line} />
+    </>
+  ),
   // A curve over axes, what the sweeps draw.
   explorador: <path d="M3 3v14h14M6 13l3.5-4 3 2.5L17 6" {...line} />,
   // A histogram: how the numbers spread.

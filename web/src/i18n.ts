@@ -12,6 +12,7 @@ const EN: Record<string, string> = {
   Funcionamiento: "How it works",
   Esquemático: "Schematic",
   Simulador: "Simulator",
+  Imágenes: "Images",
   Explorador: "Explorer",
   Numérico: "Numerics",
   Modelos: "Models",

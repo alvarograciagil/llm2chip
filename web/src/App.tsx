@@ -7,6 +7,7 @@ import { Toolbar } from "./components/Toolbar";
 import { ColumnResizers } from "./components/ColumnResizer";
 import { CalibrationPanel, ExplorerView } from "./explorer/ExplorerView";
 import { SimulatorPanel, SimulatorView } from "./simulator/SimulatorView";
+import { ImagesPanel, ImagesView } from "./images/ImagesView";
 import { SchematicPanel } from "./schematic/SchematicPanel";
 import { SchematicView } from "./schematic/SchematicView";
 import { ModelsPanel, ModelsView } from "./models/ModelsView";
@@ -57,6 +58,8 @@ export function App() {
         {view === "esquematico" && <SchematicPanel />}
         {view === "simulador" && <SimulatorView />}
         {view === "simulador" && <SimulatorPanel />}
+        {view === "imagenes" && <ImagesView />}
+        {view === "imagenes" && <ImagesPanel />}
         {view === "explorador" && <ExplorerView />}
         {view === "explorador" && <CalibrationPanel />}
         {view === "numerico" && <NumericView />}

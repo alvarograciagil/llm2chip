@@ -4,6 +4,7 @@ mod catalog;
 mod hub;
 mod layout;
 mod prompt;
+mod retouch;
 
 use axum::{
     extract::{ws::{Message, WebSocket}, Query, Request, State, WebSocketUpgrade},
@@ -75,6 +76,8 @@ struct App {
     hub: Arc<Hub>,
     image: Arc<Mutex<Option<Arc<ImageJob>>>>,
     layout: Arc<Mutex<Option<Arc<layout::LayoutJob>>>>,
+    retouch: Arc<Mutex<Option<Arc<retouch::RetouchJob>>>>,
+    painter: retouch::Painter,
 }
 
 fn home() -> PathBuf {
@@ -383,6 +386,47 @@ async fn layout_status(State(app): State<App>) -> Response {
         Some(Err(message)) => serde_json::json!({ "state": "error", "error": message }),
     })
     .into_response()
+}
+
+/// Starts drawing or retouching a picture with Show-o, one at a time.
+async fn retouch_start(State(app): State<App>, Json(request): Json<retouch::RetouchRequest>) -> Response {
+    let running = app.retouch.lock().unwrap().as_ref().is_some_and(|job| job.outcome.lock().unwrap().is_none());
+    if running {
+        return refused("ya hay una imagen en marcha".into());
+    }
+    let Some(entry) = app.catalog.find(&request.path) else { return refused("el modelo no está en las carpetas conocidas".into()) };
+    if !entry.images.edits {
+        return refused(format!("{} no retoca imágenes", entry.name));
+    }
+    let job = Arc::new(retouch::RetouchJob::default());
+    *app.retouch.lock().unwrap() = Some(job.clone());
+    let painter = app.painter.clone();
+    tokio::task::spawn_blocking(move || {
+        let outcome = retouch::run(&request, &job, &painter);
+        *job.outcome.lock().unwrap() = Some(outcome);
+    });
+    StatusCode::ACCEPTED.into_response()
+}
+
+async fn retouch_status(State(app): State<App>) -> Response {
+    let job = app.retouch.lock().unwrap().clone();
+    let Some(job) = job else { return Json(serde_json::json!({ "state": "idle" })).into_response() };
+    let outcome = job.outcome.lock().unwrap().clone();
+    let phase = job.phase.lock().unwrap().clone();
+    let (step, steps) = *job.step.lock().unwrap();
+    Json(match outcome {
+        None => serde_json::json!({ "state": "running", "phase": phase, "step": step, "steps": steps }),
+        Some(Ok(result)) => serde_json::json!({ "state": "done", "result": result }),
+        Some(Err(message)) => serde_json::json!({ "state": "error", "error": message }),
+    })
+    .into_response()
+}
+
+async fn retouch_cancel(State(app): State<App>) -> Response {
+    if let Some(job) = app.retouch.lock().unwrap().as_ref() {
+        job.cancel.store(true, Relaxed);
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn image_cancel(State(app): State<App>) -> Response {
@@ -1151,7 +1195,7 @@ fn session_token() -> String {
 
 #[tokio::main]
 async fn main() {
-    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)), layout: Arc::new(Mutex::new(None)) };
+    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)), layout: Arc::new(Mutex::new(None)), retouch: Arc::new(Mutex::new(None)), painter: Arc::new(Mutex::new(None)) };
     let routes = Router::new()
         .route("/api/models", get(models))
         .route("/api/status", get(status))
@@ -1166,6 +1210,9 @@ async fn main() {
         .route("/api/image", get(image_status).post(image_start))
         .route("/api/image/cancel", post(image_cancel))
         .route("/api/layout", get(layout_status).post(layout_start))
+        // A picture of 512 × 512 travels as some 3 MB of JSON, past the default limit.
+        .route("/api/retouch", get(retouch_status).post(retouch_start).layer(axum::extract::DefaultBodyLimit::max(32 << 20)))
+        .route("/api/retouch/cancel", post(retouch_cancel))
         .route("/api/hf/token", put(hub_set_token).get(hub_token).delete(hub_clear_token))
         .route("/api/load", post(load))
         .route("/api/generate", get(generate_socket))

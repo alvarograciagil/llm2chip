@@ -24,7 +24,7 @@ export type Selection =
 
 export type Overlay = "funcion" | "capa" | "actividad" | "energia" | "ancho" | "densidad";
 export type SidebarTab = "parametros" | "optimizaciones";
-export type View = "plano" | "funcionamiento" | "esquematico" | "simulador" | "explorador" | "modelos" | "numerico" | "parametros";
+export type View = "plano" | "funcionamiento" | "esquematico" | "simulador" | "imagenes" | "explorador" | "modelos" | "numerico" | "parametros";
 export type Appearance = "auto" | "light" | "dark";
 import { readLanguage, writeLanguage, type Language } from "./i18n";
 

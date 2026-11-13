@@ -73,6 +73,8 @@ pub struct ImageAbility {
     pub reads: bool,
     /// It makes images and the simulator runs its decoder.
     pub makes: bool,
+    /// It draws from a text and retouches a region of a picture, apart from the chip: Show-o.
+    pub edits: bool,
     /// What the model could do that the simulator cannot yet.
     pub note: Option<String>,
 }
@@ -87,14 +89,17 @@ pub fn image_ability(dir: &Path, config: &Value) -> ImageAbility {
     let draws = ["gen_vision_config", "gen_head_config", "gen_aligner_config", "vq_config", "vqmodel_config"].iter().any(|key| config.get(key).is_some());
     // Janus draws with a decoder the simulator runs.
     let makes = sim::janus::JanusConfig::read(dir).ok().flatten().is_some();
-    let note = if draws && !makes {
+    let edits = sim::showo::ShowOConfig::read(dir).ok().flatten().is_some() && dir.join("magvitv2").is_dir();
+    let note = if edits {
+        Some("Show-o dibuja y retoca imágenes en la pantalla Imágenes, en coma flotante y fuera del chip.".into())
+    } else if draws && !makes {
         Some("El modelo genera imágenes, pero el simulador aún no tiene su decodificador de imagen.".into())
     } else if config.get("vision_config").is_some() && !reads {
         Some("El modelo lee imágenes con un codificador que el simulador aún no reproduce.".into())
     } else {
         None
     };
-    ImageAbility { reads, makes, note }
+    ImageAbility { reads, makes, edits, note }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -412,6 +417,12 @@ mod image_tests {
         assert!(!other.makes && other.note.unwrap().contains("genera imágenes"));
         let janus = ability(r#"{"model_type":"janus","vq_config":{"num_patches":24},"vision_config":{"image_size":384}}"#);
         assert!(janus.makes && janus.reads && janus.note.is_none(), "Janus lee y dibuja");
+        assert!(!janus.edits);
+        let showo = r#"{"_class_name":"Showo","llm_vocab_size":50295,"codebook_size":8192,"mask_token_id":58497,"num_vq_tokens":256}"#;
+        assert!(!ability(showo).edits, "sin su MAGVIT-v2 no puede");
+        std::fs::create_dir_all(dir.join("magvitv2")).unwrap();
+        let showo = ability(showo);
+        assert!(showo.edits && !showo.makes && showo.note.unwrap().contains("Imágenes"));
         std::fs::remove_dir_all(dir).ok();
     }
 }

@@ -15,7 +15,7 @@ export interface ServerModel {
   config: string;
   adaptation: Adaptation;
   /** What the model does with images, and what the simulator cannot follow yet. */
-  images: { reads: boolean; makes: boolean; note: string | null };
+  images: { reads: boolean; makes: boolean; edits: boolean; note: string | null };
 }
 
 export type Numeric = "float" | "fixed" | "exact";
