@@ -23,10 +23,10 @@ fn a_picture_comes_back_through_the_image_tokenizer() {
         })
         .collect();
     let planes: Vec<f32> = (0..3).flat_map(|c| (0..side * side).map(move |i| (c, i))).map(|(c, i)| rgb[i * 3 + c] as f32 / 127.5 - 1.0).collect();
-    let codes = model.tokenizer.encode(&planes).unwrap();
+    let codes = model.tokenizer().unwrap().encode(&planes).unwrap();
     assert_eq!(codes.len(), model.config.image_tokens);
     assert!(codes.iter().all(|c| *c < model.config.codebook));
-    let back = model.tokenizer.decode(&codes).unwrap();
+    let back = model.tokenizer().unwrap().decode(&codes).unwrap();
     let error: f64 = rgb.iter().zip(&back).map(|(a, b)| (*a as f64 - *b as f64).powi(2)).sum::<f64>() / rgb.len() as f64;
     let psnr = 10.0 * (255.0f64 * 255.0 / error).log10();
     eprintln!("PSNR {psnr:.1} dB");

@@ -113,8 +113,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(format!("para medir, una imagen de {side} × {side}").into());
             }
             let planes: Vec<f32> = (0..3).flat_map(|c| (0..side * side).map(move |i| (c, i))).map(|(c, i)| rgb[i * 3 + c] as f32 / 127.5 - 1.0).collect();
-            let codes = model.tokenizer.encode(&planes)?;
-            let back = model.tokenizer.decode(&codes)?;
+            let codes = model.tokenizer()?.encode(&planes)?;
+            let back = model.tokenizer()?.decode(&codes)?;
             let error: f64 = rgb.iter().zip(&back).map(|(a, b)| (*a as f64 - *b as f64).powi(2)).sum::<f64>() / rgb.len() as f64;
             eprintln!("{} códigos distintos de {}, PSNR {:.1} dB", codes.iter().collect::<std::collections::HashSet<_>>().len(), codes.len(), 10.0 * (255.0f64 * 255.0 / error).log10());
             (back, &args[4])

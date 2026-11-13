@@ -91,7 +91,7 @@ pub fn image_ability(dir: &Path, config: &Value) -> ImageAbility {
     let makes = sim::janus::JanusConfig::read(dir).ok().flatten().is_some();
     let edits = sim::showo::ShowOConfig::read(dir).ok().flatten().is_some() && dir.join("magvitv2").is_dir();
     let note = if edits {
-        Some("Show-o dibuja y retoca imágenes en la pantalla Imágenes, en coma flotante y fuera del chip.".into())
+        Some("Show-o dibuja y retoca imágenes en la pantalla Imágenes, en coma flotante o con su transformador en la aritmética del chip.".into())
     } else if draws && !makes {
         Some("El modelo genera imágenes, pero el simulador aún no tiene su decodificador de imagen.".into())
     } else if config.get("vision_config").is_some() && !reads {

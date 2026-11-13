@@ -19,6 +19,8 @@ interface Result {
   side: number;
   seconds: number;
   seed: number;
+  /** Bits of the die's vectors when the chip's arithmetic made it. */
+  chip_bits?: number;
 }
 
 interface ImagesState {
@@ -30,6 +32,8 @@ interface ImagesState {
   guidance: number;
   /** Empty draws a new one each time. */
   seed: string;
+  /** Run the transformer in the die's arithmetic, much slower. */
+  onChip: boolean;
   picture: SquarePicture | null;
   region: Region | null;
   running: boolean;
@@ -85,6 +89,7 @@ export const useImages = create<ImagesState>((set, get) => ({
   steps: 16,
   guidance: 1.75,
   seed: "",
+  onChip: false,
   picture: null,
   region: null,
   running: false,
@@ -113,13 +118,14 @@ export const useImages = create<ImagesState>((set, get) => ({
   },
 
   start: async () => {
-    const { path, prompt, steps, guidance, seed, picture, region } = get();
+    const { path, prompt, steps, guidance, seed, picture, region, onChip } = get();
     const body = {
       path,
       prompt,
       steps,
       guidance,
       seed: seed.trim() ? Number(seed) : null,
+      chip_bits: onChip ? 16 : null,
       picture: picture && regionIsUsable(region, picture.side) ? { width: picture.side, height: picture.side, rgb: picture.rgb, region } : null,
     };
     set({ running: true, error: null, phase: "Empezando", step: 0, total: steps });

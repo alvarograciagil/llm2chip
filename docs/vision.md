@@ -146,6 +146,36 @@ En el panel se eligen los pasos, la guía y la semilla; con la misma semilla, el
 
 El motor lo ejecuta en segundo plano (`/api/retouch`), un trabajo a la vez, con su progreso paso a paso, y se puede detener entre pasos. Corre en el anfitrión, fuera del chip.
 
+### En la aritmética del chip
+
+`crates/sim/src/showo_chip.rs` lleva el transformador de Show-o a las operaciones del chip y lo ejecuta en la máquina exacta, en el orden en que se las da el anfitrión:
+
+- **El texto** entra como tokens normales, cada uno viendo los anteriores. El relleno a la izquierda no se envía: nada lo lee.
+- **La imagen** se ve entera en los dos sentidos, así que pasa cada capa en dos vueltas sobre sus filas, como el codificador de visión:
+  1. cada fila guarda su clave y su valor en la caché de la capa, detrás de los del texto, y su consulta;
+  2. cada fila atiende sobre el texto y todas las filas de la imagen y hace el resto de la capa.
+
+  La atención y la MLP van en paralelo sobre la misma entrada normalizada, que en la segunda vuelta se vuelve a calcular.
+- **Las piezas de Phi** son operaciones que el chip ya tenía:
+  - LayerNorm con sesgo, también por cabeza en consultas y claves;
+  - la RoPE sobre la mitad de cada cabeza;
+  - GELU con tangente;
+  - sesgos en todas las proyecciones.
+- **Las puntuaciones** salen de las filas de los códigos de la salida, con sus sesgos.
+- **MAGVIT-v2** sigue en coma flotante en el anfitrión.
+
+Comprobado con una pasada sobre la misma imagen tapada, frente a la coma flotante:
+
+| Modelo | Diferencia mayor | Mejor código igual | Tiempo por pasada |
+|---|---|---|---|
+| Show-o de juguete (2 capas) | 0,06 % | 8 de 8 | instantáneo |
+| Show-o real, vectores de 16 bits | 1,04 % | 61 de 64 | 395 s (6 s en coma flotante) |
+
+Se ejecuta con `crates/sim/tests/showo_chip.rs`. La prueba del modelo real es lenta y se activa aparte. Con la misma semilla, el muestreo de MaskGIT se separa en cuanto un código difiere, así que la comparación se hace pasada a pasada y no sobre la imagen final.
+
+En la pantalla Imágenes, la casilla «En la aritmética del chip» hace todo el retoque así. Con guía son dos pasadas por paso: unos 7 minutos cada una.
+
 Pendiente:
-- Phi a la aritmética del chip: la atención bidireccional sobre los códigos de la imagen es la misma que ya usa el codificador de visión;
-- MAGVIT en el chip, que son convoluciones como las del decodificador de Janus.
+- MAGVIT en el chip, que son convoluciones como las del decodificador de Janus;
+- el firmware y las puertas: aquí es la máquina exacta guiada desde el anfitrión;
+- los pesos en el formato del diseño, en lugar de enteros en celdas de 16 bits, para medir lo que se pierde.

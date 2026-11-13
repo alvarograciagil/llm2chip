@@ -78,6 +78,7 @@ struct App {
     layout: Arc<Mutex<Option<Arc<layout::LayoutJob>>>>,
     retouch: Arc<Mutex<Option<Arc<retouch::RetouchJob>>>>,
     painter: retouch::Painter,
+    chip_painter: retouch::ChipPainter,
 }
 
 fn home() -> PathBuf {
@@ -400,9 +401,9 @@ async fn retouch_start(State(app): State<App>, Json(request): Json<retouch::Reto
     }
     let job = Arc::new(retouch::RetouchJob::default());
     *app.retouch.lock().unwrap() = Some(job.clone());
-    let painter = app.painter.clone();
+    let (painter, chip_painter) = (app.painter.clone(), app.chip_painter.clone());
     tokio::task::spawn_blocking(move || {
-        let outcome = retouch::run(&request, &job, &painter);
+        let outcome = retouch::run(&request, &job, &painter, &chip_painter);
         *job.outcome.lock().unwrap() = Some(outcome);
     });
     StatusCode::ACCEPTED.into_response()
@@ -1195,7 +1196,7 @@ fn session_token() -> String {
 
 #[tokio::main]
 async fn main() {
-    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)), layout: Arc::new(Mutex::new(None)), retouch: Arc::new(Mutex::new(None)), painter: Arc::new(Mutex::new(None)) };
+    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)), layout: Arc::new(Mutex::new(None)), retouch: Arc::new(Mutex::new(None)), painter: Arc::new(Mutex::new(None)), chip_painter: Arc::new(Mutex::new(None)) };
     let routes = Router::new()
         .route("/api/models", get(models))
         .route("/api/status", get(status))

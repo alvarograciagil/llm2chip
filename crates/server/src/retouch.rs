@@ -3,7 +3,8 @@
 //! a time, and the browser asks how it goes.
 
 use serde::Deserialize;
-use sim::showo::ShowO;
+use sim::showo::{Magvit, ShowO};
+use sim::showo_chip::ShowOChip;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
@@ -23,6 +24,10 @@ pub struct RetouchRequest {
     pub seed: Option<u64>,
     #[serde(default)]
     pub picture: Option<Picture>,
+    /// The transformer in the die's arithmetic, with vectors of these bits, instead of in
+    /// floating point. Much slower.
+    #[serde(default)]
+    pub chip_bits: Option<u32>,
 }
 
 /// The largest integer a JavaScript number holds exactly.
@@ -58,6 +63,9 @@ pub struct RetouchJob {
 /// Show-o once opened, with the folder it came from: its weights take seconds to read.
 pub type Painter = Arc<Mutex<Option<(PathBuf, Arc<ShowO>)>>>;
 
+/// Show-o on the die's arithmetic, with MAGVIT-v2, for a folder and a width of the vectors.
+pub type ChipPainter = Arc<Mutex<Option<(PathBuf, u32, ShowOChip, Magvit)>>>;
+
 /// The pixels of the region, one flag each, or why the rectangle does not fit the picture.
 pub fn region_mask(picture: &Picture) -> Result<Vec<bool>, String> {
     let [x0, y0, x1, y1] = picture.region;
@@ -70,7 +78,10 @@ pub fn region_mask(picture: &Picture) -> Result<Vec<bool>, String> {
     Ok((0..picture.width * picture.height).map(|i| (x0..x1).contains(&(i % picture.width)) && (y0..y1).contains(&(i / picture.width))).collect())
 }
 
-pub fn run(request: &RetouchRequest, job: &RetouchJob, painter: &Painter) -> Result<serde_json::Value, String> {
+pub fn run(request: &RetouchRequest, job: &RetouchJob, painter: &Painter, chip: &ChipPainter) -> Result<serde_json::Value, String> {
+    if let Some(bits) = request.chip_bits {
+        return run_on_chip(request, job, chip, bits.clamp(8, 24));
+    }
     let set_phase = |phase: &str| *job.phase.lock().unwrap() = phase.to_string();
     let dir = Path::new(&request.path);
     let model = {
@@ -115,6 +126,50 @@ pub fn run(request: &RetouchRequest, job: &RetouchJob, painter: &Painter) -> Res
         "side": side,
         "seconds": started.elapsed().as_secs_f64(),
         "seed": seed,
+        "data": format!("data:image/bmp;base64,{}", crate::base64(&crate::bmp(&rgb, side))),
+    }))
+}
+
+/// The same with the transformer in the die's arithmetic and MAGVIT-v2 on the host.
+fn run_on_chip(request: &RetouchRequest, job: &RetouchJob, chip: &ChipPainter, bits: u32) -> Result<serde_json::Value, String> {
+    let set_phase = |phase: &str| *job.phase.lock().unwrap() = phase.to_string();
+    let dir = Path::new(&request.path);
+    let mut held = chip.lock().unwrap();
+    if !held.as_ref().is_some_and(|(path, b, _, _)| path == dir && *b == bits) {
+        *held = None;
+        set_phase("Preparando Show-o en la aritmética del chip");
+        let model = ShowOChip::exact(dir, bits)?;
+        let magvit = Magvit::open(&dir.join("magvitv2"))?;
+        *held = Some((dir.to_path_buf(), bits, model, magvit));
+    }
+    let (_, _, model, magvit) = held.as_mut().expect("recién abierto");
+    let tokenizer = Tokenizer::from_file(dir.join("phi/tokenizer.json")).map_err(|e| format!("falta el tokenizador de Phi-1.5 en «phi»: {e}"))?;
+    let text = tokenizer.encode(request.prompt.as_str(), false).map_err(|e| e.to_string())?.get_ids().to_vec();
+    let (steps, guidance) = (request.steps.clamp(1, 64), request.guidance.clamp(0.0, 10.0));
+    let seed = request.seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)) & SEED_MASK;
+    let started = std::time::Instant::now();
+    let progress = |step: usize, steps: usize| {
+        if job.cancel.load(Relaxed) {
+            return Err("cancelado".to_string());
+        }
+        *job.step.lock().unwrap() = (step, steps);
+        set_phase(if step < steps { "El chip rellena los códigos de la imagen" } else { "El decodificador convierte los códigos en píxeles" });
+        Ok(())
+    };
+    let rgb = match &request.picture {
+        Some(picture) => {
+            let region = region_mask(picture)?;
+            set_phase("Codificando la imagen con MAGVIT-v2");
+            model.inpaint(magvit, &picture.rgb, picture.width, picture.height, &region, &text, steps, guidance, seed, progress)?
+        }
+        None => model.draw(magvit, &text, steps, guidance, seed, progress)?,
+    };
+    let side = model.config.side();
+    Ok(serde_json::json!({
+        "side": side,
+        "seconds": started.elapsed().as_secs_f64(),
+        "seed": seed,
+        "chip_bits": bits,
         "data": format!("data:image/bmp;base64,{}", crate::base64(&crate::bmp(&rgb, side))),
     }))
 }
