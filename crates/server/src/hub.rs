@@ -164,10 +164,10 @@ fn select_files(siblings: &[Sibling], shards: Option<&[String]>) -> Result<Vec<S
     };
     let chosen: Vec<Sibling> = root.into_iter().filter(|s| keep(&s.rfilename)).cloned().collect();
     if !chosen.iter().any(|s| is_weights(&s.rfilename)) {
-        return Err("este repositorio no publica pesos en safetensors".into());
+        return Err("this repository does not publish weights in safetensors".into());
     }
     if !chosen.iter().any(|s| s.rfilename == "config.json") {
-        return Err("este repositorio no tiene config.json".into());
+        return Err("this repository has no config.json".into());
     }
     Ok(chosen)
 }
@@ -204,7 +204,7 @@ impl Hub {
         }
         for name in ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"] {
             if let Some(token) = std::env::var(name).ok().filter(|t| !t.trim().is_empty()) {
-                return Some((token.trim().to_string(), "entorno"));
+                return Some((token.trim().to_string(), "environment"));
             }
         }
         let cache = std::env::var_os("HF_HOME").map_or_else(|| self.home.join(".cache/huggingface"), PathBuf::from);
@@ -218,7 +218,7 @@ impl Hub {
     pub fn set_token(&self, token: &str) -> Result<(), String> {
         let token = token.trim();
         if token.is_empty() || !token.chars().all(|c| c.is_ascii_graphic()) {
-            return Err("el token no tiene un formato válido".into());
+            return Err("the token does not have a valid format".into());
         }
         let path = self.token_file();
         std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -246,13 +246,13 @@ impl Hub {
     }
 
     async fn checked(&self, request: reqwest::RequestBuilder, id: &str) -> Result<reqwest::Response, String> {
-        let response = request.send().await.map_err(|e| format!("no se pudo conectar con Hugging Face: {e}"))?;
+        let response = request.send().await.map_err(|e| format!("could not connect to Hugging Face: {e}"))?;
         match response.status().as_u16() {
             200..=299 => Ok(response),
-            401 | 403 => Err(format!("{id} necesita acceso: acepta su licencia en huggingface.co/{id} y añade un token de lectura")),
-            404 => Err(format!("{id} no existe o es privado")),
-            429 => Err("Hugging Face está limitando las peticiones; prueba dentro de un rato".into()),
-            code => Err(format!("Hugging Face respondió con el error {code}")),
+            401 | 403 => Err(format!("{id} needs access: accept its license at huggingface.co/{id} and add a read token")),
+            404 => Err(format!("{id} does not exist or is private")),
+            429 => Err("Hugging Face is rate-limiting requests; try again in a while".into()),
+            code => Err(format!("Hugging Face answered with error {code}")),
         }
     }
 
@@ -272,11 +272,11 @@ impl Hub {
 
     async fn info(&self, id: &str) -> Result<(RepoInfo, String), String> {
         if !valid_repo(id) {
-            return Err(format!("«{id}» no es un repositorio válido; se escribe autor/modelo"));
+            return Err(format!("“{id}” is not a valid repository; it is written author/model"));
         }
         let url = format!("{}/api/models/{id}", self.endpoint);
         let info: RepoInfo = self.checked(self.request(&url).query(&[("blobs", "true")]), id).await?.json().await.map_err(|e| e.to_string())?;
-        let revision = info.sha.clone().ok_or("Hugging Face no indica la revisión del repositorio")?;
+        let revision = info.sha.clone().ok_or("Hugging Face does not give the repository's revision")?;
         Ok((info, revision))
     }
 
@@ -290,7 +290,7 @@ impl Hub {
         if info.siblings.iter().any(|s| s.rfilename == index) {
             let text = self.checked(self.request(&self.file_url(id, revision, index)), id).await?.text().await.map_err(|e| e.to_string())?;
             let value: Value = serde_json::from_str(&text).map_err(|e| format!("{index}: {e}"))?;
-            let map = value["weight_map"].as_object().ok_or_else(|| format!("{index} no tiene weight_map"))?;
+            let map = value["weight_map"].as_object().ok_or_else(|| format!("{index} has no weight_map"))?;
             let mut list: Vec<String> = map.values().filter_map(|v| v.as_str().map(String::from)).collect();
             list.sort();
             list.dedup();
@@ -317,7 +317,7 @@ impl Hub {
         };
         if files.as_ref().is_ok_and(|list| !list.iter().any(|s| s.rfilename == "tokenizer.json")) && adaptation.simulate {
             adaptation.simulate = false;
-            adaptation.reason = Some("no publica tokenizer.json, que es lo que convierte el texto en tokens".into());
+            adaptation.reason = Some("it does not publish tokenizer.json, which is what turns the text into tokens".into());
         }
         let target = folder_for(root, id);
         Ok(Details {
@@ -344,13 +344,13 @@ impl Hub {
     /// Starts in the background and returns at once. `finished` runs after a success.
     pub async fn start(self: &Arc<Self>, id: String, root: PathBuf, finished: impl FnOnce() + Send + 'static) -> Result<JobView, String> {
         if self.jobs.lock().unwrap().get(&id).is_some_and(|j| j.active()) {
-            return Err("ese modelo ya se está descargando".into());
+            return Err("that model is already downloading".into());
         }
         let (info, revision) = self.info(&id).await?;
         let files = self.plan(&id, &info, &revision).await?;
         let target = folder_for(&root, &id);
         if target.join("config.json").exists() {
-            return Err(format!("ya está en {}", target.display()));
+            return Err(format!("it is already in {}", target.display()));
         }
         let job = Arc::new(Job {
             id: id.clone(),
@@ -396,10 +396,10 @@ impl Hub {
     /// Drops what an interrupted download left behind.
     pub async fn discard(&self, id: &str, root: &Path) -> Result<(), String> {
         if !valid_repo(id) {
-            return Err("repositorio no válido".into());
+            return Err("invalid repository".into());
         }
         if self.jobs.lock().unwrap().get(id).is_some_and(|j| j.active()) {
-            return Err("detén antes la descarga".into());
+            return Err("stop the download first".into());
         }
         let partial = partial_of(&folder_for(root, id));
         if partial.exists() {
@@ -424,7 +424,7 @@ impl Hub {
         if let Some(free) = free_space(&partial) {
             let needed = job.total.saturating_sub(held) + SPARE_BYTES;
             if free < needed {
-                return Err(Stop::Fatal(format!("faltan {:.1} GB libres en el disco para descargarlo", (needed - free) as f64 / 1e9)));
+                return Err(Stop::Fatal(format!("{:.1} GB more free disk space is needed to download it", (needed - free) as f64 / 1e9)));
             }
         }
 
@@ -506,10 +506,10 @@ impl Hub {
                     hasher = Sha256::new();
                 }
                 206 => {}
-                401 | 403 => return Err(Stop::Fatal(format!("sin acceso a {name}"))),
+                401 | 403 => return Err(Stop::Fatal(format!("no access to {name}"))),
                 416 => {
                     tokio::fs::remove_file(dest).await.map_err(io)?;
-                    return Err(Stop::Retry(format!("{name}: rango no válido")));
+                    return Err(Stop::Retry(format!("{name}: invalid range")));
                 }
                 408 | 429 | 500..=599 => return Err(Stop::Retry(format!("{name}: error {status}"))),
                 _ => return Err(Stop::Fatal(format!("{name}: error {status}"))),
@@ -537,12 +537,12 @@ impl Hub {
         }
 
         if expected.is_some_and(|size| held < size) {
-            return Err(Stop::Retry(format!("{name}: la conexión se cortó")));
+            return Err(Stop::Retry(format!("{name}: the connection dropped")));
         }
         let wrong_digest = digest.is_some_and(|wanted| !wanted.eq_ignore_ascii_case(&hex(&hasher.finalize())));
         if wrong_digest || expected.is_some_and(|size| held != size) {
             tokio::fs::remove_file(dest).await.map_err(io)?;
-            return Err(Stop::Retry(format!("{name} no coincide con lo publicado")));
+            return Err(Stop::Retry(format!("{name} does not match what was published")));
         }
         Ok(())
     }
@@ -570,7 +570,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     const LLAMA: &str = r#"{"model_type":"llama","hidden_size":16,"num_attention_heads":2,"intermediate_size":32,"vocab_size":8,"num_hidden_layers":1}"#;
-    const REPO: &str = "autor/modelo";
+    const REPO: &str = "author/model";
 
     #[derive(Default)]
     struct Fake {
@@ -597,7 +597,7 @@ mod tests {
         if owner == "cerrado" {
             return StatusCode::UNAUTHORIZED.into_response();
         }
-        if name != "modelo" {
+        if name != "model" {
             return StatusCode::NOT_FOUND.into_response();
         }
         let weights = weights();
@@ -617,7 +617,7 @@ mod tests {
     }
 
     async fn resolve(Route((_, _, revision, file)): Route<(String, String, String, String)>, State(fake): State<Arc<Fake>>) -> Response {
-        assert_eq!(revision, "abc123", "todo se pide a la revisión fijada");
+        assert_eq!(revision, "abc123", "everything is requested at the pinned revision");
         fake.fetched.lock().unwrap().push(file.clone());
         match file.as_str() {
             "config.json" => LLAMA.into_response(),
@@ -677,7 +677,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("la descarga no termina");
+        panic!("the download does not finish");
     }
 
     fn sibling(name: &str) -> Sibling {
@@ -715,7 +715,7 @@ mod tests {
         assert!(details.adaptation.design && details.adaptation.simulate);
         assert_eq!(*fake.fetched.lock().unwrap(), ["config.json"]);
         assert!(hub.details("cerrado/modelo", &home).await.err().unwrap().contains("token"));
-        assert!(hub.details("autor/otro", &home).await.err().unwrap().contains("no existe"));
+        assert!(hub.details("author/other", &home).await.err().unwrap().contains("does not exist"));
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -730,11 +730,11 @@ mod tests {
         let view = until_over(&hub).await;
         assert_eq!(view.state, "done", "{:?}", view.error);
         assert_eq!(*fake.ranges.lock().unwrap(), ["bytes=70000-"]);
-        let target = home.join("autor--modelo");
+        let target = home.join("author--model");
         assert_eq!(std::fs::read(target.join("model.safetensors")).unwrap(), weights());
         assert!(!target.join(".revision").exists() && !target.join("pytorch_model.bin").exists() && !target.join("modeling_custom.py").exists());
         assert!(!partial_of(&target).exists());
-        assert!(hub.start(REPO.into(), home.clone(), || {}).await.unwrap_err().contains("ya está"));
+        assert!(hub.start(REPO.into(), home.clone(), || {}).await.unwrap_err().contains("already"));
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -747,7 +747,7 @@ mod tests {
         hub.start(REPO.into(), home.clone(), || {}).await.unwrap();
         let view = until_over(&hub).await;
         assert_eq!(view.state, "done", "{:?}", view.error);
-        assert_eq!(std::fs::read(home.join("autor--modelo/model.safetensors")).unwrap(), weights());
+        assert_eq!(std::fs::read(home.join("author--model/model.safetensors")).unwrap(), weights());
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -767,7 +767,7 @@ mod tests {
         assert!(details.resumable_bytes >= 50_000 && !details.present);
 
         hub.discard(REPO, &home).await.unwrap();
-        assert!(!partial_of(&home.join("autor--modelo")).exists() && hub.jobs().is_empty());
+        assert!(!partial_of(&home.join("author--model")).exists() && hub.jobs().is_empty());
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -788,7 +788,7 @@ mod tests {
         assert!(fake.authorized.load(Relaxed) > 0);
         hub.clear_token().unwrap();
         assert!(!hub.token_file().exists());
-        assert!(hub.set_token("con espacio").is_err());
+        assert!(hub.set_token("with space").is_err());
         std::fs::remove_dir_all(home).unwrap();
     }
 }

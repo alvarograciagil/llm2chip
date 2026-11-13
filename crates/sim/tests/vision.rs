@@ -31,7 +31,7 @@ fn a_picture_larger_than_the_chip_takes_is_resized_down_to_fit() {
     let count = image.rows * image.cols;
     assert!(count <= 32 && count > 8, "{} × {} parches", image.rows, image.cols);
     assert!(image.rows.is_multiple_of(tower.config.merge) && image.cols.is_multiple_of(tower.config.merge));
-    assert!(image.cols > image.rows, "conserva la forma apaisada");
+    assert!(image.cols > image.rows, "keeps the landscape shape");
     // A small one is enlarged to the least the encoder takes, which here is also the most.
     let image = patches(&tower.config.within(32), &test_picture(12, 4), 12, 4).unwrap();
     assert!(image.rows * image.cols <= 32, "{} × {} parches", image.rows, image.cols);
@@ -58,7 +58,7 @@ fn the_encoder_in_the_die_arithmetic_gives_the_same_tokens_within_rounding() {
     assert_eq!(tokens.len(), reference.len());
     let largest = reference.iter().flatten().fold(0f32, |m, v| m.max(v.abs()));
     let worst = tokens.iter().flatten().zip(reference.iter().flatten()).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
-    eprintln!("mayor valor {largest:.3}, mayor diferencia {worst:.4}");
+    eprintln!("largest value {largest:.3}, largest difference {worst:.4}");
     assert!(worst < 0.02 * largest, "{tokens:?}\nfrente a\n{reference:?}");
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -142,7 +142,7 @@ mod gates {
         while sim.get("halted").unwrap() == 0 {
             sim.tick();
             cycles += 1;
-            assert!(cycles < 5_000_000, "el secuenciador no se detiene");
+            assert!(cycles < 5_000_000, "the sequencer does not stop");
         }
     }
 
@@ -170,7 +170,7 @@ mod gates {
         // One entry for each routine: embedding, each block's two and the fusion.
         let routines: Vec<(&[compiler::Inst], bool)> = vision.routines().into_iter().enumerate().map(|(i, range)| (&vision.ops[range], i % 2 == 1 && i < 2 * vision.blocks.len())).collect();
         let code = layout.routines_microprogram(program, &routines).unwrap();
-        eprintln!("{} rutinas, {} palabras de microcódigo", routines.len(), code.words.len());
+        eprintln!("{} routines, {} microcode words", routines.len(), code.words.len());
 
         let mut sim = Simulator::new(&die_design(c)).unwrap();
         load_microprogram(&mut sim, &c, &code);
@@ -239,7 +239,7 @@ mod gates {
             layout.set_rotation(patch as u32, &angles.iter().map(|a| *a as f64).collect::<Vec<_>>());
         }
         let code = layout.microprogram(&program).unwrap();
-        eprintln!("{} entradas, {} palabras de microcódigo", code.entries.len(), code.words.len());
+        eprintln!("{} entries, {} microcode words", code.entries.len(), code.words.len());
         let mut sim = Simulator::new(&die_design(c)).unwrap();
         load_microprogram(&mut sim, &c, &code);
         let mut initial: HashMap<(u32, u32), i64> = layout.setup().initial.clone();

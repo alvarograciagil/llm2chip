@@ -48,7 +48,7 @@ pub fn time_unit_ns(platform: &str) -> f64 {
 /// as `Running script.tcl, stage 3_3_place_gp`.
 fn phase_of(line: &str) -> Option<&'static str> {
     let stage = line.strip_prefix("Running ")?.split("stage ").nth(1)?;
-    [("1", "Sintetizando con Yosys"), ("2", "Haciendo el floorplan"), ("3", "Colocando las celdas"), ("4", "Construyendo el árbol de reloj"), ("5", "Rutando"), ("6", "Comprobando y escribiendo el GDS")]
+    [("1", "Synthesizing with Yosys"), ("2", "Making the floorplan"), ("3", "Placing the cells"), ("4", "Building the clock tree"), ("5", "Rutando"), ("6", "Checking and writing the GDS")]
         .into_iter()
         .find(|(step, _)| stage.starts_with(step))
         .map(|(_, phase)| phase)
@@ -56,12 +56,12 @@ fn phase_of(line: &str) -> Option<&'static str> {
 
 pub fn run(request: &LayoutRequest, job: &LayoutJob, home: &Path) -> Result<serde_json::Value, String> {
     let set_phase = |phase: &str| *job.phase.lock().unwrap() = phase.to_string();
-    let platform = platform_for(&request.node).ok_or("este proceso no tiene un PDK abierto: elige SkyWater 130, GF180 o ASAP7")?;
+    let platform = platform_for(&request.node).ok_or("this process has no open PDK: choose SkyWater 130, GF180 or ASAP7")?;
     let docker = Command::new("docker").arg("info").stdout(Stdio::null()).stderr(Stdio::null()).status();
     if !docker.is_ok_and(|s| s.success()) {
-        return Err("Docker no está en marcha: ábrelo para hacer layouts con OpenROAD".into());
+        return Err("Docker is not running: open it to make layouts with OpenROAD".into());
     }
-    set_phase("Generando el Verilog de la celda");
+    set_phase("Generating the cell's Verilog");
     // A few words of memory, what is measured being the logic around it: the fewest that
     // keep the cell's error correction, which the estimator sends already.
     let mut config = CellConfig { addr_bits: request.cell.addr_bits.max(2), mac_stages: request.cell.mac_stages.max(1), adder_stages: request.cell.adder_stages.max(1), ..request.cell };
@@ -84,15 +84,15 @@ pub fn run(request: &LayoutRequest, job: &LayoutJob, home: &Path) -> Result<serd
     )
     .map_err(|e| e.to_string())?;
 
-    set_phase("Sintetizando con Yosys");
+    set_phase("Synthesizing with Yosys");
     let mut child = Command::new("docker")
         .args(["run", "--rm", "--platform", "linux/amd64", "-v", &format!("{}:/work", dir.display()), "openroad/orfs:latest", "bash", "-c", "source /OpenROAD-flow-scripts/env.sh >/dev/null && cd /OpenROAD-flow-scripts/flow && make DESIGN_CONFIG=/work/config.mk WORK_HOME=/work/out 2>&1"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("no se pudo lanzar OpenROAD: {e}"))?;
+        .map_err(|e| format!("OpenROAD could not be started: {e}"))?;
     let mut tail: Vec<String> = Vec::new();
-    for line in BufReader::new(child.stdout.take().expect("salida")).lines().map_while(Result::ok) {
+    for line in BufReader::new(child.stdout.take().expect("output")).lines().map_while(Result::ok) {
         if let Some(phase) = phase_of(&line) {
             set_phase(phase);
         }
@@ -105,7 +105,7 @@ pub fn run(request: &LayoutRequest, job: &LayoutJob, home: &Path) -> Result<serd
     let logs = dir.join(format!("out/logs/{platform}/{top}/base"));
     let reports = dir.join(format!("out/reports/{platform}/{top}/base"));
     if !status.success() || !logs.join("6_report.json").exists() {
-        return Err(format!("OpenROAD no terminó: {}", tail.join("\n")));
+        return Err(format!("OpenROAD did not finish: {}", tail.join("\n")));
     }
     let metrics: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(logs.join("6_report.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let finish = std::fs::read_to_string(reports.join("6_finish.rpt")).unwrap_or_default();
@@ -134,14 +134,14 @@ mod tests {
     fn only_open_processes_can_be_laid_out() {
         assert_eq!(platform_for("sky130"), Some("sky130hd"));
         assert_eq!(platform_for("gf180"), Some("gf180"));
-        assert_eq!(platform_for("n6"), None, "sin PDK abierto");
+        assert_eq!(platform_for("n6"), None, "no open PDK");
         assert_eq!(10.0 / time_unit_ns("asap7"), 10_000.0, "ASAP7 cuenta picosegundos");
         assert_eq!(time_unit_ns("sky130hd"), 1.0);
     }
 
     #[test]
     fn the_log_tells_the_step() {
-        assert_eq!(phase_of("Running global_place.tcl, stage 3_3_place_gp"), Some("Colocando las celdas"));
+        assert_eq!(phase_of("Running global_place.tcl, stage 3_3_place_gp"), Some("Placing the cells"));
         assert_eq!(phase_of("[INFO DPL-0303] Running algorithm for global swaps."), None);
     }
 }

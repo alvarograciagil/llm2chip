@@ -1,6 +1,6 @@
 //! The real image encoder in the die's arithmetic against floating point.
 //!
-//! `cargo run --release -p sim --example see_exact -- <carpeta> [bits]`
+//! `cargo run --release -p sim --example see_exact -- <folder> [bits]`
 
 use sim::vision::{patches, VisionTower};
 use sim::vision_chip::ExactVision;
@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let dir = Path::new(&args[1]);
     let bits: u32 = args.get(2).map_or(16, |b| b.parse().unwrap());
-    let mut tower = VisionTower::open(dir)?.ok_or("sin codificador")?;
+    let mut tower = VisionTower::open(dir)?.ok_or("no encoder")?;
     let depth: Option<usize> = args.get(3).map(|d| d.parse().unwrap());
     if let Some(d) = depth { tower.config.depth = d; }
     let side = 256;
@@ -27,13 +27,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut exact = ExactVision::exact(&config, Weights::open_with_vision(dir)?, count, bits)?;
     let started = std::time::Instant::now();
     let got = exact.encode(&tower, &image)?;
-    eprintln!("aritmética del die: {:.1} s", started.elapsed().as_secs_f64());
+    eprintln!("die arithmetic: {:.1} s", started.elapsed().as_secs_f64());
     let (mut error, mut norm) = (0f64, 0f64);
     for (a, b) in got.iter().flatten().zip(float.iter().flatten()) {
         error += ((a - b) as f64).powi(2);
         norm += (*b as f64).powi(2);
     }
     let top = float.iter().flatten().fold(0f32, |m, v| m.max(v.abs()));
-    println!("error relativo {:.4} (máximo |v| {top:.1})", (error / norm).sqrt());
+    println!("relative error {:.4} (maximum |v| {top:.1})", (error / norm).sqrt());
     Ok(())
 }

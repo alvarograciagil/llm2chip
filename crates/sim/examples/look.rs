@@ -1,6 +1,6 @@
 //! Asks Janus about a picture: its SigLIP encoder reads it, the language model answers.
 //!
-//! `cargo run --release -p sim --example look -- <carpeta> imagen.bmp "<pregunta>" [exacto]`
+//! `cargo run --release -p sim --example look -- <folder> image.bmp "<question>" [exact]`
 
 use sim::janus::JanusEye;
 use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
@@ -35,12 +35,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (rgb, width, height) = read_bmp(Path::new(&args[2]));
         eye.encode(&rgb, width, height)?
     };
-    eprintln!("{} vectores de imagen en {:.0} s", vectors.len(), started.elapsed().as_secs_f64());
+    eprintln!("{} image vectors in {:.0} s", vectors.len(), started.elapsed().as_secs_f64());
     if let Some(v) = vectors.first() {
         let top = v.iter().fold(0f32, |m, x| m.max(x.abs()));
         let mean = v.iter().map(|x| x.abs()).sum::<f32>() / v.len() as f32;
         let tops: Vec<f32> = vectors.iter().map(|v| v.iter().fold(0f32, |m, x| m.max(x.abs()))).collect();
-        eprintln!("primer vector: máximo {top:.3}, media {mean:.4}; máximos de todos entre {:.2} y {:.2}", tops.iter().cloned().fold(f32::MAX, f32::min), tops.iter().cloned().fold(0f32, f32::max));
+        eprintln!("first vector: maximum {top:.3}, mean {mean:.4}; maxima of all between {:.2} and {:.2}", tops.iter().cloned().fold(f32::MAX, f32::min), tops.iter().cloned().fold(0f32, f32::max));
     }
     let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| e.to_string())?;
     let picture = if vectors.is_empty() { "" } else { "<begin_of_image><image_placeholder><end_of_image>\n" };
@@ -50,13 +50,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let program = compiler::compile_model(&config["text_config"].to_string())?;
     let weights = Weights::open(dir)?;
     // With INYECTAR, text tokens too go in as vectors, through the same path as the image's.
-    let inject = std::env::var("INYECTAR").is_ok();
+    let inject = std::env::var("INJECT").is_ok();
     let table = program.ops.iter().find_map(|i| match &i.op { compiler::Op::EmbRead { table, .. } => Some(table.clone()), _ => None }).unwrap();
     let rows = Weights::open(dir)?;
     let hidden = program.hidden;
-    // "exacto" runs the chip's integers at 16 bits, "exacto24" at 24.
+    // "exact" runs the chip's integers at 16 bits, "exact24" at 24.
     let mode = args.get(4).map(String::as_str).unwrap_or("");
-    let mut engine: Box<dyn Runner> = match mode.strip_prefix("exacto") {
+    let mut engine: Box<dyn Runner> = match mode.strip_prefix("exact") {
         Some(bits) => Box::new(ExactEngine::new(program, weights, bits.parse().unwrap_or(16))?),
         None => Box::new(Engine::new(program, weights, Numeric::Float)?),
     };
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         position += 1;
     }
-    eprintln!("prompt leído en {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("prompt read in {:.0} s", started.elapsed().as_secs_f64());
     let mut out = Vec::new();
     for _ in 0..24 {
         let next = logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).unwrap();

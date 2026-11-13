@@ -9,7 +9,7 @@
 //! For each, the colour inside the retouched square: its mean, how yellow it is
 //! (`min(R, G) − B`) and how saturated.
 //!
-//! `cargo run --release -p sim --example showo_fill_compare -- <carpeta de Show-o> <carpeta de salida> [semillas] [semillas en el chip] [pasos] [texto]`
+//! `cargo run --release -p sim --example showo_fill_compare -- <Show-o folder> <output folder> [seeds] [seeds on the chip] [steps] [text]`
 //!
 //! Seeds go comma-separated, odd: MaskGIT's generators make every seed odd, so 2 is 3. Those of
 //! the chip take about 6 minutes each.
@@ -159,7 +159,7 @@ fn main() -> Result<(), String> {
         let picture = magvit.decode(filled)?;
         write_bmp(&out.join(format!("{way}-{seed}.bmp")), &picture, side)?;
         let c = colour(&picture, side, &inside);
-        eprintln!("{way:15} semilla {seed:3}: RGB {:5.1} {:5.1} {:5.1}  amarillo {:6.1}  saturación {:.3}  ({seconds:.0} s)", c[0], c[1], c[2], c[3], c[4]);
+        eprintln!("{way:15} seed {seed:3}: RGB {:5.1} {:5.1} {:5.1}  yellow {:6.1}  saturation {:.3}  ({seconds:.0} s)", c[0], c[1], c[2], c[3], c[4]);
         rows.push((way.to_string(), seed, c, seconds));
         Ok(())
     };
@@ -167,7 +167,7 @@ fn main() -> Result<(), String> {
     for &seed in &float_seeds {
         let started = std::time::Instant::now();
         let filled = model.fill(&codes, &text, steps, GUIDANCE, seed as u64, |_, _| Ok(()))?;
-        report("flotante", seed, &filled, started.elapsed().as_secs_f64())?;
+        report("float", seed, &filled, started.elapsed().as_secs_f64())?;
 
         let started = std::time::Instant::now();
         // The model runs whole when the scores are asked for: one layer of routines will do.
@@ -175,7 +175,7 @@ fn main() -> Result<(), String> {
         let mut die = FloatDie { model: &model, text: &text, text_ids: ids.clone(), codebook: config.codebook as usize, score_routine, ids: Vec::new(), image: Vec::new(), with: Vec::new(), current: Vec::new(), row: 0 };
         let shape = FillShape { rows: codes.len() as u32 + 2, layers: 1, guided: true, bits: BITS };
         let filled = fill_on(&mut die, shape, &config, &codes, &fill(seed));
-        report("maskgit-entero", seed, &filled, started.elapsed().as_secs_f64())?;
+        report("integer-maskgit", seed, &filled, started.elapsed().as_secs_f64())?;
     }
 
     if !chip_seeds.is_empty() {
@@ -188,17 +188,17 @@ fn main() -> Result<(), String> {
         }
     }
 
-    println!("forma,semilla,R,G,B,amarillo,saturacion,segundos");
+    println!("way,seed,R,G,B,yellow,saturation,seconds");
     for (way, seed, c, seconds) in &rows {
         println!("{way},{seed},{:.1},{:.1},{:.1},{:.1},{:.3},{seconds:.0}", c[0], c[1], c[2], c[3], c[4]);
     }
-    for way in ["flotante", "maskgit-entero", "chip"] {
+    for way in ["float", "integer-maskgit", "chip"] {
         let these: Vec<_> = rows.iter().filter(|r| r.0 == way).collect();
         if these.is_empty() {
             continue;
         }
         let mean = |i: usize| these.iter().map(|r| r.2[i]).sum::<f64>() / these.len() as f64;
-        eprintln!("media {way:15} ({} semillas): RGB {:5.1} {:5.1} {:5.1}  amarillo {:6.1}  saturación {:.3}", these.len(), mean(0), mean(1), mean(2), mean(3), mean(4));
+        eprintln!("mean {way:15} ({} seeds): RGB {:5.1} {:5.1} {:5.1}  yellow {:6.1}  saturation {:.3}", these.len(), mean(0), mean(1), mean(2), mean(3), mean(4));
     }
     Ok(())
 }

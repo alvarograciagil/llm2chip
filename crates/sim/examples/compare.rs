@@ -1,5 +1,5 @@
 //! Finds the first buffer where exact integers drift away from floating point.
-//! `cargo run --release -p sim --example compare -- <carpeta> [tokens]`
+//! `cargo run --release -p sim --example compare -- <folder> [tokens]`
 
 use compiler::compile_qwen3_5;
 use sim::{Engine, ExactEngine, Numeric, Weights};
@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 reported += 1;
                 let other = b.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
                 let peak = |v: &[f32]| v.iter().fold(0f32, |m, x| m.max(x.abs()));
-                println!("{} capa {:?} búfer {buffer} norma {norm:.3}/{other:.3} pico {:.3}/{:.3} error {error:.3}: {}", inst.name, inst.layer, peak(a), peak(&b), &text[..text.len().min(90)]);
+                println!("{} layer {:?} buffer {buffer} norm {norm:.3}/{other:.3} peak {:.3}/{:.3} error {error:.3}: {}", inst.name, inst.layer, peak(a), peak(&b), &text[..text.len().min(90)]);
             }
         }
     }

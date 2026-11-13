@@ -52,10 +52,10 @@ fn memory_bits(design: &Design) -> HashMap<&'static str, u64> {
                 InstKind::Module(child) => walk(design, child, times, out),
                 InstKind::Prim(Prim::Sram { addr_bits, width }) | InstKind::Prim(Prim::Ram2p { addr_bits, width }) | InstKind::Prim(Prim::Rom { addr_bits, width }) => {
                     let kind = match inst.name.as_str() {
-                        n if n.starts_with("weight") || n.contains("scale_mem") || n.contains("bias_mem") => "pesos y factores",
-                        n if n.starts_with("vectors") || n.starts_with("wide_memory") => "memoria vectorial",
-                        n if n.starts_with("microcode") => "microcódigo",
-                        _ => "CPU, tablas y resto",
+                        n if n.starts_with("weight") || n.contains("scale_mem") || n.contains("bias_mem") => "weights and factors",
+                        n if n.starts_with("vectors") || n.starts_with("wide_memory") => "vector memory",
+                        n if n.starts_with("microcode") => "microcode",
+                        _ => "CPU, tables and the rest",
                     };
                     *out.entry(kind).or_default() += times * (1u64 << addr_bits) * *width as u64;
                 }
@@ -74,7 +74,7 @@ fn bits_for(count: u64) -> u32 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let out = args.get(1).expect("archivo de salida");
+    let out = args.get(1).expect("output file");
     let option = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let test_dir = std::env::temp_dir().join(format!("llm2chip-fpga-{}", std::process::id()));
     // Every `--model DIR`: one chip that runs them all, each from its own image.
@@ -126,26 +126,26 @@ fn main() {
     let FpgaChip { design, config, models: built } = fpga_chip_for(&pairs, trial, context, options).unwrap();
     let die = config.die;
     let last = context as u32 - 1;
-    for ((layout, code), name) in built.iter().zip(dirs.iter().map(|d| d.as_str()).chain(["modelo de prueba"])) {
+    for ((layout, code), name) in built.iter().zip(dirs.iter().map(|d| d.as_str()).chain(["test model"])) {
         eprintln!("== {name}");
         if layout.outside_table().is_some() {
-            eprintln!("la tabla de embedding se queda en la imagen");
+            eprintln!("the embedding table stays in the image");
         }
-        eprintln!("registros más largos: {:?}", layout.longest_registers(6));
+        eprintln!("longest registers: {:?}", layout.longest_registers(6));
         let (depth, groups) = layout.cell_depths();
-        eprintln!("{} registros usados (2^{} en la tabla), {} palabras de pesos y {} grupos de factores por celda", layout.registers_needed(), die.reg_bits, depth, groups);
+        eprintln!("{} registers used (2^{} in the table), {} weight words and {} factor groups per cell", layout.registers_needed(), die.reg_bits, depth, groups);
         let distinct: std::collections::HashSet<_> = code.words.iter().map(|w| format!("{w:?}")).collect();
         eprintln!("microprograma: {} palabras, {} distintas", code.words.len(), distinct.len());
         // The die's cycles for one generated token at the last position, with its logits.
         let token = code.cycles(&die, sim::lower::ENTRY_TOKEN, 1, last) + code.cycles(&die, sim::lower::ENTRY_LOGITS, 1, last);
-        eprintln!("{token} ciclos del die por token generado en la posición {last}");
+        eprintln!("{token} die cycles per token generated at position {last}");
     }
-    eprintln!("memoria vectorial compacta de 2^{} palabras, frente a 2^{} sin tabla", die.features.vector_bits, die.reg_bits + die.index_bits);
-    eprintln!("{:.0} equivalentes NAND2, microcódigo de 2^{} palabras", design.gate_equivalents(), die.microcode_bits);
+    eprintln!("compact vector memory of 2^{} words, against 2^{} without a table", die.features.vector_bits, die.reg_bits + die.index_bits);
+    eprintln!("{:.0} NAND2 equivalents, microcode of 2^{} words", design.gate_equivalents(), die.microcode_bits);
     let mut memories: Vec<_> = memory_bits(&design).into_iter().collect();
     memories.sort();
     let total: u64 = memories.iter().map(|(_, bits)| bits).sum();
-    eprintln!("memoria: {:.2} Mbit ({})", total as f64 / 1e6, memories.iter().map(|(kind, bits)| format!("{kind} {:.2}", *bits as f64 / 1e6)).collect::<Vec<_>>().join(", "));
+    eprintln!("memory: {:.2} Mbit ({})", total as f64 / 1e6, memories.iter().map(|(kind, bits)| format!("{kind} {:.2}", *bits as f64 / 1e6)).collect::<Vec<_>>().join(", "));
     if args.iter().any(|a| a == "--memories") {
         for (name, count, addr, width) in memory_list(&design) {
             eprintln!("  {count} × {name}: 2^{addr} × {width} bits = {:.3} Mbit", (count * (1u64 << addr) * width as u64) as f64 / 1e6);
@@ -193,7 +193,7 @@ fn main() {
                 hidden += 1;
                 continue;
             }
-            eprintln!("  {depth:4.0} {name}{}", if hidden > 0 { format!("  (+{hidden} sin nombre)") } else { String::new() });
+            eprintln!("  {depth:4.0} {name}{}", if hidden > 0 { format!("  (+{hidden} unnamed)") } else { String::new() });
             hidden = 0;
         }
     }

@@ -48,8 +48,8 @@ fn main() {
             r.chain_length, r.faults, r.detected, r.chain, r.untestable, r.aborted, r.random_patterns, r.deterministic_patterns,
             r.fault_coverage() * 100.0, r.test_coverage() * 100.0, started.elapsed().as_secs_f64()
         );
-        // With ATPG_PERDIDOS, where the faults no pattern finds sit, by module.
-        if std::env::var("ATPG_PERDIDOS").is_ok() {
+        // With ATPG_MISSED, where the faults no pattern finds sit, by module.
+        if std::env::var("ATPG_MISSED").is_ok() {
             let lost: Vec<_> = r.outcomes.iter().filter(|(_, o)| *o != atpg::Outcome::Detected).collect();
             let names = atpg::describe(&scanned.design, &lost.iter().map(|(f, _)| *f).collect::<Vec<_>>()).unwrap();
             let mut count: std::collections::BTreeMap<String, usize> = Default::default();

@@ -107,7 +107,7 @@ impl PromptStyle {
             return Ok(format!("{}{JANUS_SYSTEM}\n\n<|User|>: <begin_of_image><image_placeholder><end_of_image>\n{prompt}\n\n<|Assistant|>:", self.bos));
         }
         if !self.chatml_thinking {
-            return Err("este modelo no lee imágenes".into());
+            return Err("this model does not read images".into());
         }
         let think = if thinking { "<think>\n" } else { "<think>\n\n</think>\n\n" };
         Ok(format!("<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{prompt}<|im_end|>\n<|im_start|>assistant\n{think}"))
@@ -133,7 +133,7 @@ impl PromptStyle {
             bos_token => self.bos.as_str(),
             eos_token => self.eos.as_str(),
         };
-        environment.render_str(template, context).map(|text| (text, false)).map_err(|e| format!("la plantilla de chat del modelo falla: {e}"))
+        environment.render_str(template, context).map(|text| (text, false)).map_err(|e| format!("the model's chat template fails: {e}"))
     }
 }
 
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn an_image_goes_before_the_question_as_one_placeholder() {
         let qwen = PromptStyle { template: None, bos: String::new(), eos: String::new(), chatml_thinking: true, janus: false, stop: vec![], think: None };
-        assert_eq!(qwen.render_with_image("¿Qué es?", false).unwrap(), "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>¿Qué es?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+        assert_eq!(qwen.render_with_image("What is it?", false).unwrap(), "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>What is it?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
         assert!(style(None, vec![2]).render_with_image("hola", false).is_err());
     }
 

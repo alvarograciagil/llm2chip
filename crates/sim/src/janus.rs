@@ -434,7 +434,7 @@ impl JanusEye {
     /// filled with the processor's gray, and each value taken from [0, 255] to [-1, 1].
     fn frame(&self, rgb: &[u8], width: usize, height: usize) -> Result<Vec<f32>, String> {
         if rgb.len() != width * height * 3 || width == 0 || height == 0 {
-            return Err(format!("la imagen de {width}×{height} debería tener {} bytes RGB", width * height * 3));
+            return Err(format!("the {width}×{height} image should have {} RGB bytes", width * height * 3));
         }
         let side = self.side;
         let scale = side as f32 / width.max(height) as f32;

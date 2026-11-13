@@ -18,7 +18,7 @@ const N6: Process = Process { full_adder_ns: 0.04, gate_um2: 0.0875 / 1.33 * 1.2
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let dir = Path::new(args.get(1).expect("carpeta del modelo"));
+    let dir = Path::new(args.get(1).expect("model folder"));
     let prompt: u32 = args.get(2).map_or(1024, |a| a.parse().expect("prompt"));
     let context: u32 = args.get(3).map_or(8192, |a| a.parse().expect("contexto"));
     let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
@@ -32,14 +32,14 @@ fn main() {
     let first = points.first().copied();
     for c in &points {
         let extra = first.map_or(0.0, |f| c.area_mm2 / f.area_mm2);
-        println!("{} chip(s) {:>5} x {:>3}, {:>9} celdas: {:>6.0} tok/s a {:>4.0} MHz, primer token {:>6.1} ms, {:>9.1} M puertas, {:>7.0} mm² ({extra:>4.2}x, {:>4.0} por chip), {:>5.3} mm² por tok/s", c.chips, 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.tokens_per_second, c.clock_hz / 1e6, c.prompt_seconds * 1e3, c.gates / 1e6, c.area_mm2, c.die_mm2, c.area_mm2 / c.tokens_per_second);
+        println!("{} chip(s) {:>5} x {:>3}, {:>9} cells: {:>6.0} tok/s at {:>4.0} MHz, first token {:>6.1} ms, {:>9.1} M gates, {:>7.0} mm² ({extra:>4.2}x, {:>4.0} per chip), {:>5.3} mm² per tok/s", c.chips, 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.tokens_per_second, c.clock_hz / 1e6, c.prompt_seconds * 1e3, c.gates / 1e6, c.area_mm2, c.die_mm2, c.area_mm2 / c.tokens_per_second);
     }
     if let Some(c) = efficient(&points) {
-        println!("más velocidad por área: {} chip(s) de {} x {}, {} celdas, {:.0} tok/s, {:.0} mm², {:.3} mm² por tok/s", c.chips, 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.tokens_per_second, c.area_mm2, c.area_mm2 / c.tokens_per_second);
+        println!("most speed per area: {} chip(s) of {} x {}, {} cells, {:.0} tok/s, {:.0} mm², {:.3} mm² per tok/s", c.chips, 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.tokens_per_second, c.area_mm2, c.area_mm2 / c.tokens_per_second);
     }
     for ratio in [1.5, 2.0, 3.0] {
         if let Some(c) = balanced(&points, ratio) {
-            println!("equilibrio con cada tok/s extra a no más de {ratio}x el área media por tok/s: {} chip(s) de {} x {}, {} celdas, {:.0} tok/s, {:.0} mm²", c.chips, 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.tokens_per_second, c.area_mm2);
+            println!("balance with each extra tok/s at no more than {ratio}x the mean area per tok/s: {} chip(s) of {} x {}, {} cells, {:.0} tok/s, {:.0} mm²", c.chips, 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.tokens_per_second, c.area_mm2);
         }
     }
 }

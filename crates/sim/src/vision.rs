@@ -147,7 +147,7 @@ fn resize(rgb: &[u8], width: usize, height: usize, to_width: usize, to_height: u
 /// the encoder takes is used as it is; any other is resized bilinearly.
 pub fn patches(config: &VisionConfig, rgb: &[u8], width: usize, height: usize) -> Result<Patches, String> {
     if rgb.len() != width * height * 3 {
-        return Err(format!("la imagen de {width}×{height} debería tener {} bytes RGB", width * height * 3));
+        return Err(format!("the {width}×{height} image should have {} RGB bytes", width * height * 3));
     }
     let (to_width, to_height) = config.fitted_size(width, height);
     let pixels = if (to_width, to_height) == (width, height) { rgb.iter().map(|v| *v as f32).collect() } else { resize(rgb, width, height, to_width, to_height) };

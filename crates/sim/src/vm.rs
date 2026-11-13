@@ -177,9 +177,9 @@ impl BlockVm {
     }
 
     fn matrix_exponent(&self, name: &str, cols: u32) -> i64 {
-        let weights = self.weights.as_ref().expect("la máquina necesita los pesos");
+        let weights = self.weights.as_ref().expect("the machine needs the weights");
         *self.matrix_exponents.borrow_mut().entry(name.to_string()).or_insert_with(|| {
-            weights.matrix(name).expect("matriz del programa").exponent(cols as usize)
+            weights.matrix(name).expect("the program's matrix").exponent(cols as usize)
         })
     }
 }
@@ -405,11 +405,11 @@ impl BlockOps for BlockVm {
     }
 
     fn matvec(&mut self, name: &str, _matrix: u32, first: u32, src: u32, dst: u32, rows: u32, cols: u32) {
-        let weights = self.weights.clone().expect("la máquina necesita los pesos");
+        let weights = self.weights.clone().expect("the machine needs the weights");
         let exponent = self.matrix_exponent(name, cols);
         let mut x = self.registers[src as usize].clone();
         x.resize(cols as usize, 0);
-        let matrix = weights.matrix(name).expect("matriz del programa");
+        let matrix = weights.matrix(name).expect("the program's matrix");
         let sums = if self.in_cells { matrix.cell_sums(first as usize, rows as usize, &x, exponent, self.bits) } else { matrix.exact_sums(first as usize, rows as usize, &x, exponent, self.bits) };
         let sums: Vec<i64> = sums.iter().map(|v| self.wrap_wide(*v)).collect();
         self.narrow(&sums, exponent, self.exp(src), dst);
@@ -423,10 +423,10 @@ impl BlockOps for BlockVm {
         if self.registers[matrix as usize].len() >= ((row + 1) * cols) as usize {
             return self.copy_part(matrix, row * cols, dst, 0, cols);
         }
-        let weights = self.weights.clone().expect("la máquina necesita los pesos");
+        let weights = self.weights.clone().expect("the machine needs the weights");
         let exponent = self.matrix_exponent(name, cols);
-        let matrix = weights.matrix(name).expect("matriz del programa");
-        let mantissas = matrix.fixed_row(row as usize, cols as usize, exponent, self.bits).expect("fila de la matriz");
+        let matrix = weights.matrix(name).expect("the program's matrix");
+        let mantissas = matrix.fixed_row(row as usize, cols as usize, exponent, self.bits).expect("the matrix's row");
         self.load_mantissas(dst, &mantissas, exponent);
     }
 

@@ -1,4 +1,4 @@
-//! `cargo run --release -p sim --example generate -- <carpeta> "<texto>" [tokens]`
+//! `cargo run --release -p sim --example generate -- <folder> "<text>" [tokens]`
 
 use compiler::compile_qwen3_5;
 use sim::{Engine, Numeric, Weights};

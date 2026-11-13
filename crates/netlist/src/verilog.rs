@@ -372,7 +372,7 @@ pub fn chip_testbench(design: &Design, image_words: usize, input_bytes: usize, l
       end
       tick;
     end
-    $display("LIMITE");
+    $display("LIMIT");
     $finish;
   end
 endmodule

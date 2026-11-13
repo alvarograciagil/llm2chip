@@ -80,7 +80,7 @@ fn assert_vm_matches_gates(program: &compiler::Program, config: &str, dir: &Path
         let fast = vm.register_of(buffer);
         for index in 0..*length as u32 {
             let (mantissa, _) = read_block_value(sim, c, gates, index);
-            assert_eq!(mantissa, vm.mantissa(fast, index), "búfer {buffer}, elemento {index}");
+            assert_eq!(mantissa, vm.mantissa(fast, index), "buffer {buffer}, element {index}");
         }
     }
 }
@@ -229,13 +229,13 @@ fn tiny_model_runs_whole_on_the_gates() {
 
     let c = die_config();
     let GateRun { mut sim, layout, code, cycles: total_cycles } = gates_after(&program, &dir, c, &tokens);
-    eprintln!("microprograma: {} palabras, {} parámetros", code.words.len(), code.parameters.len());
+    eprintln!("microprogram: {} words, {} parameters", code.words.len(), code.parameters.len());
 
     let logits_reg = layout.logits_register(&program);
     let got: Vec<f32> = (0..8).map(|i| read_block_value(&mut sim, c, logits_reg, i).1 as f32).collect();
     let best = |v: &[f32]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
     eprintln!("ciclos: {total_cycles}\nreferencia: {expected:?}\npuertas:    {got:?}");
-    assert_eq!(best(&got), best(&expected), "el token más probable debe coincidir");
+    assert_eq!(best(&got), best(&expected), "the most likely token must match");
     let spread: f32 = expected.iter().map(|v| v.abs()).sum::<f32>() / 8.0;
     let error: f32 = got.iter().zip(&expected).map(|(a, b)| (a - b).abs()).sum::<f32>() / 8.0;
     assert!(error < 0.08 * spread.max(0.2), "error medio {error}, magnitud {spread}");
@@ -250,14 +250,14 @@ fn tiny_model_runs_whole_on_the_gates() {
         let fast = vm.register_of(buffer);
         for index in 0..*length as u32 {
             let (mantissa, _) = read_block_value(&mut sim, c, gates, index);
-            assert_eq!(mantissa, vm.mantissa(fast, index), "búfer {buffer}, elemento {index}");
+            assert_eq!(mantissa, vm.mantissa(fast, index), "buffer {buffer}, element {index}");
         }
     }
     std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
-#[ignore = "lenta: cientos de miles de ciclos: solo con optimizaciones"]
+#[ignore = "slow: hundreds of thousands of cycles: only with optimizations"]
 fn a_die_built_for_its_program_runs_it_identically_with_less_logic() {
     let dir = std::env::temp_dir().join(format!("llm2chip-trim-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -267,7 +267,7 @@ fn a_die_built_for_its_program_runs_it_identically_with_less_logic() {
     let mut general = gates_after(&program, &dir, c, &[3, 5]);
     let trimmed = DieConfig { features: netlist::DieFeatures::of(&general.code), ..c };
     let mut specific = gates_after(&program, &dir, trimmed, &[3, 5]);
-    assert_eq!(specific.code.words.len(), general.code.words.len(), "el programa no depende del recorte");
+    assert_eq!(specific.code.words.len(), general.code.words.len(), "the program does not depend on the trimming");
     assert_eq!(specific.cycles, general.cycles, "ciclos");
     let register = general.layout.logits_register(&program);
     let read = |run: &mut GateRun, config: &DieConfig| -> Vec<u64> {
@@ -281,7 +281,7 @@ fn a_die_built_for_its_program_runs_it_identically_with_less_logic() {
     assert_eq!(read(&mut specific, &trimmed), read(&mut general, &c), "logits");
     let count = |config: DieConfig| netlist::die_design(config).flat_counts().iter().filter(|(k, _)| *k != "sram").map(|(_, v)| *v).sum::<u64>();
     let (before, after) = (count(c), count(trimmed));
-    eprintln!("puertas y biestables: {before} generales, {after} para este programa");
+    eprintln!("gates and flip-flops: {before} general, {after} for this program");
     assert!(after < before);
     assert!(netlist::word_bits(&trimmed) < netlist::word_bits(&c));
     std::fs::remove_dir_all(dir).unwrap();
@@ -313,7 +313,7 @@ fn gates_in_cells(program: &compiler::Program, dir: &Path, c: DieConfig, tokens:
     };
     for cell in 0..c.cells {
         let (codes, factors) = layout.cell_contents(&weights, cell).unwrap();
-        assert!(codes.len() <= 1 << c.cell.addr_bits && 2 * factors.len() <= 1 << c.cell.addr_bits, "las celdas no alcanzan");
+        assert!(codes.len() <= 1 << c.cell.addr_bits && 2 * factors.len() <= 1 << c.cell.addr_bits, "the cells are not enough");
         sim.set("load_cell", 1 << cell).unwrap();
         sim.set("load_scale", 0).unwrap();
         for (address, code) in codes.iter().enumerate() {
@@ -338,7 +338,7 @@ fn gates_in_cells(program: &compiler::Program, dir: &Path, c: DieConfig, tokens:
 }
 
 #[test]
-#[ignore = "lenta: cientos de miles de ciclos: solo con optimizaciones"]
+#[ignore = "slow: hundreds of thousands of cycles: only with optimizations"]
 fn the_cells_reach_the_same_bits_as_the_exact_machine() {
     let dir = std::env::temp_dir().join(format!("llm2chip-cells-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -361,18 +361,18 @@ fn the_cells_reach_the_same_bits_as_the_exact_machine() {
             let fast = vm.register_of(buffer);
             for index in 0..*length as u32 {
                 let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
-                assert_eq!(mantissa, vm.mantissa(fast, index), "{cells} celdas, búfer {buffer}, elemento {index}");
+                assert_eq!(mantissa, vm.mantissa(fast, index), "{cells} cells, buffer {buffer}, element {index}");
             }
         }
         cycles.push(run.cycles);
     }
-    eprintln!("ciclos: {serial} en serie; con 1, 2 y 8 celdas, y con 8 y 4 carriles, y con carriles y unidades {cycles:?}");
+    eprintln!("cycles: {serial} in series; with 1, 2 and 8 cells, with 8 and 4 lanes, and with lanes and units {cycles:?}");
     assert!(cycles[2] < cycles[1] && cycles[1] < cycles[0], "{cycles:?}");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-#[ignore = "lenta: cientos de miles de ciclos: solo con optimizaciones"]
+#[ignore = "slow: hundreds of thousands of cycles: only with optimizations"]
 fn quantisation_groups_cut_among_the_units_keep_the_bits() {
     // Groups of four columns over four units: each unit takes two columns of a group, and
     // its cells move on to the next scale and bias only where the whole group ends.
@@ -394,7 +394,7 @@ fn quantisation_groups_cut_among_the_units_keep_the_bits() {
             let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
             for index in 0..*length as u32 {
                 let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
-                assert_eq!(mantissa, vm.mantissa(fast, index), "{steps} ciclos por factor, búfer {buffer}, elemento {index}");
+                assert_eq!(mantissa, vm.mantissa(fast, index), "{steps} cycles per factor, buffer {buffer}, element {index}");
             }
         }
     }
@@ -419,12 +419,12 @@ fn two_bit_codes_share_each_word_four_at_a_time() {
         let c = DieConfig { cells: 16, features: cell_die_config().features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits), ..cell_die_config() };
         let mut run = gates_in_cells(&program, &dir, c, &tokens);
         // On a real chip, buffers that are never alive at once share a register.
-        assert!((0..program.buffers.len()).any(|b| run.layout.is_overwritten(b)), "ningún registro compartido");
+        assert!((0..program.buffers.len()).any(|b| run.layout.is_overwritten(b)), "no shared register");
         for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer) && !run.layout.is_overwritten(*buffer)) {
             let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
             for index in 0..*length as u32 {
                 let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
-                assert_eq!(mantissa, vm.mantissa(fast, index), "{lane_bits} y {cluster_bits}, búfer {buffer}, elemento {index}");
+                assert_eq!(mantissa, vm.mantissa(fast, index), "{lane_bits} and {cluster_bits}, buffer {buffer}, element {index}");
             }
         }
     }
@@ -453,10 +453,10 @@ fn parallel_lanes_compute_the_same_bits_in_fewer_cycles() {
     for lane_bits in [1, 2] {
         let wider = DieConfig { features: c.features.with_lane_bits(lane_bits), ..c };
         let mut run = gates_after(&program, &dir, wider, &[3, 5]);
-        assert_eq!(read(&mut run, &wider), expected, "logits con {} carriles", 1 << lane_bits);
+        assert_eq!(read(&mut run, &wider), expected, "logits with {} lanes", 1 << lane_bits);
         cycles.push(run.cycles);
     }
-    eprintln!("ciclos con 1, 2 y 4 carriles: {cycles:?}");
+    eprintln!("cycles with 1, 2 and 4 lanes: {cycles:?}");
     // Vectors of 8 and 16 elements are too short for four lanes to beat two.
     assert!(cycles[1] < cycles[0] && cycles[2] < cycles[0], "{cycles:?}");
     std::fs::remove_dir_all(dir).unwrap();
@@ -482,7 +482,7 @@ fn sliding_windows_and_biases_run_on_the_gates() {
             let fast = vm.register_of(buffer);
             for index in 0..*length as u32 {
                 let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
-                assert_eq!(mantissa, vm.mantissa(fast, index), "{family}, búfer {buffer}, elemento {index}");
+                assert_eq!(mantissa, vm.mantissa(fast, index), "{family}, buffer {buffer}, element {index}");
             }
         }
     }
@@ -498,11 +498,11 @@ fn a_die_with_only_the_registers_its_routines_reach_computes_the_same() {
     layout.microprogram(&program).unwrap();
     let trimmed = sim::chip::with_registers_needed(roomy, &layout);
     // The working registers past what the routines use are left out, and the die is smaller.
-    assert!(trimmed.reg_bits < roomy.reg_bits, "{} registros de {} usados", layout.registers_needed(), layout.registers_used());
+    assert!(trimmed.reg_bits < roomy.reg_bits, "{} registers of {} used", layout.registers_needed(), layout.registers_used());
     // Only the logic and the function tables its microprogram uses: a Llama needs four of eight.
     let code = Layout::new(&program, &Weights::open(&dir).unwrap(), trimmed, Some(CHIP_TOKENS)).unwrap().microprogram(&program).unwrap();
     let c = DieConfig { features: netlist::DieFeatures::of(&code), ..trimmed };
-    assert!(netlist::die::function_address_bits(&c) < c.function_bits + c.function_select_bits, "tablas de función");
+    assert!(netlist::die::function_address_bits(&c) < c.function_bits + c.function_select_bits, "function tables");
     let tokens = [3u32, 1, 4];
     let mut run = gates_after(&program, &dir, c, &tokens);
     let mut vm = ExactEngine::new(compiler::compile_model(&config).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap().with_weights_in_registers();
@@ -512,7 +512,7 @@ fn a_die_with_only_the_registers_its_routines_reach_computes_the_same() {
     for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer) && !run.layout.is_overwritten(*buffer)) {
         let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
         for index in 0..*length as u32 {
-            assert_eq!(read_block_value(&mut run.sim, c, gates, index).0, vm.mantissa(fast, index), "búfer {buffer}, elemento {index}");
+            assert_eq!(read_block_value(&mut run.sim, c, gates, index).0, vm.mantissa(fast, index), "buffer {buffer}, element {index}");
         }
     }
     // A die with fewer registers than the routines reach is refused, not run wrong.
@@ -595,11 +595,11 @@ fn the_firmware_scores_the_draft_head_like_the_software() {
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
-        assert!(cpu.cycle < 200_000_000, "el firmware no termina");
+        assert!(cpu.cycle < 200_000_000, "the firmware does not finish");
     }
     assert!(bus.peripheral.engine.error.is_none(), "{:?}", bus.peripheral.engine.error);
     let tokens: Vec<u32> = bus.tx.as_chunks::<4>().0.iter().map(|t| u32::from_le_bytes(*t)).collect();
-    assert_eq!(tokens[..count], output[..count], "los tokens generados");
+    assert_eq!(tokens[..count], output[..count], "the generated tokens");
     assert_eq!(bus.peripheral.draft_tries[..depth], tries[..depth], "intentos");
     assert_eq!(bus.peripheral.draft_hits[..depth], hits[..depth], "aciertos");
     assert!(tries[0] > 0);
@@ -665,11 +665,11 @@ fn the_firmware_closes_the_reasoning_when_its_budget_runs_out() {
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
-        assert!(cpu.cycle < 200_000_000, "el firmware no termina");
+        assert!(cpu.cycle < 200_000_000, "the firmware does not finish");
     }
     assert!(bus.peripheral.engine.error.is_none(), "{:?}", bus.peripheral.engine.error);
     let tokens: Vec<u32> = bus.tx.as_chunks::<4>().0.iter().map(|t| u32::from_le_bytes(*t)).collect();
-    assert_eq!(tokens, expected, "el chip debe cerrar el razonamiento tras {budget} tokens");
+    assert_eq!(tokens, expected, "the chip must close the reasoning after {budget} tokens");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -721,11 +721,11 @@ fn the_cpu_profile_adds_up_and_tells_waiting_from_work() {
             answer_steps.push(now.since(&last));
             last = now;
         }
-        assert!(cpu.cycle < 50_000_000, "el firmware no termina");
+        assert!(cpu.cycle < 50_000_000, "the firmware does not finish");
     }
     // Each prompt step runs its own token through the layers once, and no more.
     for (i, step) in prompt_steps.iter().enumerate() {
-        assert_eq!(step.routines[ENTRY_TOKEN], (1, 1000), "paso {i} del prompt: {:?}", step.routines);
+        assert_eq!(step.routines[ENTRY_TOKEN], (1, 1000), "prompt step {i}: {:?}", step.routines);
     }
     // An answer's step picks it: the logits, the sampler and the host; from the second on it
     // also runs the token before it.
@@ -737,7 +737,7 @@ fn the_cpu_profile_adds_up_and_tells_waiting_from_work() {
     // Every cycle is somewhere, and every order the CPU gave is a routine the die ran.
     assert_eq!(counts.total_cycles(), cpu.cycle);
     assert_eq!(chip.routines.iter().map(|r| r.0).sum::<u64>(), orders);
-    assert_eq!(chip.routines[ENTRY_TOKEN].0, 3 + 4, "un paso por token del prompt y por cada generado");
+    assert_eq!(chip.routines[ENTRY_TOKEN].0, 3 + 4, "one step per prompt token and per generated one");
     // The CPU waits while the die works: at most the few cycles of one poll apart per order.
     let waited = counts.cycles_of(CpuTask::WaitDie);
     assert!(waited.abs_diff(chip.die_busy) <= 16 * orders, "espera {waited}, die {}", chip.die_busy);
@@ -800,7 +800,7 @@ fn grouped_checkpoint(dir: &Path) {
 }
 
 #[test]
-#[ignore = "lenta: cientos de miles de ciclos: solo con optimizaciones"]
+#[ignore = "slow: hundreds of thousands of cycles: only with optimizations"]
 fn heads_in_groups_of_three_run_on_units_a_power_of_two_apart() {
     let dir = std::env::temp_dir().join(format!("llm2chip-grouped-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -820,7 +820,7 @@ fn heads_in_groups_of_three_run_on_units_a_power_of_two_apart() {
             let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
             for index in 0..*length as u32 {
                 let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
-                assert_eq!(mantissa, vm.mantissa(fast, index), "{} unidades, búfer {buffer}, elemento {index}", 1 << cluster_bits);
+                assert_eq!(mantissa, vm.mantissa(fast, index), "{} units, buffer {buffer}, element {index}", 1 << cluster_bits);
             }
         }
     }
@@ -853,7 +853,7 @@ fn an_image_rotates_by_three_positions_on_the_chip_as_in_float() {
     let got = run(&mut exact);
     let scale = expected.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
     let error = got.iter().zip(&expected).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-    assert!(error < 0.02 * scale, "{error} sobre {scale}: {got:?} {expected:?}");
+    assert!(error < 0.02 * scale, "{error} over {scale}: {got:?} {expected:?}");
 
     // The same picture as if all its tokens sat at one place gives other logits: the rows
     // and columns really move them.
@@ -883,7 +883,7 @@ fn the_hidden_state_an_image_head_reads_comes_from_the_chip_as_in_float() {
         let got = exact.step_hidden(token, embedding).unwrap();
         let scale = expected.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
         let error = got.iter().zip(&expected).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        assert!(error < 0.02 * scale, "{error} sobre {scale}: {got:?} {expected:?}");
+        assert!(error < 0.02 * scale, "{error} over {scale}: {got:?} {expected:?}");
     }
     std::fs::remove_dir_all(dir).ok();
 }
@@ -990,7 +990,7 @@ fn two_groups_of_two_dies_run_a_token_over_their_links() {
                     let word = code.words.get(pc).map(|w| format!("op {} send {} loop {}", w.op, w.link_send, w.link_loop)).unwrap_or_default();
                     format!("pc {pc} ({word}), detenido {}", sim.get("halted").unwrap())
                 }).collect();
-                panic!("rutina {routine}: los dies no terminan: {pcs:?}; palabras por cable {:?}", wires.iter().zip(&traffic).collect::<Vec<_>>());
+                panic!("routine {routine}: the dies do not finish: {pcs:?}; words per wire {:?}", wires.iter().zip(&traffic).collect::<Vec<_>>());
             }
         }
         eprintln!("rutina {routine}: {cycles} ciclos");
@@ -1015,7 +1015,7 @@ fn two_groups_of_two_dies_run_a_token_over_their_links() {
 /// Its microprogram is longer than 2^13 words: it found that immediates laid out for a
 /// die with narrower jump targets lost their sign on the real one.
 #[test]
-#[ignore = "lenta: un modelo real en el die, puerta a puerta"]
+#[ignore = "slow: a real model on the die, gate by gate"]
 fn a_real_model_s_token_on_the_die_matches_the_exact_machine() {
     use netlist::chip::DieEngine;
     use sim::chip::{fpga_chip_for, FpgaChip, FpgaOptions, VmEngine};

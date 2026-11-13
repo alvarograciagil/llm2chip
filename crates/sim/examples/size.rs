@@ -22,8 +22,8 @@ const N6: Process = Process { full_adder_ns: 0.04, gate_um2: 0.0875 / 1.33 * 1.2
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let dir = Path::new(args.get(1).expect("carpeta del modelo"));
-    let number = |at: usize, default: f64| args.get(at).map_or(default, |a| a.parse().expect("un número"));
+    let dir = Path::new(args.get(1).expect("model folder"));
+    let number = |at: usize, default: f64| args.get(at).map_or(default, |a| a.parse().expect("a number"));
     let wanted = number(2, 1000.0);
     let first_ms = number(3, f64::INFINITY);
     let prompt = number(4, 1024.0) as u32;
@@ -36,15 +36,15 @@ fn main() {
     let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 36, mac_stages: 1, adder_stages: 1, addr_bits: 24, coding: Default::default(), exponent_bits: 0, multiplier: MultiplierKind::Booth, fixed_weights: false, ecc: false, skip_zeros: false };
     let base = DieConfig { cells: 1, cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_factor_steps(steps) };
     let costs = Costs::measure(base);
-    println!("puertas: fijo {:.0}, unidad {:.0} + {:.0}/carril, nivel {:.0} + {:.0}/carril, celda {:.0}", costs.fixed, costs.unit, costs.lane, costs.level, costs.level_lane, costs.cell);
-    println!("camino crítico: {:.1} sumadores completos con una unidad, {:.1} con cuatro, + {:.1} por cada doble de carriles y + {:.1} por cada doble de unidades más", costs.path, costs.path_four_units, costs.path_lane_bit, costs.path_unit_bit);
+    println!("gates: fixed {:.0}, unit {:.0} + {:.0}/lane, level {:.0} + {:.0}/lane, cell {:.0}", costs.fixed, costs.unit, costs.lane, costs.level, costs.level_lane, costs.cell);
+    println!("critical path: {:.1} full adders with one unit, {:.1} with four, + {:.1} for each doubling of lanes and + {:.1} for each further doubling of units", costs.path, costs.path_four_units, costs.path_lane_bit, costs.path_unit_bit);
     // N6: the delay of a full adder in that process.
     let target = Target { tokens_per_second: wanted, prompt_seconds: first_ms / 1e3, prompt, chips: std::env::var("CHIPS").unwrap_or("8,10,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect(), clock_hz: ghz * 1e9, process: N6, context, lane_bits: 6..=7, cluster_bits: 5..=11, cell_bits: 13..=25, sharing: sim::sizing::Sharing::Layers };
     let found = search(&program, &weights, base, &costs, &target);
     if found.is_empty() {
-        println!("ningún conjunto de chips del rango alcanza {wanted} tok/s y el primer token en {first_ms} ms");
+        println!("no set of chips in the range reaches {wanted} tok/s and the first token in {first_ms} ms");
     }
     for c in found.iter().take(12) {
-        println!("{} chips de {:>5} unidades x {:>3} carriles, {:>9} celdas: {:>7} ciclos a {:>4.0} MHz, {:>6.0} tok/s, primer token tras {prompt} en {:>6.1} ms, {:>8.1} M puertas, {:>6.0} mm² ({:>4.0} por chip)", c.chips, 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.cycles, c.clock_hz / 1e6, c.tokens_per_second, c.prompt_seconds * 1e3, c.gates / 1e6, c.area_mm2, c.die_mm2);
+        println!("{} chips of {:>5} units x {:>3} lanes, {:>9} cells: {:>7} cycles at {:>4.0} MHz, {:>6.0} tok/s, first token after {prompt} in {:>6.1} ms, {:>8.1} M gates, {:>6.0} mm² ({:>4.0} per chip)", c.chips, 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.cycles, c.clock_hz / 1e6, c.tokens_per_second, c.prompt_seconds * 1e3, c.gates / 1e6, c.area_mm2, c.die_mm2);
     }
 }

@@ -86,7 +86,7 @@ pub fn tech_nodes() -> Result<String, JsError> {
 pub fn estimate_design(name: &str, config: &str, params: &str) -> Result<String, JsError> {
     let model = ModelGraph::from_config_json(name, config).map_err(|e| JsError::new(&e.0))?;
     let params: ChipParams =
-        serde_json::from_str(params).map_err(|e| JsError::new(&format!("parámetros inválidos: {e}")))?;
+        serde_json::from_str(params).map_err(|e| JsError::new(&format!("invalid parameters: {e}")))?;
     let report = estimate(&model, &params).map_err(|e| JsError::new(&e))?;
     to_js(&report)
 }
@@ -95,7 +95,7 @@ pub fn estimate_design(name: &str, config: &str, params: &str) -> Result<String,
 #[wasm_bindgen]
 pub fn advise_design(name: &str, config: &str, params: &str, search: bool) -> Result<String, JsError> {
     let model = ModelGraph::from_config_json(name, config).map_err(|e| JsError::new(&e.0))?;
-    let params: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&format!("parámetros inválidos: {e}")))?;
+    let params: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&format!("invalid parameters: {e}")))?;
     to_js(&arch::feasibility::advise(&model, &params, search).map_err(|e| JsError::new(&e))?)
 }
 
@@ -104,14 +104,14 @@ pub fn advise_design(name: &str, config: &str, params: &str, search: bool) -> Re
 #[wasm_bindgen]
 pub fn fit_design(name: &str, config: &str, params: &str) -> Result<String, JsError> {
     let model = ModelGraph::from_config_json(name, config).map_err(|e| JsError::new(&e.0))?;
-    let params: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&format!("parámetros inválidos: {e}")))?;
+    let params: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&format!("invalid parameters: {e}")))?;
     let fitted = serde_json::to_value(arch::feasibility::fit_to_model(&model, &params).map_err(|e| JsError::new(&e))?)?;
     let patch: serde_json::Map<String, serde_json::Value> = arch::feasibility::FIT_FIELDS.iter().map(|&f| (f.to_string(), fitted[f].clone())).collect();
     to_js(&patch)
 }
 
 fn cell_config(config: &str, params: &str) -> Result<CellConfig, JsError> {
-    let model = ModelGraph::from_config_json("modelo", config).map_err(|e| JsError::new(&e.0))?;
+    let model = ModelGraph::from_config_json("model", config).map_err(|e| JsError::new(&e.0))?;
     let p: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&e.to_string()))?;
     let report = estimate(&model, &p).map_err(|e| JsError::new(&e))?;
     let cell_bits = report.metric("cell_sram_kb").unwrap_or(1.0) * 8_000.0;
@@ -218,19 +218,19 @@ impl CellSimulation {
             steps.push(step(&[("run", 0)]));
         }
         let report = serde_json::json!({ "config": c, "latency": c.latency(), "counts": self.design.flat_counts() }).to_string();
-        let options = ProjectOptions { name: "Celda de cálculo", description: "Una celda de cálculo del chip generado: memoria de pesos, decodificador, multiplicador y acumulador.", clock_ns, watch: "total", report, rom };
+        let options = ProjectOptions { name: "Compute cell", description: "A compute cell of the generated chip: weight memory, decoder, multiplier and accumulator.", clock_ns, watch: "total", report, rom };
         to_js(&project_files(&self.design, &steps, &options))
     }
 
     /// Fixes one word of a ROM, as the mask does at manufacture.
     pub fn burn(&mut self, memory: &str, address: u32, value: &str) -> Result<(), JsError> {
-        let parsed: u128 = value.parse().map_err(|_| JsError::new("valor inválido"))?;
+        let parsed: u128 = value.parse().map_err(|_| JsError::new("invalid value"))?;
         self.sim.poke_memory(&format!("/{memory}"), address as usize, parsed).map_err(|e| JsError::new(&e.0))
     }
 
     /// `value` is a decimal string so 64-bit inputs keep every bit.
     pub fn set(&mut self, port: &str, value: &str) -> Result<(), JsError> {
-        let parsed: u64 = value.parse().map_err(|_| JsError::new("valor inválido"))?;
+        let parsed: u64 = value.parse().map_err(|_| JsError::new("invalid value"))?;
         self.sim.set(port, parsed).map_err(|e| JsError::new(&e.0))
     }
 
@@ -254,7 +254,7 @@ impl CellSimulation {
     /// signed decimal string. Floating formats are read with an exponent base of zero.
     pub fn expected(&self, codes: &str, activations: &str) -> Result<String, JsError> {
         let c = self.config;
-        let parse = |text: &str| text.split(',').map(|v| v.trim().parse::<i128>()).collect::<Result<Vec<i128>, _>>().map_err(|_| JsError::new("lista inválida"));
+        let parse = |text: &str| text.split(',').map(|v| v.trim().parse::<i128>()).collect::<Result<Vec<i128>, _>>().map_err(|_| JsError::new("invalid list"));
         let shift_bits = 32 - (c.accumulator_bits - 1).leading_zeros();
         let mut total = 0i128;
         for (code, x) in parse(codes)?.iter().zip(parse(activations)?) {
@@ -384,7 +384,7 @@ impl DieSimulation {
                 }
                 Demo::Block(Box::new(built))
             }
-            other => return Err(JsError::new(&format!("demostración desconocida: {other}"))),
+            other => return Err(JsError::new(&format!("unknown demonstration: {other}"))),
         };
         Ok(DieSimulation { design, config, sim, demo, started: false })
     }

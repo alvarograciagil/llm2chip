@@ -38,7 +38,7 @@ pub trait Runner: Send {
     /// Runs a vector in place of a token's embedding, such as an image's, at its time,
     /// row and column positions.
     fn step_embedding(&mut self, _embedding: &[f32], _positions: [u64; 3], _want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
-        Err("este núcleo de inferencia aún no admite imágenes: elige el de coma flotante".into())
+        Err("this inference core does not take images yet: choose the floating-point one".into())
     }
     /// Runs a picture through the image encoder the engine carries, if it carries one, and
     /// keeps it there: gives how many tokens it makes, which `step_image` reads one by one.
@@ -51,7 +51,7 @@ pub trait Runner: Send {
     }
     /// Token `index` of the image `encode_image` left, at its time, row and column.
     fn step_image(&mut self, _index: u32, _positions: [u64; 3], _want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
-        Err("este núcleo de inferencia no lleva codificador de imágenes".into())
+        Err("this inference core has no image encoder".into())
     }
     /// Rotary frequencies follow three positions, `section` of them each, interleaved.
     fn set_mrope(&mut self, _section: [usize; 3]) {}

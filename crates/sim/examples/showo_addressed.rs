@@ -3,7 +3,7 @@
 //! fit in 32 bits. Prints the die's sizes and, with `pasada`, runs one pass with the text
 //! and compares each masked place's best code with floating point's.
 //!
-//! `cargo run --release -p sim --example showo_addressed -- <carpeta de Show-o> [celdas] [pasada]`
+//! `cargo run --release -p sim --example showo_addressed -- <Show-o folder> [cells] [pass]`
 
 use netlist::format::{WeightCoding, WeightFormat};
 use netlist::{CellConfig, DieConfig};
@@ -17,7 +17,7 @@ fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     let dir = Path::new(&args[1]);
     let cells: u32 = args.get(2).map_or(1024, |s| s.parse().unwrap());
-    let pass = args.get(3).is_some_and(|s| s == "pasada");
+    let pass = args.get(3).is_some_and(|s| s == "pass");
     let started = std::time::Instant::now();
     let format = WeightFormat { coding: WeightCoding::Affine, bits: 8, exponent_bits: 0, bias: true, group_size: 64, fine_scale: false, keep_source: false };
     let open = || -> Result<_, String> { weights(dir, sim::Weights::open(dir)?.with_format(Some(format))) };
@@ -38,12 +38,12 @@ fn main() -> Result<(), String> {
     };
     let guided = program_guided(&shape, Some(1.75));
     match addressed_die(&guided, &w, base, context) {
-        Ok(die) => eprintln!("con guía: {} + {} = {} bits de dirección", die.reg_bits, die.index_bits, die.reg_bits + die.index_bits),
-        Err(e) => eprintln!("con guía: {e}"),
+        Ok(die) => eprintln!("with guidance: {} + {} = {} address bits", die.reg_bits, die.index_bits, die.reg_bits + die.index_bits),
+        Err(e) => eprintln!("with guidance: {e}"),
     }
     let die = addressed_die(&program, &w, base, context)?;
     eprintln!(
-        "{cells} celdas: {} bits de registro + {} de elemento = {} bits de dirección; {} bits de profundidad de celda; {} de microcódigo ({:.0} s)",
+        "{cells} cells: {} register bits + {} element bits = {} address bits; {} bits of cell depth; {} of microcode ({:.0} s)",
         die.reg_bits,
         die.index_bits,
         die.reg_bits + die.index_bits,
@@ -111,6 +111,6 @@ fn main() -> Result<(), String> {
         agree += (chip_best == float_best) as usize;
         masked += 1;
     }
-    eprintln!("die direccionado: mejor código igual que en coma flotante en {agree} de {masked} sitios tapados ({:.0} s)", started.elapsed().as_secs_f64());
+    eprintln!("addressed die: same best code as floating point in {agree} of {masked} masked places ({:.0} s)", started.elapsed().as_secs_f64());
     Ok(())
 }

@@ -1,5 +1,5 @@
 //! Measures how often the MTP head guesses the following tokens correctly.
-//! `cargo run --release -p sim --example mtp -- <carpeta> [tokens]`
+//! `cargo run --release -p sim --example mtp -- <folder> [tokens]`
 
 use compiler::compile_qwen3_5;
 use sim::{Engine, Numeric, Weights};
@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ids = tokenizer.encode(text, false).map_err(|e| e.to_string())?.get_ids().to_vec();
 
     let mut engine = Engine::new(compile_qwen3_5(&config)?, Weights::open(dir)?, Numeric::Float)?;
-    assert!(engine.has_draft_head(), "el modelo no trae cabeza MTP");
+    assert!(engine.has_draft_head(), "the model has no MTP head");
 
     let mut sequence = ids.clone();
     let mut hits = [0usize; DEPTH];
@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     for d in 0..DEPTH {
-        println!("profundidad {}: {:.1} % ({} de {})", d + 1, 100.0 * hits[d] as f64 / tries[d].max(1) as f64, hits[d], tries[d]);
+        println!("depth {}: {:.1} % ({} of {})", d + 1, 100.0 * hits[d] as f64 / tries[d].max(1) as f64, hits[d], tries[d]);
     }
     println!("{}", tokenizer.decode(&sequence[ids.len()..], true).map_err(|e| e.to_string())?);
     Ok(())

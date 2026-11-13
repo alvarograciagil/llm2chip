@@ -25,7 +25,7 @@ fn build_firmware() -> Option<FirmwareImage> {
 fn run_gates(design: &netlist::Design, image: &[u32], input: &[u8], limit: u64) -> (Vec<u8>, u64, Simulator) {
     let mut sim = Simulator::new(design).unwrap();
     let (output, cycles, halted) = run_gates_until(&mut sim, image, input, limit);
-    assert!(halted, "el firmware no terminó en {limit} ciclos");
+    assert!(halted, "the firmware did not finish within {limit} cycles");
     (output, cycles, sim)
 }
 
@@ -61,7 +61,7 @@ fn run_gates_until(sim: &mut Simulator, image: &[u32], input: &[u8], limit: u64)
         }
         sim.tick();
         boot += 1;
-        assert!(boot < 1_000_000, "el arranque no termina");
+        assert!(boot < 1_000_000, "boot does not finish");
     }
     sim.set("cpu_hold", 0).unwrap();
     sim.set("host_tx_ready", 1).unwrap();
@@ -94,13 +94,13 @@ fn chip_in_gates(die: netlist::DieConfig, tag: &str, table_outside: bool, design
 
     let mut layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
     if table_outside {
-        assert!(layout.table_outside(&program), "el modelo de prueba tiene una tabla de embedding");
+        assert!(layout.table_outside(&program), "the test model has an embedding table");
     }
     let code = layout.microprogram(&program).unwrap();
     // Each register takes only the vector memory its routines reach, and the microcode
     // keeps each distinct word once.
     let die = sim::chip::with_code_dictionary(sim::chip::compact_die(die, &layout), &code);
-    eprintln!("diccionario de microcódigo: 2^{} palabras", die.features.dictionary_bits);
+    eprintln!("microcode dictionary: 2^{} words", die.features.dictionary_bits);
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let design = design(config);
     let (sim, die_busy) = says_the_same_in_gates(config, &design, &layout, &code, CONFIG, &dir);
@@ -130,10 +130,10 @@ fn says_the_same_in_gates(config: ChipConfig, design: &netlist::Design, layout: 
     // The model's own weights go through the real controller into the cells.
     let checkpoint = Weights::open(dir).unwrap();
     segments.extend(cell_segments(&die, layout, &checkpoint).unwrap());
-    eprintln!("{} segmentos, microprograma de {} palabras", segments.len(), code.words.len());
+    eprintln!("{} segments, a microprogram of {} words", segments.len(), code.words.len());
     let tables = tiny_tokenizer();
     let image = build_image(&firmware.program, &firmware.data, &info, &tables.to_words(), &segments).unwrap();
-    eprintln!("imagen de {} palabras", image.len());
+    eprintln!("image of {} words", image.len());
 
     let input = b"hoy\0";
     let mut engine = VmEngine::new(compile_qwen3_5(model).unwrap(), Weights::open(dir).unwrap(), die, CHIP_TOKENS).unwrap();
@@ -145,24 +145,24 @@ fn says_the_same_in_gates(config: ChipConfig, design: &netlist::Design, layout: 
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
-        assert!(cpu.cycle < 100_000_000, "el firmware no termina");
+        assert!(cpu.cycle < 100_000_000, "the firmware does not finish");
     }
     let expected = bus.tx.clone();
-    eprintln!("simulador de instrucciones: {} ciclos, salida {:?}", cpu.cycle, String::from_utf8_lossy(&expected));
+    eprintln!("instruction-level simulator: {} cycles, output {:?}", cpu.cycle, String::from_utf8_lossy(&expected));
     // A table that stays in the image is not loaded at boot.
     let at_boot = segments.iter().filter(|s| s.target != netlist::image::Target::RuntimeTable).count();
-    assert_eq!(expected.iter().filter(|b| **b == b'.').count(), at_boot, "todos los segmentos deben cargar bien");
+    assert_eq!(expected.iter().filter(|b| **b == b'.').count(), at_boot, "every segment must load correctly");
 
     let start = std::time::Instant::now();
     let (output, cycles, sim) = run_gates(design, &image, input, cpu.cycle + 4096);
-    eprintln!("puertas: {cycles} ciclos en {:.1} s, salida {:?}", start.elapsed().as_secs_f64(), String::from_utf8_lossy(&output));
+    eprintln!("gates: {cycles} cycles in {:.1} s, output {:?}", start.elapsed().as_secs_f64(), String::from_utf8_lossy(&output));
     assert_eq!(String::from_utf8_lossy(&output), String::from_utf8_lossy(&expected));
     assert_eq!(cycles, cpu.cycle, "ciclos");
     (sim, bus.peripheral.die_busy)
 }
 
 #[test]
-#[ignore = "lenta: solo tiene sentido con optimizaciones: son cientos de miles de ciclos"]
+#[ignore = "slow: only makes sense with optimizations: hundreds of thousands of cycles"]
 fn the_chip_sized_for_an_fpga_says_the_same_in_gates() {
     if build_firmware().is_none() {
         return;
@@ -172,14 +172,14 @@ fn the_chip_sized_for_an_fpga_says_the_same_in_gates() {
 }
 
 #[test]
-#[ignore = "lenta: solo tiene sentido con optimizaciones: son cientos de miles de ciclos"]
+#[ignore = "slow: only makes sense with optimizations: hundreds of thousands of cycles"]
 fn the_embedding_can_stay_in_the_image_and_come_a_row_at_a_time() {
     if build_firmware().is_none() {
         return;
     }
-    let (_, _, layout, dir) = chip_in_gates(fpga_die_config(), "fila", true, chip_design);
+    let (_, _, layout, dir) = chip_in_gates(fpga_die_config(), "row", true, chip_design);
     // The register keeps one row: the vector memory no longer holds the whole table.
-    let table = layout.outside_table().expect("tabla fuera");
+    let table = layout.outside_table().expect("table outside");
     assert_eq!(table.mantissas.len(), 8 * table.cols as usize);
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -187,11 +187,11 @@ fn the_embedding_can_stay_in_the_image_and_come_a_row_at_a_time() {
 /// The same chip and text in Icarus Verilog, a simulator that is not this project's, from
 /// the exported netlist: the same bytes in the same cycles.
 #[test]
-#[ignore = "lenta: Icarus Verilog simula el chip entero puerta a puerta, cerca de una hora; con LLM2CHIP_ICARUS=1"]
+#[ignore = "slow: Icarus Verilog simulates the whole chip gate by gate, close to an hour; with LLM2CHIP_ICARUS=1"]
 fn text_goes_through_the_whole_chip_in_icarus_verilog() {
     // Hours of simulation: only when asked for, `LLM2CHIP_ICARUS=1`.
     if std::env::var_os("LLM2CHIP_ICARUS").is_none() {
-        eprintln!("omitida: LLM2CHIP_ICARUS=1 para simular el chip entero en Icarus Verilog");
+        eprintln!("skipped: LLM2CHIP_ICARUS=1 to simulate the whole chip in Icarus Verilog");
         return;
     }
     if build_firmware().is_none() {
@@ -215,8 +215,8 @@ fn text_goes_through_the_whole_chip_in_icarus_verilog() {
         cpu.step(&mut bus);
     }
     let started = std::time::Instant::now();
-    let Some((output, cycles)) = chip_in_iverilog(&chip_design(config), &image, &input, cpu.cycle + 4096, "texto") else { return };
-    eprintln!("Icarus Verilog: {cycles} ciclos en {:.0} s, salida {:?}", started.elapsed().as_secs_f64(), String::from_utf8_lossy(&output));
+    let Some((output, cycles)) = chip_in_iverilog(&chip_design(config), &image, &input, cpu.cycle + 4096, "text") else { return };
+    eprintln!("Icarus Verilog: {cycles} cycles in {:.0} s, output {:?}", started.elapsed().as_secs_f64(), String::from_utf8_lossy(&output));
     assert_eq!(String::from_utf8_lossy(&output), String::from_utf8_lossy(&bus.tx));
     assert_eq!(cycles, cpu.cycle, "ciclos");
     std::fs::remove_dir_all(&dir).ok();
@@ -237,13 +237,13 @@ fn text_goes_through_the_whole_chip_in_gates() {
     };
     // The counters start once the synchronized reset is let go, two cycles after the pin.
     let synchronizer = netlist::chip::RESET_RELEASE - netlist::chip::RESET_STRETCH;
-    assert_eq!(debug(&mut sim, DEBUG_CYCLES), sim.cycle() - 1 - synchronizer, "contador de ciclos");
-    assert_eq!(debug(&mut sim, DEBUG_DIE_BUSY), die_busy, "ciclos del die");
+    assert_eq!(debug(&mut sim, DEBUG_CYCLES), sim.cycle() - 1 - synchronizer, "cycle counter");
+    assert_eq!(debug(&mut sim, DEBUG_DIE_BUSY), die_busy, "die cycles");
     assert!(debug(&mut sim, DEBUG_SAMPLER_BUSY) > 0);
     assert!(debug(&mut sim, DEBUG_CPU_PC) > 0);
     let (codes, _) = layout.cell_contents(&checkpoint, 0).unwrap();
     for (address, code) in codes.iter().enumerate() {
-        assert_eq!(sim.peek_memory("/die/cell0/compute/weight_sram", address), Some((*code as u8) as u128), "peso {address}");
+        assert_eq!(sim.peek_memory("/die/cell0/compute/weight_sram", address), Some((*code as u8) as u128), "weight {address}");
     }
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -317,9 +317,9 @@ fn any_token_on_the_stop_list_ends_the_answer() {
         bus.tx.iter().filter(|b| **b != b'.').copied().collect::<Vec<u8>>()
     };
     let free = generate(Vec::new());
-    assert_eq!(free.len(), 1, "un token de una letra");
+    assert_eq!(free.len(), 1, "a one-letter token");
     let token = match free[0] { b'h' => 0, b'y' => 1, b'o' => 7, letter => (letter - b'a') as u32 };
-    assert!(generate(vec![100, 200, 300, token]).is_empty(), "el cuarto de la lista también detiene");
+    assert!(generate(vec![100, 200, 300, token]).is_empty(), "the fourth on the list also stops");
     assert_eq!(generate(vec![100, 200, 300]), free);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -331,14 +331,14 @@ fn any_token_on_the_stop_list_ends_the_answer() {
 /// `LLM2CHIP_STORIES` or `~/.llm2chip/models`.
 /// The gates write the same, in as many cycles.
 #[test]
-#[ignore = "lenta: un modelo real por el chip entero en puertas, millones de ciclos"]
+#[ignore = "slow: a real model through the whole chip in gates, millions of cycles"]
 fn a_real_model_writes_the_same_text_through_the_whole_chip() {
     use netlist::chip::DieEngine;
     use sim::chip::{fpga_chip_for, FpgaChip, FpgaOptions};
     let Some(firmware) = build_firmware() else { return };
     let dir = std::env::var_os("LLM2CHIP_STORIES").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".llm2chip/models/stories260K"));
     if !dir.join("model.safetensors").exists() {
-        eprintln!("omitida: no está stories260K en {}", dir.display());
+        eprintln!("skipped: stories260K is not in {}", dir.display());
         return;
     }
     let context = 32;
@@ -376,10 +376,10 @@ fn a_real_model_writes_the_same_text_through_the_whole_chip() {
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
-        assert!(cpu.cycle < 100_000_000, "el firmware no termina");
+        assert!(cpu.cycle < 100_000_000, "the firmware does not finish");
     }
     let text = String::from_utf8_lossy(&bus.tx).trim_start_matches('.').to_string();
-    eprintln!("simulador de instrucciones: {} ciclos, {text:?}", cpu.cycle);
+    eprintln!("instruction-level simulator: {} cycles, {text:?}", cpu.cycle);
 
     // The same die's machine driven by the host, and floating point, from the same tokens.
     let tokenizer = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json")).unwrap();
@@ -410,9 +410,9 @@ fn a_real_model_writes_the_same_text_through_the_whole_chip() {
         logits = engine.step(next, true).unwrap().0.unwrap().to_vec();
     }
     let float = tokenizer.decode(&float, true).unwrap();
-    eprintln!("el anfitrión con la máquina del die: {by_host:?}; coma flotante: {float:?}");
-    assert_eq!(text.trim_start(), by_host.trim_start(), "el firmware escribe lo que la máquina del die");
-    assert_eq!(by_host, float, "la aritmética del die elige los tokens de la coma flotante");
+    eprintln!("the host with the die's machine: {by_host:?}; floating point: {float:?}");
+    assert_eq!(text.trim_start(), by_host.trim_start(), "the firmware writes what the die's machine writes");
+    assert_eq!(by_host, float, "the die's arithmetic picks the floating point's tokens");
 
     let started = std::time::Instant::now();
     let (output, cycles, _) = run_gates(&design, &image, &input, cpu.cycle + 4096);

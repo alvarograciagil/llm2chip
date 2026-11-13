@@ -99,7 +99,7 @@ impl Weights {
             .collect();
         paths.sort();
         if paths.is_empty() {
-            return Err("la carpeta no contiene pesos safetensors".into());
+            return Err("the folder has no safetensors weights".into());
         }
 
         let mut files = Vec::new();
@@ -113,14 +113,14 @@ impl Weights {
             }
             let size = u64::from_le_bytes(map[..8].try_into().unwrap()) as usize;
             let header: Value = serde_json::from_slice(&map[8..8 + size]).map_err(|e| e.to_string())?;
-            for (name, info) in header.as_object().ok_or("cabecera inválida")? {
+            for (name, info) in header.as_object().ok_or("invalid header")? {
                 if name == "__metadata__" {
                     continue;
                 }
-                let offsets = info["data_offsets"].as_array().ok_or("tensor sin offsets")?;
+                let offsets = info["data_offsets"].as_array().ok_or("tensor without offsets")?;
                 let start = 8 + size + offsets[0].as_u64().unwrap_or(0) as usize;
                 let end = 8 + size + offsets[1].as_u64().unwrap_or(0) as usize;
-                let shape = info["shape"].as_array().ok_or("tensor sin forma")?.iter().map(|v| v.as_u64().unwrap_or(0) as usize).collect();
+                let shape = info["shape"].as_array().ok_or("tensor without a shape")?.iter().map(|v| v.as_u64().unwrap_or(0) as usize).collect();
                 tensors.insert(canonical_name(name), TensorRef { file: index, start, end, dtype: info["dtype"].as_str().unwrap_or("").to_string(), shape });
             }
             files.push(map);
@@ -133,7 +133,7 @@ impl Weights {
     pub fn with_floats(mut self, tensors: Vec<Tensor>) -> Result<Self, String> {
         for (name, shape, values) in tensors {
             if shape.iter().product::<usize>() != values.len() {
-                return Err(format!("{name}: la forma no casa con los valores"));
+                return Err(format!("{name}: the shape does not match the values"));
             }
             let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
             let mut map = memmap2::MmapMut::map_anon(bytes.len().max(1)).map_err(|e| e.to_string())?;
@@ -180,7 +180,7 @@ impl Weights {
     }
 
     fn bytes(&self, name: &str) -> Result<(&[u8], &TensorRef), String> {
-        let t = self.tensors.get(name).ok_or_else(|| format!("falta el tensor {name}"))?;
+        let t = self.tensors.get(name).ok_or_else(|| format!("tensor {name} is missing"))?;
         Ok((&self.files[t.file][t.start..t.end], t))
     }
 
@@ -357,7 +357,7 @@ impl Matrix<'_> {
             format.bits = format.bits.max(8);
             format.group_size *= 2;
         }
-        let mut cache = self.owner.references.lock().expect("caché de referencias");
+        let mut cache = self.owner.references.lock().expect("reference cache");
         let reference = cache.entry(self.name.clone()).or_insert_with(|| Arc::new(self.reference(cols, &format))).clone();
         Some((format, reference))
     }
@@ -367,7 +367,7 @@ impl Matrix<'_> {
         if format.bits > 8 {
             return None;
         }
-        let mut cache = self.owner.recoded.lock().expect("caché de pesos");
+        let mut cache = self.owner.recoded.lock().expect("weight cache");
         if let Some(found) = cache.get(&self.name) {
             return found.clone();
         }
@@ -419,7 +419,7 @@ impl Matrix<'_> {
 
     pub fn row(&self, index: usize, out: usize) -> Result<Vec<f32>, String> {
         if index >= self.rows {
-            return Err("fila fuera de rango".into());
+            return Err("row out of range".into());
         }
         let mut y = vec![0f32; out];
         if let Some((format, reference)) = self.requant(out) {
@@ -504,7 +504,7 @@ impl Matrix<'_> {
 
     /// The largest magnitude this tensor can produce, computed once.
     fn largest_weight(&self, cols: usize) -> f32 {
-        if let Some(largest) = self.owner.largest.lock().expect("caché de máximos").get(&self.name) {
+        if let Some(largest) = self.owner.largest.lock().expect("maximum cache").get(&self.name) {
             return *largest;
         }
         let Source::Packed { words_per_row, groups, scales, biases, .. } = &self.source else { return 0.0 };
@@ -517,7 +517,7 @@ impl Matrix<'_> {
                 bias.abs().max((top * scale + bias).abs())
             })
             .reduce(|| 0.0, f32::max);
-        self.owner.largest.lock().expect("caché de máximos").insert(self.name.clone(), largest);
+        self.owner.largest.lock().expect("maximum cache").insert(self.name.clone(), largest);
         largest
     }
 

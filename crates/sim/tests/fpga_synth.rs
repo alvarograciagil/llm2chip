@@ -33,11 +33,11 @@ fn synthesise(yosys: &Path, chip: &Path, script: &str) -> HashMap<String, u64> {
 }
 
 #[test]
-#[ignore = "lenta: sintetiza el chip con Yosys para cuatro familias, varios minutos"]
+#[ignore = "slow: synthesizes the chip with Yosys for four families, several minutes"]
 fn the_catalog_knows_how_much_logic_the_smallest_chip_takes() {
     let yosys = PathBuf::from(std::env::var("HOME").unwrap()).join(".llm2chip/tools/oss-cad-suite/bin/yosys");
     if !yosys.exists() {
-        eprintln!("Yosys no está instalado: se omite");
+        eprintln!("Yosys is not installed: skipped");
         return;
     }
     let dir = std::env::temp_dir().join(format!("llm2chip-familias-{}", std::process::id()));
@@ -73,8 +73,8 @@ fn the_catalog_knows_how_much_logic_the_smallest_chip_takes() {
     for (board, thousands) in figures {
         let board = arch::fpga::boards().iter().find(|b| b.id == board).unwrap();
         let catalog = arch::fpga::base_logic_k(board);
-        eprintln!("{}: medido {thousands:.1} K, catálogo {catalog:.1} K", board.fpga);
-        assert!((thousands - catalog).abs() <= 0.1 * catalog, "{}: el catálogo dice {catalog:.1} K y la síntesis da {thousands:.1} K", board.fpga);
+        eprintln!("{}: measured {thousands:.1} K, catalogue {catalog:.1} K", board.fpga);
+        assert!((thousands - catalog).abs() <= 0.1 * catalog, "{}: the catalogue says {catalog:.1} K and synthesis gives {thousands:.1} K", board.fpga);
     }
     std::fs::remove_dir_all(&dir).ok();
 }

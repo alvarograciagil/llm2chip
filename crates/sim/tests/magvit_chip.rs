@@ -109,8 +109,8 @@ fn magvit_s_encoder_in_the_die_arithmetic_gives_the_floating_point_codes() {
     assert_eq!(codes.len(), float.len());
     let same = codes.iter().zip(&float).map(|(a, b)| 13 - (a ^ b).count_ones()).sum::<u32>();
     let total = 13 * codes.len() as u32;
-    eprintln!("bits iguales: {same} de {total}; códigos iguales: {} de {}", codes.iter().zip(&float).filter(|(a, b)| a == b).count(), codes.len());
-    assert!(same * 100 >= total * 97, "{same} de {total}");
+    eprintln!("equal bits: {same} of {total}; equal codes: {} of {}", codes.iter().zip(&float).filter(|(a, b)| a == b).count(), codes.len());
+    assert!(same * 100 >= total * 97, "{same} of {total}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -135,24 +135,24 @@ fn magvit_s_decoder_in_the_die_arithmetic_draws_the_floating_point_picture() {
     assert_eq!(pixels.len(), float.len());
     let quality = psnr(&pixels, &float);
     let spread = float.iter().map(|v| *v as f64).fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
-    eprintln!("PSNR {quality:.1} dB frente a la coma flotante; valores de {} a {}", spread.0, spread.1);
-    assert!(spread.1 - spread.0 > 30.0, "la imagen de referencia es casi plana");
+    eprintln!("PSNR {quality:.1} dB against floating point; values from {} to {}", spread.0, spread.1);
+    assert!(spread.1 - spread.0 > 30.0, "the reference image is almost flat");
     assert!(quality > 35.0, "{quality}");
     // Other codes give another picture, far from this one.
     let other: Vec<u32> = codes.iter().map(|c| c ^ 0x1555).collect();
     let moved = psnr(&chip.decode(&other).unwrap(), &float);
-    assert!(moved < quality - 15.0, "otros códigos: {moved}");
+    assert!(moved < quality - 15.0, "other codes: {moved}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The real MAGVIT-v2, in Show-o's folder (`LLM2CHIP_SHOWO` or `~/.llm2chip/models/Show-o`):
 /// a picture's codes decoded on the chip's arithmetic and in floating point.
 #[test]
-#[ignore = "lenta: MAGVIT-v2 real, una imagen de 256 × 256 en la aritmética del die"]
+#[ignore = "slow: the real MAGVIT-v2, a 256 × 256 image in the die's arithmetic"]
 fn the_real_magvit_decodes_a_picture_as_in_floating_point() {
     let dir = std::env::var_os("LLM2CHIP_SHOWO").map(std::path::PathBuf::from).unwrap_or_else(|| Path::new(&std::env::var("HOME").unwrap()).join(".llm2chip/models/Show-o")).join("magvitv2");
     if !dir.join("config.json").exists() {
-        eprintln!("no está MAGVIT-v2 en {}: se omite", dir.display());
+        eprintln!("MAGVIT-v2 is not in {}: skipped", dir.display());
         return;
     }
     let magvit = Magvit::open(&dir).unwrap();
@@ -174,9 +174,9 @@ fn the_real_magvit_decodes_a_picture_as_in_floating_point() {
     let started = std::time::Instant::now();
     let mut chip = MagvitChip::decoder(&dir, 16, die).unwrap();
     let pixels = chip.decode(&codes).unwrap();
-    eprintln!("aritmética del die: {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("die arithmetic: {:.0} s", started.elapsed().as_secs_f64());
     let quality = psnr(&pixels, &float);
-    eprintln!("PSNR {quality:.1} dB frente a la coma flotante");
+    eprintln!("PSNR {quality:.1} dB against floating point");
     if let Ok(out) = std::env::var("LLM2CHIP_MAGVIT_OUT") {
         std::fs::write(out, &pixels).unwrap();
     }
@@ -186,11 +186,11 @@ fn the_real_magvit_decodes_a_picture_as_in_floating_point() {
 /// The real encoder: a picture's codes on the chip's arithmetic and in floating point.
 /// Values near zero may take either sign, so some bits differ.
 #[test]
-#[ignore = "lenta: el codificador de MAGVIT-v2 real, una imagen de 256 × 256 en la aritmética del die"]
+#[ignore = "slow: the real MAGVIT-v2 encoder, a 256 × 256 image in the die's arithmetic"]
 fn the_real_magvit_encodes_a_picture_as_in_floating_point() {
     let dir = std::env::var_os("LLM2CHIP_SHOWO").map(std::path::PathBuf::from).unwrap_or_else(|| Path::new(&std::env::var("HOME").unwrap()).join(".llm2chip/models/Show-o")).join("magvitv2");
     if !dir.join("config.json").exists() {
-        eprintln!("no está MAGVIT-v2 en {}: se omite", dir.display());
+        eprintln!("MAGVIT-v2 is not in {}: skipped", dir.display());
         return;
     }
     let magvit = Magvit::open(&dir).unwrap();
@@ -207,11 +207,11 @@ fn the_real_magvit_encodes_a_picture_as_in_floating_point() {
     let die = netlist::DieConfig { reg_bits: 16, index_bits: 24, cell: netlist::CellConfig { weight_bits: 16, accumulator_bits: 40, ..base.cell }, ..base };
     let started = std::time::Instant::now();
     let codes = MagvitChip::encoder(&dir, side, die).unwrap().encode(&planes).unwrap();
-    eprintln!("aritmética del die: {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("die arithmetic: {:.0} s", started.elapsed().as_secs_f64());
     let same = codes.iter().zip(&float).map(|(a, b)| 13 - (a ^ b).count_ones()).sum::<u32>();
     let total = 13 * codes.len() as u32;
-    eprintln!("bits iguales: {same} de {total}; códigos iguales: {} de {}", codes.iter().zip(&float).filter(|(a, b)| a == b).count(), codes.len());
-    assert!(same * 100 >= total * 95, "{same} de {total}");
+    eprintln!("equal bits: {same} of {total}; equal codes: {} of {}", codes.iter().zip(&float).filter(|(a, b)| a == b).count(), codes.len());
+    assert!(same * 100 >= total * 95, "{same} of {total}");
 }
 
 /// A call the host makes, after writing a vector into the die when it has one: its
@@ -310,7 +310,7 @@ fn on_gates(build: &dyn Fn(netlist::DieConfig) -> MagvitChip, schedule: &dyn Fn(
 }
 
 #[test]
-#[ignore = "lenta: el decodificador de MAGVIT-v2 de juguete en las puertas del die"]
+#[ignore = "slow: the toy MAGVIT-v2 decoder on the die's gates"]
 fn magvit_s_decoder_on_the_die_s_gates_gives_the_exact_machine_s_pixels() {
     let dir = std::env::temp_dir().join(format!("llm2chip-magvit-gates-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -323,13 +323,13 @@ fn magvit_s_decoder_on_the_die_s_gates_gives_the_exact_machine_s_pixels() {
         &|chip| chip.decode_mantissas(&codes).unwrap(),
         3,
     );
-    eprintln!("decodificador de juguete en puertas: {cycles} ciclos");
-    assert_eq!(gates, exact, "colores de los píxeles");
+    eprintln!("toy decoder in gates: {cycles} cycles");
+    assert_eq!(gates, exact, "pixel colours");
     std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
-#[ignore = "lenta: el codificador de MAGVIT-v2 de juguete en las puertas del die"]
+#[ignore = "slow: the toy MAGVIT-v2 encoder on the die's gates"]
 fn magvit_s_encoder_on_the_die_s_gates_gives_the_exact_machine_s_values() {
     let dir = std::env::temp_dir().join(format!("llm2chip-magvit-encoder-gates-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -347,7 +347,7 @@ fn magvit_s_encoder_on_the_die_s_gates_gives_the_exact_machine_s_values() {
         &|chip| chip.encode_mantissas(&planes).unwrap(),
         13,
     );
-    eprintln!("codificador de juguete en puertas: {cycles} ciclos");
-    assert_eq!(gates, exact, "valores de los códigos");
+    eprintln!("toy encoder in gates: {cycles} cycles");
+    assert_eq!(gates, exact, "code values");
     std::fs::remove_dir_all(&dir).ok();
 }

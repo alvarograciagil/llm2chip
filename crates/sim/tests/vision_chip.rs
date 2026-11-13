@@ -61,7 +61,7 @@ fn chip(tag: &str) -> Chip {
     // Each register takes only the vector memory its routines reach, and the microcode keeps
     // each distinct word once: the firmware orders routines by their number in it.
     let die = sim::chip::with_code_dictionary(sim::chip::compact_die(die, &layout), &code);
-    let vision = layout.vision_info(&program, &tower.config).expect("el chip lleva el codificador");
+    let vision = layout.vision_info(&program, &tower.config).expect("the chip carries the encoder");
     Chip { dir, program, die, layout, code, vision, tower, image }
 }
 
@@ -135,7 +135,7 @@ fn host_ordered(chip: &Chip) -> (Vec<u32>, Vec<i64>) {
         engine.run(ENTRY_TOKEN, token, position);
         (last, position) = (token, position + 1);
     }
-    assert!(behind > 0, "la imagen ocupa más posiciones de caché que de rotación");
+    assert!(behind > 0, "the image takes more cache positions than rotation ones");
     let mut written = Vec::new();
     for _ in 0..NEW_TOKENS {
         engine.run(ENTRY_LOGITS, last, position - 1);
@@ -173,7 +173,7 @@ fn instruction_level(chip: &Chip, image: &[u32], input: &[u8]) -> (Vec<u8>, u64,
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
-        assert!(cpu.cycle < 200_000_000, "el firmware no termina");
+        assert!(cpu.cycle < 200_000_000, "the firmware does not finish");
     }
     (bus.tx.clone(), cpu.cycle, logits(&mut bus.peripheral.engine, chip))
 }
@@ -195,12 +195,12 @@ fn the_firmware_reads_the_picture_and_the_model_answers_as_the_host_ordered_it()
     let (output, cycles, logits) = instruction_level(&chip, &image, &input);
     eprintln!("{cycles} ciclos, tokens {:?}", tokens_of(&output));
     assert_eq!(tokens_of(&output), expected);
-    assert_eq!(logits, last_logits, "los logits del último token");
+    assert_eq!(logits, last_logits, "the last token's logits");
     std::fs::remove_dir_all(&chip.dir).ok();
 }
 
 #[test]
-#[ignore = "lenta: el chip entero en puertas codifica la imagen y genera, millones de ciclos"]
+#[ignore = "slow: the whole chip in gates encodes the image and generates, millions of cycles"]
 fn the_whole_chip_reads_a_picture_in_gates_as_at_instruction_level() {
     if firmware().is_none() {
         return;
@@ -230,7 +230,7 @@ fn the_firmware_drives_a_software_die_that_reads_the_picture() {
     let open = || {
         let mut engine = sim::ExactEngine::new(chip.program.clone(), Weights::open_with_vision(&chip.dir).unwrap(), 16).unwrap();
         engine.set_mrope(chip.tower.config.mrope_section);
-        let count = Runner::encode_image(&mut engine, &chip.tower, &chip.image).unwrap().expect("lleva el codificador");
+        let count = Runner::encode_image(&mut engine, &chip.tower, &chip.image).unwrap().expect("it carries the encoder");
         (engine, count)
     };
 
@@ -278,25 +278,25 @@ fn the_firmware_drives_a_software_die_that_reads_the_picture() {
     while !cpu.halted {
         cpu.step(&mut bus);
         assert!(bus.peripheral.engine.error.is_none(), "{:?}", bus.peripheral.engine.error);
-        assert!(cpu.cycle < 200_000_000, "el firmware no termina");
+        assert!(cpu.cycle < 200_000_000, "the firmware does not finish");
     }
     assert_eq!(tokens_of(&bus.tx), expected);
-    assert_eq!(bus.peripheral.engine.tokens[..PROMPT.len()], PROMPT, "el die ve el texto con la imagen en su sitio");
+    assert_eq!(bus.peripheral.engine.tokens[..PROMPT.len()], PROMPT, "the die sees the text with the image in its place");
     // The logits the last token was picked from, in the die's format.
     let (mantissas, _) = netlist::block::encode_vector(&chosen_from.iter().map(|v| *v as f64).collect::<Vec<_>>(), 16);
     let read: Vec<i64> = (0..chip.program.vocab as u32).map(|i| bus.peripheral.engine.read(1 << FLOW_INDEX_BITS | i)).collect();
-    assert_eq!(read, mantissas, "los logits del último token");
+    assert_eq!(read, mantissas, "the last token's logits");
     std::fs::remove_dir_all(&chip.dir).ok();
 }
 
 /// The same in Icarus Verilog, a simulator that is not this project's, from the exported
 /// netlist.
 #[test]
-#[ignore = "muy lenta: Icarus Verilog simula el chip entero puerta a puerta, unas horas; con LLM2CHIP_ICARUS=1"]
+#[ignore = "very slow: Icarus Verilog simulates the whole chip gate by gate, a few hours; with LLM2CHIP_ICARUS=1"]
 fn the_whole_chip_reads_a_picture_in_icarus_verilog() {
     // Hours of simulation: only when asked for, `LLM2CHIP_ICARUS=1`.
     if std::env::var_os("LLM2CHIP_ICARUS").is_none() {
-        eprintln!("omitida: LLM2CHIP_ICARUS=1 para simular el chip entero en Icarus Verilog");
+        eprintln!("skipped: LLM2CHIP_ICARUS=1 to simulate the whole chip in Icarus Verilog");
         return;
     }
     if firmware().is_none() {

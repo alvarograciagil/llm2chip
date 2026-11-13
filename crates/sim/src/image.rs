@@ -250,7 +250,7 @@ fn rows_of_cell(rows: u64, cells: u64, cell: u64) -> u64 {
 pub fn write_chip_image(dir: &Path, firmware: &FirmwareImage, request: &ImageRequest, out: &Path, done: &AtomicU64, total: &AtomicU64, cancel: &AtomicBool) -> Result<ImageReport, String> {
     let started = std::time::Instant::now();
     if request.chips.is_empty() || request.cells == 0 {
-        return Err("la imagen necesita al menos un número de chips y una celda".into());
+        return Err("the image needs at least one number of chips and one cell".into());
     }
     let config = std::fs::read_to_string(dir.join("config.json")).map_err(io)?;
     let program = compile_model(&config)?;
@@ -367,7 +367,7 @@ pub fn write_chip_image(dir: &Path, firmware: &FirmwareImage, request: &ImageReq
     manifest.tensors = entries;
     let mut text = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
     if text.len() > reserved {
-        return Err("el manifiesto no cabe en el espacio reservado".into());
+        return Err("the manifest does not fit in the space reserved".into());
     }
     text.resize(reserved, b' ');
     file.seek(SeekFrom::Start(16)).map_err(io)?;
@@ -390,14 +390,14 @@ impl ChipImage {
         let mut head = [0u8; 16];
         file.read_exact(&mut head).map_err(io)?;
         if &head[..8] != FILE_MAGIC {
-            return Err("no es una imagen de chip".into());
+            return Err("not a chip image".into());
         }
         let length = u64::from_le_bytes(head[8..].try_into().expect("ocho bytes")) as usize;
         let mut text = vec![0u8; length];
         file.read_exact(&mut text).map_err(io)?;
         let manifest: ImageManifest = serde_json::from_slice(&text).map_err(|e| e.to_string())?;
         if manifest.version != VERSION {
-            return Err("versión de imagen desconocida".into());
+            return Err("unknown image version".into());
         }
         Ok(Self { file, manifest })
     }
@@ -407,14 +407,14 @@ impl ChipImage {
         let mut bytes = vec![0u8; self.manifest.boot_words as usize * 4];
         self.file.read_exact(&mut bytes).map_err(io)?;
         if crc32fast::hash(&bytes) != self.manifest.boot_crc {
-            return Err("la parte de arranque está dañada".into());
+            return Err("the boot part is damaged".into());
         }
         Ok(bytes.as_chunks::<4>().0.iter().map(|w| u32::from_le_bytes(*w)).collect())
     }
 
     /// Everything one cell stores of a tensor, in the order it takes it.
     pub fn cell_weights(&mut self, name: &str, cell: u64) -> Result<Vec<u8>, String> {
-        let entry = self.manifest.tensors.iter().find(|t| t.name == name).ok_or_else(|| format!("{name} no está en la imagen"))?.clone();
+        let entry = self.manifest.tensors.iter().find(|t| t.name == name).ok_or_else(|| format!("{name} is not in the image"))?.clone();
         let (block, blocks) = if entry.block > 0 { (entry.block, entry.rows / entry.block) } else { (entry.rows.max(1), 1) };
         let spread = self.manifest.cells.min(block);
         if cell >= spread {
@@ -432,9 +432,9 @@ impl ChipImage {
     /// by rows: each takes an equal slice and spreads it over its cells as one chip spreads
     /// the whole, so a cell's rows lie together among those the image keeps for one cell.
     pub fn cell_weights_shared(&mut self, name: &str, cell: u64, index: u64, chips: u64) -> Result<Vec<u8>, String> {
-        let entry = self.manifest.tensors.iter().find(|t| t.name == name).ok_or_else(|| format!("{name} no está en la imagen"))?.clone();
+        let entry = self.manifest.tensors.iter().find(|t| t.name == name).ok_or_else(|| format!("{name} is not in the image"))?.clone();
         if entry.block > 0 && entry.block != entry.rows {
-            return Err(format!("{name} se usa por bloques y no se reparte por filas"));
+            return Err(format!("{name} is used by blocks and is not split by rows"));
         }
         let rows = entry.rows.max(1);
         let slice = rows / chips;
@@ -445,7 +445,7 @@ impl ChipImage {
         let count = rows_of_cell(slice, part, cell);
         let first = index * slice + cell;
         if count > 1 && whole != part {
-            return Err(format!("{name}: cada chip tiene menos filas que celdas y la imagen no las agrupa así"));
+            return Err(format!("{name}: each chip has fewer rows than cells and the image does not group them that way"));
         }
         let (bucket, at) = (first % whole, first / whole);
         let row_bytes = entry.bytes / rows;

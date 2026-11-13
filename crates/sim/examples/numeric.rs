@@ -1,5 +1,5 @@
 //! Measures how much fixed-point precision the model tolerates, with teacher forcing.
-//! `cargo run --release -p sim --example numeric -- <carpeta> [tokens] [bits,estado,tablas ...]`
+//! `cargo run --release -p sim --example numeric -- <folder> [tokens] [bits,state,tables ...]`
 
 use compiler::compile_qwen3_5;
 use sim::{Engine, Numeric, Weights};
@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    println!("activacion estado | acuerdo_top1 KL_medio KL_max saturaciones");
+    println!("activation state | top1_agreement mean_KL max_KL saturations");
 
     let mut configs = vec![(16, 16, 16), (16, 16, 12), (16, 16, 10), (16, 16, 8), (16, 16, 6), (14, 16, 10), (14, 14, 10), (14, 12, 8)];
     // Extra arguments such as `20,20,12` replace the list of configurations.
@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 kl_max = kl_max.max(kl);
             }
         }
-        println!("bloque {ab} bits, estado {sb} bits, tablas {tb} bits | {:.1}% {:.4} {:.3} {saturated}", 100.0 * agree as f64 / seen as f64, kl_sum / seen as f64, kl_max);
+        println!("block {ab} bits, state {sb} bits, tables {tb} bits | {:.1}% {:.4} {:.3} {saturated}", 100.0 * agree as f64 / seen as f64, kl_sum / seen as f64, kl_max);
     }
     Ok(())
 }

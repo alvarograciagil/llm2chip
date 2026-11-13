@@ -117,7 +117,7 @@ impl Builder<'_> {
     }
 
     fn channels(&self, name: &str) -> Result<(usize, usize), String> {
-        let shape = self.weights.shape(&format!("{name}.weight")).ok_or_else(|| format!("falta {name}"))?;
+        let shape = self.weights.shape(&format!("{name}.weight")).ok_or_else(|| format!("{name} is missing"))?;
         Ok((shape[0], shape[1]))
     }
 
@@ -144,7 +144,7 @@ impl Builder<'_> {
     fn product(&mut self, name: &str, matrix: String, src: Buf, outputs: usize, use_: &'static str) -> Buf {
         let (out, biased) = (self.row(outputs, "producto"), self.row(outputs, use_));
         self.op("producto", Op::Matvec { matrix, src, dst: out });
-        self.op("sesgo", Op::AddWeight { src: out, weight: format!("{name}.bias"), dst: biased });
+        self.op("bias", Op::AddWeight { src: out, weight: format!("{name}.bias"), dst: biased });
         biased
     }
 
@@ -163,46 +163,46 @@ impl Builder<'_> {
     fn group_norm(&mut self, name: &str, src: Buf, dst: Buf, side: usize, channels: usize, swish: bool) {
         let matrix = self.group_matrix(channels);
         let (sums, squares) = (self.buf(side * side * GROUPS), self.buf(side * side * GROUPS));
-        let (x, x2, s, q) = (self.row(channels, "x"), self.row(channels, "cuadrados"), self.row(GROUPS, "sumas"), self.row(GROUPS, "sumas de cuadrados"));
+        let (x, x2, s, q) = (self.row(channels, "x"), self.row(channels, "squares"), self.row(GROUPS, "sums"), self.row(GROUPS, "sums of squares"));
         let gather = self.routine(|b| {
-            b.op("leer píxel", Op::LoadRow { store: src, dst: x });
-            b.op("cuadrados", Op::MulElem { a: x, b: x, dst: x2 });
-            b.op("sumas por grupo", Op::Matvec { matrix: matrix.clone(), src: x, dst: s });
-            b.op("sumas de cuadrados por grupo", Op::Matvec { matrix: matrix.clone(), src: x2, dst: q });
+            b.op("read pixel", Op::LoadRow { store: src, dst: x });
+            b.op("squares", Op::MulElem { a: x, b: x, dst: x2 });
+            b.op("sums per group", Op::Matvec { matrix: matrix.clone(), src: x, dst: s });
+            b.op("sums of squares per group", Op::Matvec { matrix: matrix.clone(), src: x2, dst: q });
         });
         let keep = self.routine(|b| {
-            b.op("guardar sumas", Op::StoreRow { src: s, store: sums });
-            b.op("guardar sumas", Op::StoreRow { src: q, store: squares });
+            b.op("store sums", Op::StoreRow { src: s, store: sums });
+            b.op("store sums", Op::StoreRow { src: q, store: squares });
         });
         self.passes.push(Pass::Pixels { side, steps: vec![(gather, Row::Centre, Row::Centre), (keep, Row::Compact, Row::Compact)] });
         // Pairs of rows added, a level at a time.
-        let (a, a2, c, c2, e, e2) = (self.row(GROUPS, "suma a"), self.row(GROUPS, "cuadrados a"), self.row(GROUPS, "suma b"), self.row(GROUPS, "cuadrados b"), self.row(GROUPS, "suma"), self.row(GROUPS, "cuadrados"));
+        let (a, a2, c, c2, e, e2) = (self.row(GROUPS, "sum a"), self.row(GROUPS, "squares a"), self.row(GROUPS, "sum b"), self.row(GROUPS, "squares b"), self.row(GROUPS, "sum"), self.row(GROUPS, "squares"));
         let load = self.routine(|b| {
-            b.op("leer sumas", Op::LoadRow { store: sums, dst: a });
-            b.op("leer sumas", Op::LoadRow { store: squares, dst: a2 });
+            b.op("read sums", Op::LoadRow { store: sums, dst: a });
+            b.op("read sums", Op::LoadRow { store: squares, dst: a2 });
         });
         let load_second = self.routine(|b| {
-            b.op("leer sumas", Op::LoadRow { store: sums, dst: c });
-            b.op("leer sumas", Op::LoadRow { store: squares, dst: c2 });
+            b.op("read sums", Op::LoadRow { store: sums, dst: c });
+            b.op("read sums", Op::LoadRow { store: squares, dst: c2 });
         });
         let add = self.routine(|b| {
-            b.op("sumar", Op::Add { a, b: c, dst: e });
-            b.op("sumar", Op::Add { a: a2, b: c2, dst: e2 });
-            b.op("guardar sumas", Op::StoreRow { src: e, store: sums });
-            b.op("guardar sumas", Op::StoreRow { src: e2, store: squares });
+            b.op("add", Op::Add { a, b: c, dst: e });
+            b.op("add", Op::Add { a: a2, b: c2, dst: e2 });
+            b.op("store sums", Op::StoreRow { src: e, store: sums });
+            b.op("store sums", Op::StoreRow { src: e2, store: squares });
         });
         self.passes.push(Pass::Sums { load, load_second, add, rows: side * side });
         let (total, total_squares) = (self.buf(GROUPS), self.buf(GROUPS));
         let once = self.routine(|b| {
-            b.op("leer totales", Op::LoadRow { store: sums, dst: total });
-            b.op("leer totales", Op::LoadRow { store: squares, dst: total_squares });
+            b.op("read totals", Op::LoadRow { store: sums, dst: total });
+            b.op("read totals", Op::LoadRow { store: squares, dst: total_squares });
         });
         self.passes.push(Pass::Once { routine: once });
         let (y, z) = (self.row(channels, "normalizada"), self.row(channels, "swish"));
         let count = side * side * channels / GROUPS;
         let weight = name.to_string();
         let apply = self.routine(|b| {
-            b.op("leer píxel", Op::LoadRow { store: src, dst: x });
+            b.op("read pixel", Op::LoadRow { store: src, dst: x });
             b.op("GroupNorm", Op::GroupNorm { src: x, sums: total, squares: total_squares, count, weight, groups: GROUPS, dst: y });
             let out = if swish {
                 b.op("swish", Op::Silu { src: y, dst: z });
@@ -210,7 +210,7 @@ impl Builder<'_> {
             } else {
                 y
             };
-            b.op("guardar píxel", Op::StoreRow { src: out, store: dst });
+            b.op("store pixel", Op::StoreRow { src: out, store: dst });
         });
         self.passes.push(Pass::Pixels { side, steps: vec![(apply, Row::Centre, Row::Centre)] });
     }
@@ -227,16 +227,16 @@ impl Builder<'_> {
         let width = side + 2;
         let name = name.to_string();
         let convolve = self.routine(|b| {
-            b.op("leer vecinos", Op::LoadRows { store: src, dst: near, offsets: neighbours(side) });
-            b.product(&name, matrix, near, outputs, "convolución");
+            b.op("read neighbours", Op::LoadRows { store: src, dst: near, offsets: neighbours(side) });
+            b.product(&name, matrix, near, outputs, "convolution");
         });
-        let out = self.row(outputs, "convolución");
+        let out = self.row(outputs, "convolution");
         let finish = self.routine(|b| {
             let stored = match residual {
                 None => out,
                 Some((map, _)) => {
                     let x = b.row(b.buffers[map] / (width * width), "residual");
-                    b.op("leer residual", Op::LoadRow { store: map, dst: x });
+                    b.op("read residual", Op::LoadRow { store: map, dst: x });
                     let x = match shortcut {
                         Some((short, (matrix, outputs, _))) => b.product(&short, matrix, x, outputs, "atajo"),
                         None => x,
@@ -246,7 +246,7 @@ impl Builder<'_> {
                     result
                 }
             };
-            b.op("guardar píxel", Op::StoreRow { src: stored, store: dst });
+            b.op("store pixel", Op::StoreRow { src: stored, store: dst });
         });
         self.passes.push(Pass::Pixels { side, steps: vec![(convolve, Row::Corner, Row::Corner), (finish, Row::Centre, Row::Centre)] });
         Ok(outputs)
@@ -259,11 +259,11 @@ impl Builder<'_> {
         let near = self.row(9 * inputs, "vecinos");
         let name = name.to_string();
         let convolve = self.routine(|b| {
-            b.op("leer vecinos", Op::LoadRows { store: src, dst: near, offsets: neighbours(side) });
-            b.product(&name, matrix, near, outputs, "convolución");
+            b.op("read neighbours", Op::LoadRows { store: src, dst: near, offsets: neighbours(side) });
+            b.product(&name, matrix, near, outputs, "convolution");
         });
-        let out = self.row(outputs, "convolución");
-        let finish = self.routine(|b| b.op("guardar píxel", Op::StoreRow { src: out, store: dst }));
+        let out = self.row(outputs, "convolution");
+        let finish = self.routine(|b| b.op("store pixel", Op::StoreRow { src: out, store: dst }));
         self.passes.push(Pass::Pixels { side: side / 2, steps: vec![(convolve, Row::Stride, Row::Stride), (finish, Row::Centre, Row::Centre)] });
         Ok(())
     }
@@ -298,32 +298,32 @@ impl Builder<'_> {
             kernels.push((full, matrix));
         }
         // First pass: each pixel's key and value to the cache, its query to a store.
-        let (q, k) = (self.row(channels, "consulta"), self.row(channels, "clave"));
+        let (q, k) = (self.row(channels, "query"), self.row(channels, "key"));
         let project = self.routine(|b| {
-            b.op("leer píxel", Op::LoadRow { store: h, dst: row });
-            b.product(&kernels[0].0, kernels[0].1.clone(), row, channels, "consulta");
-            b.product(&kernels[1].0, kernels[1].1.clone(), row, channels, "clave");
-            let v = b.product(&kernels[2].0, kernels[2].1.clone(), row, channels, "valor");
-            b.op("guardar clave y valor", Op::KvAppend { slot: 0, key: k, value: v, window: None });
+            b.op("read pixel", Op::LoadRow { store: h, dst: row });
+            b.product(&kernels[0].0, kernels[0].1.clone(), row, channels, "query");
+            b.product(&kernels[1].0, kernels[1].1.clone(), row, channels, "key");
+            let v = b.product(&kernels[2].0, kernels[2].1.clone(), row, channels, "value");
+            b.op("store key and value", Op::KvAppend { slot: 0, key: k, value: v, window: None });
         });
-        let keep = self.routine(|b| b.op("guardar consulta", Op::StoreRow { src: q, store: queries }));
+        let keep = self.routine(|b| b.op("store query", Op::StoreRow { src: q, store: queries }));
         self.passes.push(Pass::Pixels { side, steps: vec![(project, Row::Centre, Row::Compact), (keep, Row::Compact, Row::Compact)] });
         // Second pass: each query over every pixel, projected, stored; then added to its pixel.
-        let (read, attended) = (self.row(channels, "consulta leída"), self.row(channels, "atendida"));
+        let (read, attended) = (self.row(channels, "query read"), self.row(channels, "atendida"));
         let attend = self.routine(|b| {
-            b.op("leer consulta", Op::LoadRow { store: queries, dst: read });
-            b.op("atención", Op::AttnSum { slot: 0, query: read, head_dim: channels, scale_dim: channels, heads: 1, kv_heads: 1, window: None, softcap: None, dst: attended });
-            let projected = b.product(&kernels[3].0, kernels[3].1.clone(), attended, channels, "proyección");
-            b.op("guardar resultado", Op::StoreRow { src: projected, store: outcome });
+            b.op("read query", Op::LoadRow { store: queries, dst: read });
+            b.op("attention", Op::AttnSum { slot: 0, query: read, head_dim: channels, scale_dim: channels, heads: 1, kv_heads: 1, window: None, softcap: None, dst: attended });
+            let projected = b.product(&kernels[3].0, kernels[3].1.clone(), attended, channels, "projection");
+            b.op("store result", Op::StoreRow { src: projected, store: outcome });
         });
-        let (got, sum) = (self.row(channels, "proyección leída"), self.row(channels, "suma"));
+        let (got, sum) = (self.row(channels, "projection read"), self.row(channels, "sum"));
         let add = self.routine(|b| {
-            b.op("leer resultado", Op::LoadRow { store: outcome, dst: got });
+            b.op("read result", Op::LoadRow { store: outcome, dst: got });
         });
         let place = self.routine(|b| {
-            b.op("leer píxel", Op::LoadRow { store: x, dst: row });
+            b.op("read pixel", Op::LoadRow { store: x, dst: row });
             b.op("residual", Op::Add { a: row, b: got, dst: sum });
-            b.op("guardar píxel", Op::StoreRow { src: sum, store: x });
+            b.op("store pixel", Op::StoreRow { src: sum, store: x });
         });
         self.passes.push(Pass::Pixels { side, steps: vec![(attend, Row::Compact, Row::Last), (add, Row::Compact, Row::Compact), (place, Row::Centre, Row::Centre)] });
         Ok(())
@@ -387,13 +387,13 @@ impl MagvitChip {
         b.derived.push((format!("{BITS_TABLE}.weight"), vec![1 << CODE_BITS, CODE_BITS], values));
         let input = b.buf(CODE_BITS);
         let (post, post_out, _) = b.kernel("decoder.post_quant_conv", 1)?;
-        let z = b.store(grid, post_out, "códigos");
-        let projected = b.row(post_out, "códigos");
+        let z = b.store(grid, post_out, "codes");
+        let projected = b.row(post_out, "codes");
         let input_read = b.routine(|b| {
-            b.op("leer los valores del código", Op::EmbRead { table: BITS_TABLE.into(), dst: input });
-            b.product("decoder.post_quant_conv", post, input, post_out, "códigos");
+            b.op("read the code's values", Op::EmbRead { table: BITS_TABLE.into(), dst: input });
+            b.product("decoder.post_quant_conv", post, input, post_out, "codes");
         });
-        let input_routine = b.routine(|b| b.op("guardar píxel", Op::StoreRow { src: projected, store: z }));
+        let input_routine = b.routine(|b| b.op("store pixel", Op::StoreRow { src: projected, store: z }));
         let (channels, _) = b.channels("decoder.conv_in")?;
         let mut x = b.store(grid, channels, "principal");
         b.conv3("decoder.conv_in", z, x, grid, None)?;
@@ -414,8 +414,8 @@ impl MagvitChip {
                 // Each row to its four places in a map of twice the side.
                 let wide = b.store(2 * side, channels, "ampliada");
                 let row = b.row(channels, "x");
-                let read = b.routine(|b| b.op("leer píxel", Op::LoadRow { store: x, dst: row }));
-                let write = b.routine(|b| b.op("guardar píxel", Op::StoreRow { src: row, store: wide }));
+                let read = b.routine(|b| b.op("read pixel", Op::LoadRow { store: x, dst: row }));
+                let write = b.routine(|b| b.op("store pixel", Op::StoreRow { src: row, store: wide }));
                 b.passes.push(Pass::Pixels { side: 2 * side, steps: vec![(read, Row::Half, Row::Half), (write, Row::Centre, Row::Centre)] });
                 side *= 2;
                 let next = b.store(side, channels, "principal");
@@ -429,7 +429,7 @@ impl MagvitChip {
         let near = b.row(9 * channels, "vecinos");
         let mut output = 0;
         let output_routine = b.routine(|b| {
-            b.op("leer vecinos", Op::LoadRows { store: normed, dst: near, offsets: neighbours(side) });
+            b.op("read neighbours", Op::LoadRows { store: normed, dst: near, offsets: neighbours(side) });
             output = b.product("decoder.conv_out", out_matrix, near, colours, "color");
         });
         let Builder { buffers, ops, passes, derived, .. } = b;
@@ -449,8 +449,8 @@ impl MagvitChip {
         let mut b = Builder { weights: &weights, buffers: Vec::new(), ops: Vec::new(), passes: Vec::new(), derived: Vec::new(), stores: HashMap::new(), rows: HashMap::new() };
         // The pixels' colours, a row each, into the first map.
         let input = b.buf(3);
-        let picture = b.store(side, 3, "imagen");
-        let input_routine = b.routine(|b| b.op("guardar píxel", Op::StoreRow { src: input, store: picture }));
+        let picture = b.store(side, 3, "image");
+        let input_routine = b.routine(|b| b.op("store pixel", Op::StoreRow { src: input, store: picture }));
         let (channels, _) = b.channels("encoder.conv_in")?;
         let mut x = b.store(side, channels, "principal");
         b.conv3("encoder.conv_in", picture, x, side, None)?;
@@ -481,9 +481,9 @@ impl MagvitChip {
         let near = b.row(9 * channels, "vecinos");
         let mut output = 0;
         let output_routine = b.routine(|b| {
-            b.op("leer vecinos", Op::LoadRows { store: normed, dst: near, offsets: neighbours(side_now) });
-            let out = b.product("encoder.conv_out", out_matrix, near, out_channels, "salida");
-            output = b.product("encoder.quant_conv", quant, out, bits, "códigos");
+            b.op("read neighbours", Op::LoadRows { store: normed, dst: near, offsets: neighbours(side_now) });
+            let out = b.product("encoder.conv_out", out_matrix, near, out_channels, "output");
+            output = b.product("encoder.quant_conv", quant, out, bits, "codes");
         });
         let Builder { buffers, ops, passes, derived, .. } = b;
         Self::finish(weights, (buffers, ops, passes, derived), "encoder.mid.attn_1", (input, None, input_routine, side), (output, output_routine, side_now), die, tokens)
@@ -499,7 +499,7 @@ impl MagvitChip {
             Pass::Once { .. } => 1,
         });
         let reach = reach.chain([(side + 2) * (side + 2), (input_side + 2) * (input_side + 2)]).max().unwrap_or(1);
-        let attention_channels = weights.shape(&format!("{attention}.q.weight")).map(|s| s[0]).ok_or("falta la atención del centro")?;
+        let attention_channels = weights.shape(&format!("{attention}.q.weight")).map(|s| s[0]).ok_or("the middle attention is missing")?;
         let program = Program {
             family: "magvit".into(),
             vocab: 0,
@@ -538,7 +538,7 @@ impl MagvitChip {
     }
 
     fn run(&mut self, routine: &Range<usize>, token: usize, position: usize) -> Result<(), String> {
-        let part = self.program.vision.as_ref().expect("las rutinas");
+        let part = self.program.vision.as_ref().expect("the routines");
         let list = part.ops[routine.clone()].to_vec();
         self.layout.run_ops(&mut self.vm, &self.program, &list, token as u32, position as u32, false)
     }
@@ -610,9 +610,9 @@ impl MagvitChip {
     /// Everything the decoder runs for `codes`: each code's values read and kept, every
     /// pass, and each pixel's colours.
     pub fn decoder_calls(&self, codes: &[u32]) -> Result<Vec<Call>, String> {
-        let read = self.input_read.clone().ok_or("esto no es el decodificador")?;
+        let read = self.input_read.clone().ok_or("this is not the decoder")?;
         if codes.len() != self.grid * self.grid {
-            return Err(format!("el decodificador espera {} códigos", self.grid * self.grid));
+            return Err(format!("the decoder expects {} codes", self.grid * self.grid));
         }
         let mut calls = Vec::new();
         for (i, code) in codes.iter().enumerate() {
@@ -688,7 +688,7 @@ impl MagvitChip {
 
     fn encode_reads(&mut self, planes: &[f32]) -> Result<Vec<Read>, String> {
         if planes.len() != 3 * self.grid * self.grid {
-            return Err(format!("el codificador espera una imagen de {} × {}", self.grid, self.grid));
+            return Err(format!("the encoder expects a {} × {} image", self.grid, self.grid));
         }
         self.reset();
         let (reg, values, calls) = self.encoder_inputs(planes);

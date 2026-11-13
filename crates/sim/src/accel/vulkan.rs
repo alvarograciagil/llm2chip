@@ -205,7 +205,7 @@ impl VulkanAccelerator {
 
     #[allow(clippy::too_many_arguments)]
     fn run(&self, pipeline: vk::Pipeline, tensor: &PackedTensor<'_>, rows: usize, job: Job, float: bool, input: &[u8], sums_at: usize, output: &mut [u8]) -> bool {
-        let mut guard = self.state.lock().expect("estado de Vulkan");
+        let mut guard = self.state.lock().expect("Vulkan state");
         let state = &mut *guard;
         // SAFETY: the mutex serialises GPU work, and the fence wait ends each submission
         // before any buffer is read, reused or released.
@@ -260,7 +260,7 @@ impl VulkanAccelerator {
 
 impl Drop for VulkanAccelerator {
     fn drop(&mut self) {
-        let state = self.state.get_mut().expect("estado de Vulkan");
+        let state = self.state.get_mut().expect("Vulkan state");
         // SAFETY: nothing else can be using the device while it is being dropped.
         unsafe {
             let _ = self.device.device_wait_idle();
@@ -335,7 +335,7 @@ mod tests {
         for bits in [4, 8] {
             for entry in ["float_product", "exact_product"] {
                 let code = spirv(bits, entry).unwrap_or_else(|e| panic!("{bits} bits, {entry}: {e}"));
-                assert_eq!(code[0], 0x0723_0203, "número mágico de SPIR-V");
+                assert_eq!(code[0], 0x0723_0203, "SPIR-V magic number");
             }
         }
     }

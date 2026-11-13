@@ -89,7 +89,7 @@ impl ExactVision {
 pub(crate) fn run_encoder(layout: &Layout, vm: &mut BlockVm, program: &Program, part: &VisionPart, bits: u32, tower: &VisionTower, image: &Patches) -> Result<usize, String> {
     let count = image.rows * image.cols;
     if count > part.patches {
-        return Err(format!("la imagen tiene {count} parches y el codificador admite {}", part.patches));
+        return Err(format!("the image has {count} patches and the encoder takes {}", part.patches));
     }
     layout.clear_rotations();
     for (patch, angles) in patch_angles(&tower.config, image.rows, image.cols).iter().enumerate() {
@@ -105,7 +105,7 @@ pub(crate) fn run_encoder(layout: &Layout, vm: &mut BlockVm, program: &Program, 
     for (index, (list, token, position, rope)) in routine_order(part, count).iter().enumerate() {
         // The host writes each patch's pixels and position before its embedding.
         if index < count {
-            let (values, place) = inputs.next().ok_or("faltan parches")?;
+            let (values, place) = inputs.next().ok_or("patches are missing")?;
             load(vm, part.pixels, values);
             load(vm, part.position, place);
         }

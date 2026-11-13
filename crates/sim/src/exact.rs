@@ -42,7 +42,7 @@ impl ExactEngine {
     /// `bits` is the mantissa width of the die's vectors.
     pub fn new(program: Program, weights: Weights, bits: u32) -> Result<Self, String> {
         if !(8..=24).contains(&bits) {
-            return Err("los vectores admiten de 8 a 24 bits".into());
+            return Err("vectors take from 8 to 24 bits".into());
         }
         let config = exact_config(bits);
         let weights = Arc::new(weights);
@@ -123,14 +123,14 @@ impl ExactEngine {
     /// (`compiler::attach_vision`), and keeps it there: gives how many tokens it makes, which
     /// `step_image` then reads one by one.
     pub fn encode_image(&mut self, tower: &crate::vision::VisionTower, image: &crate::vision::Patches) -> Result<usize, String> {
-        let part = self.program.vision.clone().ok_or("este modelo no lleva codificador de imágenes")?;
+        let part = self.program.vision.clone().ok_or("this model has no image encoder")?;
         crate::vision_chip::run_encoder(&self.layout, &mut self.vm, &self.program, &part, self.bits, tower, image)
     }
 
     /// Token `index` of the encoded image: the encoder's fusion makes it, and the language
     /// model reads it in place of an embedding, in the cache's next position.
     pub fn step_image(&mut self, index: u32, positions: [u64; 3], want_logits: bool) -> Result<Option<Vec<f32>>, String> {
-        let part = self.program.vision.clone().ok_or("este modelo no lleva codificador de imágenes")?;
+        let part = self.program.vision.clone().ok_or("this model has no image encoder")?;
         self.layout.run_ops(&mut self.vm, &self.program, &part.ops[part.merge.clone()], index, index, false)?;
         self.layout.place_rotation(&self.program, self.position as u32, positions, self.mrope)?;
         self.layout.run_token_from_image(&mut self.vm, &self.program, self.position as u32, want_logits)?;
@@ -144,7 +144,7 @@ impl ExactEngine {
     pub fn step_hidden(&mut self, token: u32, embedding: Option<&[f32]>) -> Result<Vec<f32>, String> {
         let last = self.program.ops.len() - 1;
         let compiler::Op::Matvec { src, .. } = self.program.ops[last].op else {
-            return Err("el modelo no termina en el producto de los logits".into());
+            return Err("the model does not end with the logits' product".into());
         };
         let text = (self.position as i64 + self.rope_offset) as u64;
         self.layout.place_rotation(&self.program, self.position as u32, [text; 3], self.mrope)?;
@@ -162,14 +162,14 @@ impl ExactEngine {
     /// `step_hidden` left, in the die's arithmetic.
     pub fn image_logits(&mut self) -> Result<Vec<f32>, String> {
         self.layout.run_image_logits(&mut self.vm, &self.program)?;
-        let image = self.program.image.as_ref().ok_or("este modelo no dibuja")?;
+        let image = self.program.image.as_ref().ok_or("this model does not draw")?;
         Ok(self.buffer(image.logits))
     }
 
     /// The vector the image head makes for a drawn code, to go in as the next token's.
     pub fn image_input(&mut self, code: u32) -> Result<Vec<f32>, String> {
         self.layout.run_image_input(&mut self.vm, &self.program, code)?;
-        let image = self.program.image.as_ref().ok_or("este modelo no dibuja")?;
+        let image = self.program.image.as_ref().ok_or("this model does not draw")?;
         Ok(self.buffer(image.input))
     }
 
@@ -204,7 +204,7 @@ impl ExactEngine {
     pub fn draft(&mut self, token: u32, want_logits: bool) -> Result<Option<Vec<f32>>, String> {
         self.layout.run_draft(&mut self.vm, &self.program, token, self.draft_tokens as u32, want_logits)?;
         self.draft_tokens += 1;
-        let draft = self.program.draft.as_ref().ok_or("este modelo no tiene cabeza MTP")?;
+        let draft = self.program.draft.as_ref().ok_or("this model has no MTP head")?;
         Ok(want_logits.then(|| self.vm.floats(self.layout.register_of(draft.logits), self.program.vocab)))
     }
 }

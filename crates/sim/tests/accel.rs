@@ -71,10 +71,10 @@ fn compare(gap: usize) {
     let Some(name) = gpu.accelerator_name() else {
         // Every Mac has Metal, so a missing GPU there means the shaders failed to compile.
         #[cfg(target_os = "macos")]
-        panic!("Metal no se ha podido iniciar");
+        panic!("Metal could not start");
         #[cfg(not(target_os = "macos"))]
         {
-            eprintln!("sin GPU: prueba omitida");
+            eprintln!("no GPU: test skipped");
             return;
         }
     };
@@ -100,12 +100,12 @@ fn compare(gap: usize) {
             for first in [0, 40] {
                 let slow = a.exact_sums(first, ROWS - first, &x, exponent, bits);
                 let fast = b.exact_sums(first, ROWS - first, &x, exponent, bits);
-                assert_eq!(slow, fast, "{matrix} a {bits} bits, desde la fila {first}");
+                assert_eq!(slow, fast, "{matrix} at {bits} bits, from row {first}");
                 let (slow, fast) = (a.cell_sums(first, ROWS - first, &x, exponent, bits), b.cell_sums(first, ROWS - first, &x, exponent, bits));
-                assert_eq!(slow, fast, "{matrix} en celdas a {bits} bits, desde la fila {first}");
+                assert_eq!(slow, fast, "{matrix} in cells at {bits} bits, from row {first}");
             }
         }
     }
-    assert_eq!(gpu.gpu_products(), 2 * (2 + 5 * 2 * 2), "la GPU debe ejecutar todos los productos");
+    assert_eq!(gpu.gpu_products(), 2 * (2 + 5 * 2 * 2), "the GPU must run every product");
     std::fs::remove_dir_all(dir).ok();
 }

@@ -86,10 +86,10 @@ const SHOWO_CELLS: u32 = 4096;
 pub fn region_mask(picture: &Picture) -> Result<Vec<bool>, String> {
     let [x0, y0, x1, y1] = picture.region;
     if picture.rgb.len() != picture.width * picture.height * 3 {
-        return Err(format!("la imagen dice medir {} × {} y trae {} bytes", picture.width, picture.height, picture.rgb.len()));
+        return Err(format!("the image claims to be {} × {} and has {} bytes", picture.width, picture.height, picture.rgb.len()));
     }
     if x0 >= x1 || y0 >= y1 || x1 > picture.width || y1 > picture.height {
-        return Err("marca una zona dentro de la imagen".into());
+        return Err("mark a region inside the image".into());
     }
     Ok((0..picture.width * picture.height).map(|i| (x0..x1).contains(&(i % picture.width)) && (y0..y1).contains(&(i / picture.width))).collect())
 }
@@ -107,14 +107,14 @@ pub fn run(request: &RetouchRequest, job: &RetouchJob, painter: &Painter, chip: 
             _ => {
                 // Only one Show-o in memory: its weights, in floating point, take gigabytes.
                 *held = None;
-                set_phase("Abriendo Show-o");
-                let model = Arc::new(ShowO::open(dir)?.ok_or("esta carpeta no tiene Show-o")?);
+                set_phase("Opening Show-o");
+                let model = Arc::new(ShowO::open(dir)?.ok_or("this folder does not have Show-o")?);
                 *held = Some((dir.to_path_buf(), model.clone()));
                 model
             }
         }
     };
-    let tokenizer = Tokenizer::from_file(dir.join("phi/tokenizer.json")).map_err(|e| format!("falta el tokenizador de Phi-1.5 en «phi»: {e}"))?;
+    let tokenizer = Tokenizer::from_file(dir.join("phi/tokenizer.json")).map_err(|e| format!("Phi-1.5's tokenizer is missing from “phi”: {e}"))?;
     let text = tokenizer.encode(request.prompt.as_str(), false).map_err(|e| e.to_string())?.get_ids().to_vec();
     let steps = request.steps.clamp(1, 64);
     let guidance = request.guidance.clamp(0.0, 10.0);
@@ -123,16 +123,16 @@ pub fn run(request: &RetouchRequest, job: &RetouchJob, painter: &Painter, chip: 
     let started = std::time::Instant::now();
     let progress = |step: usize, steps: usize| {
         if job.cancel.load(Relaxed) {
-            return Err("cancelado".to_string());
+            return Err("cancelled".to_string());
         }
         *job.step.lock().unwrap() = (step, steps);
-        set_phase(if step < steps { "Rellenando los códigos de la imagen" } else { "El decodificador convierte los códigos en píxeles" });
+        set_phase(if step < steps { "Filling in the image's codes" } else { "The decoder turns the codes into pixels" });
         Ok(())
     };
     let rgb = match &request.picture {
         Some(picture) => {
             let region = region_mask(picture)?;
-            set_phase("Codificando la imagen con MAGVIT-v2");
+            set_phase("Encoding the image with MAGVIT-v2");
             model.inpaint(&picture.rgb, picture.width, picture.height, &region, &text, steps, guidance, seed, progress)?
         }
         None => model.draw(&text, steps, guidance, seed, progress)?,
@@ -157,7 +157,7 @@ fn run_on_chip(request: &RetouchRequest, job: &RetouchJob, chip: &ChipPainter, b
     // The guidance is part of the die's program, so another one needs the die anew.
     if !held.as_ref().is_some_and(|c| c.path == dir && c.guidance == guidance.to_bits()) {
         *held = None;
-        set_phase("Preparando Show-o en el die del chip");
+        set_phase("Preparing Show-o on the chip's die");
         // The design's usual format, affine of 8 bits in groups of 64: as good as whole
         // weights here (`examples/showo_formats.rs`), and what the cells keep.
         let format = netlist::format::WeightFormat { coding: netlist::format::WeightCoding::Affine, bits: 8, exponent_bits: 0, bias: true, group_size: 64, fine_scale: false, keep_source: false };
@@ -165,30 +165,30 @@ fn run_on_chip(request: &RetouchRequest, job: &RetouchJob, chip: &ChipPainter, b
         let magvit = Magvit::open(&dir.join("magvitv2"))?;
         *held = Some(ChipShowO { path: dir.to_path_buf(), guidance: guidance.to_bits(), model, magvit, on_chip: None });
     }
-    let held = held.as_mut().expect("recién abierto");
+    let held = held.as_mut().expect("just opened");
     if request.magvit_on_chip && !held.on_chip.as_ref().is_some_and(|(b, _)| *b == bits) {
-        set_phase("Preparando MAGVIT-v2 en la aritmética del chip");
+        set_phase("Preparing MAGVIT-v2 in the chip's arithmetic");
         held.on_chip = Some((bits, MagvitPair::exact(&dir.join("magvitv2"), held.model.config.side(), bits)?));
     }
     let ChipShowO { model, magvit, on_chip, .. } = held;
     let mut pair = if request.magvit_on_chip { on_chip.as_mut().map(|(_, p)| p) } else { None };
-    let tokenizer = Tokenizer::from_file(dir.join("phi/tokenizer.json")).map_err(|e| format!("falta el tokenizador de Phi-1.5 en «phi»: {e}"))?;
+    let tokenizer = Tokenizer::from_file(dir.join("phi/tokenizer.json")).map_err(|e| format!("Phi-1.5's tokenizer is missing from “phi”: {e}"))?;
     let text = tokenizer.encode(request.prompt.as_str(), false).map_err(|e| e.to_string())?.get_ids().to_vec();
     let seed = request.seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)) & SEED_MASK;
     let started = std::time::Instant::now();
     let progress = |step: usize, steps: usize| {
         if job.cancel.load(Relaxed) {
-            return Err("cancelado".to_string());
+            return Err("cancelled".to_string());
         }
         *job.step.lock().unwrap() = (step, steps);
-        set_phase(if step < steps { "El chip rellena los códigos de la imagen" } else { "El decodificador convierte los códigos en píxeles" });
+        set_phase(if step < steps { "The chip fills in the image's codes" } else { "The decoder turns the codes into pixels" });
         Ok(())
     };
     let config = model.config.clone();
     let known = match &request.picture {
         Some(picture) => {
             let region = region_mask(picture)?;
-            set_phase("Codificando la imagen con MAGVIT-v2");
+            set_phase("Encoding the image with MAGVIT-v2");
             match pair.as_mut() {
                 Some(pair) => config.masked_codes_with(|p| pair.encoder.encode(p), &picture.rgb, picture.width, picture.height, &region)?,
                 None => config.masked_codes(magvit, &picture.rgb, picture.width, picture.height, &region)?,
@@ -222,8 +222,8 @@ mod tests {
         let mask = region_mask(&picture([1, 1, 3, 2])).unwrap();
         let marked: Vec<usize> = (0..12).filter(|i| mask[*i]).collect();
         assert_eq!(marked, [5, 6]);
-        assert!(region_mask(&picture([2, 0, 2, 3])).is_err(), "vacía");
-        assert!(region_mask(&picture([0, 0, 5, 3])).is_err(), "se sale");
-        assert!(region_mask(&Picture { rgb: vec![0; 3], ..picture([0, 0, 1, 1]) }).is_err(), "faltan píxeles");
+        assert!(region_mask(&picture([2, 0, 2, 3])).is_err(), "empty");
+        assert!(region_mask(&picture([0, 0, 5, 3])).is_err(), "goes outside");
+        assert!(region_mask(&Picture { rgb: vec![0; 3], ..picture([0, 0, 1, 1]) }).is_err(), "pixels are missing");
     }
 }

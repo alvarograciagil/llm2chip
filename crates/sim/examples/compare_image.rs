@@ -1,6 +1,6 @@
 //! Finds the first buffer where the chip's integers drift away from floating point when
 //! a picture's vector stands in for a token, on Janus.
-//! `cargo run --release -p sim --example compare_image -- <carpeta> imagen.bmp`
+//! `cargo run --release -p sim --example compare_image -- <folder> image.bmp`
 
 use sim::janus::JanusEye;
 use sim::{Engine, ExactEngine, Numeric, Weights};
@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bits: u32 = std::env::var("BITS").map_or(16, |v| v.parse().unwrap());
     let mut exact = ExactEngine::new(compiler::compile_model(&text)?, Weights::open(dir)?, bits)?;
     // A few tokens of text, then the picture's largest vector.
-    let all = std::env::var("TODA").is_ok();
+    let all = std::env::var("ALL").is_ok();
     let steps: Vec<Option<u32>> = if all { [Some(100_000), Some(2054)].into_iter().chain(std::iter::repeat_n(None, vectors.len())).collect() } else { vec![Some(100_000), Some(2054), Some(418), None, None] };
     for (position, step) in steps.iter().enumerate() {
         match step {
@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if all && position % 32 != 31 {
             continue;
         }
-        println!("--- paso {position} ({})", if step.is_some() { "texto" } else { "imagen" });
+        println!("--- step {position} ({})", if step.is_some() { "text" } else { "image" });
         let mut reported = 0;
         for inst in &program.ops {
             let text = format!("{:?}", inst.op);
@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if error > 0.1 * norm.max(1e-9) && reported < 8 {
                 reported += 1;
                 let other = b.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
-                println!("{} capa {:?} búfer {buffer} norma {norm:.3}/{other:.3} pico {:.3}/{:.3} error {error:.3}: {}", inst.name, inst.layer, peak(a), peak(&b), &text[..text.len().min(90)]);
+                println!("{} layer {:?} buffer {buffer} norm {norm:.3}/{other:.3} peak {:.3}/{:.3} error {error:.3}: {}", inst.name, inst.layer, peak(a), peak(&b), &text[..text.len().min(90)]);
             }
         }
     }

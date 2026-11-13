@@ -2,7 +2,7 @@
 //! chip's image path is checked against. With `chip`, the die's arithmetic does it all
 //! instead, the image encoder included, carried by the chip with the model.
 //!
-//! `cargo run --release -p sim --example see -- <carpeta> [figura] "<pregunta>" [tokens] [chip]`
+//! `cargo run --release -p sim --example see -- <folder> [shape] "<question>" [tokens] [chip]`
 //!
 //! The figure is drawn here, 256×256 pixels on white: `rojo` (a red disc), `azul` (a blue
 //! square) or `verde` (a green triangle).
@@ -22,8 +22,8 @@ fn figure(kind: &str) -> Vec<u8> {
         for x in 0..SIDE {
             let (dx, dy) = (x as f32 - 128.0, y as f32 - 128.0);
             let (inside, colour) = match kind {
-                "azul" => (dx.abs() < 70.0 && dy.abs() < 70.0, [30, 60, 220]),
-                "verde" => (y > 50 && y < 210 && dx.abs() < (y as f32 - 50.0) * 0.6, [30, 170, 60]),
+                "blue" => (dx.abs() < 70.0 && dy.abs() < 70.0, [30, 60, 220]),
+                "green" => (y > 50 && y < 210 && dx.abs() < (y as f32 - 50.0) * 0.6, [30, 170, 60]),
                 _ => (dx * dx + dy * dy < 80.0 * 80.0, [220, 30, 30]),
             };
             if inside {
@@ -37,10 +37,10 @@ fn figure(kind: &str) -> Vec<u8> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let dir = Path::new(&args[1]);
-    let kind = args.get(2).map_or("rojo", String::as_str);
-    let question = args.get(3).map_or("¿De qué color es la figura? Responde con una sola palabra.", String::as_str);
+    let kind = args.get(2).map_or("red", String::as_str);
+    let question = args.get(3).map_or("What colour is the shape? Answer with a single word.", String::as_str);
     let count_out: usize = args.get(4).map_or(8, |n| n.parse().unwrap());
-    let tower = VisionTower::open(dir)?.ok_or("este modelo no trae codificador de imágenes")?;
+    let tower = VisionTower::open(dir)?.ok_or("this model has no image encoder")?;
     let c = tower.config.clone();
     let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| e.to_string())?;
     let encode = |text: &str| tokenizer.encode(text, false).map(|e| e.get_ids().to_vec()).map_err(|e| e.to_string());
@@ -65,9 +65,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let count = match &tokens {
         Some(tokens) => tokens.len(),
-        None => engine.encode_image(&tower, &image)?.ok_or("el chip no lleva codificador")?,
+        None => engine.encode_image(&tower, &image)?.ok_or("the chip has no encoder")?,
     };
-    eprintln!("imagen: {} parches, {count} tokens, {:.1} s", image.rows * image.cols, started.elapsed().as_secs_f64());
+    eprintln!("image: {} patches, {count} tokens, {:.1} s", image.rows * image.cols, started.elapsed().as_secs_f64());
     let (positions, next) = image_positions(before.len() as u64, image.rows, image.cols, c.merge);
     for (index, position) in positions.into_iter().enumerate() {
         match &tokens {

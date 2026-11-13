@@ -208,7 +208,7 @@ fn what_cannot_be_done_is_refused_with_the_reason() {
     refused(r#"{"pre_tokenizer":{"type":"UnicodeScripts"},"model":{"type":"BPE","vocab":{},"merges":[]}}"#, "UnicodeScripts");
     refused(r#"{"model":{"type":"BPE","dropout":0.1,"vocab":{},"merges":[]}}"#, "dropout");
     refused(r#"{"pre_tokenizer":{"type":"Split","pattern":{"Regex":"(a)\\1"},"behavior":"Isolated"},"model":{"type":"BPE","vocab":{},"merges":[]}}"#, "\\1");
-    refused(r#"{"pre_tokenizer":{"type":"Split","pattern":{"Regex":"(a*)*"},"behavior":"Isolated"},"model":{"type":"BPE","vocab":{},"merges":[]}}"#, "vacío");
+    refused(r#"{"pre_tokenizer":{"type":"Split","pattern":{"Regex":"(a*)*"},"behavior":"Isolated"},"model":{"type":"BPE","vocab":{},"merges":[]}}"#, "empty");
 }
 
 /// Text as far as it stays within this many tokens and the bytes set aside for them.
@@ -251,7 +251,7 @@ fn a_prompt_as_long_as_the_context_fits_in_the_memory_set_aside() {
             let text = filled_to_context(&reference, seed, CONTEXT, text_bytes as usize);
             match tables.encode(&text) {
                 Ok(tokens) if tokens == reference.encode(text.as_str(), false).unwrap().get_ids() => {}
-                other => failures.push(format!("{} con {seed:?} ({} bytes): {}", path.display(), text.len(), other.map_or_else(|e| e, |_| "tokens distintos".to_string()))),
+                other => failures.push(format!("{} with {seed:?} ({} bytes): {}", path.display(), text.len(), other.map_or_else(|e| e, |_| "different tokens".to_string()))),
             }
         }
     }
@@ -265,10 +265,10 @@ fn the_tables_stay_within_what_the_estimator_assumes() {
         let tables = TokenizerTables::from_file(&path, 256).unwrap();
         let vocabulary = Tokenizer::from_file(&path).unwrap().get_vocab_size(true) as f64;
         let bits = tables.table_words() as f64 * 32.0 / vocabulary;
-        eprintln!("{:>6.0} bits por token: {}", bits, path.display());
+        eprintln!("{:>6.0} bits per token: {}", bits, path.display());
         worst = worst.max(bits);
     }
-    assert!(worst <= arch::TOKENIZER_BITS_PER_TOKEN, "{worst} bits por token");
+    assert!(worst <= arch::TOKENIZER_BITS_PER_TOKEN, "{worst} bits per token");
 }
 
 #[test]
@@ -281,7 +281,7 @@ fn running_out_of_memory_is_reported_not_misread() {
 #[test]
 fn the_firmware_tokenizes_like_the_reference() {
     let Some(firmware) = build_firmware() else {
-        eprintln!("omitido: falta el firmware");
+        eprintln!("skipped: the firmware is missing");
         return;
     };
     let mut failures = Vec::new();
@@ -318,7 +318,7 @@ fn firmware_matches(firmware: &FirmwareImage, path: &Path, failures: &mut Vec<St
         let mut cpu = Rv32Iss::default();
         while !cpu.halted {
             cpu.step(&mut bus);
-            assert!(cpu.cycle < 2_000_000_000, "el firmware no termina con {text:?}");
+            assert!(cpu.cycle < 2_000_000_000, "the firmware does not finish with {text:?}");
         }
         let got = tokens.borrow().clone();
         eprintln!("{:>9} ciclos, {:>3} tokens: {:?}", cpu.cycle, got.len(), &text[..text.len().min(40)]);

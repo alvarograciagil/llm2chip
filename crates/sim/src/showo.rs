@@ -42,7 +42,7 @@ impl ShowOConfig {
         if config["_class_name"] != "Showo" {
             return Ok(None);
         }
-        let number = |key: &str| config[key].as_u64().ok_or_else(|| format!("falta «{key}» en la configuración de Show-o"));
+        let number = |key: &str| config[key].as_u64().ok_or_else(|| format!("“{key}” is missing from Show-o's configuration"));
         let phi: Value = std::fs::read_to_string(dir.join("phi/config.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
         let heads = phi["num_attention_heads"].as_u64().unwrap_or(32) as usize;
         let rotary_fraction = phi["partial_rotary_factor"].as_f64().unwrap_or(0.5);
@@ -316,7 +316,7 @@ impl ShowO {
 
     /// MAGVIT-v2, which turns pictures into codes and back.
     pub fn tokenizer(&self) -> Result<&Magvit, String> {
-        self.tokenizer.as_ref().ok_or_else(|| "falta MAGVIT-v2 en la carpeta «magvitv2»".to_string())
+        self.tokenizer.as_ref().ok_or_else(|| "MAGVIT-v2 is missing from the “magvitv2” folder".to_string())
     }
 
     /// One pass of the model: each code's score at every place of the image, after `text`.
@@ -352,7 +352,7 @@ impl ShowO {
         };
         let with_text = cache(text);
         let without_text = (guidance > 0.0).then(|| cache(&[]));
-        let scores = |tokens: &[u32], with: bool| Ok(self.code_scores(if with { &with_text } else { without_text.as_ref().expect("sin guía no hay pasada sin texto") }, tokens));
+        let scores = |tokens: &[u32], with: bool| Ok(self.code_scores(if with { &with_text } else { without_text.as_ref().expect("without guidance there is no pass without the text") }, tokens));
         fill_with(&self.config, codes, steps, guidance, seed, progress, scores)
     }
 
@@ -376,7 +376,7 @@ pub fn fill_with(
 ) -> Result<Vec<u32>, String> {
     {
         if codes.len() != c.image_tokens {
-            return Err(format!("una imagen de Show-o tiene {} códigos", c.image_tokens));
+            return Err(format!("a Show-o image has {} codes", c.image_tokens));
         }
         let mut rng = Rng(seed | 1);
         let n = codes.len();

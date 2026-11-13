@@ -1,6 +1,6 @@
 //! Draws a picture from a description with a model that makes images, such as Janus-Pro.
 //!
-//! `cargo run --release -p sim --example draw -- <carpeta> "<descripción>" salida.bmp [temperatura] [semilla]`
+//! `cargo run --release -p sim --example draw -- <folder> "<description>" output.bmp [temperature] [seed]`
 
 use sim::janus::Janus;
 use std::path::Path;
@@ -37,18 +37,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = Path::new(&args[1]);
     let temperature: f32 = args.get(4).map_or(1.0, |t| t.parse().unwrap());
     let seed: u64 = args.get(5).map_or(42, |s| s.parse().unwrap());
-    let janus = Janus::open(dir)?.ok_or("este modelo no genera imágenes")?;
+    let janus = Janus::open(dir)?.ok_or("this model does not generate images")?;
     let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| e.to_string())?;
     let text = format!("<|User|>: {}\n\n<|Assistant|>:", args[2]);
     let mut ids = vec![janus.config.bos];
     ids.extend(tokenizer.encode(text.as_str(), false).map_err(|e| e.to_string())?.get_ids());
     ids.push(janus.config.begin_image);
     let started = std::time::Instant::now();
-    // EXACTO=16 draws with the language model in the die's arithmetic at 16 bits.
-    let exact = std::env::var("EXACTO").ok().and_then(|bits| bits.parse().ok());
+    // EXACT=16 draws with the language model in the die's arithmetic at 16 bits.
+    let exact = std::env::var("EXACT").ok().and_then(|bits| bits.parse().ok());
     let tokens = janus.draw(&ids, temperature, seed, exact, |done, total| {
         if done % 48 == 0 {
-            eprintln!("{done} de {total} tokens de imagen, {:.0} s", started.elapsed().as_secs_f64());
+            eprintln!("{done} of {total} image tokens, {:.0} s", started.elapsed().as_secs_f64());
         }
     })?;
     let drawn = std::time::Instant::now();

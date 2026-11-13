@@ -36,7 +36,7 @@ fn a_damaged_image_is_reported() {
     let path = dir.join("manifest.json");
     let (manifest, created) = load_or_build(&weights, &path).unwrap();
     assert!(created);
-    assert!(!load_or_build(&weights, &path).unwrap().1, "la segunda vez se reutiliza");
+    assert!(!load_or_build(&weights, &path).unwrap().1, "the second time it is reused");
     let clean = verify(&weights, &manifest, false);
     assert!(clean.crc_errors.is_empty());
     assert_eq!(clean.cycles, 3 * clean.words);
@@ -96,7 +96,7 @@ mod chip_image {
             for (index, row) in bytes.chunks(row_bytes).enumerate() {
                 let (codes, factors) = matrix.cell_row(cell + 3 * index, cols, exponent, 16).unwrap();
                 let decoded: Vec<i64> = row[..code_bytes].chunks(2).map(|b| i64::from(i16::from_le_bytes([b[0], b[1]]))).collect();
-                assert_eq!(decoded, codes, "códigos de la fila {}", cell + 3 * index);
+                assert_eq!(decoded, codes, "codes of row {}", cell + 3 * index);
                 for (group, (scale, bias)) in factors.iter().enumerate() {
                     let at = code_bytes + 8 * group;
                     assert_eq!(i64::from(i32::from_le_bytes(row[at..at + 4].try_into().unwrap())), *scale);
@@ -133,13 +133,13 @@ mod chip_image {
                     // Each chip spreads its slice over its cells as one chip spreads the whole.
                     let global = chip * slice + cell + 3 * k;
                     let codes: Vec<i64> = row[..2 * cols].chunks(2).map(|b| i64::from(i16::from_le_bytes([b[0], b[1]]))).collect();
-                    assert_eq!(codes, matrix.cell_row(global, cols, exponent, 16).unwrap().0, "fila {global} en el chip {chip}");
+                    assert_eq!(codes, matrix.cell_row(global, cols, exponent, 16).unwrap().0, "row {global} on chip {chip}");
                     seen.push(global);
                 }
             }
         }
         seen.sort();
-        assert_eq!(seen, (0..2 * slice).collect::<Vec<_>>(), "cada fila, en un solo chip");
+        assert_eq!(seen, (0..2 * slice).collect::<Vec<_>>(), "each row, on a single chip");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

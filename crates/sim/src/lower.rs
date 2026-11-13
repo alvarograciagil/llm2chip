@@ -172,7 +172,7 @@ fn matrices_of(program: &Program, op: &Op) -> Vec<(String, usize, usize)> {
 fn program_dst(op: &Op) -> usize {
     match op {
         Op::Matvec { dst, .. } => *dst,
-        _ => unreachable!("solo los productos se encadenan"),
+        _ => unreachable!("only products are chained"),
     }
 }
 
@@ -634,10 +634,10 @@ impl Layout {
                 };
                 if table_out && table && in_registers.insert(name.clone()) {
                     if outside.as_ref().is_some_and(|t| t.name != name) {
-                        return Err("solo una tabla de embedding puede quedarse en la imagen".into());
+                        return Err("only one embedding table can stay in the image".into());
                     }
                     if cols > 1 << config.index_bits {
-                        return Err(format!("una fila de {name} tiene {cols} elementos y el direccionamiento solo llega a {}", 1usize << config.index_bits));
+                        return Err(format!("a row of {name} has {cols} elements and addressing only reaches {}", 1usize << config.index_bits));
                     }
                     let matrix = weights.matrix(&name)?;
                     let exponent = matrix.exponent(cols);
@@ -650,7 +650,7 @@ impl Layout {
                     outside = Some(OutsideTable { name: name.clone(), register: reg, cols: cols as u32, mantissas });
                 } else if chip_tokens.is_some() && matrices_in_registers && (!cells || table) && in_registers.insert(name.clone()) {
                     if rows * cols > 1 << config.index_bits {
-                        return Err(format!("la matriz {name} tiene {} elementos y el direccionamiento solo llega a {}", rows * cols, 1usize << config.index_bits));
+                        return Err(format!("matrix {name} has {} elements and addressing only reaches {}", rows * cols, 1usize << config.index_bits));
                     }
                     let matrix = weights.matrix(&name)?;
                     let exponent = matrix.exponent(cols);
@@ -678,7 +678,7 @@ impl Layout {
                     let code_bits = matrix.cell_code_bits(cols, config.cell.activation_bits);
                     // Weights with no format of their own go in whole, one mantissa each.
                     if code_bits > config.cell.weight_bits {
-                        return Err(format!("las celdas guardan pesos de {} bits y {name}, sin cuantizar, necesita {code_bits}: dale un formato de pesos o celdas más anchas", config.cell.weight_bits));
+                        return Err(format!("the cells keep {}-bit weights and {name}, unquantized, needs {code_bits}: give it a weight format or wider cells", config.cell.weight_bits));
                     }
                     let packing = (0..=config.cell.most_packing()).rev().find(|p| code_bits << p <= config.cell.weight_bits && group.is_multiple_of(1 << p)).unwrap_or(0);
                     let exponent = matrix.exponent(cols);
@@ -864,7 +864,7 @@ impl Layout {
         let spread = spread_buffers(program);
         let next = next.get();
         if next >= (1 << config.reg_bits) - 2 {
-            return Err(format!("faltan registros: se necesitan {next}"));
+            return Err(format!("registers are missing: {next} are needed"));
         }
         let key_capacity = chip_tokens.filter(|_| cells && config.features.combines()).map(|tokens| match config.features.key_shift {
             0 => (tokens as u32).next_multiple_of(1 << config.features.lane_bits),
@@ -872,29 +872,29 @@ impl Layout {
         });
         if let (Some(tokens), Some(capacity)) = (chip_tokens, key_capacity) {
             if tokens as u32 > capacity {
-                return Err(format!("cada columna de claves tiene sitio para {capacity} tokens y el contexto es de {tokens}"));
+                return Err(format!("each key column has room for {capacity} tokens and the context is {tokens}"));
             }
             if let Some(vision) = program.vision.as_ref().filter(|v| v.patches as u32 > capacity) {
-                return Err(format!("cada columna de claves tiene sitio para {capacity} tokens y una imagen puede tener {} parches", vision.patches));
+                return Err(format!("each key column has room for {capacity} tokens and an image can have {} patches", vision.patches));
             }
         }
         // A pass of the cells drains whole blocks: fewer cells than lanes on a unit would
         // leave lanes idle and its rows out of place.
         let (units, lanes) = (1u32 << config.features.cluster_bits, 1u32 << config.features.lane_bits);
         if cells && config.cells / units < lanes {
-            return Err(format!("cada unidad necesita al menos {lanes} celdas, una por carril, y tiene {}", config.cells / units));
+            return Err(format!("each unit needs at least {lanes} cells, one per lane, and has {}", config.cells / units));
         }
         // A cell applies one group's factors while it adds up the next, so no group is shorter.
         let steps = config.features.factor_steps as usize;
         if let Some(short) = cell_plan.iter().find(|e| e.group < steps) {
-            return Err(format!("{} tiene grupos de {} columnas y cada celda tarda {steps} ciclos en aplicar sus factores", short.name, short.group));
+            return Err(format!("{} has groups of {} columns and each cell takes {steps} cycles to apply its factors", short.name, short.group));
         }
         let (in_cells, cell_weights, cell_factors) = place_in_cells(&cell_plan, config.cells as usize, 1 << config.features.cluster_bits, 1 << config.features.lane_bits);
         chains.retain(|_, parts| parts.len() > 1);
         let followers: HashSet<String> = chains.values().flat_map(|parts| parts[1..].iter().map(|(name, _)| name.clone())).collect();
         let reach = 1u64 << config.index_bits.min(config.cell.addr_bits);
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
-            return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
+            return Err(format!("the cells need {cell_weights} weight positions and {cell_factors} groups, and only reach {reach}"));
         }
         // The token a routine takes is a row of an embedding table, a patch, or one of the
         // vocabulary: as far as the largest of them, which is how far its registers reach.
@@ -1044,7 +1044,7 @@ impl Layout {
     /// group. The logits are made on the first chip of all, from the final hidden state the
     /// last chip of all sends it.
     pub fn group_microprogram(&self, program: &Program, plan: &[Range<usize>], stage: usize) -> Result<Microprogram, String> {
-        let shard = self.shard.filter(|s| s.grouped).ok_or("el reparto mixto necesita la porción del chip en su grupo")?;
+        let shard = self.shard.filter(|s| s.grouped).ok_or("the mixed split needs the chip's share within its group")?;
         let (member, members) = (shard.index as usize, shard.chips as usize);
         let token = Expr::var(Var::Token);
         let position = Expr::var(Var::Position);
@@ -1089,7 +1089,7 @@ impl Layout {
         let lanes = 1u32 << self.config.features.lane_bits;
         register_extents(steps, &mut ranges, lanes, self.config.features.key_shift, &mut self.extents.borrow_mut(), &mut self.windows.borrow_mut());
         match self.highest_register() {
-            Some(r) if r >= self.next => Err(format!("faltan registros: las rutinas llegan al {r} y el die tiene {}", self.next)),
+            Some(r) if r >= self.next => Err(format!("registers are missing: the routines reach {r} and the die has {}", self.next)),
             _ => {
                 code.assemble(steps);
                 Ok(())
@@ -1363,7 +1363,7 @@ impl Layout {
             Op::EmbRead { table, .. } if self.lookup_tables.contains(table) => Some(table.clone()),
             _ => None,
         });
-        let name = text_table.or_else(|| self.lookup_tables.iter().next().cloned()).expect("una tabla");
+        let name = text_table.or_else(|| self.lookup_tables.iter().next().cloned()).expect("a table");
         let Some(cols) = all_ops(program).find_map(|inst| match &inst.op {
             Op::EmbRead { table, dst } if *table == name => Some(program.buffers[*dst] as u32),
             _ => None,
@@ -1402,7 +1402,7 @@ impl Layout {
                 Ok(())
             }
             ENTRY_DRAFT | ENTRY_DRAFT_LOGITS => {
-                let draft = program.draft.as_ref().ok_or("este modelo no tiene cabeza MTP")?;
+                let draft = program.draft.as_ref().ok_or("this model has no MTP head")?;
                 let (list, rope) = if routine == ENTRY_DRAFT { (&draft.ops[..draft.logits_from], true) } else { (&draft.ops[draft.logits_from..], false) };
                 self.run_list(ops, program, list, token, position, rope)
             }
@@ -1543,7 +1543,7 @@ impl Layout {
     }
 
     pub fn run_draft<O: BlockOps>(&self, ops: &mut O, program: &Program, token: O::N, position: O::N, want_logits: bool) -> Result<(), String> {
-        let draft = program.draft.as_ref().ok_or("este modelo no tiene cabeza MTP")?;
+        let draft = program.draft.as_ref().ok_or("this model has no MTP head")?;
         let limit = if want_logits { draft.ops.len() } else { draft.logits_from };
         self.run_list(ops, program, &draft.ops[..limit], token, position, true)
     }
@@ -1557,12 +1557,12 @@ impl Layout {
             return Ok(());
         }
         if program.local_rope_theta.is_some() {
-            return Err("este modelo tiene dos tablas de rotación y solo se reescribe la principal".into());
+            return Err("this model has two rotation tables and only the main one is rewritten".into());
         }
         let section = match section {
             Some(section) => section,
             None if positions[1] == positions[0] && positions[2] == positions[0] => [self.rope_half, 0, 0],
-            None => return Err("tres posiciones distintas sin las secciones de M-RoPE".into()),
+            None => return Err("three different positions without the M-RoPE sections".into()),
         };
         rotations.insert((0, slot), mixed_rope_row(program.rope_theta, program.rope_scaling, self.rope_half, positions, section));
         Ok(())
@@ -1575,13 +1575,13 @@ impl Layout {
 
     /// An image head's scores of each code, from the final hidden state the last token left.
     pub fn run_image_logits<O: BlockOps>(&self, ops: &mut O, program: &Program) -> Result<(), String> {
-        let image = program.image.as_ref().ok_or("este modelo no dibuja")?;
+        let image = program.image.as_ref().ok_or("this model does not draw")?;
         self.run_list(ops, program, &image.logits_ops, 0.into(), 0.into(), false)
     }
 
     /// The vector that goes in for a drawn code, in place of a token's embedding.
     pub fn run_image_input<O: BlockOps>(&self, ops: &mut O, program: &Program, code: O::N) -> Result<(), String> {
-        let image = program.image.as_ref().ok_or("este modelo no dibuja")?;
+        let image = program.image.as_ref().ok_or("this model does not draw")?;
         self.run_list(ops, program, &image.input_ops, code, 0.into(), false)
     }
 
@@ -1705,7 +1705,7 @@ impl Layout {
         let zero: O::N = 0.into();
         match op {
             Op::EmbRead { dst, .. } if self.from_image.get() => {
-                let output = program.vision.as_ref().ok_or("este modelo no lee imágenes")?.output;
+                let output = program.vision.as_ref().ok_or("this model does not read images")?.output;
                 let len = program.buffers[*dst] as u32;
                 ops.copy_part(self.reg(output), zero, self.reg(*dst), zero, len.into());
                 ops.normalize(self.reg(*dst), len.into());
@@ -1718,7 +1718,7 @@ impl Layout {
                 ops.normalize(self.reg(*dst), len.into());
             }
             Op::Matvec { matrix, src, dst } if self.by_rows.contains(matrix) => {
-                let Shard { index, chips, .. } = self.shard.expect("reparto por filas");
+                let Shard { index, chips, .. } = self.shard.expect("split by rows");
                 let share = |buffer: usize| program.buffers[buffer] as u32 / chips;
                 if let Some(chain) = self.chains.get(matrix) {
                     let parts: Vec<(u32, u32, u32, u32)> = chain.iter().map(|(name, dst)| (self.weights[name], self.reg(*dst), share(*dst), index * share(*dst))).collect();

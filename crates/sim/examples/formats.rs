@@ -1,5 +1,5 @@
 //! Measures how much each weight format costs in output quality, on real weights.
-//! `cargo run --release -p sim --example formats -- <carpeta> <tokens> q8 q4_group fp16 ...`
+//! `cargo run --release -p sim --example formats -- <folder> <tokens> q8 q4_group fp16 ...`
 
 use compiler::compile_qwen3_5;
 use netlist::format::{WeightCoding, WeightFormat};

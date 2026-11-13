@@ -82,25 +82,25 @@ fn show_o_s_scores_in_the_die_arithmetic_match_the_floating_point_ones() {
     let scores = chip.scores(&ids, &positions, &image).unwrap();
     assert_eq!(scores.len(), float.len());
     let (error, agree, masked) = compare(&scores, &float, &image, model.config.mask_token, CODEBOOK);
-    eprintln!("diferencia mayor {:.3} % de la mayor puntuación; mejor código igual en {agree} de {masked}", error * 100.0);
+    eprintln!("largest difference {:.3} % of the largest score; same best code in {agree} of {masked}", error * 100.0);
     assert!(error < 0.02, "{error}");
-    assert!(agree * 10 >= masked * 9, "{agree} de {masked}");
+    assert!(agree * 10 >= masked * 9, "{agree} of {masked}");
     // The text and the image's other rows matter: with another text the scores move far
     // more than the arithmetic's error.
     let other = model.scores(&[12, 7], &image);
     let (moved, _, _) = compare(&other, &float, &image, model.config.mask_token, CODEBOOK);
-    assert!(moved > 10.0 * error, "otro texto mueve las puntuaciones {moved}");
+    assert!(moved > 10.0 * error, "another text moves the scores {moved}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The real Show-o, in `LLM2CHIP_SHOWO` or `~/.llm2chip/models/Show-o`: one pass over a
 /// picture with its middle masked, on the chip's arithmetic and in floating point.
 #[test]
-#[ignore = "lenta: Show-o real, 1 300 M de parámetros, una pasada en la aritmética del die"]
+#[ignore = "slow: the real Show-o, 1,300 M parameters, one pass in the die's arithmetic"]
 fn the_real_show_o_scores_a_masked_picture_as_in_floating_point() {
     let dir = std::env::var_os("LLM2CHIP_SHOWO").map(std::path::PathBuf::from).unwrap_or_else(|| Path::new(&std::env::var("HOME").unwrap()).join(".llm2chip/models/Show-o"));
     if !dir.join("config.json").exists() {
-        eprintln!("no está Show-o en {}: se omite", dir.display());
+        eprintln!("Show-o is not in {}: skipped", dir.display());
         return;
     }
     let model = ShowO::open(&dir).unwrap().unwrap();
@@ -135,10 +135,10 @@ fn the_real_show_o_scores_a_masked_picture_as_in_floating_point() {
     eprintln!("chip preparado en {:.0} s", started.elapsed().as_secs_f64());
     let started = std::time::Instant::now();
     let scores = chip.scores(&ids, &positions, &image).unwrap();
-    eprintln!("aritmética del die: {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("die arithmetic: {:.0} s", started.elapsed().as_secs_f64());
     let (error, agree, masked) = compare(&scores, &float, &image, model.config.mask_token, model.config.codebook as usize);
-    eprintln!("diferencia mayor {:.2} % de la mayor puntuación; mejor código igual en {agree} de {masked}", error * 100.0);
-    assert!(agree * 10 >= masked * 9, "{agree} de {masked}");
+    eprintln!("largest difference {:.2} % of the largest score; same best code in {agree} of {masked}", error * 100.0);
+    assert!(agree * 10 >= masked * 9, "{agree} of {masked}");
 }
 
 /// Show-o's routines, numbered as the chip's microprogram numbers them, on any die: the
@@ -189,7 +189,7 @@ fn die_for(program: &compiler::Program, weights: &sim::Weights, context: usize, 
 }
 
 #[test]
-#[ignore = "lenta: Show-o de juguete en las puertas del die"]
+#[ignore = "slow: toy Show-o on the die's gates"]
 fn show_o_s_routines_on_the_die_s_gates_give_the_exact_machine_s_scores() {
     gates_match_the_exact_machine(None, "gates");
 }
@@ -198,7 +198,7 @@ fn show_o_s_routines_on_the_die_s_gates_give_the_exact_machine_s_scores() {
 /// with groups of 32: the cells keep each weight's 8-bit code and each group's scale and
 /// bias, as they keep the weights of a checkpoint that comes quantized.
 #[test]
-#[ignore = "lenta: Show-o de juguete en las puertas del die, pesos de 8 bits"]
+#[ignore = "slow: toy Show-o on the die's gates, 8-bit weights"]
 fn floating_point_weights_in_an_8_bit_format_go_into_8_bit_cells() {
     gates_match_the_exact_machine(Some(EIGHT_BITS), "8bits");
 }
@@ -277,8 +277,8 @@ fn gates_match_the_exact_machine(format: Option<netlist::format::WeightFormat>, 
     sim.set("load_scale", 0).unwrap();
     if format.is_some() {
         let (codes, factors) = layout.cell_contents(&weights, 0).unwrap();
-        assert!(codes.iter().all(|c| (-128..128).contains(c)), "códigos de 8 bits");
-        assert!(factors.len() > 1, "una escala y un sesgo por grupo");
+        assert!(codes.iter().all(|c| (-128..128).contains(c)), "8-bit codes");
+        assert!(factors.len() > 1, "one scale and one bias per group");
     }
     let mut cycles = 0;
     let gates = {
@@ -291,8 +291,8 @@ fn gates_match_the_exact_machine(format: Option<netlist::format::WeightFormat>, 
             shape.layers,
         )
     };
-    eprintln!("Show-o de juguete en puertas: {cycles} ciclos");
-    assert_eq!(gates, exact, "puntuaciones de los códigos");
+    eprintln!("toy Show-o in gates: {cycles} cycles");
+    assert_eq!(gates, exact, "code scores");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -317,7 +317,7 @@ fn the_firmware_runs_show_o_s_pass_as_the_host_ordered_it() {
     let program = sim::showo_chip::program(&shape);
     let (ids, positions) = config.text_prefix(&[5, 17, 23]);
     let first = positions[0] as u32;
-    assert!(first > 0, "un texto corto empieza más adelante");
+    assert!(first > 0, "a short text starts further on");
     let mask_token = config.mask_token;
     let codes: Vec<u32> = (0..IMAGE as u32).map(|i| if i % 3 == 0 { mask_token } else { config.first_code() + (i * 5) % CODEBOOK as u32 }).collect();
     let image: Vec<u32> = std::iter::once(config.start_of_image()).chain(codes).chain([config.end_of_image()]).collect();
@@ -371,14 +371,14 @@ fn the_firmware_runs_show_o_s_pass_as_the_host_ordered_it() {
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
-        assert!(cpu.cycle < 500_000_000, "el firmware no termina");
+        assert!(cpu.cycle < 500_000_000, "the firmware does not finish");
     }
     // Each segment loaded at boot reports a dot first.
     let start = bus.tx.iter().position(|b| *b != b'.').unwrap_or(bus.tx.len());
     let sent: Vec<u32> = bus.tx[start..].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).map(|w| w & ((1u32 << die.cell.activation_bits) - 1)).collect();
-    eprintln!("firmware: {} ciclos de CPU, {} palabras", cpu.cycle, sent.len());
+    eprintln!("firmware: {} CPU cycles, {} words", cpu.cycle, sent.len());
     assert_eq!(sent.len(), expected.len());
-    assert_eq!(sent, expected, "puntuaciones de los códigos");
+    assert_eq!(sent, expected, "code scores");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -445,7 +445,7 @@ fn fill_chip(tag: &str, steps: usize, outside: bool) -> Option<FillChip> {
     let expected = fill_on_die(&mut vm, &layout, &program, &showo, &config, die.cell.activation_bits, &codes, &fill);
     for (place, known) in codes.iter().enumerate() {
         if let Some(code) = known {
-            assert_eq!(expected[place], *code, "un código conocido se queda");
+            assert_eq!(expected[place], *code, "a known code stays");
         }
     }
 
@@ -479,7 +479,7 @@ fn fill_on_iss(chip: &FillChip) -> (Vec<u8>, u64) {
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
-        assert!(cpu.cycle < 2_000_000_000, "el firmware no termina");
+        assert!(cpu.cycle < 2_000_000_000, "the firmware does not finish");
     }
     (bus.tx.clone(), cpu.cycle)
 }
@@ -497,8 +497,8 @@ fn sent_codes(bytes: &[u8]) -> Vec<u32> {
 fn the_firmware_fills_an_image_as_the_host_ordered_it() {
     let Some(chip) = fill_chip("iss", 4, false) else { return };
     let (sent, cycles) = fill_on_iss(&chip);
-    eprintln!("relleno en el chip: {cycles} ciclos de CPU, códigos {:?}", sent_codes(&sent));
-    assert_eq!(sent_codes(&sent), chip.expected, "los códigos del relleno");
+    eprintln!("fill on the chip: {cycles} CPU cycles, codes {:?}", sent_codes(&sent));
+    assert_eq!(sent_codes(&sent), chip.expected, "the fill's codes");
     std::fs::remove_dir_all(&chip.dir).ok();
 }
 
@@ -509,13 +509,13 @@ fn the_firmware_fills_an_image_as_the_host_ordered_it() {
 fn the_firmware_fills_an_image_with_the_table_in_the_image() {
     let Some(chip) = fill_chip("fuera", 4, true) else { return };
     let (sent, _) = fill_on_iss(&chip);
-    assert_eq!(sent_codes(&sent), chip.expected, "los códigos del relleno");
+    assert_eq!(sent_codes(&sent), chip.expected, "the fill's codes");
     std::fs::remove_dir_all(&chip.dir).ok();
 }
 
 /// The same chip in gates, CPU and all: the same bytes in the same cycles.
 #[test]
-#[ignore = "lenta: el chip entero en puertas rellena una imagen de juguete, millones de ciclos"]
+#[ignore = "slow: the whole chip in gates fills in a toy image, millions of cycles"]
 fn the_whole_chip_fills_an_image_in_gates_as_at_instruction_level() {
     let Some(chip) = fill_chip("gates", 2, false) else { return };
     let (expected, cycles) = fill_on_iss(&chip);
@@ -532,11 +532,11 @@ fn the_whole_chip_fills_an_image_in_gates_as_at_instruction_level() {
 /// The real Show-o fits the firmware's 32-bit addresses with its embedding table left in
 /// the image and the guidance kept as the final state: 4 096 cells of 16-bit weights.
 #[test]
-#[ignore = "lenta: lee los 1 300 M de pesos del Show-o real para repartirlos en las celdas"]
+#[ignore = "slow: reads the real Show-o's 1,300 M weights to spread them over the cells"]
 fn the_real_show_o_fits_the_addressed_die_with_its_table_in_the_image() {
     let dir = std::env::var_os("LLM2CHIP_SHOWO").map(std::path::PathBuf::from).unwrap_or_else(|| Path::new(&std::env::var("HOME").unwrap()).join(".llm2chip/models/Show-o"));
     if !dir.join("config.json").exists() {
-        eprintln!("no está Show-o en {}: se omite", dir.display());
+        eprintln!("Show-o is not in {}: skipped", dir.display());
         return;
     }
     let (shape, config, weights) = sim::showo_chip::weights(&dir, sim::Weights::open(&dir).unwrap()).unwrap();
@@ -545,9 +545,9 @@ fn the_real_show_o_fits_the_addressed_die_with_its_table_in_the_image() {
     let base = die_config();
     let base = netlist::DieConfig { cells: 4096, cell: netlist::CellConfig { weight_bits: 16, accumulator_bits: 48, ..base.cell }, scale_bits: 21, ..base };
     let die = sim::showo_chip::addressed_die(&program, &weights, base, context).unwrap();
-    eprintln!("{} bits de registro y {} de elemento", die.reg_bits, die.index_bits);
+    eprintln!("{} register bits and {} element bits", die.reg_bits, die.index_bits);
     assert!(die.reg_bits + die.index_bits <= 32);
     let layout = sim::lower::Layout::with_cells_table_outside(&program, &weights, die, context).unwrap();
-    let table = layout.outside_table().expect("la tabla en la imagen");
+    let table = layout.outside_table().expect("the table in the image");
     assert_eq!((table.cols as usize, table.mantissas.len()), (shape.hidden, shape.vocab * shape.hidden));
 }

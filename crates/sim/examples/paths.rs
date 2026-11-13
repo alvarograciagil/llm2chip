@@ -12,7 +12,7 @@ fn main() {
             let mut hidden = 0;
             for (net, time) in trace {
                 if net.starts_with('#') { hidden += 1; if hidden % 10 == 1 { println!("   {time:6.1} {net}"); } continue; }
-                println!("   {time:6.1} {net}  (+{hidden} sin nombre)");
+                println!("   {time:6.1} {net}  (+{hidden} unnamed)");
                 hidden = 0;
             }
         }

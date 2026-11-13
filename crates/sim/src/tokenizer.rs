@@ -25,7 +25,7 @@ pub struct TokenizerTables {
 }
 
 fn refuse<T>(what: &str) -> Result<T, String> {
-    Err(format!("el tokenizador del chip no admite {what}"))
+    Err(format!("the chip's tokenizer does not support {what}"))
 }
 
 fn characters() -> impl Iterator<Item = char> {
@@ -68,7 +68,7 @@ impl Node {
 
     fn emit(&self, code: &mut Vec<u32>) -> Result<(), String> {
         if code.len() > MAX_PROGRAM_WORDS {
-            return refuse("una expresión regular tan larga");
+            return refuse("such a long regular expression");
         }
         match self {
             Node::Char(value) => code.extend([R_CHAR, *value]),
@@ -99,7 +99,7 @@ impl Node {
                 match max {
                     None => {
                         if node.nullable() {
-                            return refuse("repetir sin límite algo que puede ser vacío");
+                            return refuse("repeating without limit something that can be empty");
                         }
                         let split = code.len();
                         code.extend([R_SPLIT, 0, 0]);
@@ -206,10 +206,10 @@ impl Parser<'_> {
         self.at += 1;
         let greedy = !self.eat('?');
         if self.peek() == Some('+') {
-            return refuse("cuantificadores posesivos en sus expresiones regulares");
+            return refuse("possessive quantifiers in its regular expressions");
         }
         if matches!(self.peek(), Some('*' | '{')) && self.counted_or_star() {
-            return refuse("cuantificadores encadenados en sus expresiones regulares");
+            return refuse("chained quantifiers in its regular expressions");
         }
         Ok(Node::Repeat { node: Box::new(atom), min, max, greedy })
     }
@@ -255,7 +255,7 @@ impl Parser<'_> {
             self.at += 2;
             let inner = self.alternatives()?;
             if contains_look(&inner) {
-                return refuse("miradas anidadas en sus expresiones regulares");
+                return refuse("nested lookarounds in its regular expressions");
             }
             Node::Look { node: Box::new(inner), negative }
         } else if self.eat('?') {
@@ -265,7 +265,7 @@ impl Parser<'_> {
                     Some('i') => self.case_insensitive = enable,
                     Some('-') => enable = false,
                     Some(':' | ')') => break,
-                    _ => return refuse("esa construcción de sus expresiones regulares"),
+                    _ => return refuse("that construct in its regular expressions"),
                 }
                 self.at += 1;
             }
@@ -286,7 +286,7 @@ impl Parser<'_> {
         };
         if close {
             if !self.eat(')') {
-                return Err("expresión regular sin cerrar".into());
+                return Err("an unclosed regular expression".into());
             }
             self.case_insensitive = saved;
         }
@@ -294,7 +294,7 @@ impl Parser<'_> {
     }
 
     fn set(&mut self, atom: &str) -> Result<Node, String> {
-        let parsed = regex_syntax::ParserBuilder::new().case_insensitive(self.case_insensitive).build().parse(atom).map_err(|e| format!("expresión regular no admitida: {e}"))?;
+        let parsed = regex_syntax::ParserBuilder::new().case_insensitive(self.case_insensitive).build().parse(atom).map_err(|e| format!("an unsupported regular expression: {e}"))?;
         match parsed.kind() {
             HirKind::Class(Class::Unicode(class)) => Ok(Node::Class(self.builder.class(class.iter().map(|r| (r.start() as u32, r.end() as u32)).collect()))),
             HirKind::Literal(literal) => {
@@ -302,10 +302,10 @@ impl Parser<'_> {
                 let mut letters = text.chars();
                 match (letters.next(), letters.next()) {
                     (Some(c), None) => Ok(Node::Char(c as u32)),
-                    _ => Err(format!("expresión regular no admitida: {atom}")),
+                    _ => Err(format!("an unsupported regular expression: {atom}")),
                 }
             }
-            _ => Err(format!("expresión regular no admitida: {atom}")),
+            _ => Err(format!("an unsupported regular expression: {atom}")),
         }
     }
 
@@ -328,7 +328,7 @@ impl Parser<'_> {
         }
         while depth > 0 {
             match self.peek() {
-                None => return Err("clase de caracteres sin cerrar".into()),
+                None => return Err("an unclosed character class".into()),
                 Some('\\') => self.at += 2,
                 Some('[') => {
                     depth += 1;
@@ -349,11 +349,11 @@ impl Parser<'_> {
         let end = (self.at + digits).min(self.text.len());
         let code: String = self.text[self.at..end].iter().collect();
         self.at = end;
-        u32::from_str_radix(&code, 16).ok().and_then(char::from_u32).ok_or_else(|| format!("escape no válido: {code}"))
+        u32::from_str_radix(&code, 16).ok().and_then(char::from_u32).ok_or_else(|| format!("an invalid escape: {code}"))
     }
 
     fn escape(&mut self) -> Result<Node, String> {
-        let c = self.peek().ok_or("expresión regular que acaba en \\")?;
+        let c = self.peek().ok_or("a regular expression ending in \\")?;
         self.at += 1;
         match c {
             's' | 'S' | 'd' | 'D' | 'w' | 'W' => self.set(&format!("\\{c}")),
@@ -384,7 +384,7 @@ impl Parser<'_> {
                 }
                 let code: String = self.text[start..self.at].iter().collect();
                 self.at += 1;
-                let value = u32::from_str_radix(&code, 16).ok().and_then(char::from_u32).ok_or("escape no válido")?;
+                let value = u32::from_str_radix(&code, 16).ok().and_then(char::from_u32).ok_or("an invalid escape")?;
                 self.literal(value)
             }
             'x' => {
@@ -398,13 +398,13 @@ impl Parser<'_> {
             'A' => Ok(Node::Assert(R_TEXT_START)),
             'z' => Ok(Node::Assert(R_TEXT_END)),
             'Z' => Ok(Node::Assert(R_TEXT_END_NEWLINE)),
-            c if c.is_ascii_alphanumeric() => refuse(&format!("\\{c} en sus expresiones regulares")),
+            c if c.is_ascii_alphanumeric() => refuse(&format!("\\{c} in its regular expressions")),
             c => self.literal(c),
         }
     }
 
     fn atom(&mut self) -> Result<Node, String> {
-        let c = self.peek().ok_or("expresión regular incompleta")?;
+        let c = self.peek().ok_or("an incomplete regular expression")?;
         self.at += 1;
         match c {
             '(' => self.group(),
@@ -434,7 +434,7 @@ fn split_mode(value: &Value) -> Result<u32, String> {
         Some("MergedWithPrevious") => Ok(SPLIT_PREVIOUS),
         Some("MergedWithNext") => Ok(SPLIT_NEXT),
         Some("Contiguous") => Ok(SPLIT_CONTIGUOUS),
-        _ => refuse(&format!("el modo de corte {value}")),
+        _ => refuse(&format!("the split mode {value}")),
     }
 }
 
@@ -478,7 +478,7 @@ impl Builder {
         let mut parser = Parser { text: pattern.chars().collect(), at: 0, case_insensitive: false, builder: self };
         let node = parser.alternatives()?;
         if parser.at != parser.text.len() {
-            return Err(format!("expresión regular no admitida: {pattern}"));
+            return Err(format!("an unsupported regular expression: {pattern}"));
         }
         self.program(&node)
     }
@@ -496,13 +496,13 @@ impl Builder {
     fn pattern(&mut self, value: &Value) -> Result<u32, String> {
         if let Some(text) = value.as_str().or_else(|| value["String"].as_str()) {
             if text.is_empty() {
-                return refuse("un patrón vacío");
+                return refuse("an empty pattern");
             }
             return self.literal(text);
         }
         match value["Regex"].as_str() {
             Some(pattern) => self.regex(pattern),
-            None => refuse(&format!("el patrón {value}")),
+            None => refuse(&format!("the pattern {value}")),
         }
     }
 
@@ -583,7 +583,7 @@ impl Builder {
         let kind = value["type"].as_str().unwrap_or("");
         match kind {
             "Sequence" => {
-                for item in value["normalizers"].as_array().ok_or("normalizador sin lista")? {
+                for item in value["normalizers"].as_array().ok_or("a normalizer without a list")? {
                     self.normalizer(item, steps)?;
                 }
             }
@@ -613,7 +613,7 @@ impl Builder {
                 steps.push(step(S_PREPEND, at, length, 0));
             }
             "ByteLevel" => steps.push(step(S_BYTES, 0, 0, 0)),
-            other => return refuse(&format!("el normalizador «{other}»")),
+            other => return refuse(&format!("the “{other}” normalizer")),
         }
         Ok(())
     }
@@ -625,7 +625,7 @@ impl Builder {
         let kind = value["type"].as_str().unwrap_or("");
         match kind {
             "Sequence" => {
-                for item in value["pretokenizers"].as_array().ok_or("pre-tokenizador sin lista")? {
+                for item in value["pretokenizers"].as_array().ok_or("a pre-tokenizer without a list")? {
                     self.pre_tokenizer(item, steps)?;
                 }
             }
@@ -655,7 +655,7 @@ impl Builder {
                 steps.push(step(S_SPLIT, pattern, SPLIT_REMOVED, 0));
             }
             "CharDelimiterSplit" => {
-                let delimiter = value["delimiter"].as_str().and_then(|d| d.chars().next()).ok_or("delimitador vacío")?;
+                let delimiter = value["delimiter"].as_str().and_then(|d| d.chars().next()).ok_or("an empty delimiter")?;
                 let pattern = self.program(&Node::Char(delimiter as u32))?;
                 steps.push(step(S_SPLIT, pattern, SPLIT_REMOVED, 0));
             }
@@ -688,14 +688,14 @@ impl Builder {
                     steps.push(step(S_SPLIT, mark, SPLIT_NEXT, 0));
                 }
             }
-            other => return refuse(&format!("el pre-tokenizador «{other}»")),
+            other => return refuse(&format!("the “{other}” pre-tokenizer")),
         }
         Ok(())
     }
 
     fn punctuation(&mut self) -> Result<u32, String> {
         let parsed = regex_syntax::parse(r"[\p{P}!-/:-@\[-`{-~]").map_err(|e| e.to_string())?;
-        let HirKind::Class(Class::Unicode(class)) = parsed.kind() else { return Err("clase de puntuación".into()) };
+        let HirKind::Class(Class::Unicode(class)) = parsed.kind() else { return Err("a punctuation class".into()) };
         let class = self.class(class.iter().map(|r| (r.start() as u32, r.end() as u32)).collect());
         self.program(&Node::Class(class))
     }
@@ -707,11 +707,11 @@ impl Builder {
     }
 
     fn special_tokens(&self, processor: &Value, before: &mut Vec<u32>, after: &mut Vec<u32>) -> Result<(), String> {
-        let id_of = |pair: &Value| pair[1].as_u64().map(|v| v as u32).ok_or("procesador sin identificador");
+        let id_of = |pair: &Value| pair[1].as_u64().map(|v| v as u32).ok_or("a processor without an id");
         match processor["type"].as_str() {
             None | Some("ByteLevel") => {}
             Some("Sequence") => {
-                for item in processor["processors"].as_array().ok_or("procesador sin lista")? {
+                for item in processor["processors"].as_array().ok_or("a processor without a list")? {
                     self.special_tokens(item, before, after)?;
                 }
             }
@@ -721,18 +721,18 @@ impl Builder {
             }
             Some("TemplateProcessing") => {
                 let mut seen = false;
-                for item in processor["single"].as_array().ok_or("plantilla sin lista")? {
+                for item in processor["single"].as_array().ok_or("a template without a list")? {
                     if item.get("Sequence").is_some() {
                         seen = true;
                         continue;
                     }
-                    let name = item["SpecialToken"]["id"].as_str().ok_or("plantilla no válida")?;
-                    let ids = processor["special_tokens"][name]["ids"].as_array().ok_or("plantilla sin el token")?;
+                    let name = item["SpecialToken"]["id"].as_str().ok_or("an invalid template")?;
+                    let ids = processor["special_tokens"][name]["ids"].as_array().ok_or("a template without the token")?;
                     let target = if seen { &mut *after } else { &mut *before };
                     target.extend(ids.iter().filter_map(Value::as_u64).map(|v| v as u32));
                 }
             }
-            Some(other) => return refuse(&format!("el post-procesador «{other}»")),
+            Some(other) => return refuse(&format!("the “{other}” post-processor")),
         }
         Ok(())
     }
@@ -760,14 +760,14 @@ fn composition_parts() -> (Vec<char>, Vec<char>) {
 
 /// Each token's output bytes, and how the start of the output is cleaned.
 fn decoded(tokens: &mut [Vec<u8>], decoder: &Value, fused: &mut bool, leading: &mut u32, first_token: &mut bool) -> Result<(), String> {
-    let gpt2: HashMap<char, u8> = (0..=255u8).map(|b| (char::from_u32(byte_character(b)).expect("carácter"), b)).collect();
+    let gpt2: HashMap<char, u8> = (0..=255u8).map(|b| (char::from_u32(byte_character(b)).expect("character"), b)).collect();
     match decoder["type"].as_str() {
         None => {
             tokens.iter_mut().for_each(|t| t.insert(0, b' '));
             *leading += 1;
         }
         Some("Sequence") => {
-            for item in decoder["decoders"].as_array().ok_or("decodificador sin lista")? {
+            for item in decoder["decoders"].as_array().ok_or("a decoder without a list")? {
                 decoded(tokens, item, fused, leading, first_token)?;
             }
         }
@@ -790,7 +790,7 @@ fn decoded(tokens: &mut [Vec<u8>], decoder: &Value, fused: &mut bool, leading: &
         Some("Replace") => {
             let content = decoder["content"].as_str().unwrap_or("");
             let Some(pattern) = decoder["pattern"].as_str().or_else(|| decoder["pattern"]["String"].as_str()) else {
-                return refuse("un decodificador Replace con expresión regular");
+                return refuse("a Replace decoder with a regular expression");
             };
             tokens.iter_mut().for_each(|t| *t = String::from_utf8_lossy(t).replace(pattern, content).into_bytes());
         }
@@ -808,7 +808,7 @@ fn decoded(tokens: &mut [Vec<u8>], decoder: &Value, fused: &mut bool, leading: &
             let (start, stop) = (decoder["start"].as_u64().unwrap_or(0) as usize, decoder["stop"].as_u64().unwrap_or(0) as usize);
             if *fused {
                 if content != ' ' || stop != 0 {
-                    return refuse("recortar el final del texto ya unido");
+                    return refuse("trimming the end of the already joined text");
                 }
                 *leading += start as u32;
             } else {
@@ -820,7 +820,7 @@ fn decoded(tokens: &mut [Vec<u8>], decoder: &Value, fused: &mut bool, leading: &
                 }
             }
         }
-        Some(other) => return refuse(&format!("el decodificador «{other}»")),
+        Some(other) => return refuse(&format!("the “{other}” decoder")),
     }
     Ok(())
 }
@@ -838,12 +838,12 @@ impl TokenizerTables {
         let model = &json["model"];
         let kind = model["type"].as_str().unwrap_or("");
         if kind != "BPE" && kind != "WordLevel" {
-            return refuse(&format!("el modelo «{kind}»"));
+            return refuse(&format!("the “{kind}” model"));
         }
         if !model["dropout"].is_null() {
-            return refuse("un modelo con dropout, que no es determinista");
+            return refuse("a model with dropout, which is not deterministic");
         }
-        let vocabulary = model["vocab"].as_object().ok_or("tokenizer.json sin vocabulario")?;
+        let vocabulary = model["vocab"].as_object().ok_or("a tokenizer.json without a vocabulary")?;
         let ids: HashMap<&str, u32> = vocabulary.iter().map(|(k, v)| (k.as_str(), v.as_u64().unwrap_or(0) as u32)).collect();
 
         let mut b = Builder { words: vec![0; HEADER_WORDS], blob: Vec::new(), classes: Vec::new(), class_numbers: HashMap::new(), forms: HashMap::new(), lowercase: None };
@@ -880,7 +880,7 @@ impl TokenizerTables {
                 temporary[F_BLOB] = temporary.len() as u32;
                 temporary.extend(blob_words(&b.blob));
                 let mut arena = vec![0u32; (content.len() * 64).max(4096)];
-                Tokenizer::new(&temporary).normalize(content.as_bytes(), &mut arena, &mut |byte| bytes.push(byte)).map_err(|_| "token añadido demasiado largo")?;
+                Tokenizer::new(&temporary).normalize(content.as_bytes(), &mut arena, &mut |byte| bytes.push(byte)).map_err(|_| "an added token too long")?;
             }
             normalized_text.push(bytes);
         }
@@ -975,7 +975,7 @@ impl TokenizerTables {
         b.words[F_FUSE_UNK] = model["fuse_unk"].as_bool().unwrap_or(false) as u32;
         b.words[F_UNK] = model["unk_token"].as_str().and_then(|u| ids.get(u)).map_or(0, |id| id + 1);
         if !is_bpe && b.words[F_UNK] == 0 {
-            return refuse("un vocabulario sin token desconocido");
+            return refuse("a vocabulary without an unknown token");
         }
         let (at, length) = b.string(prefix.as_bytes());
         b.words[F_PREFIX] = at;
@@ -1047,7 +1047,7 @@ impl TokenizerTables {
     pub fn encode(&self, text: &str) -> Result<Vec<u32>, String> {
         let mut arena = vec![0u32; self.words[F_ARENA_WORDS] as usize];
         let mut tokens = Vec::new();
-        Tokenizer::new(&self.words).encode(text.as_bytes(), &mut arena, &mut |id| tokens.push(id)).map_err(|_| "la memoria de trabajo del tokenizador no alcanza".to_string())?;
+        Tokenizer::new(&self.words).encode(text.as_bytes(), &mut arena, &mut |id| tokens.push(id)).map_err(|_| "the tokenizer's working memory is not enough".to_string())?;
         Ok(tokens)
     }
 

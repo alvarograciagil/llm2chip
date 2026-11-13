@@ -1,7 +1,7 @@
 //! Continues a text with any supported model, in floating point and choosing the most
 //! likely token each time.
 //!
-//! `cargo run --release -p sim --example complete -- <carpeta> "<texto>" [tokens]`
+//! `cargo run --release -p sim --example complete -- <folder> "<text>" [tokens]`
 
 use sim::{Engine, Numeric, Weights};
 use std::path::Path;

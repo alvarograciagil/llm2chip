@@ -175,7 +175,7 @@ pub fn firmware() -> Option<netlist::soc::FirmwareImage> {
                 return None;
             }
             let elf = std::fs::read(dir.join("target/riscv32im-unknown-none-elf/release/firmware")).ok()?;
-            Some(netlist::soc::FirmwareImage::from_elf(&elf).expect("ELF del firmware"))
+            Some(netlist::soc::FirmwareImage::from_elf(&elf).expect("the firmware's ELF"))
         })
         .clone()
 }
@@ -263,7 +263,7 @@ pub fn chip_in_iverilog(design: &netlist::Design, image: &[u32], input: &[u8], l
     let output = text.lines().filter_map(|l| l.strip_prefix("B ")).map(|b| b.trim().parse().unwrap()).collect();
     let cycles = text.lines().find_map(|l| l.strip_prefix("CICLOS ")).map(|c| c.trim().parse().unwrap());
     std::fs::remove_dir_all(&dir).ok();
-    Some((output, cycles.unwrap_or_else(|| panic!("Icarus Verilog no terminó: {}", text.lines().last().unwrap_or_default()))))
+    Some((output, cycles.unwrap_or_else(|| panic!("Icarus Verilog did not finish: {}", text.lines().last().unwrap_or_default()))))
 }
 
 // The die driven on its gates as its firmware would, for the tests that need it.
@@ -326,7 +326,7 @@ pub fn enter(sim: &mut netlist::Simulator, code: &netlist::Microprogram, routine
     while sim.get("halted").unwrap() == 0 {
         sim.tick();
         cycles += 1;
-        assert!(cycles < 20_000_000, "el secuenciador no se detiene");
+        assert!(cycles < 20_000_000, "the sequencer does not stop");
     }
     cycles
 }
@@ -364,7 +364,7 @@ pub fn gates(design: &netlist::Design, image: &[u32], input: &[u8], limit: u64) 
         }
         sim.tick();
         boot += 1;
-        assert!(boot < 1_000_000, "el arranque no termina");
+        assert!(boot < 1_000_000, "boot does not finish");
     }
     sim.set("cpu_hold", 0).unwrap();
     sim.set("host_tx_ready", 1).unwrap();
@@ -381,5 +381,5 @@ pub fn gates(design: &netlist::Design, image: &[u32], input: &[u8], limit: u64) 
     }
     sim.set("debug_select", netlist::chip::DEBUG_CPU_PC).unwrap();
     sim.settle();
-    panic!("el firmware no terminó en {limit} ciclos: salida {output:?}, CPU en {:#x}, {sent} de {} bytes enviados", sim.get("debug_value").unwrap(), input.len());
+    panic!("the firmware did not finish within {limit} cycles: output {output:?}, CPU at {:#x}, {sent} of {} bytes sent", sim.get("debug_value").unwrap(), input.len());
 }

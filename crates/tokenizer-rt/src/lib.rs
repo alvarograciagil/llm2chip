@@ -1112,7 +1112,7 @@ mod loop_tests {
 
     #[test]
     fn a_phrase_said_again_stops_at_the_second_time() {
-        // «París.» as three tokens, said again and again: it stops once it has said it twice.
+        // “Paris.” as three tokens, said again and again: it stops once it has said it twice.
         let text: Vec<u32> = [5, 6, 7].repeat(6);
         assert_eq!(first_alarm(&text), Some(5));
         // A whole sentence too.
@@ -1124,8 +1124,8 @@ mod loop_tests {
     fn ordinary_text_and_short_repeats_go_on() {
         let text: Vec<u32> = (0..200).map(|i| (i * 7 + i / 5) % 50).collect();
         assert_eq!(first_alarm(&text), None);
-        assert_eq!(first_alarm(&[1, 1, 1, 2, 2, 2, 3, 3, 3]), None, "tres iguales no es un bucle");
+        assert_eq!(first_alarm(&[1, 1, 1, 2, 2, 2, 3, 3, 3]), None, "three alike is not a loop");
         assert_eq!(first_alarm(&[4, 5, 4, 5, 6]), None, "dos fichas dos veces tampoco");
-        assert_eq!(first_alarm(&[9; 8]), Some(7), "ocho veces la misma ficha sí");
+        assert_eq!(first_alarm(&[9; 8]), Some(7), "eight times the same piece is");
     }
 }

@@ -91,11 +91,11 @@ pub fn image_ability(dir: &Path, config: &Value) -> ImageAbility {
     let makes = sim::janus::JanusConfig::read(dir).ok().flatten().is_some();
     let edits = sim::showo::ShowOConfig::read(dir).ok().flatten().is_some() && dir.join("magvitv2").is_dir();
     let note = if edits {
-        Some("Show-o dibuja y retoca imágenes en la pantalla Imágenes, en coma flotante o con su transformador en la aritmética del chip.".into())
+        Some("Show-o draws and retouches images on the Images screen, in floating point or as the chip would.".into())
     } else if draws && !makes {
-        Some("El modelo genera imágenes, pero el simulador aún no tiene su decodificador de imagen.".into())
+        Some("The model generates images, but the simulator does not have its image decoder yet.".into())
     } else if config.get("vision_config").is_some() && !reads {
-        Some("El modelo lee imágenes con un codificador que el simulador aún no reproduce.".into())
+        Some("The model reads images with an encoder the simulator does not reproduce yet.".into())
     } else {
         None
     };
@@ -144,7 +144,7 @@ fn describe(dir: &Path, name: String) -> Option<ModelEntry> {
     let mut adaptation = adapt_config(&config);
     if adaptation.simulate && !dir.join("tokenizer.json").exists() {
         adaptation.simulate = false;
-        adaptation.reason = Some("falta tokenizer.json, que es lo que convierte el texto en tokens".into());
+        adaptation.reason = Some("tokenizer.json is missing, which is what turns the text into tokens".into());
     }
     let images = image_ability(dir, &value);
     Some(ModelEntry { name, path: dir.to_string_lossy().into(), supported: adaptation.simulate, architecture, size_gb: size as f64 / 1e9, config, adaptation, images })
@@ -244,10 +244,10 @@ impl Catalog {
         for raw in wanted.model_dirs.iter().filter(|d| !d.trim().is_empty()) {
             let path = self.expand(raw);
             if !path.is_absolute() {
-                return Err(format!("«{raw}» no es una ruta completa"));
+                return Err(format!("“{raw}” is not a full path"));
             }
             if !path.is_dir() {
-                return Err(format!("la carpeta «{raw}» no existe"));
+                return Err(format!("the folder “{raw}” does not exist"));
             }
             let text = path.to_string_lossy().into_owned();
             if !model_dirs.contains(&text) {
@@ -258,9 +258,9 @@ impl Catalog {
         if let Some(raw) = &download_dir {
             let path = self.expand(raw);
             if !path.is_absolute() {
-                return Err(format!("«{raw}» no es una ruta completa"));
+                return Err(format!("“{raw}” is not a full path"));
             }
-            std::fs::create_dir_all(&path).map_err(|e| format!("no se puede usar «{raw}»: {e}"))?;
+            std::fs::create_dir_all(&path).map_err(|e| format!("“{raw}” cannot be used: {e}"))?;
         }
         let settings = Settings { model_dirs, download_dir };
         let dir = self.home.join(".llm2chip");
@@ -325,11 +325,11 @@ mod tests {
     #[test]
     fn folders_are_searched_a_few_levels_down_and_partial_downloads_are_skipped() {
         let root = scratch("depth");
-        write_model(&root.join("autor/grupo/uno"), LLAMA, true);
+        write_model(&root.join("author/group/one"), LLAMA, true);
         write_model(&root.join("demasiado/profundo/por/aqui/dos"), LLAMA, true);
         write_model(&root.join("a--b.partial"), LLAMA, true);
         let names: Vec<String> = scan(std::slice::from_ref(&root)).into_iter().map(|m| m.name).collect();
-        assert_eq!(names, ["uno"]);
+        assert_eq!(names, ["one"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -357,15 +357,15 @@ mod tests {
     fn each_model_says_how_far_it_can_be_adapted() {
         let root = scratch("tiers");
         write_model(&root.join("corre"), LLAMA, true);
-        write_model(&root.join("sin-tokenizador"), LLAMA, false);
+        write_model(&root.join("no-tokenizer"), LLAMA, false);
         write_model(&root.join("solo-diseno"), &LLAMA.replace("llama", "phi3"), true);
-        write_model(&root.join("desconocido"), r#"{"model_type":"bert"}"#, true);
+        write_model(&root.join("unknown"), r#"{"model_type":"bert"}"#, true);
         let list = scan(std::slice::from_ref(&root));
         let of = |name: &str| list.iter().find(|m| m.name == name).unwrap();
         assert!(of("corre").supported && of("corre").adaptation.parameters.is_some());
-        assert!(!of("sin-tokenizador").supported && of("sin-tokenizador").adaptation.reason.as_ref().unwrap().contains("tokenizer"));
+        assert!(!of("no-tokenizer").supported && of("no-tokenizer").adaptation.reason.as_ref().unwrap().contains("tokenizer"));
         assert!(of("solo-diseno").adaptation.design && of("solo-diseno").adaptation.approximate && !of("solo-diseno").supported);
-        assert!(!of("desconocido").adaptation.design && of("desconocido").adaptation.reason.as_ref().unwrap().contains("bert"));
+        assert!(!of("unknown").adaptation.design && of("unknown").adaptation.reason.as_ref().unwrap().contains("bert"));
         assert_eq!(list[0].name, "corre");
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -374,12 +374,12 @@ mod tests {
     fn settings_are_checked_kept_and_survive_a_restart() {
         let home = scratch("settings");
         let models = home.join("mis modelos");
-        write_model(&models.join("uno"), LLAMA, true);
+        write_model(&models.join("one"), LLAMA, true);
         let catalog = Catalog::open(home.clone());
         assert!(catalog.models().is_empty());
 
         let bad = Settings { model_dirs: vec!["~/no-existe".into()], download_dir: None };
-        assert!(catalog.update(bad).unwrap_err().contains("no existe"));
+        assert!(catalog.update(bad).unwrap_err().contains("does not exist"));
         assert!(catalog.update(Settings { model_dirs: vec!["relativa".into()], download_dir: None }).is_err());
 
         let good = Settings { model_dirs: vec!["~/mis modelos".into(), models.to_string_lossy().into()], download_dir: Some("~/bajadas".into()) };
@@ -412,17 +412,17 @@ mod image_tests {
         let qwen = ability(r#"{"model_type":"qwen3_5","vision_config":{"depth":2}}"#);
         assert!(qwen.reads && qwen.note.is_none());
         let other = ability(r#"{"model_type":"llava","vision_config":{"depth":2}}"#);
-        assert!(!other.reads && other.note.unwrap().contains("codificador"));
+        assert!(!other.reads && other.note.unwrap().contains("encoder"));
         let other = ability(r#"{"model_type":"multi_modality","gen_vision_config":{}}"#);
-        assert!(!other.makes && other.note.unwrap().contains("genera imágenes"));
+        assert!(!other.makes && other.note.unwrap().contains("generates images"));
         let janus = ability(r#"{"model_type":"janus","vq_config":{"num_patches":24},"vision_config":{"image_size":384}}"#);
-        assert!(janus.makes && janus.reads && janus.note.is_none(), "Janus lee y dibuja");
+        assert!(janus.makes && janus.reads && janus.note.is_none(), "Janus reads and draws");
         assert!(!janus.edits);
         let showo = r#"{"_class_name":"Showo","llm_vocab_size":50295,"codebook_size":8192,"mask_token_id":58497,"num_vq_tokens":256}"#;
-        assert!(!ability(showo).edits, "sin su MAGVIT-v2 no puede");
+        assert!(!ability(showo).edits, "without its MAGVIT-v2 it cannot");
         std::fs::create_dir_all(dir.join("magvitv2")).unwrap();
         let showo = ability(showo);
-        assert!(showo.edits && !showo.makes && showo.note.unwrap().contains("Imágenes"));
+        assert!(showo.edits && !showo.makes && showo.note.unwrap().contains("Images"));
         std::fs::remove_dir_all(dir).ok();
     }
 }

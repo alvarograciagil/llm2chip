@@ -1,5 +1,5 @@
 //! Compares simulation speed on the CPU and the GPU, on real weights.
-//! `cargo run --release -p sim --example speed -- <carpeta> [tokens]`, con `BITS` para el modo exacto.
+//! `cargo run --release -p sim --example speed -- <folder> [tokens]`, with `BITS` for the exact mode.
 
 use compiler::compile_qwen3_5;
 use sim::{Engine, ExactEngine, Numeric, Weights};
@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("GPU: {name}");
     }
 
-    println!("| modo | s/token | coincide con la CPU |\n|---|---|---|");
+    println!("| mode | s/token | matches the CPU |\n|---|---|---|");
     let mut float_cpu: Vec<Vec<f32>> = Vec::new();
     let mut sequence = ids.clone();
     for gpu in [false, true] {
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let time = started.elapsed().as_secs_f64() / (ids.len() + count - 1) as f64;
-        println!("| coma flotante, {} | {time:.3} | {} |", if gpu { "GPU" } else { "CPU" }, if gpu { format!("{matches} de {outputs} en top-1") } else { "referencia".into() });
+        println!("| coma flotante, {} | {time:.3} | {} |", if gpu { "GPU" } else { "CPU" }, if gpu { format!("{matches} of {outputs} in top-1") } else { "referencia".into() });
     }
 
     let mut exact_cpu: Vec<Vec<f32>> = Vec::new();
@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let time = started.elapsed().as_secs_f64() / (ids.len() + count - 1) as f64;
-        println!("| exacto a {bits} bits, {} | {time:.3} | {} |", if gpu { "GPU" } else { "CPU" }, if gpu { format!("{matches} de {outputs} con logits idénticos") } else { "referencia".into() });
+        println!("| exacto a {bits} bits, {} | {time:.3} | {} |", if gpu { "GPU" } else { "CPU" }, if gpu { format!("{matches} of {outputs} with identical logits") } else { "referencia".into() });
     }
     Ok(())
 }

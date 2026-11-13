@@ -195,9 +195,9 @@ fn relative_error(fixed: &[f32], float: &[f32]) -> f64 {
 /// Runs the same tokens in floating point and in the chip's arithmetic and compares them.
 fn run_lab(catalog: &Catalog, request: LabRequest) -> Result<serde_json::Value, String> {
     let dir = PathBuf::from(&request.path);
-    let entry = catalog.find(&request.path).ok_or("el modelo no está en las carpetas conocidas")?;
+    let entry = catalog.find(&request.path).ok_or("the model is not in the known folders")?;
     if !entry.supported {
-        return Err(entry.adaptation.reason.unwrap_or_else(|| "esta arquitectura todavía no se puede ejecutar".into()));
+        return Err(entry.adaptation.reason.unwrap_or_else(|| "this architecture cannot run yet".into()));
     }
     let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| e.to_string())?;
     let program = compile_model(&entry.config)?;
@@ -206,7 +206,7 @@ fn run_lab(catalog: &Catalog, request: LabRequest) -> Result<serde_json::Value, 
     let mut tokens = tokenizer.encode(text.as_str(), add_special).map_err(|e| e.to_string())?.get_ids().to_vec();
     let prompt_tokens = tokens.len();
     if prompt_tokens == 0 {
-        return Err("el texto no produce ningún token".into());
+        return Err("the text produces no token".into());
     }
     // The output of each layer is what its last operation writes.
     let mut layer_outputs: Vec<(u32, usize)> = Vec::new();
@@ -226,7 +226,7 @@ fn run_lab(catalog: &Catalog, request: LabRequest) -> Result<serde_json::Value, 
     let total = prompt_tokens + request.new_tokens.clamp(1, 256);
     let mut position = 0;
     while position < total {
-        let token = *tokens.get(position).ok_or("faltan tokens")?;
+        let token = *tokens.get(position).ok_or("tokens are missing")?;
         let wanted = position + 1 >= prompt_tokens;
         let best = |logits: &[f32]| logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(i, _)| i as u32);
         let float_logits = float.step(token, wanted)?.0.map(<[f32]>::to_vec);
@@ -280,9 +280,9 @@ struct SpeedRequest {
 /// would be built for. The result is what the circuit does, not what the estimator expects.
 fn run_speed(catalog: &Catalog, request: SpeedRequest) -> Result<serde_json::Value, String> {
     let dir = PathBuf::from(&request.path);
-    let entry = catalog.find(&request.path).ok_or("el modelo no está en las carpetas conocidas")?;
+    let entry = catalog.find(&request.path).ok_or("the model is not in the known folders")?;
     if !entry.supported {
-        return Err(entry.adaptation.reason.unwrap_or_else(|| "esta arquitectura todavía no se puede ejecutar".into()));
+        return Err(entry.adaptation.reason.unwrap_or_else(|| "this architecture cannot run yet".into()));
     }
     let program = compile_model(&entry.config)?;
     let weights = Weights::open(&dir)?;
@@ -365,7 +365,7 @@ async fn image_status(State(app): State<App>) -> Response {
 async fn layout_start(State(app): State<App>, Json(request): Json<layout::LayoutRequest>) -> Response {
     let running = app.layout.lock().unwrap().as_ref().is_some_and(|job| job.outcome.lock().unwrap().is_none());
     if running {
-        return (StatusCode::CONFLICT, "ya hay un layout en marcha").into_response();
+        return (StatusCode::CONFLICT, "a layout is already running").into_response();
     }
     let job = Arc::new(layout::LayoutJob::default());
     *app.layout.lock().unwrap() = Some(job.clone());
@@ -393,11 +393,11 @@ async fn layout_status(State(app): State<App>) -> Response {
 async fn retouch_start(State(app): State<App>, Json(request): Json<retouch::RetouchRequest>) -> Response {
     let running = app.retouch.lock().unwrap().as_ref().is_some_and(|job| job.outcome.lock().unwrap().is_none());
     if running {
-        return refused("ya hay una imagen en marcha".into());
+        return refused("an image is already being written".into());
     }
-    let Some(entry) = app.catalog.find(&request.path) else { return refused("el modelo no está en las carpetas conocidas".into()) };
+    let Some(entry) = app.catalog.find(&request.path) else { return refused("the model is not in the known folders".into()) };
     if !entry.images.edits {
-        return refused(format!("{} no retoca imágenes", entry.name));
+        return refused(format!("{} does not retouch images", entry.name));
     }
     let job = Arc::new(retouch::RetouchJob::default());
     *app.retouch.lock().unwrap() = Some(job.clone());
@@ -441,12 +441,12 @@ async fn image_cancel(State(app): State<App>) -> Response {
 async fn image_start(State(app): State<App>, Json(request): Json<ImageStart>) -> Response {
     let running = app.image.lock().unwrap().as_ref().is_some_and(|job| job.outcome.lock().unwrap().is_none());
     if running {
-        return refused("ya se está generando una imagen".into());
+        return refused("an image is already being generated".into());
     }
     let catalog = app.catalog.clone();
-    let Some(entry) = catalog.find(&request.path) else { return refused("el modelo no está en las carpetas conocidas".into()) };
+    let Some(entry) = catalog.find(&request.path) else { return refused("the model is not in the known folders".into()) };
     if !entry.supported {
-        return refused(entry.adaptation.reason.unwrap_or_else(|| "esta arquitectura todavía no se puede ejecutar".into()));
+        return refused(entry.adaptation.reason.unwrap_or_else(|| "this architecture cannot run yet".into()));
     }
     let job = Arc::new(ImageJob { name: Mutex::new(entry.name.clone()), ..Default::default() });
     *app.image.lock().unwrap() = Some(job.clone());
@@ -503,9 +503,9 @@ fn load_model(catalog: &Catalog, request: LoadRequest) -> Result<Loaded, String>
     let LoadRequest { path, numeric, exact, format, gpu, transaction } = request;
     let path = path.as_str();
     let dir = Path::new(path);
-    let entry = catalog.find(path).ok_or("el modelo no está en las carpetas conocidas")?;
+    let entry = catalog.find(path).ok_or("the model is not in the known folders")?;
     if !entry.supported {
-        let reason = entry.adaptation.reason.unwrap_or_else(|| format!("la arquitectura «{}» todavía no se puede ejecutar", entry.architecture));
+        let reason = entry.adaptation.reason.unwrap_or_else(|| format!("the “{}” architecture cannot run yet", entry.architecture));
         return Err(format!("{}: {reason}", entry.name));
     }
     let config = std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?;
@@ -733,7 +733,7 @@ type ImageForFirmware = (ImageTokens, Placement, u32, (Vec<u8>, netlist::chip::V
 fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32], request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool, picture: Option<ImageForFirmware>) -> Result<(), String> {
     use std::sync::atomic::Ordering::Relaxed;
     if request.mtp_depth > 0 && !loaded.engine.has_draft_head() {
-        return Err("este modelo no trae cabeza MTP".into());
+        return Err("this model has no MTP head".into());
     }
     let firmware = FirmwareImage::from_elf(FIRMWARE)?;
     let vocabulary = loaded.engine.vocabulary();
@@ -854,7 +854,7 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
     }
     let runner = &bus.peripheral.engine;
     if use_tables && runner.tokens.is_empty() && !ids.is_empty() {
-        return Err("el texto no cabe en la memoria de trabajo del tokenizador del chip".into());
+        return Err("the text does not fit in the chip tokenizer's working memory".into());
     }
     let tokenizer_match = use_tables.then(|| runner.tokens.len() >= ids.len() && runner.tokens[..ids.len()] == *ids);
     // Short of the limit, the firmware stopped by its own rules: an end token or a loop.
@@ -905,7 +905,7 @@ fn bmp(rgb: &[u8], side: usize) -> Vec<u8> {
 fn run_drawing(loaded: &mut Loaded, request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> {
     use std::sync::atomic::Ordering::Relaxed;
     if loaded.painter.is_none() {
-        loaded.painter = Some(sim::janus::Janus::open(&loaded.dir)?.ok_or("este modelo no genera imágenes")?);
+        loaded.painter = Some(sim::janus::Janus::open(&loaded.dir)?.ok_or("this model does not generate images")?);
     }
     let painter = loaded.painter.as_ref().unwrap();
     let text = format!("<|User|>: {}\n\n<|Assistant|>:", request.prompt);
@@ -932,7 +932,7 @@ fn run_drawing(loaded: &mut Loaded, request: &GenerateRequest, sender: &mpsc::Se
 fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), String> {
     use std::sync::atomic::Ordering::Relaxed;
     let mut guard = app.loaded.lock().unwrap();
-    let loaded = guard.as_mut().ok_or("carga un modelo primero")?;
+    let loaded = guard.as_mut().ok_or("load a model first")?;
     if request.draw {
         return run_drawing(loaded, &request, sender, cancelled);
     }
@@ -946,10 +946,10 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     let image = match &request.image {
         Some(input) => {
             if request.mtp_depth > 0 {
-                return Err("las imágenes aún no pasan por la cabeza MTP".into());
+                return Err("images do not go through the MTP head yet".into());
             }
             if loaded.vision.is_none() {
-                loaded.vision = Some(Seer::open(&loaded.dir)?.ok_or("este modelo no trae codificador de imágenes")?);
+                loaded.vision = Some(Seer::open(&loaded.dir)?.ok_or("this model has no image encoder")?);
             }
             let started = std::time::Instant::now();
             let plan = match loaded.vision.as_ref().unwrap() {
@@ -984,7 +984,7 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     // The chip remembers its context and no more: the prompt must fit, and the answer ends there.
     let context = request.fidelity.context_tokens as usize;
     if context > 0 && ids.len() + image_tokens >= context {
-        return Err(format!("el prompt ocupa {} tokens y el chip recuerda {context}: sube el contexto del diseño", ids.len() + image_tokens));
+        return Err(format!("the prompt takes {} tokens and the chip remembers {context}: raise the design's context", ids.len() + image_tokens));
     }
     let _ = sender.blocking_send(serde_json::json!({ "type": "start", "prompt_tokens": ids.len() + image_tokens }));
     if request.fidelity.firmware {
@@ -1034,7 +1034,7 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     }
 
     if request.mtp_depth > 0 && !loaded.engine.has_draft_head() {
-        return Err("este modelo no trae cabeza MTP".into());
+        return Err("this model has no MTP head".into());
     }
     let mut output: Vec<u32> = Vec::new();
     let mut shown = 0;
@@ -1064,7 +1064,7 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
         let saturated = stats.saturated;
         let seconds = stats.seconds;
         let token = next;
-        let logits = logits.ok_or("sin logits")?;
+        let logits = logits.ok_or("no logits")?;
         next = reasoning.steer(if use_unit { sample_on_unit(&mut unit, logits, request.temperature, request.top_k) } else { sample(logits, request.temperature, request.top_k, &mut seed) });
 
         if request.mtp_depth > 0 {
@@ -1085,7 +1085,7 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
             let mut guesses = Vec::new();
             loaded.engine.feed_draft_from_main();
             for _ in 0..request.mtp_depth {
-                let logits = loaded.engine.draft(guess, true)?.ok_or("sin logits")?;
+                let logits = loaded.engine.draft(guess, true)?.ok_or("no logits")?;
                 guess = logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(i, _)| i as u32);
                 guesses.push(guess);
                 loaded.engine.feed_draft_from_draft();
@@ -1189,7 +1189,7 @@ fn session_token() -> String {
         std::process::id() as u128 * 0x9E3779B97F4A7C15
     );
     if std::fs::write(&path, &token).is_err() {
-        eprintln!("No se pudo escribir el token en {}", path.display());
+        eprintln!("Could not write the token to {}", path.display());
     }
     token
 }
@@ -1220,9 +1220,9 @@ async fn main() {
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .fallback(static_file)
         .with_state(app);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", PORT)).await.expect("el puerto 7878 está ocupado");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", PORT)).await.expect("port 7878 is in use");
     println!("llm2chip en http://127.0.0.1:{PORT}");
-    axum::serve(listener, routes).await.expect("el servidor ha fallado");
+    axum::serve(listener, routes).await.expect("the server failed");
 }
 
 #[cfg(test)]

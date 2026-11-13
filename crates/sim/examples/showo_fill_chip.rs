@@ -2,7 +2,7 @@
 //! (`maskgit-rt`), the guidance in the die, every routine on the die as the chip addresses
 //! it, the cells keeping the weights affine of 8 bits; MAGVIT-v2 on the host.
 //!
-//! `cargo run --release -p sim --example showo_fill_chip -- <carpeta de Show-o> salida.bmp [pasos] [semilla]`
+//! `cargo run --release -p sim --example showo_fill_chip -- <Show-o folder> output.bmp [steps] [seed]`
 
 use netlist::format::{WeightCoding, WeightFormat};
 use sim::showo::Magvit;
@@ -33,7 +33,7 @@ fn main() -> Result<(), String> {
     let codes = config.masked_codes(&magvit, &rgb, side, side, &region)?;
     eprintln!("preparado en {:.0} s", started.elapsed().as_secs_f64());
     let filled = chip.fill(&codes, &text, steps, seed as u64, |step, steps| {
-        eprintln!("paso {step} de {steps}: {:.0} s", started.elapsed().as_secs_f64());
+        eprintln!("step {step} of {steps}: {:.0} s", started.elapsed().as_secs_f64());
         Ok(())
     })?;
     eprintln!("rellenado en {:.0} s", started.elapsed().as_secs_f64());

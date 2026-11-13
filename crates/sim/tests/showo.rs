@@ -6,11 +6,11 @@ use sim::showo::ShowO;
 use std::path::PathBuf;
 
 #[test]
-#[ignore = "lenta: abre Show-o (6 GB) y pasa una imagen por MAGVIT-v2"]
+#[ignore = "slow: opens Show-o (6 GB) and passes an image through MAGVIT-v2"]
 fn a_picture_comes_back_through_the_image_tokenizer() {
     let dir = std::env::var_os("LLM2CHIP_SHOWO").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".llm2chip/models/Show-o"));
     let Some(model) = (if dir.join("config.json").exists() { ShowO::open(&dir).unwrap() } else { None }) else {
-        eprintln!("omitida: no está Show-o en {}", dir.display());
+        eprintln!("skipped: Show-o is not in {}", dir.display());
         return;
     };
     let side = model.config.side();

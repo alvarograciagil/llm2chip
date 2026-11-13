@@ -164,7 +164,7 @@ impl<'a> Board<'a> {
             }
             self.cycles += 1;
             if self.cycles.is_multiple_of(500_000) {
-                eprintln!("{} ciclos, salida {:?}", self.cycles, String::from_utf8_lossy(&self.output));
+                eprintln!("{} cycles, output {:?}", self.cycles, String::from_utf8_lossy(&self.output));
             }
             if self.cycles >= limit {
                 // Where each chip stands: its CPU's address and whether its die is busy.
@@ -176,7 +176,7 @@ impl<'a> Board<'a> {
                     };
                     format!("pc {:#x}, die {}", read(netlist::chip::DEBUG_CPU_PC), read(netlist::chip::DEBUG_DIE_BUSY))
                 }).collect();
-                panic!("la placa no termina; salida {:?}; chips: {states:?}", String::from_utf8_lossy(&self.output));
+                panic!("the board does not finish; output {:?}; chips: {states:?}", String::from_utf8_lossy(&self.output));
             }
         }
     }
@@ -209,28 +209,28 @@ fn setup_for(name: &str, firmware: &FirmwareImage, die: DieConfig, sharing: Shar
 }
 
 #[test]
-#[ignore = "lenta: dos chips completos en puertas: solo con optimizaciones"]
+#[ignore = "slow: two whole chips in gates: only with optimizations"]
 fn the_same_image_adapts_to_one_or_two_chips() {
     let Some(firmware) = build_firmware() else { return };
     two_chips_say_what_one_says(&firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, "two", Sharing::Layers);
 }
 
 #[test]
-#[ignore = "lenta: dos chips completos en puertas: solo con optimizaciones"]
+#[ignore = "slow: two whole chips in gates: only with optimizations"]
 fn two_chips_that_share_every_product_by_rows_say_what_one_says() {
     let Some(firmware) = build_firmware() else { return };
     two_chips_say_what_one_says(&firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, "rows", Sharing::Rows);
 }
 
 #[test]
-#[ignore = "lenta: cuatro chips completos en puertas: solo con optimizaciones"]
+#[ignore = "slow: four whole chips in gates: only with optimizations"]
 fn two_groups_of_two_chips_sharing_rows_in_a_chain_say_what_one_says() {
     let Some(firmware) = build_firmware() else { return };
     chips_say_what_one_says(&firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, "mixed", Sharing::Mixed(2), 4);
 }
 
 #[test]
-#[ignore = "lenta: dos chips completos en puertas: solo con optimizaciones"]
+#[ignore = "slow: two whole chips in gates: only with optimizations"]
 fn chips_sharing_rows_over_a_wide_link_say_what_one_says() {
     let Some(firmware) = build_firmware() else { return };
     let base = cell_die_config();
@@ -239,7 +239,7 @@ fn chips_sharing_rows_over_a_wide_link_say_what_one_says() {
 }
 
 #[test]
-#[ignore = "lenta: dos chips completos en puertas: solo con optimizaciones"]
+#[ignore = "slow: two whole chips in gates: only with optimizations"]
 fn a_wide_link_moves_blocks_between_two_chips_and_keeps_the_text() {
     let Some(firmware) = build_firmware() else { return };
     let base = cell_die_config();
@@ -267,7 +267,7 @@ fn chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &str,
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
-        assert!(cpu.cycle < 100_000_000, "el firmware no termina");
+        assert!(cpu.cycle < 100_000_000, "the firmware does not finish");
     }
     let reference = String::from_utf8_lossy(&bus.tx).trim_start_matches('.').to_string();
     assert_eq!(reference.len(), 1, "{:?}", String::from_utf8_lossy(&bus.tx));
@@ -277,11 +277,11 @@ fn chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &str,
         _ => None,
     };
     let mut board = Board::new(&setup.design, chips, &setup.image, input, setup.die.features.link_lanes(), group);
-    board.run(std::env::var("LIMITE").ok().and_then(|l| l.parse().ok()).unwrap_or(8_000_000));
+    board.run(std::env::var("LIMIT").ok().and_then(|l| l.parse().ok()).unwrap_or(8_000_000));
     let text = String::from_utf8_lossy(&board.output).into_owned();
-    eprintln!("{} ciclos, {} bits invertidos en los enlaces, salida {text:?}", board.cycles, board.flips);
-    assert_eq!(text.trim_start_matches('.'), reference, "el texto debe ser el mismo que con un solo chip");
-    assert!(board.flips > 0, "la prueba debe inyectar errores");
+    eprintln!("{} cycles, {} flipped bits on the links, output {text:?}", board.cycles, board.flips);
+    assert_eq!(text.trim_start_matches('.'), reference, "the text must be the same as with a single chip");
+    assert!(board.flips > 0, "the test must inject errors");
 
     let debug = |chip: &mut Simulator, what: u64| {
         chip.set("debug_select", what).unwrap();
@@ -290,9 +290,9 @@ fn chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &str,
     };
     let corrected: u64 = board.chips.iter_mut().map(|chip| debug(chip, DEBUG_LINK_CORRECTED)).sum();
     let failed: u64 = board.chips.iter_mut().map(|chip| debug(chip, DEBUG_LINK_FAILED)).sum();
-    assert!(board.doubles > 0, "la prueba debe forzar repeticiones");
-    assert_eq!(failed, board.doubles as u64, "cada palabra con dos bits malos consta como fallida");
-    assert_eq!(corrected, (board.flips - board.doubles) as u64, "cada bit suelto invertido consta como corregido");
+    assert!(board.doubles > 0, "the test must force retries");
+    assert_eq!(failed, board.doubles as u64, "each word with two bad bits is logged as failed");
+    assert_eq!(corrected, (board.flips - board.doubles) as u64, "each single flipped bit is logged as corrected");
 
     let logits_register = Layout::with_cells(&program, &Weights::open(&setup.dir).unwrap(), setup.die, CHIP_TOKENS).unwrap().logits_register(&program);
     for index in 0..8 {

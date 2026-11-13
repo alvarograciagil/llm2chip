@@ -21,11 +21,11 @@ fn a_draw_follows_the_softmax_and_its_confidence_is_the_log_probability() {
         counts[code as usize] += 1;
         let expected = probabilities[code as usize].ln();
         let got = confidence as f64 / (1 << FRACTION) as f64;
-        assert!((got - expected).abs() < 0.02, "código {code}: {got} frente a {expected}");
+        assert!((got - expected).abs() < 0.02, "code {code}: {got} against {expected}");
     }
     for (c, p) in probabilities.iter().enumerate() {
         let seen = counts[c] as f64 / draws as f64;
-        assert!((seen - p).abs() < 0.01, "código {c}: {seen} frente a {p}");
+        assert!((seen - p).abs() < 0.01, "code {c}: {seen} against {p}");
     }
 }
 

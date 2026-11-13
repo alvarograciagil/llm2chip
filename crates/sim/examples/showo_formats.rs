@@ -1,7 +1,7 @@
 //! How much Show-o loses with its weights in the design's formats, in the die's arithmetic:
 //! one pass over a picture with its middle masked, against floating point.
 //!
-//! `cargo run --release -p sim --example showo_formats -- <carpeta de Show-o>`
+//! `cargo run --release -p sim --example showo_formats -- <Show-o folder>`
 
 use netlist::format::{WeightCoding, WeightFormat};
 use sim::showo::ShowO;
@@ -12,9 +12,9 @@ use std::path::Path;
 type Run<'a> = (&'static str, Box<dyn Fn() -> Result<ShowOChip, String> + 'a>);
 
 fn main() -> Result<(), String> {
-    let dir = std::env::args().nth(1).ok_or("falta la carpeta de Show-o")?;
+    let dir = std::env::args().nth(1).ok_or("Show-o's folder is missing")?;
     let dir = Path::new(&dir);
-    let model = ShowO::open(dir)?.ok_or("la carpeta no tiene Show-o")?;
+    let model = ShowO::open(dir)?.ok_or("the folder does not have Show-o")?;
     let tokenizer = tokenizers::Tokenizer::from_file(dir.join("phi/tokenizer.json")).map_err(|e| e.to_string())?;
     let text = tokenizer.encode("a green apple on a wooden table", false).map_err(|e| e.to_string())?.get_ids().to_vec();
     let side = model.config.side();
@@ -54,15 +54,15 @@ fn main() -> Result<(), String> {
             likelihood += p[best(&scores[*i * codebook..][..codebook])] / p.iter().copied().fold(0.0, f64::max);
         }
         let n = masked.len() as f64;
-        println!("| {name} | {:.2} % | {agree} de {} | {:.4} | {:.1} % | {seconds:.0} |", 100.0 * worst / largest, masked.len(), divergence / n, 100.0 * likelihood / n);
+        println!("| {name} | {:.2} % | {agree} of {} | {:.4} | {:.1} % | {seconds:.0} |", 100.0 * worst / largest, masked.len(), divergence / n, 100.0 * likelihood / n);
     };
-    println!("| Pesos | Diferencia mayor | Mejor código igual | KL media (nats) | Probabilidad del mejor del chip, frente al mejor | Segundos por pasada |");
+    println!("| Weights | Largest difference | Same best code | Mean KL (nats) | Probability of the chip's best, against the best | Seconds per pass |");
     println!("|---|---|---|---|---|---|");
     let affine = |bits, group_size| WeightFormat { coding: WeightCoding::Affine, bits, exponent_bits: 0, bias: true, group_size, fine_scale: false, keep_source: false };
     let runs: Vec<Run> = vec![
-        ("enteros de 16 bits", Box::new(|| ShowOChip::exact(dir, 16))),
-        ("afín de 8 bits, grupos de 64", Box::new(|| ShowOChip::with_format(dir, 16, affine(8, 64)))),
-        ("afín de 4 bits, grupos de 32", Box::new(|| ShowOChip::with_format(dir, 16, affine(4, 32)))),
+        ("16-bit integers", Box::new(|| ShowOChip::exact(dir, 16))),
+        ("8-bit affine, groups of 64", Box::new(|| ShowOChip::with_format(dir, 16, affine(8, 64)))),
+        ("4-bit affine, groups of 32", Box::new(|| ShowOChip::with_format(dir, 16, affine(4, 32)))),
     ];
     for (name, open) in runs {
         let started = std::time::Instant::now();

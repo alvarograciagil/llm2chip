@@ -1,5 +1,5 @@
 //! Compares the die's exact integer arithmetic with floating point, on real weights.
-//! `cargo run --release -p sim --example exact -- <carpeta> [tokens]`
+//! `cargo run --release -p sim --example exact -- <folder> [tokens]`
 
 use compiler::compile_qwen3_5;
 use sim::{Engine, ExactEngine, Numeric, Weights};
@@ -48,6 +48,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokens = sequence.len() - 1;
     println!("coincidencia top-1: {matches}/{compared}");
     println!("float: {:.2} s/token, enteros: {:.2} s/token", float_time / tokens as f64, exact_time / tokens as f64);
-    println!("texto: {}", tokenizer.decode(&sequence[ids.len()..], true).map_err(|e| e.to_string())?);
+    println!("text: {}", tokenizer.decode(&sequence[ids.len()..], true).map_err(|e| e.to_string())?);
     Ok(())
 }

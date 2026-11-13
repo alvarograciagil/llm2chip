@@ -43,8 +43,8 @@ pub struct Shape {
 impl Shape {
     /// From Show-o's folder: its configuration, Phi's in `phi`, and its weights' shapes.
     pub fn read(dir: &Path, weights: &Weights) -> Result<(Self, ShowOConfig), String> {
-        let config = ShowOConfig::read(dir)?.ok_or("esta carpeta no tiene Show-o")?;
-        let shape = |name: &str| weights.shape(name).map(<[usize]>::to_vec).ok_or_else(|| format!("falta {name}"));
+        let config = ShowOConfig::read(dir)?.ok_or("this folder does not have Show-o")?;
+        let shape = |name: &str| weights.shape(name).map(<[usize]>::to_vec).ok_or_else(|| format!("{name} is missing"));
         let embed = shape("showo.model.embed_tokens.weight")?;
         let up = shape("showo.model.layers.0.mlp.fc1.weight")?;
         let layers = (0..).take_while(|i| weights.shape(&format!("showo.model.layers.{i}.input_layernorm.weight")).is_some()).count();
@@ -90,7 +90,7 @@ impl Emit {
     fn linear(&mut self, name: &'static str, matrix: String, src: Buf, rows: usize) -> Buf {
         let (product, biased) = (self.buf(rows), self.buf(rows));
         self.op(name, Op::Matvec { matrix: matrix.clone(), src, dst: product });
-        self.op("sesgo", Op::AddWeight { src: product, weight: format!("{matrix}.bias"), dst: biased });
+        self.op("bias", Op::AddWeight { src: product, weight: format!("{matrix}.bias"), dst: biased });
         biased
     }
 
@@ -109,14 +109,14 @@ fn layer_name(layer: usize, name: &str) -> String {
 /// rotated: `(normalised input, query, key, value)`.
 fn attention_inputs(e: &mut Emit, s: &Shape, layer: usize, x: Buf) -> (Buf, Buf, Buf, Buf) {
     let p = |name: &str| layer_name(layer, name);
-    let normed = e.norm("norma de entrada", x, p("input_layernorm"), s.hidden);
-    let q = e.linear("consulta", p("self_attn.q_proj"), normed, s.hidden);
-    let k = e.linear("clave", p("self_attn.k_proj"), normed, s.hidden);
-    let v = e.linear("valor", p("self_attn.v_proj"), normed, s.hidden);
-    let q = e.norm("norma de la consulta", q, p("self_attn.q_layernorm"), s.head_dim());
-    let k = e.norm("norma de la clave", k, p("self_attn.k_layernorm"), s.head_dim());
-    e.op("RoPE de la consulta", Op::Rope { buf: q, block: s.head_dim(), rotary: s.rotary, table: 0 });
-    e.op("RoPE de la clave", Op::Rope { buf: k, block: s.head_dim(), rotary: s.rotary, table: 0 });
+    let normed = e.norm("input norm", x, p("input_layernorm"), s.hidden);
+    let q = e.linear("query", p("self_attn.q_proj"), normed, s.hidden);
+    let k = e.linear("key", p("self_attn.k_proj"), normed, s.hidden);
+    let v = e.linear("value", p("self_attn.v_proj"), normed, s.hidden);
+    let q = e.norm("query norm", q, p("self_attn.q_layernorm"), s.head_dim());
+    let k = e.norm("key norm", k, p("self_attn.k_layernorm"), s.head_dim());
+    e.op("query RoPE", Op::Rope { buf: q, block: s.head_dim(), rotary: s.rotary, table: 0 });
+    e.op("key RoPE", Op::Rope { buf: k, block: s.head_dim(), rotary: s.rotary, table: 0 });
     (normed, q, k, v)
 }
 
@@ -126,12 +126,12 @@ fn attention_and_mlp(e: &mut Emit, s: &Shape, layer: usize, x: Buf, normed: Buf,
     let p = |name: &str| layer_name(layer, name);
     let attended = e.buf(s.hidden);
     let head_dim = s.head_dim();
-    e.op("atención", Op::AttnSum { slot: layer, query, head_dim, scale_dim: head_dim, heads: s.heads, kv_heads: s.heads, window: None, softcap: None, dst: attended });
-    let projected = e.linear("proyección", p("self_attn.dense"), attended, s.hidden);
-    let up = e.linear("MLP, subida", p("mlp.fc1"), normed, s.intermediate);
+    e.op("attention", Op::AttnSum { slot: layer, query, head_dim, scale_dim: head_dim, heads: s.heads, kv_heads: s.heads, window: None, softcap: None, dst: attended });
+    let projected = e.linear("projection", p("self_attn.dense"), attended, s.hidden);
+    let up = e.linear("MLP, up", p("mlp.fc1"), normed, s.intermediate);
     let activated = e.buf(s.intermediate);
     e.op("GELU", Op::Gelu { src: up, approximate: true, dst: activated });
-    let down = e.linear("MLP, bajada", p("mlp.fc2"), activated, s.hidden);
+    let down = e.linear("MLP, down", p("mlp.fc2"), activated, s.hidden);
     let (with_attention, out) = (e.buf(s.hidden), e.buf(s.hidden));
     e.op("residual", Op::Add { a: x, b: projected, dst: with_attention });
     e.op("residual", Op::Add { a: with_attention, b: down, dst: out });
@@ -144,8 +144,8 @@ const CODE_HEAD: &str = "showo.cabeza_de_codigos";
 
 /// The final norm and the scores of the codes.
 fn code_scores(e: &mut Emit, s: &Shape, x: Buf) -> (Buf, Buf) {
-    let normed = e.norm("norma final", x, "showo.model.final_layernorm".into(), s.hidden);
-    let codes = e.linear("puntuaciones de los códigos", CODE_HEAD.into(), normed, s.codebook);
+    let normed = e.norm("final norm", x, "showo.model.final_layernorm".into(), s.hidden);
+    let codes = e.linear("code scores", CODE_HEAD.into(), normed, s.codebook);
     (normed, codes)
 }
 
@@ -181,11 +181,11 @@ pub fn program_guided(s: &Shape, guidance: Option<f32>) -> Program {
     let mut guided = None;
     let mut e = Emit { buffers: Vec::new(), ops: Vec::new(), layer: None };
     let mut x = e.buf(s.hidden);
-    e.op("leer embedding", Op::EmbRead { table: "showo.model.embed_tokens".into(), dst: x });
+    e.op("read embedding", Op::EmbRead { table: "showo.model.embed_tokens".into(), dst: x });
     for layer in 0..s.layers {
         e.layer = Some(layer as u32);
         let (normed, q, k, v) = attention_inputs(&mut e, s, layer, x);
-        e.op("guardar clave y valor", Op::KvAppend { slot: layer, key: k, value: v, window: None });
+        e.op("store key and value", Op::KvAppend { slot: layer, key: k, value: v, window: None });
         x = attention_and_mlp(&mut e, s, layer, x, normed, q);
     }
     e.layer = None;
@@ -197,7 +197,7 @@ pub fn program_guided(s: &Shape, guidance: Option<f32>) -> Program {
     let rows = s.image_rows;
     let (state, queries) = (e.buf(rows * s.hidden), e.buf(rows * s.hidden));
     let row = e.buf(s.hidden);
-    e.op("leer embedding", Op::EmbRead { table: "showo.model.embed_tokens".into(), dst: row });
+    e.op("read embedding", Op::EmbRead { table: "showo.model.embed_tokens".into(), dst: row });
     let embed = 0..e.ops.len();
     let mut blocks = Vec::new();
     for layer in 0..s.layers {
@@ -205,27 +205,27 @@ pub fn program_guided(s: &Shape, guidance: Option<f32>) -> Program {
         let first = e.ops.len();
         // The first layer's first pass starts by keeping the row the embedding left.
         if layer == 0 {
-            e.op("guardar fila", Op::StoreRow { src: row, store: state });
+            e.op("store row", Op::StoreRow { src: row, store: state });
         }
         let h = e.buf(s.hidden);
-        e.op("leer fila", Op::LoadRow { store: state, dst: h });
+        e.op("read row", Op::LoadRow { store: state, dst: h });
         let (_, q, k, v) = attention_inputs(&mut e, s, layer, h);
-        e.op("guardar clave y valor", Op::KvAppend { slot: layer, key: k, value: v, window: None });
-        e.op("guardar consulta", Op::StoreRow { src: q, store: queries });
+        e.op("store key and value", Op::KvAppend { slot: layer, key: k, value: v, window: None });
+        e.op("store query", Op::StoreRow { src: q, store: queries });
         let middle = e.ops.len();
         let (q, h) = (e.buf(s.hidden), e.buf(s.hidden));
-        e.op("leer consulta", Op::LoadRow { store: queries, dst: q });
-        e.op("leer fila", Op::LoadRow { store: state, dst: h });
+        e.op("read query", Op::LoadRow { store: queries, dst: q });
+        e.op("read row", Op::LoadRow { store: state, dst: h });
         // The norm again, rather than another store: it costs little next to the products.
-        let normed = e.norm("norma de entrada", h, layer_name(layer, "input_layernorm"), s.hidden);
+        let normed = e.norm("input norm", h, layer_name(layer, "input_layernorm"), s.hidden);
         let out = attention_and_mlp(&mut e, s, layer, h, normed, q);
-        e.op("guardar fila", Op::StoreRow { src: out, store: state });
+        e.op("store row", Op::StoreRow { src: out, store: state });
         blocks.push((first..middle, middle..e.ops.len()));
     }
     e.layer = None;
     let score_start = e.ops.len();
     let h = e.buf(s.hidden);
-    e.op("leer fila", Op::LoadRow { store: state, dst: h });
+    e.op("read row", Op::LoadRow { store: state, dst: h });
     let (normed, scores) = code_scores(&mut e, s, h);
     let score = score_start..e.ops.len();
     // With guidance, two more routines: one keeps a row's final state with the text, the
@@ -237,16 +237,16 @@ pub fn program_guided(s: &Shape, guidance: Option<f32>) -> Program {
     if let Some(g) = guidance {
         let kept = e.buf(rows * s.hidden);
         let start = e.ops.len();
-        e.op("guardar estado con texto", Op::StoreRow { src: normed, store: kept });
+        e.op("store state with text", Op::StoreRow { src: normed, store: kept });
         extra.push(start..e.ops.len());
         let start = e.ops.len();
         let (with, without, difference, pushed, combined) = (e.buf(s.hidden), e.buf(s.hidden), e.buf(s.hidden), e.buf(s.hidden), e.buf(s.hidden));
-        e.op("leer estado con texto", Op::LoadRow { store: kept, dst: with });
-        e.op("cambiar de signo", Op::Scale { src: normed, factor: -1.0, dst: without });
-        e.op("diferencia", Op::Add { a: with, b: without, dst: difference });
-        e.op("guía", Op::Scale { src: difference, factor: g, dst: pushed });
-        e.op("estado guiado", Op::Add { a: with, b: pushed, dst: combined });
-        let scored = e.linear("puntuaciones guiadas", CODE_HEAD.into(), combined, s.codebook);
+        e.op("read state with text", Op::LoadRow { store: kept, dst: with });
+        e.op("negate", Op::Scale { src: normed, factor: -1.0, dst: without });
+        e.op("difference", Op::Add { a: with, b: without, dst: difference });
+        e.op("guidance", Op::Scale { src: difference, factor: g, dst: pushed });
+        e.op("guided state", Op::Add { a: with, b: pushed, dst: combined });
+        let scored = e.linear("guided scores", CODE_HEAD.into(), combined, s.codebook);
         extra.push(start..e.ops.len());
         guided = Some(scored);
     }
@@ -335,9 +335,9 @@ impl ShowOChip {
     /// place of the image (the codes' rows of the output, a place after another), after
     /// `text`. The image is the model's tokens, a code's or the mask.
     pub fn scores(&mut self, text_ids: &[u32], text_positions: &[u64], image: &[u32]) -> Result<Vec<f32>, String> {
-        let part = self.program.vision.clone().ok_or("falta la parte de la imagen")?;
+        let part = self.program.vision.clone().ok_or("the image part is missing")?;
         if image.len() + 2 != self.shape.image_rows {
-            return Err(format!("una imagen de Show-o tiene {} códigos", self.shape.image_rows - 2));
+            return Err(format!("a Show-o image has {} codes", self.shape.image_rows - 2));
         }
         self.vm.clear();
         crate::chip::load_initial(&mut self.vm, &self.layout.setup().initial, self.exponents);
@@ -422,8 +422,8 @@ impl ShowOChip {
 
 /// What the firmware needs to run a pass of `program`, Show-o's, laid out by `layout`.
 pub fn firmware_info(program: &Program, layout: &Layout, die: &DieConfig) -> Result<netlist::chip::ShowOInfo, String> {
-    let part = program.vision.as_ref().ok_or("no es el programa de Show-o")?;
-    let (rope, rope_half) = layout.rope_table().ok_or("la tabla de rotaciones no está en registros")?;
+    let part = program.vision.as_ref().ok_or("not Show-o's program")?;
+    let (rope, rope_half) = layout.rope_table().ok_or("the rotation table is not in registers")?;
     let scores = layout.register_of(part.output);
     Ok(netlist::chip::ShowOInfo {
         rows: part.patches as u32,
@@ -459,7 +459,7 @@ pub fn addressed_die(program: &Program, weights: &Weights, base: DieConfig, cont
     let code = wide.microprogram(program)?;
     let die = DieConfig { microcode_bits: bits_for(code.words.len() as u64), ..crate::chip::with_registers_needed(sized, &wide) };
     if die.reg_bits + die.index_bits > 32 {
-        return Err(format!("{} bits de registro y {} de elemento no caben en 32: hacen falta más celdas", die.reg_bits, die.index_bits));
+        return Err(format!("{} register bits and {} element bits do not fit in 32: more cells are needed", die.reg_bits, die.index_bits));
     }
     Ok(die)
 }
@@ -536,15 +536,15 @@ impl FillDie for Addressed<'_> {
 
 impl FillDie for ShowOChip {
     fn run(&mut self, routine: usize, token: u32, position: u32) {
-        self.layout.run_routine(&mut self.vm, &self.program, routine, token, position).expect("rutina de Show-o");
+        self.layout.run_routine(&mut self.vm, &self.program, routine, token, position).expect("Show-o routine");
     }
 
     fn rotate(&mut self, slot: u32, position: u32) {
-        self.layout.place_rotation(&self.program, slot, [position as u64; 3], None).expect("rotación");
+        self.layout.place_rotation(&self.program, slot, [position as u64; 3], None).expect("rotation");
     }
 
     fn scores(&mut self) -> (i32, Vec<i32>) {
-        let part = self.program.vision.as_ref().expect("la imagen");
+        let part = self.program.vision.as_ref().expect("the image");
         let (reg, width) = (self.layout.register_of(part.output), self.program.buffers[part.output] as u32);
         (self.vm.register_exponent(reg) as i32, (0..width).map(|i| self.vm.mantissa(reg, i) as i32).collect())
     }
@@ -560,7 +560,7 @@ impl ShowOChip {
 
     /// The shape of a fill on this machine: its rows, layers, codes and whether it guides.
     pub fn fill_shape(&self) -> FillShape {
-        let part = self.program.vision.as_ref().expect("la imagen");
+        let part = self.program.vision.as_ref().expect("the image");
         FillShape { rows: part.patches as u32, layers: part.blocks.len() as u32, guided: !part.extra.is_empty(), bits: self.layout.config().cell.activation_bits }
     }
 }
@@ -580,7 +580,7 @@ impl ShowOChip {
 #[allow(clippy::too_many_arguments)]
 fn firmware_fill(die: &mut dyn FillDie, shape: FillShape, config: &ShowOConfig, codes: &[Option<u32>], text: &[u32], steps: usize, seed: u64, progress: &mut dyn FnMut(usize, usize) -> Result<(), String>) -> Result<Vec<u32>, String> {
     if codes.len() != config.image_tokens {
-        return Err(format!("una imagen de Show-o tiene {} códigos", config.image_tokens));
+        return Err(format!("a Show-o image has {} codes", config.image_tokens));
     }
     let (ids, first) = config.text_prefix(text);
     let (plain, plain_first) = config.text_prefix(&[]);
@@ -662,7 +662,7 @@ pub fn fill_on_die(engine: &mut dyn netlist::chip::DieEngine, layout: &Layout, p
 
 /// The fill on any die, as the firmware runs it.
 pub fn fill_on(die: &mut dyn FillDie, shape: FillShape, config: &ShowOConfig, codes: &[Option<u32>], fill: &Fill) -> Vec<u32> {
-    fill_on_with(die, shape, config, codes, fill, &mut |_, _| Ok(())).expect("sin nada que lo pare")
+    fill_on_with(die, shape, config, codes, fill, &mut |_, _| Ok(())).expect("nothing stops it")
 }
 
 /// The same, telling `progress` of each step before it runs, and of the end: an error from

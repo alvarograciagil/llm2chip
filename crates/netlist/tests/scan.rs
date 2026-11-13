@@ -306,7 +306,7 @@ fn replay_on_cells(sim: &mut Simulator, p: &TestPattern) -> (bool, bool) {
 }
 
 #[test]
-#[ignore = "lenta: genera los patrones de la celda del die (unos 2 min) y los aplica a las tres celdas"]
+#[ignore = "slow: generates the patterns of the die's cell (about 2 min) and applies them to the three cells"]
 fn a_cell_s_patterns_test_every_cell_of_the_die_at_once() {
     let die = netlist::die_design(small_die());
     let groups = netlist::cell_groups(small_die());

@@ -104,7 +104,7 @@ impl MetalAccelerator {
         // Tensors are not aligned in the file: start on a word and skip the codes before the row.
         let words_start = words_at + first * tensor.stride;
         let job = Job { skip: (words_start % 4) as u32 * 8, ..job };
-        let mut scratch = self.scratch.lock().expect("búferes de Metal");
+        let mut scratch = self.scratch.lock().expect("Metal buffers");
         autoreleasepool(|_| {
             if scratch.input.length() < input.len() {
                 let Some(buffer) = shared(&self.device, input.len() * 2) else { return false };
@@ -138,7 +138,7 @@ impl MetalAccelerator {
             commands.commit();
             commands.waitUntilCompleted();
             if commands.status() != MTLCommandBufferStatus::Completed {
-                eprintln!("Metal: la orden no terminó: {:?}", commands.error());
+                eprintln!("Metal: the command did not finish: {:?}", commands.error());
                 return false;
             }
             // SAFETY: the GPU has finished and the buffer holds at least `output.len()` bytes.

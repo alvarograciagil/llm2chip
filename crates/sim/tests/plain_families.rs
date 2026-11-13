@@ -58,7 +58,7 @@ fn llama_3_depends_on_its_scaled_waves() {
         let (logits, _) = Runner::step(&mut engine, *token, true).unwrap();
         largest = logits.unwrap().iter().zip(reference).fold(largest, |most, (got, want)| most.max((got - want).abs()));
     }
-    assert!(largest > 0.05, "sin escalar se aleja solo {largest}");
+    assert!(largest > 0.05, "without scaling it strays only {largest}");
 }
 
 mod common;
@@ -101,7 +101,7 @@ fn an_image_heads_scores_and_inputs_come_from_the_chip_as_in_float() {
     let close = |got: &[f32], want: &[f32], what: &str| {
         let scale = want.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
         let error = got.iter().zip(want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        assert!(error < 0.02 * scale, "{what}: {error} sobre {scale}: {got:?} {want:?}");
+        assert!(error < 0.02 * scale, "{what}: {error} over {scale}: {got:?} {want:?}");
     };
 
     let mut float = Engine::new(compile_model(&config).unwrap(), Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
@@ -111,11 +111,11 @@ fn an_image_heads_scores_and_inputs_come_from_the_chip_as_in_float() {
         exact.step_hidden(*token, None).unwrap();
         // The scores of each code, from the state the token left.
         let want = linear(&linear(&state, &proj).into_iter().map(gelu).collect::<Vec<_>>(), &head);
-        close(&exact.image_logits().unwrap(), &want, &format!("puntuaciones del paso {step}"));
+        close(&exact.image_logits().unwrap(), &want, &format!("scores of step {step}"));
         // The vector a drawn code goes in as.
         let code = (step * 5 + 3) % codes;
         let want = linear(&linear(&book[code * code_dim..(code + 1) * code_dim], &fc1).into_iter().map(gelu).collect::<Vec<_>>(), &fc2);
-        close(&exact.image_input(code as u32).unwrap(), &want, &format!("entrada del código {code}"));
+        close(&exact.image_input(code as u32).unwrap(), &want, &format!("input of code {code}"));
     }
     std::fs::remove_dir_all(dir).ok();
 }

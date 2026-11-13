@@ -22,7 +22,7 @@ fn env(name: &str, default: u32) -> u32 {
 
 fn kind(w: &ControlWord) -> &'static str {
     if w.cell_run || w.cell_flush || w.cell_feed || w.chain_shift || w.chain_load || w.cell_clear_group {
-        "celdas"
+        "cells"
     } else if w.x_write {
         "bucles"
     } else if w.read_step && w.vector {
@@ -69,7 +69,7 @@ fn profile(code: &Microprogram, die: &DieConfig) -> BTreeMap<usize, (u64, u64)> 
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let dir = Path::new(args.get(1).expect("carpeta del modelo"));
+    let dir = Path::new(args.get(1).expect("model folder"));
     let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
     let program = compiler::compile_model(&config).unwrap();
     if args.get(2).map(String::as_str) == Some("list") {
@@ -83,7 +83,7 @@ fn main() {
     let features = DieFeatures::default().with_lane_bits(env("LANES", 7)).with_cluster_bits(env("UNITS", 7)).with_key_shift(CONTEXT.trailing_zeros());
     let die = DieConfig { cells: 1 << env("CELLS", 18), cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features };
     let layout = Layout::for_image(&program, &weights, die, CONTEXT as usize).unwrap();
-    let pick: Option<usize> = args.get(2).map(|a| a.parse().expect("índice de operación"));
+    let pick: Option<usize> = args.get(2).map(|a| a.parse().expect("operation index"));
 
     let mut table: BTreeMap<String, BTreeMap<&str, u64>> = BTreeMap::new();
     for (i, inst) in program.ops.iter().enumerate() {

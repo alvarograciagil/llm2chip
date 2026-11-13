@@ -279,7 +279,7 @@ impl Engine {
     pub fn step_hidden(&mut self, token: u32, embedding: Option<&[f32]>) -> Result<Vec<f32>, String> {
         let last = self.program.ops.len() - 1;
         let Op::Matvec { src, dst, .. } = self.program.ops[last].op else {
-            return Err("el modelo no termina en el producto de los logits".into());
+            return Err("the model does not end with the logits' product".into());
         };
         debug_assert_eq!(dst, self.program.logits);
         self.input = embedding.map(<[f32]>::to_vec);
@@ -355,7 +355,7 @@ impl Engine {
 
     /// One step of the draft head for `next_token`. Logits only when asked.
     pub fn draft(&mut self, next_token: u32, want_logits: bool) -> Result<Option<&[f32]>, String> {
-        let draft = self.program.draft.as_ref().ok_or("este modelo no tiene cabeza MTP")?.clone();
+        let draft = self.program.draft.as_ref().ok_or("this model has no MTP head")?.clone();
         self.rope_position = self.draft_tokens as u64;
         self.rope_positions = [self.draft_tokens as u64; 3];
         let limit = if want_logits { draft.ops.len() } else { draft.logits_from };
@@ -525,7 +525,7 @@ impl Engine {
                 // The given vector serves this token only.
                 match self.input.take() {
                     Some(given) if given.len() == self.buffers[*dst].len() => self.buffers[*dst].copy_from_slice(&given),
-                    Some(given) => return Err(format!("la entrada tiene {} valores y el modelo espera {}", given.len(), self.buffers[*dst].len())),
+                    Some(given) => return Err(format!("the input has {} values and the model expects {}", given.len(), self.buffers[*dst].len())),
                     None => {
                         let matrix = self.weights.matrix(table)?;
                         let len = self.buffers[*dst].len();

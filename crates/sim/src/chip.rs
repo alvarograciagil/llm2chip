@@ -62,7 +62,7 @@ impl VmEngine {
     fn build(program: Program, weights: Weights, config: DieConfig, chip_tokens: usize, table_outside: bool) -> Result<Self, String> {
         // The die's addresses put the register above the element in 32 bits.
         if config.reg_bits + config.index_bits > 32 {
-            return Err(format!("{} bits de registro y {} de elemento no caben en una dirección de 32 bits", config.reg_bits, config.index_bits));
+            return Err(format!("{} register bits and {} element bits do not fit in a 32-bit address", config.reg_bits, config.index_bits));
         }
         let weights = Arc::new(weights);
         let layout = if table_outside { Layout::with_cells_table_outside(&program, &weights, config, chip_tokens)? } else { Layout::with_cells(&program, &weights, config, chip_tokens)? };
@@ -94,7 +94,7 @@ impl VmEngine {
 
 impl DieEngine for VmEngine {
     fn run(&mut self, routine: usize, token: u32, position: u32) {
-        self.layout.run_routine(&mut self.vm, &self.program, routine, token, position).expect("rutina del die");
+        self.layout.run_routine(&mut self.vm, &self.program, routine, token, position).expect("die routine");
     }
 
     fn cycles(&self, routine: usize, token: u32, position: u32) -> u64 {
@@ -286,7 +286,7 @@ impl DieEngine for RunnerEngine<'_> {
         } else if routine == crate::lower::ENTRY_TOKEN_FROM_IMAGE {
             // The image's tokens take the cache's positions from the first one on.
             let Some((tokens, placement, start)) = &mut self.image else {
-                self.error = Some("el firmware pide un token de imagen sin imagen".into());
+                self.error = Some("the firmware asks for an image token without an image".into());
                 return;
             };
             if start.is_none() {
@@ -296,7 +296,7 @@ impl DieEngine for RunnerEngine<'_> {
             let first = *start.get_or_insert(position as u64);
             let index = (position as u64 - first) as usize;
             if index >= tokens.len() {
-                self.error = Some("el firmware pide más tokens de imagen de los que hay".into());
+                self.error = Some("the firmware asks for more image tokens than there are".into());
                 return;
             }
             self.die_cycles += self.cycles_per_token;
@@ -411,9 +411,9 @@ pub fn cell_segments(config: &DieConfig, layout: &Layout, weights: &Weights) -> 
 /// the step of the loops that visit it by number above it.
 pub fn register_table(config: &DieConfig, layout: &Layout) -> Vec<u32> {
     let bits = config.features.vector_bits;
-    assert!(bits + netlist::die::BASE_SHIFT_BITS <= 32, "la tabla de registros no cabe en palabras de 32 bits");
+    assert!(bits + netlist::die::BASE_SHIFT_BITS <= 32, "the register table does not fit in 32-bit words");
     let (bases, needed) = layout.register_bases();
-    assert!(needed <= bits, "la memoria vectorial del die tiene 2^{bits} palabras y hacen falta 2^{needed}");
+    assert!(needed <= bits, "the die's vector memory has 2^{bits} words and 2^{needed} are needed");
     bases.iter().map(|(base, shift)| base | shift << bits).collect()
 }
 
@@ -500,7 +500,7 @@ pub fn fpga_chip_for(models: &[(&Program, &Weights)], trial: DieConfig, context:
         needs.push(if options.dictionary { with_code_dictionary(die, &code) } else { die });
         built.push((layout, code));
     }
-    let features = needs.iter().map(|d| d.features).reduce(netlist::DieFeatures::union).ok_or("ningún modelo")?;
+    let features = needs.iter().map(|d| d.features).reduce(netlist::DieFeatures::union).ok_or("no model")?;
     let die = DieConfig { features, microcode_bits: needs.iter().map(|d| d.microcode_bits).max().unwrap_or(1), ..trial };
     // The firmware's data, its stack and the chip's description take the first 32 KB, and
     // the tokenizer's tables, if any, go after them.

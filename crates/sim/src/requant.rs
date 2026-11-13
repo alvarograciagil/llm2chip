@@ -405,7 +405,7 @@ mod tests {
         let reference = Reference { min: 0.0, max: 1.0, table: Vec::new() };
         let mut values = vec![1.0f32, 0.5, 1e-9];
         quantize(&format(WeightCoding::Float, 32, 8), &reference, &mut values);
-        assert_eq!(values[2], 0.0, "fuera de la ventana del acumulador");
+        assert_eq!(values[2], 0.0, "outside the accumulator's window");
     }
 
     #[test]
@@ -473,7 +473,7 @@ mod tests {
         for format in formats {
             let (min, max) = values.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
             let reference = Reference { min, max, table: Vec::new() };
-            let recoded = recode(&format, &reference, rows, cols, |index, out| out.copy_from_slice(&values[index * cols..(index + 1) * cols])).expect("cabe en 256 códigos");
+            let recoded = recode(&format, &reference, rows, cols, |index, out| out.copy_from_slice(&values[index * cols..(index + 1) * cols])).expect("fits in 256 codes");
             let mut decoded = vec![0f32; cols];
             for index in 0..rows {
                 let mut expected = values[index * cols..(index + 1) * cols].to_vec();
