@@ -114,7 +114,8 @@ pub fn draw(codes: u32, score: &dyn Fn(u32) -> i32, exponent: i32, bits: u32, te
         t.max(FLOOR)
     };
     let total: u64 = (0..codes).map(|c| exp2(log2_of(c))).sum();
-    let pick = ((rng.next_word() as u64) * total) >> 32;
+    // Up to 2^13 codes of 2^24 each add up past 2^32: the product needs 128 bits.
+    let pick = ((rng.next_word() as u128 * total as u128) >> 32) as u64;
     let mut sum = 0;
     let mut code = codes - 1;
     for c in 0..codes {

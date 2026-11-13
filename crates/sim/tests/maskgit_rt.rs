@@ -43,3 +43,24 @@ fn the_noise_spreads_the_confidences_and_the_least_sure_stay_masked() {
     assert_eq!(cut(&confidences, 2), 5);
     assert_eq!(confidences.iter().filter(|c| **c < cut(&confidences, 2)).count(), 2);
 }
+
+/// Among as many codes as Show-o's 8 192, all equally likely, the draws spread evenly: the
+/// weights add up past 2^32, and the pick must not wrap around towards the first codes.
+#[test]
+fn a_flat_draw_over_many_codes_is_even() {
+    let mut rng = Rng(12345);
+    let score = |_: u32| 0;
+    let (codes, draws) = (8192u32, 40_000);
+    let mut upper = 0;
+    let mut confidence = 0i64;
+    for _ in 0..draws {
+        let (code, sure) = draw(codes, &score, 0, 16, 0, &mut rng);
+        upper += (code >= codes / 2) as usize;
+        confidence += sure;
+    }
+    let share = upper as f64 / draws as f64;
+    assert!((share - 0.5).abs() < 0.02, "mitad alta {share}");
+    // Each code's log-probability is ln(1/8192).
+    let mean = confidence as f64 / draws as f64 / (1u64 << FRACTION) as f64;
+    assert!((mean - (1.0f64 / 8192.0).ln()).abs() < 0.01, "confianza {mean}");
+}

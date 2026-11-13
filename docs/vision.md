@@ -241,7 +241,7 @@ El chip también rellena la imagen él solo. El firmware hace los pasos de MaskG
 
 Comprobado:
 - **Frente a la coma flotante:** las confianzas quedan a menos de 0,02 nats y las frecuencias de los sorteos, a menos de un 1 % (`crates/sim/tests/maskgit_rt.rs`).
-- **En el chip a nivel de instrucción:** el Show-o de juguete rellena una imagen de 16 sitios, la mitad conocidos, con guía y 4 pasos, en 23,8 millones de ciclos de CPU. Da los mismos códigos que el anfitrión ordenando la misma máquina (`the_firmware_fills_an_image_as_the_host_ordered_it`).
+- **En el chip a nivel de instrucción:** el Show-o de juguete rellena una imagen de 16 sitios, la mitad conocidos, con guía y 4 pasos, en 24,1 millones de ciclos de CPU. Da los mismos códigos que el anfitrión ordenando la misma máquina (`the_firmware_fills_an_image_as_the_host_ordered_it`).
 - **El chip entero en puertas,** CPU, firmware, cargador y die, rellena la imagen de juguete con dos pasos. Envía los mismos bytes en los mismos ciclos que a nivel de instrucción: 12,28 millones de ciclos, 903 s (`the_whole_chip_fills_an_image_in_gates_as_at_instruction_level`).
 - **Con el Show-o real:** el mismo bucle (`fill_on`), sobre la máquina exacta con la guía en el die y pesos afines de 8 bits, retoca el disco rojo con «a yellow lemon» en 4 pasos y 367 s (`cargo run --release -p sim --example showo_fill_chip`). Sale un limón con su textura, más pálido que en coma flotante.
 
