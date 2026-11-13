@@ -64,9 +64,9 @@ fn memory_name(backend: WeightBackend) -> Option<&'static str> {
     match backend {
         WeightBackend::Sram => None,
         WeightBackend::Rom => Some("ROM"),
-        WeightBackend::StackedDram => Some("DRAM apilada"),
+        WeightBackend::StackedDram => Some("stacked DRAM"),
         WeightBackend::Hbm4 => Some("HBM4"),
-        WeightBackend::ExternalDdr => Some("memoria externa DDR"),
+        WeightBackend::ExternalDdr => Some("external DDR memory"),
     }
 }
 
@@ -135,24 +135,24 @@ fn chip_notes(p: &ChipParams, report: &Report, tech: Option<&TechNode>) -> Vec<S
         // An open shuttle hands each die back in its own package; they meet on a board.
         let per_board = if report.die_area_mm2 > 100.0 { BOARD_PACKAGES } else { BOARD_SMALL_PACKAGES };
         let boards = report.dies.div_ceil(per_board);
-        let where_ = if boards > 1 { format!("{boards} placas unidas por cable") } else { "una placa".into() };
+        let where_ = if boards > 1 { format!("{boards} boards joined by cable") } else { "one board".into() };
         notes.push(format!(
-            "Una lanzadera abierta entrega cada die en su propio encapsulado: {} chips sobre {where_}, unidos por sus pines de E/S. Cada token pasa {crossing:.1} µs solo en los saltos, más lo que tarda el vector en cruzar los pines.",
+            "An open shuttle delivers each die in its own package: {} chips on {where_}, joined by their I/O pins. Each token spends {crossing:.1} µs on the hops alone, plus the time the vector takes to cross the pins.",
             report.dies
         ));
     } else if plan.packages > BOARD_PACKAGES {
         let boards = plan.packages.div_ceil(BOARD_PACKAGES);
         notes.push(format!(
-            "{} chips en {} encapsulados no caben en una placa (unos {BOARD_PACKAGES} encapsulados por placa): harían falta {boards} placas unidas por cable. Funciona, pero cada token cruza todos los enlaces: {crossing:.1} µs por token solo en ellos.",
+            "{} chips in {} packages do not fit on one board (about {BOARD_PACKAGES} packages per board): it would take {boards} boards joined by cable. It works, but each token crosses every link: {crossing:.1} µs per token in them alone.",
             report.dies, plan.packages
         ));
     } else if plan.packages > 1 {
-        notes.push(format!("{} chips en {} encapsulados sobre una placa, unidos por SerDes: {crossing:.1} µs por token en enlaces.", report.dies, plan.packages));
+        notes.push(format!("{} chips in {} packages on one board, joined by SerDes: {crossing:.1} µs per token in links.", report.dies, plan.packages));
     } else {
-        notes.push(format!("{} chips en un solo encapsulado, unidos por UCIe.", report.dies));
+        notes.push(format!("{} chips in a single package, joined by UCIe.", report.dies));
     }
     if designs(p, report.dies) > 1 && tech.is_some_and(|t| t.open_pdk && t.fabricable) {
-        notes.push(format!("Con los pesos grabados en ROM, cada uno de los {} dies es un diseño distinto: en una lanzadera abierta ocupa una plaza propia. Con «Todos iguales» basta un diseño fabricado {} veces.", report.dies, report.dies));
+        notes.push(format!("With the weights burnt into ROM, each of the {} dies is a different design: on an open shuttle it takes a place of its own. With “All identical” one design made {} times is enough.", report.dies, report.dies));
     }
     notes
 }
@@ -167,23 +167,23 @@ pub fn judge(p: &ChipParams, report: &Report) -> Feasibility {
     blocks.truncate(4);
     if report.die_area_mm2 > limit {
         let list = blocks.iter().take(3).map(|(label, area)| format!("{label} {} mm²", mm2(*area))).collect::<Vec<_>>().join(", ");
-        let chips = if report.dies > 1 { format!(" aun repartido en {} chips", report.dies) } else { String::new() };
-        reasons.push(format!("Cada die necesita {} mm²{chips} y el proceso admite {limit:.0} mm²: {list}.", mm2(report.die_area_mm2)));
+        let chips = if report.dies > 1 { format!(" even spread over {} chips", report.dies) } else { String::new() };
+        reasons.push(format!("Each die needs {} mm²{chips} and the process takes {limit:.0} mm²: {list}.", mm2(report.die_area_mm2)));
     }
-    for v in report.violations.iter().filter(|v| v.severity == Severity::Error && !v.message.starts_with("Cada die ocupa")) {
+    for v in report.violations.iter().filter(|v| v.severity == Severity::Error && !v.message.starts_with("Each die takes")) {
         reasons.push(v.message.clone());
     }
     let possible = reasons.is_empty();
     let open = tech.is_some_and(|t| t.open_pdk);
     let mut layout_reasons = Vec::new();
     if !open {
-        layout_reasons.push(format!("{} no tiene un PDK abierto: se estima, pero no se puede hacer su layout. Para eso, SkyWater 130, GF180 o ASAP7.", tech.map_or(p.node.as_str(), |t| t.label.as_str())));
+        layout_reasons.push(format!("{} has no open PDK: it is estimated, but it cannot be laid out. For that, SkyWater 130, GF180 or ASAP7.", tech.map_or(p.node.as_str(), |t| t.label.as_str())));
     } else {
         if let Some(memory) = memory_name(p.weight_backend) {
-            layout_reasons.push(format!("Los pesos van en {memory}, que el PDK abierto no ofrece: solo tiene macros de SRAM."));
+            layout_reasons.push(format!("The weights go in {memory}, which the open PDK does not offer: it only has SRAM macros."));
         }
         if p.kv_backend != KvBackend::Sram {
-            layout_reasons.push("La caché KV va fuera del chip, y el PDK abierto no tiene la interfaz para esa memoria.".into());
+            layout_reasons.push("The KV cache is off the chip, and the open PDK has no interface for that memory.".into());
         }
     }
     let layout = possible && layout_reasons.is_empty();
@@ -191,7 +191,7 @@ pub fn judge(p: &ChipParams, report: &Report) -> Feasibility {
     // How the chips would be put together matters once they can be made.
     let mut notes = if reasons.is_empty() { chip_notes(p, report, tech) } else { Vec::new() };
     if tech.is_some_and(|t| !t.fabricable) {
-        notes.push(format!("{} es un proceso predictivo: su layout enseña cómo sería, pero ninguna fábrica lo produce.", tech.map_or("", |t| t.label.as_str())));
+        notes.push(format!("{} is a predictive process: its layout shows what it would be like, but no foundry makes it.", tech.map_or("", |t| t.label.as_str())));
     }
     Feasibility {
         possible,
@@ -214,43 +214,43 @@ fn levers(model: &ModelGraph, p: &ChipParams, tech: &TechNode) -> Vec<Change> {
         out.push(Change { field, value, label, risk: risk.map(str::to_string) });
     };
     if p.dies != 0 {
-        add("dies", 0.into(), "Repartir el modelo en los chips que hagan falta".into(), None);
+        add("dies", 0.into(), "Spread the model over as many chips as it takes".into(), None);
     }
     // A design sized for a bigger model carries room this one never uses.
     let params_g = model.total_params() as f64 / 1e9;
     if p.max_params_g > params_g * 1.1 {
         let room = (params_g * 1.05 * 1e4).ceil() / 1e4;
-        add("max_params_g", room.into(), format!("Dimensionar para este modelo, {} G parámetros", room), None);
+        add("max_params_g", room.into(), format!("Size it for this model, {} G parameters", room), None);
     }
     if model.max_context > 0 && p.context_tokens > model.max_context {
-        add("context_tokens", model.max_context.into(), format!("El contexto nativo del modelo, {} tokens", model.max_context), None);
+        add("context_tokens", model.max_context.into(), format!("The model's native context, {} tokens", model.max_context), None);
     }
     if p.die_max_mm2 < tech.die_max_mm2 {
-        add("die_max_mm2", tech.die_max_mm2.into(), format!("Usar todo el die que admite el proceso, {:.0} mm²", tech.die_max_mm2), None);
+        add("die_max_mm2", tech.die_max_mm2.into(), format!("Use the whole die the process takes, {:.0} mm²", tech.die_max_mm2), None);
     }
     // A mixed checkpoint keeps some matrices wider: all of them at one width is lighter.
     let mixed = p.use_model_mix && model.tensors.iter().any(|t| t.wide);
     for bits in [6, 4, 3] {
         if bits < p.weight_bits || (mixed && bits <= p.weight_bits) {
-            let risk = if bits >= 6 { "calidad: pérdida pequeña" } else if bits == 4 { "calidad: pérdida apreciable sin cuantización cuidada" } else { "calidad: pérdida grande" };
-            add("weight_bits", bits.into(), format!("Pesos de {bits} bits"), Some(risk));
+            let risk = if bits >= 6 { "quality: small loss" } else if bits == 4 { "quality: noticeable loss without careful quantization" } else { "quality: large loss" };
+            add("weight_bits", bits.into(), format!("{bits}-bit weights"), Some(risk));
         }
     }
     for divisor in [2, 4, 8] {
         let context = p.context_tokens / divisor;
         if context >= 128 {
-            add("context_tokens", context.into(), format!("Contexto de {context} tokens"), Some("conversaciones más cortas"));
+            add("context_tokens", context.into(), format!("Context of {context} tokens"), Some("shorter conversations"));
         }
     }
     if p.kv_bits > 8 {
-        add("kv_bits", 8.into(), "Caché KV de 8 bits".into(), Some("calidad: pérdida pequeña en contextos largos"));
+        add("kv_bits", 8.into(), "8-bit KV cache".into(), Some("quality: small loss in long contexts"));
     }
     if p.function_units_per_die > 1 {
-        add("function_units_per_die", 1.into(), "Una sola unidad de función por die".into(), None);
+        add("function_units_per_die", 1.into(), "A single function unit per die".into(), None);
     }
     if p.function_table_bits > 8 {
         let bits = (p.function_table_bits - 2).max(8);
-        add("function_table_bits", bits.into(), format!("Tablas de función de {bits} bits de entrada"), Some("precisión de SiLU, exp y raíz algo menor"));
+        add("function_table_bits", bits.into(), format!("Function tables of {bits} input bits"), Some("somewhat less precise SiLU, exp and root"));
     }
     // Fewer units per die, down to what a small model needs: each a quarter of the last.
     // With a speed to reach, the multipliers follow it, so the speed is what changes.
@@ -258,30 +258,30 @@ fn levers(model: &ModelGraph, p: &ChipParams, tech: &TechNode) -> Vec<Change> {
         for divisor in [2.0, 4.0, 16.0] {
             let rate = (p.target_tok_s / divisor).round();
             if rate >= 1.0 {
-                add("target_tok_s", rate.into(), format!("Velocidad objetivo de {rate} tok/s"), Some("menos tok/s"));
+                add("target_tok_s", rate.into(), format!("Target speed of {rate} tok/s"), Some("fewer tok/s"));
             }
         }
     }
     for divisor in [2, 8, 32, 128, 512, 2048] {
         let macs = p.macs_per_die / divisor;
         if macs >= 16 && p.target_tok_s <= 0.0 {
-            add("macs_per_die", macs.into(), format!("{macs} multiplicadores por die"), Some("menos tok/s"));
+            add("macs_per_die", macs.into(), format!("{macs} multipliers per die"), Some("fewer tok/s"));
         }
         let lanes = p.vector_lanes_per_die / divisor;
         if lanes >= 4 {
-            add("vector_lanes_per_die", lanes.into(), format!("{lanes} carriles vectoriales por die"), Some("menos tok/s"));
+            add("vector_lanes_per_die", lanes.into(), format!("{lanes} vector lanes per die"), Some("fewer tok/s"));
         }
     }
     if tech.open_pdk {
         if p.weight_backend != WeightBackend::Sram {
-            add("weight_backend", "sram".into(), "Pesos en SRAM, la memoria del PDK abierto".into(), None);
+            add("weight_backend", "sram".into(), "Weights in SRAM, the open PDK's memory".into(), None);
         }
         if p.kv_backend != KvBackend::Sram {
-            add("kv_backend", "sram".into(), "Caché KV en SRAM dentro del chip".into(), None);
+            add("kv_backend", "sram".into(), "KV cache in SRAM on the chip".into(), None);
         }
     }
     for other in crate::tech::nodes().iter().filter(|n| n.open_pdk && n.fabricable && n.id != tech.id) {
-        add("node", other.id.clone().into(), format!("Proceso {}", other.label), None);
+        add("node", other.id.clone().into(), format!("Process {}", other.label), None);
     }
     out
 }
@@ -325,7 +325,7 @@ pub fn advise(model: &ModelGraph, p: &ChipParams, search: bool) -> Result<Advice
     if goal(&verdict) {
         let mut suggestions = Vec::new();
         if verdict.designs > 1 {
-            let same = Change { field: "die_mode", value: "identical".into(), label: format!("Todos los dies iguales: un diseño fabricado {} veces", verdict.dies), risk: Some("algo más de área por die".into()) };
+            let same = Change { field: "die_mode", value: "identical".into(), label: format!("All dies identical: one design made {} times", verdict.dies), risk: Some("a little more area per die".into()) };
             if let Some((f, mut s)) = try_changes(std::slice::from_ref(&same)).filter(|(f, _)| goal(f)) {
                 s.cheaper = true;
                 s.designs = f.designs;
@@ -446,10 +446,10 @@ mod tests {
         let p = ChipParams { dies: 0, ..Default::default() };
         let report = estimate(&model, &p).unwrap();
         let notes = chip_notes(&p, &report, node(&p.node));
-        assert!(report.dies > 1 && notes[0].contains("encapsulado"), "{} {notes:?}", report.dies);
+        assert!(report.dies > 1 && notes[0].contains("package"), "{} {notes:?}", report.dies);
         // Each package of 32 small dies on its own: far more than a board takes.
         let crowded = Report { dies: 40 * BOARD_PACKAGES, die_area_mm2: 800.0, ..report };
-        assert!(chip_notes(&ChipParams { link: crate::params::LinkKind::Auto, ..p }, &crowded, None)[0].contains("placas"));
+        assert!(chip_notes(&ChipParams { link: crate::params::LinkKind::Auto, ..p }, &crowded, None)[0].contains("boards"));
     }
 
     #[test]

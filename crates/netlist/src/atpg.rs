@@ -187,9 +187,9 @@ impl View {
                 next[s] += 1;
             }
         }
-        let pin = |name: &str| flat.inputs.iter().find(|(n, _)| n == name).map(|(_, bits)| bits[0]).ok_or_else(|| SimError(format!("el diseño no tiene el pin {name}: falta la cadena de scan")));
+        let pin = |name: &str| flat.inputs.iter().find(|(n, _)| n == name).map(|(_, bits)| bits[0]).ok_or_else(|| SimError(format!("the design has no {name} pin: the scan chain is missing")));
         let (enable, test_mode, scan_in) = (pin(SCAN_ENABLE)?, pin(TEST_MODE)?, pin(SCAN_IN)?);
-        let scan_out = flat.outputs.iter().find(|(n, _)| n == SCAN_OUT).map(|(_, bits)| bits[0]).ok_or_else(|| SimError("el diseño no tiene scan_out".into()))?;
+        let scan_out = flat.outputs.iter().find(|(n, _)| n == SCAN_OUT).map(|(_, bits)| bits[0]).ok_or_else(|| SimError("the design has no scan_out".into()))?;
         let mut pins_in = Vec::new();
         let mut controlled = Vec::new();
         for (name, bits) in flat.inputs.iter().filter(|(n, _)| ![SCAN_ENABLE, TEST_MODE, SCAN_IN].contains(&n.as_str())) {
@@ -233,7 +233,7 @@ impl View {
             at = flat.flops[k].1;
         }
         if chain.len() != flat.flops.len() || through_buffers(scan_out) != at {
-            return Err(SimError(format!("la cadena de scan recorre {} de {} biestables", chain.len(), flat.flops.len())));
+            return Err(SimError(format!("the scan chain goes through {} of {} flip-flops", chain.len(), flat.flops.len())));
         }
         // The buffers between one link of the chain and the next, and up to `scan_out`.
         let mut shift_path = vec![false; flat.signals];
@@ -785,7 +785,7 @@ pub fn generate(design: &Design, limit: usize) -> Result<AtpgReport, SimError> {
     flush(&mut batch, &mut remaining, &mut scratch, &mut kept, &mut rng);
     // Each PODEM pattern finds its own fault: none should be left.
     if !remaining.is_empty() {
-        return Err(SimError(format!("{} fallos con patrón de PODEM no se detectan al simularlos (de {pending} pendientes)", remaining.len())));
+        return Err(SimError(format!("{} faults with a PODEM pattern are not detected when simulated (of {pending} pending)", remaining.len())));
     }
     report.deterministic_patterns = kept.len() - report.random_patterns;
     report.detected = faults.len() - report.untestable - report.aborted;
@@ -830,7 +830,7 @@ pub fn describe(design: &Design, faults: &[Fault]) -> Result<Vec<String>, SimErr
             Site::Stem(s) => format!("{} a {}", name(s), f.stuck as u8),
             Site::Branch(g, pin) => {
                 let gate = view.flat.gates[g];
-                format!("{} a {} en la entrada {pin} de {:?} → {}", name(gate.input(pin)), f.stuck as u8, gate.op, name(gate.y))
+                format!("{} stuck at {} on input {pin} of {:?} → {}", name(gate.input(pin)), f.stuck as u8, gate.op, name(gate.y))
             }
         })
         .collect())

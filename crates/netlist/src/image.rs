@@ -66,14 +66,14 @@ pub fn build_image(program: &[u32], data: &[u32], config: &[u32], tokenizer: &[u
     let segments = segments.as_slice();
     let mut config = config.to_vec();
     if data.len() > CONFIG_WORD {
-        return Err(format!("los datos del firmware ocupan {} palabras y el límite es {CONFIG_WORD}", data.len()));
+        return Err(format!("the firmware's data take {} words and the limit is {CONFIG_WORD}", data.len()));
     }
     if config.len() > PLAN_DIRECTORY_WORD - CONFIG_WORD {
-        return Err(format!("la descripción del chip ocupa {} palabras y el límite es {}", config.len(), PLAN_DIRECTORY_WORD - CONFIG_WORD));
+        return Err(format!("the chip's description takes {} words and the limit is {}", config.len(), PLAN_DIRECTORY_WORD - CONFIG_WORD));
     }
     let table_words = 1 + segments.len() * SEGMENT_FIELDS;
     if table_words > TOKENIZER_WORD - SEGMENT_TABLE_WORD {
-        return Err(format!("la tabla de segmentos ocupa {table_words} palabras y el límite es {}", TOKENIZER_WORD - SEGMENT_TABLE_WORD));
+        return Err(format!("the segment table takes {table_words} words and the limit is {}", TOKENIZER_WORD - SEGMENT_TABLE_WORD));
     }
     let data_words = if tokenizer.is_empty() { SEGMENT_TABLE_WORD + table_words } else { TOKENIZER_WORD + tokenizer.len() };
     let mut source = HEADER_WORDS + program.len() + data_words;
@@ -109,7 +109,7 @@ pub fn build_image(program: &[u32], data: &[u32], config: &[u32], tokenizer: &[u
 /// Splits off the tables that stay in the image from the segments loaded at boot.
 fn runtime_tables(segments: &[Segment]) -> (Vec<Segment>, Vec<Segment>) {
     let (tables, boot): (Vec<Segment>, Vec<Segment>) = segments.iter().cloned().partition(|s| s.target == Target::RuntimeTable);
-    assert!(tables.len() <= 1, "la imagen solo admite una tabla que se lea en marcha");
+    assert!(tables.len() <= 1, "the image takes only one table read while running");
     (boot, tables)
 }
 
@@ -147,7 +147,7 @@ fn segment_table(segments: &[Segment], source: &mut usize) -> Vec<u32> {
 /// The firmware counts the chips at start-up and takes its own part.
 pub fn build_plan_image(program: &[u32], data: &[u32], tokenizer: &[u32], plans: &[Vec<ChipPart>]) -> Result<Vec<u32>, String> {
     if data.len() > CONFIG_WORD {
-        return Err(format!("los datos del firmware ocupan {} palabras y el límite es {CONFIG_WORD}", data.len()));
+        return Err(format!("the firmware's data take {} words and the limit is {CONFIG_WORD}", data.len()));
     }
     // The directory: for each plan its number of chips and where its parts are listed.
     let lists_at = TOKENIZER_WORD + tokenizer.len();

@@ -160,13 +160,13 @@ fn hierarchy_expands_into_real_gates() {
     assert!(design.modules.contains_key("full_adder"));
     let sim = Simulator::new(&design).unwrap();
     // The rows are wide enough for prefix adders, so there is no full adder inside them.
-    assert!(sim.snapshot("/multiplier/adder0").is_some(), "se puede entrar hasta el sumador de cada fila");
+    assert!(sim.snapshot("/multiplier/adder0").is_some(), "one can step down to each row's adder");
 }
 
 #[test]
 fn verilog_matches_the_gate_simulator_cycle_by_cycle() {
     if Command::new("iverilog").arg("-V").output().is_err() {
-        eprintln!("iverilog no está instalado: se omite");
+        eprintln!("iverilog is not installed: skipped");
         return;
     }
     let mut rng = Rng(0xDEADBEEFCAFE);
@@ -217,7 +217,7 @@ fn verilog_matches_the_gate_simulator_cycle_by_cycle() {
         assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
         let run = Command::new("vvp").arg(&binary).output().unwrap();
         let theirs: Vec<String> = String::from_utf8_lossy(&run.stdout).lines().filter(|l| l.parse::<u64>().is_ok()).map(str::to_string).collect();
-        assert_eq!(ours, theirs, "configuración {index}");
+        assert_eq!(ours, theirs, "configuration {index}");
     }
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -225,7 +225,7 @@ fn verilog_matches_the_gate_simulator_cycle_by_cycle() {
 #[test]
 fn vhdl_export_computes_the_same_result() {
     if Command::new("nvc").arg("--version").output().is_err() {
-        eprintln!("nvc no está instalado: se omite");
+        eprintln!("nvc is not installed: skipped");
         return;
     }
     let c = CONFIGS[1];

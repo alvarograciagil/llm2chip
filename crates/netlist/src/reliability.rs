@@ -116,7 +116,7 @@ impl Gen {
             return name;
         }
         let hamming = check_bits(data_bits) - 1;
-        let mut b = Builder::new(&name, "Codificador ECC", "Calcula los bits de comprobación que se guardan junto a cada palabra.");
+        let mut b = Builder::new(&name, "Codificador ECC", "Computes the check bits stored with each word.");
         let data = b.input("data", data_bits);
         let check = b.output("check", hamming + 1);
         {
@@ -137,7 +137,7 @@ impl Gen {
             return name;
         }
         let hamming = check_bits(data_bits) - 1;
-        let mut b = Builder::new(&name, "Corrector ECC", "Corrige un bit erróneo en cada palabra leída y avisa si hay dos.");
+        let mut b = Builder::new(&name, "Corrector ECC", "Corrects one wrong bit in each word read and flags it if there are two.");
         let data = b.input("data", data_bits);
         let stored = b.input("check", hamming + 1);
         let corrected = b.output("corrected", data_bits);
@@ -187,7 +187,7 @@ impl Gen {
         let width = lane_bits + bit_bits;
         let total = lane_check_bits(lanes, weight_bits);
         let word = lanes * weight_bits;
-        let mut b = Builder::new(&name, "Corrector ECC por carril", "Comprueba la palabra entera y corrige solo el peso que se está leyendo.");
+        let mut b = Builder::new(&name, "Per-lane ECC corrector", "Checks the whole word and corrects only the weight being read.");
         let data = b.input("data", word);
         let stored = b.input("check", total);
         let lane_now = b.input("lane", lane_bits);
@@ -289,7 +289,7 @@ impl Gen {
             return name;
         }
         let a = addr_bits as usize;
-        let mut b = Builder::new(&name, "Autotest de memoria", "Escribe y lee toda la memoria en secuencia ascendente y descendente para encontrar bits defectuosos.");
+        let mut b = Builder::new(&name, "Memory self-test", "Writes and reads the whole memory in ascending and descending order to find defective bits.");
         let start = b.input("start", 1)[0];
         let rdata = b.input("mem_rdata", width);
         let mem_addr = b.output("mem_addr", addr_bits);
@@ -335,7 +335,7 @@ impl Gen {
                 l.b.or_to(*from, Bit::Zero, *to);
             }
 
-            l.b.group("Comparación");
+            l.b.group("Comparison");
             let wrong: Vec<Bit> = rdata.iter().map(|bit| l.xor(*bit, expected)).collect();
             let any_wrong = l.any(&wrong);
             let bad_now = {
@@ -444,7 +444,7 @@ impl Gen {
         let march = self.march_test(addr_bits, width);
         let (a, s) = (addr_bits as usize, spares as usize);
         let spare_bits = (usize::BITS - (s.max(2) - 1).leading_zeros()) as usize;
-        let mut b = Builder::new(&name, "Memoria reparable", "Comprueba sus filas al arrancar y sustituye las defectuosas por filas de reserva.");
+        let mut b = Builder::new(&name, "Repairable memory", "Checks its rows at boot and replaces the defective ones with spare rows.");
         let start = b.input("test_start", 1)[0];
         let addr = b.input("addr", addr_bits);
         let we = b.input("we", 1)[0];
@@ -524,7 +524,7 @@ impl Gen {
                 l.b.or_to(*from, Bit::Zero, *to);
             }
 
-            l.b.group("Filas de reserva");
+            l.b.group("Spare rows");
             let logical = l.mux_bus(testing, &addr, &march_addr);
             let mut mapped = logical.clone();
             let mut to_spare = Bit::Zero;
@@ -551,7 +551,7 @@ impl Gen {
             chosen_we = l.mux(testing, we, march_we);
             chosen_wdata = l.mux_bus(testing, &wdata, &march_wdata);
         }
-        b.group("Memoria");
+        b.group("Memory");
         b.sram("cells", addr_bits + 1, width, &[("addr", physical), ("we", vec![chosen_we]), ("wdata", chosen_wdata), ("rdata", rdata)]);
         self.add(b.finish())
     }

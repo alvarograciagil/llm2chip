@@ -74,7 +74,7 @@ fn visit(gen: &mut Gen, name: &str, lengths: &mut HashMap<String, usize>, skip: 
     }
 
     let names = module.nets.iter().map(|net| net.name.clone()).collect();
-    let mut b = Builder { prefix: String::new(), module, counter: 2_000_000, group: "Cadena de scan".into(), names };
+    let mut b = Builder { prefix: String::new(), module, counter: 2_000_000, group: "Scan chain".into(), names };
     let enable = b.input(SCAN_ENABLE, 1)[0];
     // A module made testable already reads `test_mode`.
     let test_mode = match b.module.ports.iter().find(|p| p.name == TEST_MODE) {
@@ -176,7 +176,7 @@ fn testable_module(gen: &mut Gen, name: &str) -> (String, u32) {
     module.name = testable.clone();
     module.title = format!("{} (comprobable)", module.title);
     let names = module.nets.iter().map(|net| net.name.clone()).collect();
-    let mut b = Builder { prefix: String::new(), module, counter: 3_000_000, group: "Envoltorio de prueba".into(), names };
+    let mut b = Builder { prefix: String::new(), module, counter: 3_000_000, group: "Test wrapper".into(), names };
     // What each input becomes inside: the pin, or in test mode its part of `test_in`.
     let inner: HashMap<usize, Vec<Bit>> = inputs.iter().map(|(net, w)| (*net, b.wire(&format!("{}_en_prueba", b.module.nets[*net].name), *w))).collect();
     for inst in &mut b.module.instances {
@@ -209,7 +209,7 @@ fn wrapper(b: &mut Builder, enable: Bit, scan_in: Bit, width: u32) -> Vec<Bit> {
     let mut previous = scan_in;
     (0..width)
         .map(|_| {
-            let (d, q) = (b.wire("envoltorio_d", 1)[0], b.wire("envoltorio", 1)[0]);
+            let (d, q) = (b.wire("wrapper_d", 1)[0], b.wire("wrapper", 1)[0]);
             b.mux_to(enable, q, previous, d);
             b.dff_to(d, q);
             previous = q;
@@ -227,15 +227,15 @@ fn wrapper(b: &mut Builder, enable: Bit, scan_in: Bit, width: u32) -> Vec<Bit> {
 pub fn insert_scan_parallel(design: Design, groups: &[Vec<String>]) -> Result<ParallelScan, String> {
     let Design { top, modules } = design;
     let mut gen = Gen { modules };
-    let find = |gen: &Gen, name: &str| gen.modules[&top].instances.iter().position(|i| i.name == name).ok_or_else(|| format!("no hay ninguna instancia «{name}» en {top}"));
+    let find = |gen: &Gen, name: &str| gen.modules[&top].instances.iter().position(|i| i.name == name).ok_or_else(|| format!("there is no “{name}” instance in {top}"));
     let mut cells = Vec::new();
     for group in groups {
         cells.push(group.iter().map(|name| find(&gen, name)).collect::<Result<Vec<_>, _>>()?);
     }
-    let first = *cells.iter().flatten().next().ok_or("no hay celdas")?;
-    let InstKind::Module(cell) = gen.modules[&top].instances[first].kind.clone() else { return Err("las celdas deben ser módulos".into()) };
+    let first = *cells.iter().flatten().next().ok_or("there are no cells")?;
+    let InstKind::Module(cell) = gen.modules[&top].instances[first].kind.clone() else { return Err("the cells must be modules".into()) };
     if cells.iter().flatten().any(|i| !matches!(&gen.modules[&top].instances[*i].kind, InstKind::Module(m) if *m == cell)) {
-        return Err("todas las celdas deben ser del mismo módulo".into());
+        return Err("all the cells must be of the same module".into());
     }
     let (testable, width) = testable_module(&mut gen, &cell);
     for i in cells.iter().flatten() {
@@ -254,10 +254,10 @@ pub fn insert_scan_parallel(design: Design, groups: &[Vec<String>]) -> Result<Pa
 
     // The cells' chains, after the main one has given the top its pins.
     let module = gen.modules[&top].clone();
-    let pin = |name: &str| module.ports.iter().find(|p| p.name == name).map(|p| Bit::Net(p.net, 0)).ok_or_else(|| format!("falta el pin {name}: el resto del diseño no tiene biestables"));
+    let pin = |name: &str| module.ports.iter().find(|p| p.name == name).map(|p| Bit::Net(p.net, 0)).ok_or_else(|| format!("the {name} pin is missing: the rest of the design has no flip-flops"));
     let (enable, test_mode) = (pin(SCAN_ENABLE)?, pin(TEST_MODE)?);
     let names = module.nets.iter().map(|net| net.name.clone()).collect();
-    let mut b = Builder { prefix: String::new(), module, counter: 4_000_000, group: "Prueba de las celdas en paralelo".into(), names };
+    let mut b = Builder { prefix: String::new(), module, counter: 4_000_000, group: "Cells tested in parallel".into(), names };
     let scan_in = b.input(SCAN_CELLS_IN, 1)[0];
     let out = b.output(SCAN_CELLS_OUT, 1)[0];
     let differ = b.output(SCAN_CELLS_DIFFER, 1)[0];
@@ -266,7 +266,7 @@ pub fn insert_scan_parallel(design: Design, groups: &[Vec<String>]) -> Result<Pa
         let held = wrapper(&mut b, enable, scan_in, width);
         let after = held.last().copied().unwrap_or(scan_in);
         for index in group {
-            let chain_out = b.wire("salida_cadena_celda", 1)[0];
+            let chain_out = b.wire("cell_chain_out", 1)[0];
             let conns = &mut b.module.instances[*index].conns;
             conns.insert(TEST_MODE.into(), vec![test_mode]);
             conns.insert(TEST_IN.into(), held.clone());
@@ -276,7 +276,7 @@ pub fn insert_scan_parallel(design: Design, groups: &[Vec<String>]) -> Result<Pa
             match reference {
                 None => reference = Some(chain_out),
                 Some(first) => {
-                    let (x, y) = (b.wire("celda_distinta", 1)[0], b.wire("alguna_distinta", 1)[0]);
+                    let (x, y) = (b.wire("cell_differs", 1)[0], b.wire("any_differs", 1)[0]);
                     b.xor_to(first, chain_out, x);
                     b.or_to(any, x, y);
                     any = y;
@@ -291,7 +291,7 @@ pub fn insert_scan_parallel(design: Design, groups: &[Vec<String>]) -> Result<Pa
     // One cell alone, with its wrapper, for the patterns: its other inputs are pins, and
     // its outputs too, though in the design only the chain reads it.
     let cell_module = gen.modules[&testable].clone();
-    let mut s = Builder::new("porcion_de_prueba", "Una celda para generar patrones", "La celda comprobable con su envoltorio, encadenados como en el diseño.");
+    let mut s = Builder::new("test_slice", "A cell for generating patterns", "The testable cell with its wrapper, chained as in the design.");
     let enable = s.input(SCAN_ENABLE, 1)[0];
     let test_mode = s.input(TEST_MODE, 1)[0];
     let scan_in = s.input(SCAN_IN, 1)[0];
@@ -313,9 +313,9 @@ pub fn insert_scan_parallel(design: Design, groups: &[Vec<String>]) -> Result<Pa
         conns.push((port.name.clone(), bits));
     }
     let refs: Vec<(&str, Vec<Bit>)> = conns.iter().map(|(n, b)| (n.as_str(), b.clone())).collect();
-    s.inst("celda", &testable, &refs);
+    s.inst("cell", &testable, &refs);
     let mut modules = gen.modules.clone();
-    modules.insert("porcion_de_prueba".into(), s.finish());
-    let slice = Design { top: "porcion_de_prueba".into(), modules };
+    modules.insert("test_slice".into(), s.finish());
+    let slice = Design { top: "test_slice".into(), modules };
     Ok(ParallelScan { design: Design { top, modules: gen.modules }, length, cell_length: cell_chain + width as usize, wrapper_width: width as usize, slice })
 }

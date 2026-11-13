@@ -23,9 +23,9 @@ const ROUTING_OVERHEAD: f64 = 1.2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
-    Derivada,
-    Calibrada,
-    Supuesta,
+    Derived,
+    Calibrated,
+    Assumed,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -42,12 +42,12 @@ pub struct Metric {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Category {
-    Memoria,
-    Calculo,
-    Interconexion,
-    Vectorial,
-    Estado,
-    Sistema,
+    Memory,
+    Compute,
+    Interconnect,
+    Vector,
+    State,
+    System,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -70,7 +70,7 @@ pub struct BlockArea {
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     Error,
-    Aviso,
+    Warning,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -117,12 +117,12 @@ const GATE_DELAYS: [f64; 5] = [0.25, 0.25, 0.5, 0.12, 0.4];
 
 fn coding_name(coding: WeightCoding) -> &'static str {
     match coding {
-        WeightCoding::Fixed => "punto fijo",
-        WeightCoding::Affine => "formato afín",
-        WeightCoding::Float => "coma flotante",
+        WeightCoding::Fixed => "fixed point",
+        WeightCoding::Affine => "affine format",
+        WeightCoding::Float => "floating point",
         WeightCoding::Posit => "posit",
-        WeightCoding::Log => "formato logarítmico",
-        WeightCoding::Codebook => "libro de códigos",
+        WeightCoding::Log => "logarithmic format",
+        WeightCoding::Codebook => "codebook",
     }
 }
 
@@ -174,20 +174,20 @@ fn storage(model: &ModelGraph, p: &ChipParams, budget_params: f64) -> Storage {
             p.weight_bits as f64 + p.group_overhead_bits(p.group_size)
         };
         let mut factor = 1.0;
-        if p.has("compresion_pesos") {
+        if p.has("weight_compression") {
             factor *= 0.75;
         }
-        if p.has("poda_pesos") {
+        if p.has("weight_pruning") {
             factor *= 0.85;
         }
-        if p.has("baja_rango") {
+        if p.has("low_rank") {
             factor *= 0.6;
         }
-        if t.block == Block::Head && p.has("cabeza_recortada") {
+        if t.block == Block::Head && p.has("trimmed_head") {
             factor *= 0.3;
         }
         let bits = params * per_weight * factor;
-        if t.block == Block::Embedding && p.has("embedding_externo") {
+        if t.block == Block::Embedding && p.has("external_embedding") {
             external_bits += bits;
             continue;
         }
@@ -222,7 +222,7 @@ struct StageTotals {
 }
 
 fn stage_totals(model: &ModelGraph, p: &ChipParams) -> StageTotals {
-    let attention_factor = if p.has("atencion_dispersa") { 0.25 } else { 1.0 };
+    let attention_factor = if p.has("sparse_attention") { 0.25 } else { 1.0 };
     let context = p.context_tokens as f64;
     let mut t = StageTotals::default();
     for stage in &model.stages {
@@ -424,22 +424,22 @@ fn weight_multiplier(tech: &TechNode, p: &ChipParams, widest: u32, cell_bits: f6
     let mut energy = switching * SWITCHING_TO_FULL_ADDERS * tech.e_fa_pj;
     let mut delay_factor = 1.0;
     let mut cycle_factor = 1.0;
-    if p.has("aritmetica_distribuida") {
+    if p.has("distributed_arithmetic") {
         area *= 0.15;
         energy *= 0.5;
         delay_factor = 0.3;
         cycle_factor = 4.0;
     }
-    if p.has("cim_analogico") {
+    if p.has("analog_cim") {
         area *= 0.3;
         energy *= 0.2;
     }
-    if p.has("pesos_csd") && p.weight_backend == WeightBackend::Rom {
+    if p.has("csd_weights") && p.weight_backend == WeightBackend::Rom {
         area *= 0.23;
         energy *= 0.5;
         delay_factor *= 0.7;
     }
-    let decoder = if p.has("compresion_pesos") { 8.0 } else { 0.0 };
+    let decoder = if p.has("weight_compression") { 8.0 } else { 0.0 };
     Multiplier {
         area_um2: area + accumulator + decoder,
         energy_pj: energy,
@@ -464,21 +464,21 @@ fn check_envelope(model: &ModelGraph, p: &ChipParams, out: &mut Vec<Violation>) 
     if p.weight_backend == WeightBackend::Rom {
         out.push(Violation {
             severity: Severity::Error,
-            message: "Con ROM cada die lleva grabados pesos distintos, así que no pueden ser todos iguales.".into(),
-            fix: "Usa SRAM o genera cada die a medida.".into(),
+            message: "With ROM each die has different weights burnt in, so they cannot all be the same.".into(),
+            fix: "Use SRAM or build each die to measure.".into(),
             field: Some("die_mode"), value: Some(serde_json::json!("custom")),
         });
     }
     for (too_big, what, field, model_value) in [
-        (model.num_layers > p.max_layers, "capas", "max_layers", model.num_layers as u64),
-        (model.hidden_size > p.max_hidden_size as u64, "ancho interno", "max_hidden_size", model.hidden_size),
-        (model.vocab_size > p.max_vocabulary as u64, "vocabulario", "max_vocabulary", model.vocab_size),
+        (model.num_layers > p.max_layers, "layers", "max_layers", model.num_layers as u64),
+        (model.hidden_size > p.max_hidden_size as u64, "hidden size", "max_hidden_size", model.hidden_size),
+        (model.vocab_size > p.max_vocabulary as u64, "vocabulary", "max_vocabulary", model.vocab_size),
     ] {
         if too_big {
             out.push(Violation {
                 severity: Severity::Error,
-                message: format!("El modelo supera el límite de {what} de este diseño."),
-                fix: "Sube ese límite.".into(),
+                message: format!("The model exceeds this design's limit of {what}."),
+                fix: "Raise that limit.".into(),
                 field: Some(field), value: Some(serde_json::json!(model_value)),
             });
         }
@@ -569,8 +569,8 @@ struct AreaInputs<'a> {
 }
 
 fn sram_margin(p: &ChipParams) -> f64 {
-    let ecc = if p.has("sin_ecc_con_refresco") { 1.0 } else { 1.125 };
-    let spare = if p.has("reparacion_por_compilador") { 1.01 } else { 1.03 };
+    let ecc = if p.has("refresh_without_ecc") { 1.0 } else { 1.125 };
+    let spare = if p.has("compiler_repair") { 1.01 } else { 1.03 };
     ecc * spare
 }
 
@@ -601,11 +601,11 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     let weights_mm2 = match p.weight_backend {
         WeightBackend::Sram => {
             let mut density = tech.sram_density(cell_kbit);
-            if p.has("edram_ganancia") {
+            if p.has("gain_cell_edram") {
                 density *= 2.0;
             }
             let mut area = store.chip_bits * sram_margin(p) / 1e6 / density / d;
-            if p.has("sram_apilada_3d") {
+            if p.has("stacked_sram_3d") {
                 area *= 0.5;
             }
             area
@@ -615,14 +615,14 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
             n * 4.0 * 8.0 / 1e6 / tech.sram_density(32.0)
         }
     };
-    push("cell_weights", "Celdas: memoria de pesos", weights_mm2,
-        "Cada celda guarda un trozo de cada matriz junto a su multiplicador, para que los pesos nunca viajen.");
-    if p.weight_backend == WeightBackend::Sram && !p.has("sin_ecc_con_refresco") {
-        push("cell_ecc", "Celdas: corrección ECC", n * ECC_GATES_PER_CELL * 0.5 * tech.fa_um2 * um2 * ROUTING_OVERHEAD,
-            "Comprueba cada palabra de pesos y corrige el peso que se está leyendo.");
+    push("cell_weights", "Cells: weight memory", weights_mm2,
+        "Each cell keeps a piece of every matrix next to its multiplier, so weights never travel.");
+    if p.weight_backend == WeightBackend::Sram && !p.has("refresh_without_ecc") {
+        push("cell_ecc", "Cells: ECC correction", n * ECC_GATES_PER_CELL * 0.5 * tech.fa_um2 * um2 * ROUTING_OVERHEAD,
+            "Checks each word of weights and corrects the weight being read.");
     }
-    push("cell_macs", "Celdas: multiplicadores", n * mult.area_um2 * um2 * ROUTING_OVERHEAD,
-        "Multiplican peso por activación y acumulan la suma de cada fila.");
+    push("cell_macs", "Cells: multipliers", n * mult.area_um2 * um2 * ROUTING_OVERHEAD,
+        "Multiply weight by activation and accumulate each row's sum.");
 
     if p.cell_table_bits() > 0.0 {
         let table_mm2 = if p.weight_backend == WeightBackend::Rom {
@@ -630,8 +630,8 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
         } else {
             n * p.cell_table_bits() * sram_margin(p) / 1e6 / tech.sram_density((p.cell_table_bits() / 1e3).max(1.0))
         };
-        push("weight_tables", "Tablas de pesos", table_mm2,
-            "Cada celda guarda los valores reales a los que apuntan sus códigos.");
+        push("weight_tables", "Weight tables", table_mm2,
+            "Each cell keeps the real values its codes point to.");
     }
 
     if p.uses_groups() {
@@ -640,24 +640,24 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
         // Applied over several cycles, each cycle takes only a part of the scale's bits.
         let steps = p.factor_steps.clamp(1, p.scale_bits.max(1)) as f64;
         let unit = if p.scale_is_multiplied() { (p.scale_bits as f64 / steps).ceil() * width * tech.fa_um2 + width * tech.ff_um2 * (steps > 1.0) as u8 as f64 } else { width * width.log2().ceil() * tech.mux_um2 };
-        push("scale_units", "Escala y sesgo por grupo", n * unit * um2 * ROUTING_OVERHEAD,
-            "Aplican la escala y el sesgo que comparten los pesos de cada grupo.");
+        push("scale_units", "Scale and bias per group", n * unit * um2 * ROUTING_OVERHEAD,
+            "Apply the scale and bias shared by the weights of each group.");
     }
 
-    push("activation_noc", "Red de activaciones",
+    push("activation_noc", "Activation network",
         n * i.broadcast_bits * tech.ff_um2 * p.noc_stages.max(1) as f64 * 4.0 * um2,
-        "Reparte cada vector de entrada a todas las celdas y recoge las sumas parciales.");
+        "Sends each input vector to every cell and gathers the partial sums.");
 
     let lane = (p.vector_bits * p.vector_bits) as f64 * tech.fa_um2
         + 2.0 * p.vector_bits as f64 * (tech.fa_um2 + tech.ff_um2);
-    push("vector_units", "Unidades vectoriales",
+    push("vector_units", "Vector units",
         p.vector_lanes_per_die as f64 * lane * um2 * ROUTING_OVERHEAD,
-        "Multiplican activación por activación o estado: atención Q·K, regla delta y puertas.");
+        "Multiply activation by activation or state: attention Q·K, delta rule and gates.");
 
     let table_bits = (1u64 << p.function_table_bits.clamp(4, 20)) as f64 * p.activation_bits as f64;
-    push("function_units", "Unidades de función",
+    push("function_units", "Function units",
         p.function_units_per_die as f64 * (table_bits / 1e6 / tech.sram_density(64.0) + 5000.0 * um2),
-        "Tablas para SiLU, sigmoide, softplus, exp, raíz inversa y softmax.");
+        "Tables for SiLU, sigmoid, softplus, exp, inverse square root and softmax.");
 
     let widest_vector = model
         .tensors
@@ -668,24 +668,24 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
         .max()
         .unwrap_or(0);
     let buffer_bits = (model.hidden_size * 8 + widest_vector * 2) as f64 * p.activation_bits as f64;
-    push("activation_buffers", "Búferes de activación",
+    push("activation_buffers", "Activation buffers",
         buffer_bits / 1e6 / tech.sram_density(256.0),
-        "Guardan los vectores intermedios entre etapas.");
+        "Hold the intermediate vectors between stages.");
 
     if p.kv_backend == KvBackend::Sram {
-        push("kv_sram", "Caché KV de atención",
+        push("kv_sram", "Attention KV cache",
             i.kv_bits * sram_margin(p) / 1e6 / tech.sram_density(1024.0) / d,
-            "Claves y valores de cada token del contexto. Crece con el contexto.");
+            "Keys and values of every token in the context. Grows with the context.");
     }
     if p.kv_backend != KvBackend::ExternalDdr {
-        push("delta_state", "Estado de DeltaNet",
+        push("delta_state", "DeltaNet state",
             i.state_bits * sram_margin(p) / 1e6 / tech.sram_density(1024.0) / d,
-            "Matrices recurrentes de las capas lineales. No crece con el contexto.");
+            "Recurrent matrices of the linear layers. Does not grow with the context.");
     }
     if p.mtp_enabled {
-        push("mtp_rollback", "MTP: copia de estado",
+        push("mtp_rollback", "MTP: state copy",
             i.rollback_bits * sram_margin(p) / 1e6 / tech.sram_density(1024.0) / d,
-            "Permite deshacer el estado cuando se rechaza un token especulado.");
+            "Lets the state be undone when a speculated token is rejected.");
     }
 
     let logit_bits = p.activation_bits as f64;
@@ -695,26 +695,26 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
         + 24.0 * 16.0 * tech.fa_um2;
     // Every chip is the same one repeated, so each carries the parts only the first uses:
     // the sampler, the tokenizer's tables, the CPU and its memory.
-    push("sampler", "Unidad de muestreo", sampler_um2 * um2 * ROUTING_OVERHEAD,
-        "Conserva los mejores logits y elige el siguiente token, con top-k y temperatura.");
+    push("sampler", "Sampling unit", sampler_um2 * um2 * ROUTING_OVERHEAD,
+        "Keeps the best logits and picks the next token, with top-k and temperature.");
     // Merge table, token offsets and the text of each token, read only by the CPU.
     let tokenizer_bits = vocabulary_room(model, p) * TOKENIZER_BITS_PER_TOKEN;
     let tokenizer_density = if p.weight_backend == WeightBackend::Rom { tech.rom_mbit_mm2 } else { tech.sram_density(1024.0) };
-    push("tokenizer_tables", "Tablas del tokenizador", tokenizer_bits / 1e6 / tokenizer_density,
-        "Vocabulario y fusiones que el firmware usa para convertir texto en tokens y volver.");
+    push("tokenizer_tables", "Tokenizer tables", tokenizer_bits / 1e6 / tokenizer_density,
+        "Vocabulary and merges the firmware uses to turn text into tokens and back.");
     // Not in the tech file's CPU figure: this grows with the context the design allows.
     let (text_bytes, arena_words) = tokenizer_rt::memory_for_context(p.context_tokens);
     let cpu_memory_bits = 8.0 * (FIRMWARE_PROGRAM_BYTES as f64 + text_bytes as f64 + 4.0 * arena_words as f64);
-    push("cpu_memory", "Memoria de la CPU", cpu_memory_bits / 1e6 / tech.sram_density(1024.0),
-        "Programa del firmware y memoria donde el tokenizador trabaja con el texto de entrada.");
-    push("control", "Secuenciador y microprograma", 0.8,
-        "Ejecuta el microprograma que dirige cada etapa.");
+    push("cpu_memory", "CPU memory", cpu_memory_bits / 1e6 / tech.sram_density(1024.0),
+        "The firmware's program and the memory where the tokenizer works on the input text.");
+    push("control", "Sequencer and microprogram", 0.8,
+        "Runs the microprogram that drives each stage.");
     // Interchangeable dies all carry the CPU, even though only the first one leads.
-    push("system", "CPU de control y carga", tech.cpu_mm2 + tech.io_mm2,
+    push("system", "Control and load CPU", tech.cpu_mm2 + tech.io_mm2,
         if p.weight_backend == WeightBackend::Rom {
-            "Tokenizador, muestreo y carga del microprograma. Los pesos ya vienen grabados."
+            "Tokenizer, sampling and loading of the microprogram. The weights come already burnt in."
         } else {
-            "Tokenizador, muestreo y volcado de pesos desde la imagen."
+            "Tokenizer, sampling and loading of the weights from the image."
         });
     if dies > 1 {
         // Sized for the worst each die can be, since its own area depends on this.
@@ -724,27 +724,27 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
         let rate = p.link_words.max(1) as f64 * p.activation_bits as f64 * p.freq_ghz;
         let endpoints = |capacity: f64| (rate / capacity).ceil().max(1.0);
         let endpoint = (plan.ucie_hops as f64 * UCIE_ENDPOINT_MM2 * endpoints(UCIE_ENDPOINT_GBPS) + plan.serdes_hops as f64 * SERDES_ENDPOINT_MM2 * endpoints(SERDES_ENDPOINT_GBPS)) / d;
-        push("links", "Enlaces entre dies", endpoint, "Pasan un vector de activación entre capas consecutivas.");
+        push("links", "Die-to-die links", endpoint, "Pass an activation vector between consecutive layers.");
     }
-    if p.has("checkpoint_estado") || p.has("embedding_externo") {
-        push("dram_ctrl", "Controlador de DRAM", 4.0 / d, "Acceso a la DRAM externa.");
+    if p.has("state_checkpoints") || p.has("external_embedding") {
+        push("dram_ctrl", "DRAM controller", 4.0 / d, "Access to the external DRAM.");
     }
     let hbm = p.weight_backend == WeightBackend::Hbm4 || p.kv_backend == KvBackend::Hbm4;
     if hbm {
-        push("hbm_phy", "PHY de HBM4", 12.0 * p.hbm_stacks as f64 / d, "Interfaz con las pilas de memoria HBM4.");
+        push("hbm_phy", "HBM4 PHY", 12.0 * p.hbm_stacks as f64 / d, "Interface to the HBM4 memory stacks.");
     }
-    push("fixed", "Reloj, alimentación y test", tech.fixed_die_mm2, "Infraestructura necesaria en cada die.");
+    push("fixed", "Clock, power and test", tech.fixed_die_mm2, "Infrastructure every die needs.");
     b
 }
 
 fn category_of(id: &str) -> Category {
     match id {
-        "cell_weights" | "weight_tables" => Category::Memoria,
-        "cell_macs" | "cell_ecc" | "scale_units" => Category::Calculo,
-        "activation_noc" | "links" => Category::Interconexion,
-        "vector_units" | "function_units" => Category::Vectorial,
-        "activation_buffers" | "kv_sram" | "delta_state" | "mtp_rollback" => Category::Estado,
-        _ => Category::Sistema,
+        "cell_weights" | "weight_tables" => Category::Memory,
+        "cell_macs" | "cell_ecc" | "scale_units" => Category::Compute,
+        "activation_noc" | "links" => Category::Interconnect,
+        "vector_units" | "function_units" => Category::Vector,
+        "activation_buffers" | "kv_sram" | "delta_state" | "mtp_rollback" => Category::State,
+        _ => Category::System,
     }
 }
 
@@ -776,7 +776,7 @@ fn total(blocks: &[BlockArea]) -> f64 {
 
 fn check_optimizations(p: &ChipParams, out: &mut Vec<Violation>) {
     let aviso = |message: &str, fix: &str| Violation {
-        severity: Severity::Aviso,
+        severity: Severity::Warning,
         message: message.into(),
         fix: fix.into(),
         field: None,
@@ -791,46 +791,46 @@ fn check_optimizations(p: &ChipParams, out: &mut Vec<Violation>) {
     };
     for id in &p.optimizations {
         if !catalog().iter().any(|o| o.id == id) {
-            out.push(aviso(&format!("Optimización desconocida: {id}"), "Quítala del diseño."));
+            out.push(aviso(&format!("Unknown optimization: {id}"), "Remove it from the design."));
         }
     }
-    let sram_only = ["edram_ganancia", "sram_apilada_3d", "sram_baja_tension", "cim_analogico", "sin_ecc_con_refresco"];
+    let sram_only = ["gain_cell_edram", "stacked_sram_3d", "low_voltage_sram", "analog_cim", "refresh_without_ecc"];
     if p.weight_backend != WeightBackend::Sram {
         for id in sram_only.iter().filter(|id| p.has(id)) {
             out.push(error(
-                &format!("«{id}» solo tiene sentido con pesos en SRAM."),
-                "Cambia la memoria de pesos a SRAM o desactiva la optimización.",
+                &format!("“{id}” only makes sense with weights in SRAM."),
+                "Change the weight memory to SRAM or turn the optimization off.",
             ));
         }
     }
     for (a, b) in [
-        ("sin_multiplicadores", "aritmetica_distribuida"),
-        ("sin_multiplicadores", "cim_analogico"),
-        ("aritmetica_distribuida", "cim_analogico"),
-        ("edram_ganancia", "cim_analogico"),
+        ("multiplier_free", "distributed_arithmetic"),
+        ("multiplier_free", "analog_cim"),
+        ("distributed_arithmetic", "analog_cim"),
+        ("gain_cell_edram", "analog_cim"),
     ] {
         if p.has(a) && p.has(b) {
-            out.push(error(&format!("«{a}» y «{b}» son incompatibles."), "Elige una de las dos."));
+            out.push(error(&format!("“{a}” and “{b}” are incompatible."), "Choose one of the two."));
         }
     }
-    if p.has("sin_multiplicadores") && (p.weight_bits > 4 || p.mixes_widths() || p.weight_coding.shifts()) {
+    if p.has("multiplier_free") && (p.weight_bits > 4 || p.mixes_widths() || p.weight_coding.shifts()) {
         out.push(aviso(
-            "«sin_multiplicadores» solo rinde lo anunciado con pesos de 4 bits o menos.",
-            "Baja los bits de peso y desactiva la mezcla de 8 bits.",
+            "“multiplier_free” only delivers what it promises with weights of 4 bits or fewer.",
+            "Lower the weight bits and turn off the 8-bit mix.",
         ));
     }
     if p.effective_accumulator() > p.accumulator_bits {
         out.push(Violation {
-            severity: Severity::Aviso,
-            message: format!("Este formato de pesos necesita un acumulador de {} bits; se usa ese ancho en lugar de {}.", p.effective_accumulator(), p.accumulator_bits),
-            fix: "Sube los bits de acumulador o usa un formato más estrecho.".into(),
+            severity: Severity::Warning,
+            message: format!("This weight format needs a {}-bit accumulator; that width is used instead of {}.", p.effective_accumulator(), p.accumulator_bits),
+            fix: "Raise the accumulator bits or use a narrower format.".into(),
             field: Some("accumulator_bits"), value: Some(serde_json::json!(p.effective_accumulator())),
         });
     }
-    if p.has("pesos_csd") && p.weight_backend != WeightBackend::Rom {
+    if p.has("csd_weights") && p.weight_backend != WeightBackend::Rom {
         out.push(aviso(
-            "Los pesos CSD solo ahorran área si están grabados en ROM: con memoria cargable la celda necesita un multiplicador general.",
-            "Elige ROM como memoria de pesos.",
+            "CSD weights only save area when burnt into ROM: with loadable memory the cell needs a general multiplier.",
+            "Choose ROM as the weight memory.",
         ));
     }
 }
@@ -875,9 +875,9 @@ fn with_choice(p: &ChipParams, multiplier: MultiplierKind, mac_stages: u32, adde
     q.mac_stages = mac_stages;
     q.adder_stages = adder_stages;
     if skip_zeros {
-        q.optimizations.insert("salto_ceros".into());
+        q.optimizations.insert("zero_skipping".into());
     } else {
-        q.optimizations.remove("salto_ceros");
+        q.optimizations.remove("zero_skipping");
     }
     q
 }
@@ -892,8 +892,8 @@ fn candidates_for(tech: &TechNode, p: &ChipParams, weight_bits: u32, cell_bits: 
     if let Some(found) = CANDIDATES.with(|c| c.borrow().get(&key).cloned()) {
         return found;
     }
-    let forced_multiples = p.has("sin_multiplicadores");
-    let forced_skip = p.has("salto_ceros");
+    let forced_multiples = p.has("multiplier_free");
+    let forced_skip = p.has("zero_skipping");
     let mut list = Vec::new();
     for multiplier in [MultiplierKind::Array, MultiplierKind::Wallace, MultiplierKind::Booth, MultiplierKind::Multiples] {
         let is_multiples = multiplier == MultiplierKind::Multiples;
@@ -1026,9 +1026,9 @@ fn estimate_on_silicon(model: &ModelGraph, p: &ChipParams) -> Result<Report, Str
     }
     if report.metric("tok_s_base").unwrap_or(0.0) < p.target_tok_s * 0.97 {
         report.violations.push(Violation {
-            severity: Severity::Aviso,
-            message: "No se alcanza la velocidad objetivo solo con más multiplicadores.".into(),
-            fix: "Sube los carriles vectoriales, la frecuencia o el ancho de banda de memoria.".into(),
+            severity: Severity::Warning,
+            message: "The target speed cannot be reached with more multipliers alone.".into(),
+            fix: "Raise the vector lanes, the clock or the memory bandwidth.".into(),
             field: Some("target_tok_s"), value: Some(serde_json::json!((report.metric("tok_s_base").unwrap_or(0.0) / 100.0).floor() * 100.0)),
         });
     }
@@ -1044,7 +1044,7 @@ pub fn resolved_params(model: &ModelGraph, p: &ChipParams) -> Result<ChipParams,
 const MAX_MACS_PER_DIE: u64 = 64_000_000;
 
 fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String> {
-    let tech = node(&p.node).ok_or_else(|| format!("nodo tecnológico desconocido: {}", p.node))?;
+    let tech = node(&p.node).ok_or_else(|| format!("unknown technology node: {}", p.node))?;
     let mut violations = Vec::new();
     check_optimizations(p, &mut violations);
 
@@ -1072,32 +1072,32 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
         violations.push(Violation {
             severity: Severity::Error,
             message: format!(
-                "El modelo no cabe: tiene {:.2} G de parámetros y el chip admite {:.2} G.",
+                "The model does not fit: it has {:.2} G parameters and the chip takes {:.2} G.",
                 included / 1e9,
                 budget / 1e9
             ),
-            fix: "Sube los parámetros máximos.".into(),
+            fix: "Raise the maximum parameters.".into(),
             field: Some("max_params_g"), value: Some(serde_json::json!((included / 1e9 * 100.0).ceil() / 100.0)),
         });
     }
     if model.max_context > 0 && p.context_tokens > model.max_context {
         violations.push(Violation {
-            severity: Severity::Aviso,
-            message: format!("El modelo declara {} tokens de contexto nativos; por encima puede perder calidad.", model.max_context),
-            fix: "Reduce el contexto si la calidad cae.".into(),
+            severity: Severity::Warning,
+            message: format!("The model declares {} tokens of native context; beyond that it may lose quality.", model.max_context),
+            fix: "Reduce the context if quality drops.".into(),
             field: Some("context_tokens"), value: Some(serde_json::json!(model.max_context)),
         });
     }
     if p.mtp_enabled && model.params_in(Block::Mtp) == 0 {
         violations.push(Violation {
-            severity: Severity::Aviso,
-            message: "Este modelo no tiene cabeza MTP.".into(),
-            fix: "Desactiva MTP.".into(),
+            severity: Severity::Warning,
+            message: "This model has no MTP head.".into(),
+            fix: "Turn MTP off.".into(),
             field: Some("mtp_enabled"), value: Some(serde_json::json!(false)),
         });
     }
 
-    let kv_compression = if p.has("compresion_kv") { 0.5 } else { 1.0 };
+    let kv_compression = if p.has("kv_compression") { 0.5 } else { 1.0 };
     // A die meant for any model reserves state for the largest one it accepts.
     let (layer_room, width_room) = envelope_scale(model, p);
     let kv_bits = model.state.kv_values_per_token as f64 * layer_room * width_room * context * p.kv_bits as f64 * kv_compression;
@@ -1121,11 +1121,11 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
         violations.push(Violation {
             severity: Severity::Error,
             message: format!(
-                "Los pesos ocupan {:.1} GB y la memoria externa tiene {:.0} GB.",
+                "The weights take {:.1} GB and the external memory has {:.0} GB.",
                 store.chip_bits / 8e9,
                 p.ddr_capacity_gb
             ),
-            fix: "Amplía la memoria externa o reduce los bits de peso.".into(),
+            fix: "Enlarge the external memory or reduce the weight bits.".into(),
             field: Some("ddr_capacity_gb"), value: Some(serde_json::json!((store.chip_bits / 8e9).ceil())),
         });
     }
@@ -1144,8 +1144,8 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     if die_area > die_limit {
         violations.push(Violation {
             severity: Severity::Error,
-            message: format!("Cada die ocupa {die_area:.0} mm² y el máximo es {die_limit:.0} mm²."),
-            fix: "Añade dies, reduce multiplicadores o contexto, o activa optimizaciones de memoria.".into(),
+            message: format!("Each die takes {die_area:.0} mm² and the limit is {die_limit:.0} mm²."),
+            fix: "Add dies, reduce multipliers or context, or turn on memory optimizations.".into(),
             field: Some("dies"), value: Some(serde_json::json!(0)),
         });
     }
@@ -1156,7 +1156,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     // Timing: each token visits every stage in order, so stage times add up.
     let cell = timed_cell(p, store.widest_weight_bits, cell_bits_estimate);
     // Static timing on the generated gates, already cut by its pipeline stages.
-    let path = cell_path(cell).ok_or("el circuito de la celda no se puede simular")?;
+    let path = cell_path(cell).ok_or("the cell's circuit cannot be simulated")?;
     let logic_ns = path * tech.fa_delay_ns * mult.delay_factor;
     let fmax = match measured(p, &cell) {
         Some((_, ghz)) if ghz > 0.0 => ghz,
@@ -1166,9 +1166,9 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     let freq = p.freq_ghz.min(fmax);
     if p.freq_ghz > fmax {
         violations.push(Violation {
-            severity: Severity::Aviso,
-            message: format!("Con {} etapas de multiplicador el máximo son {fmax:.2} GHz; se simula a esa frecuencia.", p.mac_stages),
-            fix: "Añade etapas o baja la frecuencia.".into(),
+            severity: Severity::Warning,
+            message: format!("With {} multiplier stages the maximum is {fmax:.2} GHz; it is simulated at that clock.", p.mac_stages),
+            fix: "Add stages or lower the clock.".into(),
             field: Some("freq_ghz"), value: Some(serde_json::json!((fmax * 100.0).floor() / 100.0)),
         });
     }
@@ -1184,9 +1184,9 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     let plan = link_plan(link, dies, die_area);
     if p.link == LinkKind::Ucie && dies > 1 && total_area > PACKAGE_MAX_MM2 {
         violations.push(Violation {
-            severity: Severity::Aviso,
-            message: format!("{total_area:.0} mm² de silicio no caben en un encapsulado de {PACKAGE_MAX_MM2:.0} mm²."),
-            fix: "Elige el enlace automático, que reparte los dies en varios encapsulados unidos por SerDes.".into(),
+            severity: Severity::Warning,
+            message: format!("{total_area:.0} mm² of silicon do not fit in a {PACKAGE_MAX_MM2:.0} mm² package."),
+            fix: "Choose the automatic link, which spreads the dies over several packages joined by SerDes.".into(),
             field: Some("link"), value: Some(serde_json::json!("auto")),
         });
     }
@@ -1214,16 +1214,16 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     let total_cycles = weight_cycles + vector_cycles + latency_cycles + link_cycles;
     if group > 1 && plan.packages > 1 && group > dies.div_ceil(plan.packages) {
         violations.push(Violation {
-            severity: Severity::Aviso,
-            message: format!("Los grupos de {group} chips que comparten cada capa no caben en un encapsulado: sus sumas cruzarían la placa, mucho más lenta."),
-            fix: "Usa grupos más pequeños (reparto mixto) o dies menores para que cada grupo quepa en un encapsulado.".into(),
+            severity: Severity::Warning,
+            message: format!("The groups of {group} chips that share each layer do not fit in a package: their sums would cross the board, much slower."),
+            fix: "Use smaller groups (mixed split) or smaller dies so each group fits in a package.".into(),
             field: Some("tensor_group"), value: Some(serde_json::json!(dies.div_ceil(plan.packages).max(1))),
         });
     }
     let compute_time = total_cycles / (freq * 1e9);
 
     let read_bytes = totals.weights * store.bits_per_read_weight / 8.0;
-    let kv_factor = if p.has("atencion_dispersa") { 0.25 } else { 1.0 };
+    let kv_factor = if p.has("sparse_attention") { 0.25 } else { 1.0 };
     let kv_read_bytes = kv_bits / 8.0 * kv_factor;
     let weight_bandwidth = match p.weight_backend {
         WeightBackend::Hbm4 => Some(p.hbm_stacks as f64 * HBM4_STACK_BYTES_PER_S),
@@ -1270,7 +1270,7 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     let e_read = read_bits
         * match p.weight_backend {
             WeightBackend::Sram => {
-                let low_voltage = if p.has("sram_baja_tension") { 0.7 } else { 1.0 };
+                let low_voltage = if p.has("low_voltage_sram") { 0.7 } else { 1.0 };
                 tech.e_sram_fj_bit * low_voltage / 1e3
             }
             WeightBackend::Rom => tech.e_sram_fj_bit * 0.3 / 1e3,
@@ -1303,10 +1303,10 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
         _ => 0.0,
     } + if p.kv_backend == KvBackend::Sram { kv_bits } else { 0.0 }
         + if p.kv_backend == KvBackend::ExternalDdr { 0.0 } else { state_bits + rollback_bits };
-    let sram_leak_scale = if p.has("sram_baja_tension") { 0.5 } else { 1.0 };
+    let sram_leak_scale = if p.has("low_voltage_sram") { 0.5 } else { 1.0 };
     let leak_sram = sram_on_chip_bits * tech.sram_leak_pw_bit * 1e-12 * sram_leak_scale;
     let logic_area = (die_area - blocks.iter().filter(|b| b.id == "cell_weights").map(|b| b.per_die_mm2).sum::<f64>()) * d;
-    let gated = if p.has("apagado_dies_inactivos") { (1.0 + 0.1 * (d - 1.0)) / d } else { 1.0 };
+    let gated = if p.has("idle_die_power_off") { (1.0 + 0.1 * (d - 1.0)) / d } else { 1.0 };
     let leak_logic = logic_area * tech.logic_leak_w_mm2 * gated;
     let leakage_w = leak_sram + leak_logic;
     let dynamic_w = energy_token_mj * 1e-3 * stream_rate;
@@ -1326,31 +1326,31 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     for b in &mut blocks {
         let (activity, energy_pj, bytes, why) = match b.id {
             "cell_weights" => (weight_share, e_read, read_bytes,
-                format!("{:.1} KB por celda con {} celdas por die, a unos {density:.0} Mbit/mm².", cell_bytes / 1e3, p.macs_per_die)),
+                format!("{:.1} KB per cell with {} cells per die, at about {density:.0} Mbit/mm².", cell_bytes / 1e3, p.macs_per_die)),
             "cell_macs" => (weight_share, e_mac, 0.0,
-                format!("{} multiplicadores de {} × {} bits para pesos de {} bits en {}, de {:.0} µm² cada uno.", p.macs_per_die, cell.significand_bits(), p.activation_bits, store.widest_weight_bits, coding_name(p.weight_coding), mult.area_um2)),
+                format!("{} multipliers of {} × {} bits for {}-bit weights in {}, {:.0} µm² each.", p.macs_per_die, cell.significand_bits(), p.activation_bits, store.widest_weight_bits, coding_name(p.weight_coding), mult.area_um2)),
             "weight_tables" => (weight_share, 0.0, 0.0,
-                format!("{:.1} Kbit de tabla por celda.", p.cell_table_bits() / 1e3)),
+                format!("{:.1} Kbit of table per cell.", p.cell_table_bits() / 1e3)),
             "scale_units" => (weight_share, e_scale, 0.0,
-                format!("Una unidad por celda, usada una vez cada {} pesos.", p.group_size)),
+                format!("One unit per cell, used once every {} weights.", p.group_size)),
             "activation_noc" => (weight_share, e_noc, noc_bytes,
-                format!("Árbol de {tree_levels:.0} niveles sobre {} celdas.", p.macs_per_die)),
+                format!("Tree of {tree_levels:.0} levels over {} cells.", p.macs_per_die)),
             "vector_units" => (vector_share, e_vector, 0.0,
-                format!("{} carriles de {} bits.", p.vector_lanes_per_die, p.vector_bits)),
+                format!("{} lanes of {} bits.", p.vector_lanes_per_die, p.vector_bits)),
             "function_units" => (vector_share, 0.0, 0.0,
-                format!("{} unidades con tablas de 64 Kbit.", p.function_units_per_die)),
-            "activation_buffers" => (1.0, 0.0, 0.0, "Ocho vectores del tamaño oculto y dos del ancho intermedio.".into()),
+                format!("{} units with 64 Kbit tables.", p.function_units_per_die)),
+            "activation_buffers" => (1.0, 0.0, 0.0, "Eight vectors of the hidden size and two of the intermediate width.".into()),
             "kv_sram" => (vector_share, e_kv, kv_read_bytes,
-                format!("{:.2} GB para {} tokens, repartidos entre {dies} dies.", kv_bits / 8e9, p.context_tokens)),
+                format!("{:.2} GB for {} tokens, spread over {dies} dies.", kv_bits / 8e9, p.context_tokens)),
             "delta_state" => (vector_share, e_delta, 2.0 * state_bits / 8.0,
-                format!("{:.0} MB a {} bits, repartidos entre {dies} dies.", state_bits / 8e6, p.delta_state_bits)),
-            "mtp_rollback" => (0.0, 0.0, 0.0, format!("{depth} copias del estado recurrente.")),
-            "control" => (1.0, 0.0, 0.0, "Área fija estimada por die.".into()),
-            "tokenizer_tables" => (0.0, 0.0, 0.0, format!("{:.0} Mbit para un vocabulario de {} tokens.", model.vocab_size as f64 * TOKENIZER_BITS_PER_TOKEN / 1e6, model.vocab_size)),
-            "cpu_memory" => (0.0, 0.0, 0.0, format!("Para prompts de hasta {} tokens.", p.context_tokens)),
-            "sampler" => (0.0, 0.0, 0.0, format!("{} carriles de filtro y {} candidatos.", p.sampler_lanes, p.sampler_entries)),
-            "links" => (link_cycles / total_cycles, 0.0, link_bytes, if pins { format!("{} enlaces por pines de E/S, uno por encapsulado.", plan.pin_hops) } else { format!("{} enlaces UCIe y {} SerDes, en {} encapsulados.", plan.ucie_hops, plan.serdes_hops, plan.packages) }),
-            _ => (0.0, 0.0, 0.0, "Área fija estimada.".into()),
+                format!("{:.0} MB at {} bits, spread over {dies} dies.", state_bits / 8e6, p.delta_state_bits)),
+            "mtp_rollback" => (0.0, 0.0, 0.0, format!("{depth} copies of the recurrent state.")),
+            "control" => (1.0, 0.0, 0.0, "Estimated fixed area per die.".into()),
+            "tokenizer_tables" => (0.0, 0.0, 0.0, format!("{:.0} Mbit for a vocabulary of {} tokens.", model.vocab_size as f64 * TOKENIZER_BITS_PER_TOKEN / 1e6, model.vocab_size)),
+            "cpu_memory" => (0.0, 0.0, 0.0, format!("For prompts of up to {} tokens.", p.context_tokens)),
+            "sampler" => (0.0, 0.0, 0.0, format!("{} filter lanes and {} candidates.", p.sampler_lanes, p.sampler_entries)),
+            "links" => (link_cycles / total_cycles, 0.0, link_bytes, if pins { format!("{} links over I/O pins, one per package.", plan.pin_hops) } else { format!("{} UCIe and {} SerDes links, in {} packages.", plan.ucie_hops, plan.serdes_hops, plan.packages) }),
+            _ => (0.0, 0.0, 0.0, "Estimated fixed area.".into()),
         };
         b.activity = activity.clamp(0.0, 1.0);
         b.energy_mj = energy_pj * 1e-9;
@@ -1365,62 +1365,62 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     };
     use Confidence::*;
 
-    m("model_params_g", "Modelo", "Parámetros del modelo cargado", included / 1e9, "G", Derivada,
-        "Suma de los tensores del config.json con las opciones activas.".into());
-    m("model_weights_gb", "Modelo", "Pesos del modelo en memoria", store.model_bits / 8e9, "GB", Derivada,
-        "Bits por peso, escalas y sesgos por grupo y optimizaciones de almacenamiento.".into());
-    m("chip_capacity_gb", "Modelo", "Capacidad de pesos del chip", store.chip_bits / 8e9, "GB", Derivada,
-        "El chip se dimensiona para el máximo de parámetros, no solo para este modelo.".into());
-    m("load_seconds", "Modelo", "Tiempo de carga de la imagen", load_seconds, "s", Derivada,
-        if p.weight_backend == WeightBackend::Rom { "Los pesos vienen grabados en el chip y no se cargan.".into() } else { "Tamaño de la imagen dividido por la interfaz de carga.".into() });
+    m("model_params_g", "Model", "Parameters of the loaded model", included / 1e9, "G", Derived,
+        "Sum of the config.json tensors with the active options.".into());
+    m("model_weights_gb", "Model", "Model weights in memory", store.model_bits / 8e9, "GB", Derived,
+        "Bits per weight, scales and biases per group, and storage optimizations.".into());
+    m("chip_capacity_gb", "Model", "Chip weight capacity", store.chip_bits / 8e9, "GB", Derived,
+        "The chip is sized for the maximum parameters, not just for this model.".into());
+    m("load_seconds", "Model", "Image load time", load_seconds, "s", Derived,
+        if p.weight_backend == WeightBackend::Rom { "The weights come burnt into the chip and are not loaded.".into() } else { "Image size divided by the load interface.".into() });
 
-    m("dies", "Silicio", "Dies", d, "", Supuesta, "El mínimo que cumple el área máxima por die.".into());
-    m("packages", "Silicio", "Encapsulados", plan.packages as f64, "", Supuesta, format!("Hasta {PACKAGE_MAX_MM2:.0} mm² de silicio en cada uno."));
-    m("die_area_mm2", "Silicio", "Área por die", die_area, "mm²", Supuesta, "Suma de los bloques del die.".into());
-    m("total_area_mm2", "Silicio", "Área total", total_area, "mm²", Supuesta, "Área por die por número de dies.".into());
-    m("macs_total", "Silicio", "Multiplicadores de pesos en total", n * d, "", Derivada,
-        "Con un solo usuario solo trabajan los de un die cada vez.".into());
-    m("cell_sram_kb", "Silicio", "Memoria de pesos por celda", cell_bytes / 1e3, "KB", Derivada,
-        "Capacidad total repartida entre todas las celdas.".into());
+    m("dies", "Silicon", "Dies", d, "", Assumed, "The fewest that meet the maximum area per die.".into());
+    m("packages", "Silicon", "Packages", plan.packages as f64, "", Assumed, format!("Up to {PACKAGE_MAX_MM2:.0} mm² of silicon in each."));
+    m("die_area_mm2", "Silicon", "Area per die", die_area, "mm²", Assumed, "Sum of the die's blocks.".into());
+    m("total_area_mm2", "Silicon", "Total area", total_area, "mm²", Assumed, "Area per die times the number of dies.".into());
+    m("macs_total", "Silicon", "Weight multipliers in total", n * d, "", Derived,
+        "With a single user only one die's work at a time.".into());
+    m("cell_sram_kb", "Silicon", "Weight memory per cell", cell_bytes / 1e3, "KB", Derived,
+        "Total capacity spread over all the cells.".into());
 
-    m("tok_s", "Velocidad", "Generación con un usuario", effective_rate, "tok/s", Supuesta,
-        if depth > 0 { format!("Incluye MTP: {tokens_per_round:.2} tokens por ronda con las tasas de aceptación medidas por MTPLX.") }
-        else { "Un token recorre todas las etapas antes de empezar el siguiente.".into() });
-    m("sampling_cycles", "Velocidad", "Muestreo por token", sampling, "ciclos", Derivada,
-        "Filtra los logits mientras salen de lm_head; solo cuenta lo que no se solapa con el cálculo.".into());
-    m("tok_s_base", "Velocidad", "Sin especulación", stream_rate, "tok/s", Supuesta,
-        "Inverso del tiempo de un token.".into());
-    m("prefill_tok_s", "Velocidad", "Lectura de prompt", prefill_rate, "tok/s", Supuesta,
-        "Los tokens ya se conocen, así que todos los dies trabajan a la vez.".into());
+    m("tok_s", "Speed", "Generation with one user", effective_rate, "tok/s", Assumed,
+        if depth > 0 { format!("Includes MTP: {tokens_per_round:.2} tokens per round with the acceptance rates MTPLX measured.") }
+        else { "A token goes through every stage before the next one starts.".into() });
+    m("sampling_cycles", "Speed", "Sampling per token", sampling, "cycles", Derived,
+        "Filters the logits as they leave lm_head; only what does not overlap the computation counts.".into());
+    m("tok_s_base", "Speed", "Without speculation", stream_rate, "tok/s", Assumed,
+        "Inverse of the time of one token.".into());
+    m("prefill_tok_s", "Speed", "Prompt reading", prefill_rate, "tok/s", Assumed,
+        "The tokens are already known, so every die works at once.".into());
     if let (true, Some(vision)) = (p.include_vision, model.vision) {
         // The encoder runs on one die's cells, before the prompt's text.
         let macs = vision.macs_per_image(512, 512) as f64;
-        m("image_ms", "Velocidad", "Imagen de 512×512", macs / (p.macs_per_die.max(1) as f64 * freq * 1e9) * 1e3, "ms", Supuesta,
-            format!("{:.1} G multiplicaciones del codificador por imagen, en los multiplicadores de un die.", macs / 1e9));
+        m("image_ms", "Speed", "512×512 image", macs / (p.macs_per_die.max(1) as f64 * freq * 1e9) * 1e3, "ms", Assumed,
+            format!("{:.1} G encoder multiplications per image, on one die's multipliers.", macs / 1e9));
     }
-    m("freq_ghz", "Velocidad", "Frecuencia efectiva", freq, "GHz", Supuesta,
-        format!("Limitada a {fmax:.2} GHz por las etapas del multiplicador."));
-    m("cycles_token", "Velocidad", "Ciclos por token", total_cycles, "", Supuesta,
-        format!("Pesos {weight_cycles:.0}, vectores {vector_cycles:.0}, latencia {latency_cycles:.0}, enlaces {link_cycles:.0}."));
+    m("freq_ghz", "Speed", "Effective clock", freq, "GHz", Assumed,
+        format!("Limited to {fmax:.2} GHz by the multiplier stages."));
+    m("cycles_token", "Speed", "Cycles per token", total_cycles, "", Assumed,
+        format!("Weights {weight_cycles:.0}, vectors {vector_cycles:.0}, latency {latency_cycles:.0}, links {link_cycles:.0}."));
 
-    m("weight_bytes_token", "Ancho de banda", "Pesos leídos por token", read_bytes / 1e9, "GB", Derivada,
-        "Cada peso de las matrices se usa una vez por token.".into());
-    m("weight_bandwidth", "Ancho de banda", "Ancho de banda de pesos necesario", read_bytes * stream_rate / 1e12, "TB/s", Derivada,
-        "Pesos por token multiplicados por la velocidad.".into());
-    m("link_bandwidth", "Ancho de banda", "Tráfico entre dies", model.hidden_size as f64 * p.activation_bits as f64 / 8.0 * stream_rate / 1e6, "MB/s", Derivada,
-        "Solo viaja el vector de activación entre capas.".into());
+    m("weight_bytes_token", "Bandwidth", "Weights read per token", read_bytes / 1e9, "GB", Derived,
+        "Each weight of the matrices is used once per token.".into());
+    m("weight_bandwidth", "Bandwidth", "Weight bandwidth needed", read_bytes * stream_rate / 1e12, "TB/s", Derived,
+        "Weights per token times the speed.".into());
+    m("link_bandwidth", "Bandwidth", "Die-to-die traffic", model.hidden_size as f64 * p.activation_bits as f64 / 8.0 * stream_rate / 1e6, "MB/s", Derived,
+        "Only the activation vector travels between layers.".into());
 
-    m("kv_gb", "Estado", "Caché KV", kv_bits / 8e9, "GB", Derivada,
-        "Valores por token de contexto por bits y por tokens de contexto.".into());
-    m("delta_state_mb", "Estado", "Estado de DeltaNet y convolución", state_bits / 8e6, "MB", Derivada,
-        "Matrices recurrentes de las capas lineales e historia de las convoluciones.".into());
-    m("kv_kib_token", "Estado", "KV por token de contexto", model.state.kv_values_per_token as f64 * p.kv_bits as f64 / 8.0 / 1024.0, "KiB", Derivada,
-        "Crece linealmente con el contexto.".into());
+    m("kv_gb", "State", "KV cache", kv_bits / 8e9, "GB", Derived,
+        "Values per context token times bits times context tokens.".into());
+    m("delta_state_mb", "State", "DeltaNet and convolution state", state_bits / 8e6, "MB", Derived,
+        "Recurrent matrices of the linear layers and the convolutions' history.".into());
+    m("kv_kib_token", "State", "KV per context token", model.state.kv_values_per_token as f64 * p.kv_bits as f64 / 8.0 / 1024.0, "KiB", Derived,
+        "Grows linearly with the context.".into());
 
-    m("energy_token_mj", "Energía", "Energía por token", energy_token_mj, "mJ", Supuesta,
-        "Multiplicar, leer pesos, unidades vectoriales, estado y red.".into());
-    m("power_w", "Energía", "Potencia generando", power_w, "W", Supuesta,
-        format!("Dinámica {dynamic_w:.0} W y fugas {leakage_w:.0} W."));
+    m("energy_token_mj", "Energy", "Energy per token", energy_token_mj, "mJ", Assumed,
+        "Multiplying, reading weights, vector units, state and network.".into());
+    m("power_w", "Energy", "Power while generating", power_w, "W", Assumed,
+        format!("Dynamic {dynamic_w:.0} W and leakage {leakage_w:.0} W."));
 
     Ok(Report { model: model.name.clone(), dies, die_area_mm2: die_area, total_area_mm2: total_area, blocks, metrics, violations, floorplan, decisions: resolved.decisions.clone(), macs_per_die: p.macs_per_die, resolved: p.clone() })
 }
@@ -1508,7 +1508,7 @@ mod tests {
         let custom = estimate(&model, &ChipParams::default()).unwrap();
         let repeated = ChipParams { die_mode: DieMode::Identical, ..Default::default() };
         let identical = estimate(&model, &repeated).unwrap();
-        assert_eq!(identical.decisions.len(), 1, "todas las celdas iguales");
+        assert_eq!(identical.decisions.len(), 1, "every cell the same");
         assert!(identical.total_area_mm2 > custom.total_area_mm2);
         let errors = |p: &ChipParams| estimate(&model, p).unwrap().violations.iter().filter(|v| v.severity == Severity::Error).count();
         assert_eq!(errors(&repeated), 0);
@@ -1559,7 +1559,7 @@ mod tests {
         let rate = r.metric("tok_s").unwrap();
         let power = r.metric("power_w").unwrap();
         assert_eq!(r.dies, 1);
-        assert!((r.die_area_mm2 / 815.0 - 1.0).abs() < 0.2, "área {}", r.die_area_mm2);
+        assert!((r.die_area_mm2 / 815.0 - 1.0).abs() < 0.2, "area {}", r.die_area_mm2);
         assert!((14_400.0 * 0.8..17_000.0 * 1.2).contains(&rate), "velocidad {rate}");
         assert!((200.0 * 0.8..250.0 * 1.2).contains(&power), "potencia {power}");
     }
@@ -1570,7 +1570,7 @@ mod tests {
         let rom = estimate(&qwen(), &ChipParams { weight_backend: WeightBackend::Rom, ..Default::default() }).unwrap();
         assert!(rom.total_area_mm2 < sram.total_area_mm2);
         let metric = |report: &Report, id: &str| report.metrics.iter().find(|m| m.id == id).unwrap().value;
-        assert!(metric(&rom, "load_seconds") < metric(&sram, "load_seconds") / 100.0, "los pesos grabados no se cargan");
+        assert!(metric(&rom, "load_seconds") < metric(&sram, "load_seconds") / 100.0, "burnt-in weights are not loaded");
     }
 
     #[test]
@@ -1585,15 +1585,15 @@ mod tests {
     fn a_million_token_context_is_sized_and_flagged() {
         let sram = estimate(&qwen(), &ChipParams { context_tokens: 1_048_576, ..Default::default() }).unwrap();
         assert!((sram.metric("kv_gb").unwrap() - 68.7).abs() < 0.2);
-        assert!(sram.violations.iter().any(|v| v.severity == Severity::Aviso && v.message.contains("262144")));
+        assert!(sram.violations.iter().any(|v| v.severity == Severity::Warning && v.message.contains("262144")));
         let base = estimate(&qwen(), &ChipParams::default()).unwrap();
-        assert!(sram.dies > base.dies, "la caché en SRAM debe costar más silicio");
+        assert!(sram.dies > base.dies, "a cache in SRAM must cost more silicon");
 
         let hbm = estimate(&qwen(), &ChipParams { context_tokens: 1_048_576, kv_backend: KvBackend::Hbm4, ..Default::default() }).unwrap();
         assert!(hbm.total_area_mm2 < sram.total_area_mm2);
 
         let narrow = estimate(&qwen(), &ChipParams { context_tokens: 1_048_576, kv_backend: KvBackend::Hbm4, hbm_stacks: 2, ..Default::default() }).unwrap();
-        assert!(narrow.metric("tok_s").unwrap() < hbm.metric("tok_s").unwrap(), "con pocas pilas debe limitar el ancho de banda");
+        assert!(narrow.metric("tok_s").unwrap() < hbm.metric("tok_s").unwrap(), "with few stacks the bandwidth must limit");
     }
 
     #[test]
@@ -1616,7 +1616,7 @@ mod tests {
     fn every_optimization_changes_the_design() {
         for option in catalog() {
             // Hardwired weights are the only place this optimization applies.
-            let start = ChipParams { weight_backend: if option.id == "pesos_csd" { WeightBackend::Rom } else { WeightBackend::Sram }, ..Default::default() };
+            let start = ChipParams { weight_backend: if option.id == "csd_weights" { WeightBackend::Rom } else { WeightBackend::Sram }, ..Default::default() };
             let base_report = estimate(&qwen(), &start).unwrap();
             let base = serde_json::to_string(&base_report.metrics).unwrap();
             let mut p = start.clone();
@@ -1632,8 +1632,8 @@ mod tests {
     #[test]
     fn incompatible_optimizations_are_reported() {
         let mut p = ChipParams::default();
-        p.optimizations.insert("sin_multiplicadores".into());
-        p.optimizations.insert("cim_analogico".into());
+        p.optimizations.insert("multiplier_free".into());
+        p.optimizations.insert("analog_cim".into());
         let report = estimate(&qwen(), &p).unwrap();
         assert!(report.violations.iter().any(|v| v.severity == Severity::Error));
     }
@@ -1642,7 +1642,7 @@ mod tests {
     fn oversized_model_is_rejected_with_a_fix() {
         let report = estimate(&qwen(), &ChipParams { max_params_g: 10.0, ..Default::default() }).unwrap();
         let v = report.violations.iter().find(|v| v.severity == Severity::Error).unwrap();
-        assert!(v.message.contains("no cabe") && !v.fix.is_empty());
+        assert!(v.message.contains("does not fit") && !v.fix.is_empty());
     }
 
     #[test]

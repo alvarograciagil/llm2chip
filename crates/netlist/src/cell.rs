@@ -123,7 +123,7 @@ impl Gen {
         if self.modules.contains_key("full_adder") {
             return "full_adder".into();
         }
-        let mut b = Builder::new("full_adder", "Sumador completo", "Suma tres bits y produce el bit de suma y el de acarreo.");
+        let mut b = Builder::new("full_adder", "Sumador completo", "Adds three bits and gives the sum bit and the carry bit.");
         let a = b.input("a", 1)[0];
         let x = b.input("b", 1)[0];
         let cin = b.input("cin", 1)[0];
@@ -149,15 +149,15 @@ impl Gen {
         }
         let fa = self.full_adder();
         let wide = width as usize >= crate::rv32::PREFIX_FROM;
-        let how = if wide { "Los acarreos salen de un árbol de prefijos (Brent-Kung): tan profundo como dos veces el logaritmo de los bits." } else { "Cadena de sumadores completos: cada acarreo alimenta al siguiente bit." };
-        let mut b = Builder::new(&name, &format!("Sumador de {width} bits"), how);
+        let how = if wide { "The carries come from a prefix tree (Brent-Kung): as deep as twice the logarithm of the bits." } else { "A chain of full adders: each carry feeds the next bit." };
+        let mut b = Builder::new(&name, &format!("{width}-bit adder"), how);
         let a = b.input("a", width);
         let x = b.input("b", width);
         let cin = b.input("cin", 1)[0];
         let sum = b.output("sum", width);
         let cout = b.output("cout", 1)[0];
         if wide {
-            b.group("Árbol de acarreos");
+            b.group("Carry tree");
             let mut l = crate::rv32::Logic { b: &mut b, next: 0 };
             let (s, c) = l.prefix_adder(&a, &x, cin);
             for (from, to) in s.iter().zip(&sum) {
@@ -166,7 +166,7 @@ impl Gen {
             l.b.or_to(c, Bit::Zero, cout);
             return self.add(b.finish());
         }
-        b.group("Cadena de acarreo");
+        b.group("Carry chain");
         let carries = b.wire("carry", width.saturating_sub(1));
         let mut carry = cin;
         for i in 0..width as usize {
@@ -182,7 +182,7 @@ impl Gen {
         if self.modules.contains_key(&name) {
             return name;
         }
-        let mut b = Builder::new(&name, &format!("Registro de {width} bits"), "Guarda el valor de entrada en cada flanco de reloj.");
+        let mut b = Builder::new(&name, &format!("{width}-bit register"), "Stores the input value on each clock edge.");
         let d = b.input("d", width);
         let q = b.output("q", width);
         b.group("Biestables");
@@ -197,7 +197,7 @@ impl Gen {
         if self.modules.contains_key(&name) {
             return name;
         }
-        let mut b = Builder::new(&name, &format!("Selector de {width} bits"), "Deja pasar «a» si la selección vale 0 y «b» si vale 1.");
+        let mut b = Builder::new(&name, &format!("{width}-bit selector"), "Passes “a” if the select is 0 and “b” if it is 1.");
         let s = b.input("s", 1)[0];
         let a = b.input("a", width);
         let x = b.input("b", width);
@@ -216,9 +216,9 @@ impl Gen {
             return name;
         }
         let what = if negate {
-            "Fila de signo: si el bit del peso vale 1, invierte el valor para restarlo."
+            "Sign row: if the weight's bit is 1, inverts the value to subtract it."
         } else {
-            "Deja pasar el valor desplazado si el bit del peso vale 1."
+            "Passes the shifted value if the weight's bit is 1."
         };
         let mut b = Builder::new(&name, "Producto parcial", what);
         let enable = b.input("enable", 1)[0];
@@ -253,8 +253,8 @@ impl Gen {
 
         let mut b = Builder::new(
             &name,
-            &format!("Multiplicador con signo {weight_bits} × {x_bits}"),
-            "Suma una fila desplazada por cada bit del peso. La última fila resta, porque el bit alto tiene signo negativo.",
+            &format!("Signed multiplier {weight_bits} × {x_bits}"),
+            "Adds one shifted row per bit of the weight. The last row subtracts, because the top bit has a negative sign.",
         );
         let weight_in = b.input("weight", weight_bits);
         let x_in = b.input("x", x_bits);
@@ -266,9 +266,9 @@ impl Gen {
         let mut running = vec![Bit::Zero; width as usize];
 
         for row in 0..weight_bits {
-            b.group(&format!("Fila {row}"));
+            b.group(&format!("Row {row}"));
             let last = row + 1 == weight_bits;
-            let sign = *x.last().expect("activación sin bits");
+            let sign = *x.last().expect("activation without bits");
             let shifted: Vec<Bit> = (0..width as usize)
                 .map(|i| {
                     let i = i as i64 - row as i64;
@@ -290,7 +290,7 @@ impl Gen {
 
             // A pipeline cut stores everything the later rows still need.
             if cuts.contains(&(row + 1)) && !last {
-                b.group(&format!("Etapa tras fila {row}"));
+                b.group(&format!("Stage after row {row}"));
                 let q_sum = b.wire(&format!("sum{row}_q"), width);
                 b.inst(&format!("sum_reg{row}"), &sum_reg, &[("d", running), ("q", q_sum.clone())]);
                 running = q_sum;
@@ -321,7 +321,7 @@ impl Gen {
         let adder = if fast { self.prefix_adder(width) } else { self.ripple_adder(width) };
         let mux = self.mux_bus(width);
         let reg = self.register(width);
-        let mut b = Builder::new(&name, &format!("Acumulador de {width} bits"), "Suma cada producto válido al total. «clear» lo devuelve a cero.");
+        let mut b = Builder::new(&name, &format!("{width}-bit accumulator"), "Adds each valid product to the total. “clear” sets it back to zero.");
         let mut sum_ports: Vec<(&str, Vec<Bit>)> = Vec::new();
         let clear = b.input("clear", 1)[0];
         let restart = restartable.then(|| b.input("restart", 1)[0]);
@@ -352,7 +352,7 @@ impl Gen {
             sum_ports.extend([("cin", vec![Bit::Zero]), ("cout", unused)]);
         }
         b.inst("adder", &adder, &sum_ports);
-        b.group("Decisión");
+        b.group("Decision");
         b.inst("select", &mux, &[("s", vec![valid]), ("a", kept), ("b", sum), ("y", chosen.clone())]);
         b.not_to(clear, not_clear);
         for i in 0..width as usize {
@@ -370,7 +370,7 @@ impl Gen {
         }
         let adder = self.ripple_adder(width);
         let reg = self.register(width);
-        let mut b = Builder::new(&name, &format!("Contador de direcciones de {width} bits"), "Avanza a la siguiente posición de memoria en cada multiplicación.");
+        let mut b = Builder::new(&name, &format!("{width}-bit address counter"), "Moves to the next memory position at each multiplication.");
         let clear = b.input("clear", 1)[0];
         let advance = b.input("advance", 1)[0];
         let address = b.output("address", width);
@@ -400,7 +400,7 @@ impl Gen {
         let adder = self.ripple_adder(width);
         let reg = self.register(width);
         let mux = self.mux_bus(width);
-        let mut b = Builder::new(&name, &format!("Contador con salto de {width} bits"), "Avanza a la siguiente posición, vuelve a cero o salta a la que le indiquen.");
+        let mut b = Builder::new(&name, &format!("{width}-bit counter with jump"), "Moves to the next position, goes back to zero or jumps to the one it is given.");
         let clear = b.input("clear", 1)[0];
         let advance = b.input("advance", 1)[0];
         let seek = b.input("seek", 1)[0];
@@ -439,7 +439,7 @@ impl Gen {
         let stored_check = b.wire("stored_check", check_width);
         let stored_word = b.wire("stored_word", word_bits);
 
-        b.group("Memoria de pesos");
+        b.group("Weight memory");
         let (word_address, lane_now);
         {
             let mut l = crate::rv32::Logic { b, next: 0 };
@@ -450,7 +450,7 @@ impl Gen {
         let mut full_read = stored_word.clone();
         full_read.extend(&stored_check);
         b.sram("weight_sram", c.addr_bits - lane_bits as u32, word_bits + check_width, &[("addr", word_address), ("we", vec![load_en]), ("wdata", load_data), ("rdata", full_read)]);
-        b.group("Corrección de errores");
+        b.group("Error correction");
         b.inst("ecc_corrector", &corrector, &[("data", stored_word), ("check", stored_check), ("lane", lane_now), ("weight", weight), ("fixed", corrected_out), ("failed", failed_out)]);
     }
 
@@ -461,12 +461,12 @@ impl Gen {
             return name;
         }
         let (count, width) = (odd_multiples(significand) as usize, (significand + a) as usize);
-        let mut b = Builder::new(&name, "Múltiplos de la activación", "Calcula una sola vez los múltiplos impares de cada activación para que las celdas solo tengan que elegir.");
+        let mut b = Builder::new(&name, "Activation multiples", "Computes each activation's odd multiples once, so the cells only have to choose.");
         let x = b.input("x", a);
         let out = b.output("multiples", (count * width) as u32);
         {
             let mut l = crate::rv32::Logic { b: &mut b, next: 0 };
-            let sign = *x.last().expect("activación vacía");
+            let sign = *x.last().expect("empty activation");
             let extended: Vec<Bit> = (0..width).map(|i| x.get(i).copied().unwrap_or(sign)).collect();
             let doubled: Vec<Bit> = std::iter::once(Bit::Zero).chain(extended[..width - 1].iter().copied()).collect();
             let mut current = extended.clone();
@@ -535,8 +535,8 @@ impl Gen {
 
         let mut b = Builder::new(
             "compute_cell",
-            "Celda de cálculo",
-            "Guarda sus pesos, multiplica cada uno por la activación que llega y acumula la suma.",
+            "Compute cell",
+            "Keeps its weights, multiplies each by the incoming activation and accumulates the sum.",
         );
         let clear = b.input("clear", 1)[0];
         let clear_total = b.input("clear_total", 1)[0];
@@ -604,11 +604,11 @@ impl Gen {
                 let addr_mux = self.mux_bus(c.addr_bits);
                 let mem_addr = b.wire("mem_addr", c.addr_bits);
                 b.inst("address_select", &addr_mux, &[("s", load_en.clone()), ("a", address), ("b", load_addr), ("y", mem_addr.clone())]);
-                b.group("Memoria de pesos");
+                b.group("Weight memory");
                 b.sram("weight_sram", c.addr_bits, w, &[("addr", mem_addr), ("we", load_en), ("wdata", load_data), ("rdata", weight.clone())]);
             }
             None => {
-                b.group("Memoria de pesos");
+                b.group("Weight memory");
                 b.rom("weight_rom", c.addr_bits, w, &[("addr", address), ("rdata", weight.clone())]);
             }
         }
@@ -640,10 +640,10 @@ impl Gen {
         } else {
             weight
         };
-        b.group("Decodificación del formato");
+        b.group("Format decoding");
         let decoded = self.decode(&mut b, &c, weight, table_ports);
 
-        b.group("Alineación");
+        b.group("Alignment");
         let x_aligned = b.wire("x_aligned", a);
         let multiples = uses_multiples.then(|| {
             let bus = b.wire("multiples", odd_multiples(significand) * product_bits);
@@ -708,8 +708,8 @@ impl Gen {
             });
         }
 
-        b.group("Etapas de suma");
-        let sign = *product.last().expect("producto sin bits");
+        b.group("Adder stages");
+        let sign = *product.last().expect("product without bits");
         let mut value: Vec<Bit> = (0..acc as usize).map(|i| product.get(i).copied().unwrap_or(sign)).collect();
         if let Some((amount, under)) = window {
             value = self.place_product(&mut b, acc, value, &amount, under);

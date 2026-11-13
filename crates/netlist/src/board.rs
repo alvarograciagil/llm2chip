@@ -33,7 +33,7 @@ pub const OMDAZZ_EP4CE10: Board = Board {
     uart_tx: "PIN_114",
     leds: ["PIN_87", "PIN_86", "PIN_85", "PIN_84"],
     pins_checked: false,
-    notes: "Son los pines habituales de las placas EP4CE6/EP4CE10 de este tipo (reloj de 50 MHz en PIN_23, reset en PIN_25, LED en PIN_84-87, serie en PIN_114/115), sin comprobar en el esquema de la OMDAZZ: compruébalos antes de programarla. Si el puerto serie es un conector DB9 (RS-232), hace falta un adaptador USB a RS-232; si es un mini-USB con CH340 o PL2303, basta el cable.",
+    notes: "These are the usual pins of EP4CE6/EP4CE10 boards of this kind (50 MHz clock on PIN_23, reset on PIN_25, LEDs on PIN_84-87, serial on PIN_114/115), not checked against the OMDAZZ schematic: check them before programming the board. If the serial port is a DB9 connector (RS-232), you need a USB to RS-232 adapter; if it is a mini-USB with a CH340 or PL2303, the cable is enough.",
 };
 
 /// The cell the demo carries: 8-bit weights, 16-bit activations, room for 4096 weights.
@@ -224,8 +224,8 @@ fn testbench(c: &CellConfig, weights: &[i64], activations: &[i64], expected: &[i
     }
     format!(
         r#"`timescale 1ns/1ns
-// Envía por el puerto serie los pesos y las activaciones de un producto matriz-vector y
-// comprueba cada total con el que calcula llm2chip.
+// Sends over the serial port the weights and activations of a matrix-vector product and
+// checks each total against the one llm2chip computes.
 module testbench;
   localparam BIT = 8;
   reg clk = 0, rx = 1;
@@ -273,7 +273,7 @@ module testbench;
     reg [7:0] got;
     begin
       receive_byte(got);
-      if (got !== want) begin errors = errors + 1; $display("respuesta %0d, se esperaba %0d", got, want); end
+      if (got !== want) begin errors = errors + 1; $display("answer %0d, expected %0d", got, want); end
     end
   endtask
 
@@ -281,13 +281,13 @@ module testbench;
     reg [7:0] b0, b1, b2, b3;
     begin
       receive_byte(b0); receive_byte(b1); receive_byte(b2); receive_byte(b3);
-      if ({{b3, b2, b1, b0}} !== want) begin errors = errors + 1; $display("fila %0d: %0d, se esperaba %0d", row, $signed({{b3, b2, b1, b0}}), $signed(want)); end
+      if ({{b3, b2, b1, b0}} !== want) begin errors = errors + 1; $display("row %0d: %0d, expected %0d", row, $signed({{b3, b2, b1, b0}}), $signed(want)); end
     end
   endtask
 
   initial begin
     repeat (4) @(posedge clk);
-{steps}    if (errors == 0) $display("PASS"); else $display("FAIL: %0d errores", errors);
+{steps}    if (errors == 0) $display("PASS"); else $display("FAIL: %0d errors", errors);
     $finish;
   end
 endmodule
@@ -296,13 +296,13 @@ endmodule
 }
 
 fn qsf(board: &Board) -> String {
-    let checked = if board.pins_checked { "comprobados en el esquema de la placa" } else { "SIN VERIFICAR: compruébalos en el esquema de la placa antes de programarla" };
+    let checked = if board.pins_checked { "checked against the board's schematic" } else { "UNVERIFIED: check them against the board's schematic before programming it" };
     let mut pins = format!("set_location_assignment {} -to clk\nset_location_assignment {} -to reset_n\nset_location_assignment {} -to uart_rx\nset_location_assignment {} -to uart_tx\n", board.clock, board.reset_n, board.uart_rx, board.uart_tx);
     for (i, pin) in board.leds.iter().enumerate() {
         pins += &format!("set_location_assignment {pin} -to led[{i}]\n");
     }
     format!(
-        "# {name}: una celda de cálculo de llm2chip detrás del puerto serie.\nset_global_assignment -name FAMILY \"{family}\"\nset_global_assignment -name DEVICE {device}\nset_global_assignment -name TOP_LEVEL_ENTITY cell_demo\nset_global_assignment -name VERILOG_FILE ../rtl/compute_cell.v\nset_global_assignment -name VERILOG_FILE ../rtl/cell_demo.v\nset_global_assignment -name SDC_FILE cell_demo.sdc\nset_global_assignment -name STRATIX_DEVICE_IO_STANDARD \"3.3-V LVTTL\"\nset_global_assignment -name RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP \"AS INPUT TRI-STATED\"\nset_global_assignment -name CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION \"USE AS REGULAR IO\"\n\n# Pines, {checked}.\n{pins}",
+        "# {name}: a compute cell of llm2chip behind the serial port.\nset_global_assignment -name FAMILY \"{family}\"\nset_global_assignment -name DEVICE {device}\nset_global_assignment -name TOP_LEVEL_ENTITY cell_demo\nset_global_assignment -name VERILOG_FILE ../rtl/compute_cell.v\nset_global_assignment -name VERILOG_FILE ../rtl/cell_demo.v\nset_global_assignment -name SDC_FILE cell_demo.sdc\nset_global_assignment -name STRATIX_DEVICE_IO_STANDARD \"3.3-V LVTTL\"\nset_global_assignment -name RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP \"AS INPUT TRI-STATED\"\nset_global_assignment -name CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION \"USE AS REGULAR IO\"\n\n# Pins, {checked}.\n{pins}",
         name = board.name,
         family = board.family,
         device = board.device,
@@ -312,11 +312,11 @@ fn qsf(board: &Board) -> String {
 fn host_script(c: &CellConfig) -> String {
     format!(
         r#"#!/usr/bin/env python3
-"""Prueba la celda de llm2chip en la placa: carga una matriz, la multiplica por un vector
-por el puerto serie y compara cada fila con el cálculo exacto.
+"""Tests llm2chip's cell on the board: loads a matrix, multiplies it by a vector over
+the serial port and compares each row with the exact computation.
 
     pip install pyserial
-    python3 matvec.py /dev/tty.usbserial-XXXX [filas] [columnas]
+    python3 matvec.py /dev/tty.usbserial-XXXX [rows] [columns]
 """
 import random
 import struct
@@ -331,10 +331,10 @@ MAX_WEIGHTS = {weights}
 def expect(port, want):
     got = port.read(1)
     if got != want:
-        sys.exit(f"la placa respondió {{got!r}} y se esperaba {{want!r}}")
+        sys.exit(f"the board answered {{got!r}} and {{want!r}} was expected")
 
 def main():
-    assert ROWS * COLS <= MAX_WEIGHTS, f"la celda guarda {{MAX_WEIGHTS}} pesos"
+    assert ROWS * COLS <= MAX_WEIGHTS, f"the cell holds {{MAX_WEIGHTS}} weights"
     rng = random.Random(1)
     matrix = [[rng.randint(-128, 127) for _ in range(COLS)] for _ in range(ROWS)]
     vector = [rng.randint(-32768, 32767) for _ in range(COLS)]
@@ -350,9 +350,9 @@ def main():
             got = struct.unpack("<i", port.read(4))[0]
             want = sum(w * x for w, x in zip(row, vector))
             want = (want + 2**31) % 2**32 - 2**31
-            print(f"fila {{r}}: {{got}} {{'✓' if got == want else f'✗, se esperaba {{want}}'}}")
+            print(f"row {{r}}: {{got}} {{'✓' if got == want else f'✗, expected {{want}}'}}")
             errors += got != want
-        print("todo correcto" if errors == 0 else f"{{errors}} filas mal")
+        print("all correct" if errors == 0 else f"{{errors}} rows wrong")
 
 main()
 "#,
@@ -362,7 +362,7 @@ main()
 
 fn readme(board: &Board, c: &CellConfig) -> String {
     format!(
-        "# Una celda de llm2chip en la {name}\n\nUna celda de cálculo del chip (memoria de {weights} pesos de {w} bits, multiplicador por activaciones de {a} bits y acumulador de {acc} bits), generada por llm2chip, detrás del puerto serie de la placa a 115 200 baudios. El chip completo no cabe en esta FPGA; esta prueba comprueba en hardware real la pieza que más se repite.\n\n## Archivos\n\n- `rtl/compute_cell.v`: la celda, tal como la genera llm2chip (el producto como multiplicación con signo, para los bloques multiplicadores de la FPGA).\n- `rtl/cell_demo.v`: receptor y emisor serie y el bucle de órdenes.\n- `tb/testbench.v`: envía una matriz y un vector por el puerto serie simulado y comprueba cada fila.\n- `quartus/`: proyecto para Quartus Prime Lite (gratuito).\n- `host/matvec.py`: la misma prueba con la placa de verdad.\n\n## Simular\n\n```bash\niverilog -g2005 -o tb.vvp rtl/compute_cell.v rtl/cell_demo.v tb/testbench.v && vvp tb.vvp\n```\n\nDebe escribir `PASS`.\n\n## Programar la placa\n\n1. {notes}\n2. Abre `quartus/cell_demo.qpf` en Quartus Prime Lite y compila.\n3. Programa el `.sof` por JTAG con el USB-Blaster; para que quede en la flash EPCS16, conviértelo a `.jic` (File → Convert Programming Files).\n4. `python3 host/matvec.py PUERTO` carga una matriz de 8 × 64, la multiplica por un vector y compara cada fila.\n\n## Órdenes\n\n| Orden | Datos | Respuesta |\n|---|---|---|\n| `L` | número de pesos (2 bytes) y los pesos | `K` |\n| `C` | | `K`: vuelve al primer peso con el total a cero |\n| `X` | activación (2 bytes, con signo) | multiplica el peso siguiente y lo suma al total |\n| `T` | | el total (4 bytes, con signo) y lo pone a cero |\n\nLas luces: la primera parpadea con el reloj, la segunda cambia con cada orden, la tercera se enciende mientras la celda trabaja y la cuarta en reset (en muchas placas se encienden con un cero: entonces es al revés).\n",
+        "# An llm2chip cell on the {name}\n\nA compute cell of the chip (a memory of {weights} weights of {w} bits, a multiplier by {a}-bit activations and a {acc}-bit accumulator), generated by llm2chip, behind the board's serial port at 115,200 baud. The whole chip does not fit in this FPGA; this test checks on real hardware the piece that repeats the most.\n\n## Files\n\n- `rtl/compute_cell.v`: the cell, as llm2chip generates it (the product as a signed multiplication, for the FPGA's multiplier blocks).\n- `rtl/cell_demo.v`: serial receiver and transmitter and the command loop.\n- `tb/testbench.v`: sends a matrix and a vector over the simulated serial port and checks each row.\n- `quartus/`: project for Quartus Prime Lite (free).\n- `host/matvec.py`: the same test with the real board.\n\n## Simulating\n\n```bash\niverilog -g2005 -o tb.vvp rtl/compute_cell.v rtl/cell_demo.v tb/testbench.v && vvp tb.vvp\n```\n\nIt must print `PASS`.\n\n## Programming the board\n\n1. {notes}\n2. Open `quartus/cell_demo.qpf` in Quartus Prime Lite and compile.\n3. Program the `.sof` over JTAG with the USB-Blaster; to keep it in the EPCS16 flash, convert it to `.jic` (File → Convert Programming Files).\n4. `python3 host/matvec.py PORT` loads an 8 × 64 matrix, multiplies it by a vector and compares each row.\n\n## Commands\n\n| Command | Data | Answer |\n|---|---|---|\n| `L` | number of weights (2 bytes) and the weights | `K` |\n| `C` | | `K`: goes back to the first weight with the total at zero |\n| `X` | activation (2 bytes, signed) | multiplies the next weight and adds it to the total |\n| `T` | | the total (4 bytes, signed), and sets it to zero |\n\nThe lights: the first blinks with the clock, the second changes with each command, the third is on while the cell works and the fourth during reset (on many boards they light up with a zero: then it is the other way round).\n",
         name = board.name,
         weights = 1u32 << c.addr_bits,
         w = c.weight_bits,
@@ -376,7 +376,7 @@ fn readme(board: &Board, c: &CellConfig) -> String {
 /// `rows` × `cols` against the exact arithmetic.
 pub fn cell_demo_files(board: &Board, rows: usize, cols: usize) -> BTreeMap<String, String> {
     let c = demo_cell();
-    assert!(rows * cols <= 1 << c.addr_bits, "la celda guarda {} pesos", 1 << c.addr_bits);
+    assert!(rows * cols <= 1 << c.addr_bits, "the cell holds {} weights", 1 << c.addr_bits);
     let mut state = 0x2545_F491_4F6C_DD1Du64;
     let mut next = |range: i64| {
         state ^= state << 13;

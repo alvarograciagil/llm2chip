@@ -15,9 +15,9 @@ type Block = (&'static str, Box<dyn Fn() -> Design>);
 fn main() {
     let wanted: Vec<String> = std::env::args().skip(1).collect();
     let blocks: Vec<Block> = vec![
-        ("celda", Box::new(|| cell_design(CellConfig { weight_bits: 4, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 5, coding: WeightCoding::Affine, exponent_bits: 0, multiplier: MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false }))),
+        ("cell", Box::new(|| cell_design(CellConfig { weight_bits: 4, activation_bits: 16, accumulator_bits: 32, mac_stages: 2, adder_stages: 2, addr_bits: 5, coding: WeightCoding::Affine, exponent_bits: 0, multiplier: MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false }))),
         ("cpu", Box::new(netlist::rv32::core_design)),
-        ("muestreo", Box::new(|| sampler_design(SamplerConfig { logit_bits: 16, index_bits: 12, entries: 8, lanes: 1 }))),
+        ("sampler", Box::new(|| sampler_design(SamplerConfig { logit_bits: 16, index_bits: 12, entries: 8, lanes: 1 }))),
         // A small die whole: three cells, the sequencer, the vector unit and the tables.
         ("die", Box::new(|| {
             die_design(DieConfig {
@@ -34,7 +34,7 @@ fn main() {
             })
         })),
     ];
-    println!("| Bloque | Biestables en la cadena | Fallos | Detectados | Por la cadena | Imposibles | Abandonados | Patrones | Cobertura de fallos | Cobertura de prueba | Segundos |");
+    println!("| Block | Flip-flops in the chain | Faults | Detected | By the chain | Undetectable | Aborted | Patterns | Fault coverage | Test coverage | Seconds |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|");
     for (name, build) in blocks {
         if if wanted.is_empty() { name == "die" } else { !wanted.iter().any(|w| w == name) } {

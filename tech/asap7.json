@@ -18,7 +18,7 @@
   "fixed_die_mm2": 6.0,
   "cpu_mm2": 2.0,
   "io_mm2": 4.0,
-  "label": "ASAP7 (predictivo, abierto, calibrado con OpenROAD)",
+  "label": "ASAP7 (predictive, open, calibrated with OpenROAD)",
   "id": "asap7",
   "and_um2": 0.0875,
   "or_um2": 0.0875,

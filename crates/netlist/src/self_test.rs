@@ -41,9 +41,9 @@ fn visit(gen: &mut Gen, name: &str, finished: &mut HashMap<String, bool>, top: b
     }
 
     let names = module.nets.iter().map(|net| net.name.clone()).collect();
-    let mut b = Builder { prefix: String::new(), module, counter: 1_000_000, group: "Autotest de memorias".into(), names };
+    let mut b = Builder { prefix: String::new(), module, counter: 1_000_000, group: "Memory self-test".into(), names };
     let hooks = if top {
-        let found = |b: &Builder, net: &str| net_named(&b.module, net).expect("el chip debe declarar las señales de autotest");
+        let found = |b: &Builder, net: &str| net_named(&b.module, net).expect("the chip must declare the self-test signals");
         Hooks { enable: found(&b, ENABLE), done: found(&b, DONE), fail: found(&b, FAIL) }
     } else {
         Hooks { enable: b.input(ENABLE, 1)[0], done: b.output(DONE, 1)[0], fail: b.output(FAIL, 1)[0] }
@@ -78,7 +78,7 @@ fn visit(gen: &mut Gen, name: &str, finished: &mut HashMap<String, bool>, top: b
         let (addr_bits, width, two_ports) = match b.module.instances[index].kind {
             InstKind::Prim(Prim::Sram { addr_bits, width }) => (addr_bits, width, false),
             InstKind::Prim(Prim::Ram2p { addr_bits, width }) => (addr_bits, width, true),
-            _ => unreachable!("solo se recogieron memorias"),
+            _ => unreachable!("only memories were collected"),
         };
         let engine = gen.march_test(addr_bits, width);
         let (address, we, data) = (b.wire("bist_address", addr_bits), b.wire("bist_we", 1), b.wire("bist_data", width));

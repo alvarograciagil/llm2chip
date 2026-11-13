@@ -35,7 +35,7 @@ fn run(c: DieConfig, e: &Example) -> (Simulator, Vec<TestStep>) {
         sim.tick();
         steps.push(TestStep { inputs: vec![] });
         guard += 1;
-        assert!(guard < 20_000, "el secuenciador no se detiene");
+        assert!(guard < 20_000, "the sequencer does not stop");
     }
     (sim, steps)
 }
@@ -152,8 +152,8 @@ fn an_fpga_gets_the_register_table_as_a_memory_that_does_what_the_gates_do() {
 fn die_contains_every_block() {
     let design = die_design(config());
     let groups: Vec<&str> = design.modules["llm2chip_die"].instances.iter().map(|i| i.group.as_str()).collect();
-    for name in ["Secuenciador", "Banco de vectores", "Unidad vectorial", "Tabla de funciones", "Red de activaciones", "Celdas", "Cadena de resultados"] {
-        assert!(groups.contains(&name), "falta {name}");
+    for name in ["Secuenciador", "Vector bank", "Unidad vectorial", "Function table", "Activation network", "Cells", "Result chain"] {
+        assert!(groups.contains(&name), "{name} is missing");
     }
 }
 
@@ -237,10 +237,10 @@ fn a_microcode_word_reads_back_as_what_it_does() {
     let bits = &bits[bits.len() - netlist::word_bits(&c) as usize..];
     let fields = decode_word(bits, &c);
     assert_eq!((fields["op"], fields["reg_a"], fields["reg_b"], fields["reg_dst"]), (OP_ADD as u128, 2, 3, 5));
-    assert_eq!(describe_word(&fields), "Suma r2 + r3 y lo guarda en r5.");
+    assert_eq!(describe_word(&fields), "Adds r2 + r3 and stores it in r5.");
     let halt = netlist::ControlWord { halt: true, ..Default::default() };
     let bits: String = halt.encode_words(&c).iter().rev().map(|w| format!("{w:032b}")).collect();
-    assert!(describe_word(&decode_word(&bits[bits.len() - netlist::word_bits(&c) as usize..], &c)).starts_with("Fin de la rutina"));
+    assert!(describe_word(&decode_word(&bits[bits.len() - netlist::word_bits(&c) as usize..], &c)).starts_with("End of the routine"));
 }
 
 #[test]
@@ -265,7 +265,7 @@ fn a_wide_link_carries_a_whole_block_in_one_word() {
     };
     let (p0, p1) = programs(general);
     let features = netlist::DieFeatures::of(&p0).union(netlist::DieFeatures::of(&p1)).with_lane_bits(2);
-    assert!(features.wide_link, "un bloque por el enlace pide un carril de enlace por carril");
+    assert!(features.wide_link, "a block over the link takes one link lane per lane");
     let c = DieConfig { features, ..general };
     let (code0, code1) = (p0.words, p1.words);
     let design = package_design(c, 2, 1);

@@ -70,7 +70,7 @@ impl Gen {
         let encoder = self.secded_encoder(framed);
         let decoder = self.secded_decoder(framed);
         let (data_width, frame_width, check) = (width as usize, framed as usize, check_bits(framed));
-        let mut b = Builder::new(&name, "Enlace entre chips", "Envía palabras numeradas y protegidas, repite las que llegan dañadas y cruza entre los relojes de los dos chips.");
+        let mut b = Builder::new(&name, "Chip-to-chip link", "Sends numbered, protected words, repeats those that arrive damaged and crosses between the two chips' clocks.");
         let tx_send = b.input("tx_send", 1)[0];
         let tx_data = b.input("tx_data", width);
         let tx_can_send = b.output("tx_can_send", 1)[0];
@@ -91,17 +91,17 @@ impl Gen {
         let corrected = b.output("corrected", 1)[0];
         let failed = b.output("failed", 1)[0];
 
-        b.group("Envío");
+        b.group("Sending");
         let frame_out = b.wire("frame_out", framed);
         let check_out = b.wire("check_out", check);
         b.inst("encoder", &encoder, &[("data", frame_out.clone()), ("check", check_out.clone())]);
-        b.group("Recepción");
+        b.group("Receiving");
         let frame_in = b.wire("received", framed);
         let (fixed, bad) = (b.wire("fixed", 1)[0], b.wire("bad", 1)[0]);
         b.inst("decoder", &decoder, &[("data", pin_rx_bits[..frame_width].to_vec()), ("check", pin_rx_bits[frame_width..].to_vec()), ("corrected", frame_in.clone()), ("fixed", vec![fixed]), ("failed", vec![bad])]);
 
         let mut l = Logic { b: &mut b, next: 0 };
-        l.b.group("Repetición");
+        l.b.group("Retry");
         let (next, base) = (l.fresh_bus(SEQUENCE_BITS), l.fresh_bus(SEQUENCE_BITS));
         let replay = l.fresh_bus(SEQUENCE_BITS);
         let (replaying, rewound) = (l.fresh(), l.fresh());
@@ -182,7 +182,7 @@ impl Gen {
         clocked(&mut l, core_stall, &[send_any], &[pin_tx_valid]);
         clocked(&mut l, core_stall, &wire_out, &pin_tx_bits);
 
-        l.b.group("Cola de entrada");
+        l.b.group("Input queue");
         let (write, read) = (l.fresh_bus(QUEUE_BITS + 1), l.fresh_bus(QUEUE_BITS + 1));
         let read_gray = l.fresh_bus(QUEUE_BITS + 1);
         let write_gray = l.fresh_bus(QUEUE_BITS + 1);

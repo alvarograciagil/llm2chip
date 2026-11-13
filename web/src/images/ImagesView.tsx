@@ -153,7 +153,7 @@ export function ImagesPanel() {
       <p className="detail-sub">Dibuja una imagen desde un texto o retoca una zona de otra con Show-o.</p>
 
       {s.online === false ? (
-        <div className="issue aviso" role="status">
+        <div className="issue warning" role="status">
           <span className="issue-icon" aria-hidden="true">i</span>
           <div>
             <strong>El motor no está en marcha.</strong>

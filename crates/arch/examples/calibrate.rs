@@ -13,12 +13,12 @@ pub fn node_of(platform: &str) -> &str {
 fn main() {
     let golden: serde_json::Value = serde_json::from_str(include_str!("../../../tests/golden/asic.json")).expect("asic.json");
     let mut fits: BTreeMap<String, Vec<(f64, f64, f64)>> = BTreeMap::new();
-    println!("| Celda | Proceso | Área medida µm² | Estimada | Relación | Reloj medido MHz | Estimado | Relación |");
+    println!("| Cell | Process | Measured area µm² | Estimated | Ratio | Measured clock MHz | Estimated | Ratio |");
     println!("|---|---|---|---|---|---|---|---|");
     for m in golden["measures"].as_array().expect("medidas") {
         let platform = m["platform"].as_str().unwrap();
-        let tech = node(node_of(platform)).expect("tecnología");
-        let config: CellConfig = serde_json::from_value(m["config"].clone()).expect("celda");
+        let tech = node(node_of(platform)).expect("technology");
+        let config: CellConfig = serde_json::from_value(m["config"].clone()).expect("cell");
         let (area, fmax_ghz) = laid_out_cell(tech, config);
         let (measured_area, measured_mhz) = (m["area_um2"].as_f64().unwrap(), m["fmax_mhz"].as_f64().unwrap_or(0.0));
         println!(
@@ -41,7 +41,7 @@ fn main() {
         let n = points.len() as f64;
         let (mx, my) = (points.iter().map(|p| p.0).sum::<f64>() / n, points.iter().map(|p| p.1).sum::<f64>() / n);
         let slope = points.iter().map(|(x, y, _)| (x - mx) * (y - my)).sum::<f64>() / points.iter().map(|(x, _, _)| (x - mx).powi(2)).sum::<f64>();
-        println!("{id}: con ambos libres, retardo {slope:.3} ns y biestable {:.3} ns (ahora {:.3})", my - slope * mx, tech.ff_overhead_ns);
-        println!("{id}: retardo de sumador ajustado {delay:.3} ns (ahora {:.3}); área estimada / medida, media geométrica {:.2}", tech.fa_delay_ns, area.exp());
+        println!("{id}: with both free, delay {slope:.3} ns and flip-flop {:.3} ns (now {:.3})", my - slope * mx, tech.ff_overhead_ns);
+        println!("{id}: fitted adder delay {delay:.3} ns (now {:.3}); estimated / measured area, geometric mean {:.2}", tech.fa_delay_ns, area.exp());
     }
 }

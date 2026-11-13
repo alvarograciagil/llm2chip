@@ -6,7 +6,7 @@ use std::process::Command;
 #[test]
 fn the_cell_behind_the_serial_port_multiplies_a_matrix_exactly() {
     if Command::new("iverilog").arg("-V").output().is_err() {
-        eprintln!("iverilog no está instalado: se omite");
+        eprintln!("iverilog is not installed: skipped");
         return;
     }
     let files = cell_demo_files(&OMDAZZ_EP4CE10, 4, 16);
@@ -22,6 +22,6 @@ fn the_cell_behind_the_serial_port_multiplies_a_matrix_exactly() {
     let out = String::from_utf8_lossy(&run.stdout);
     assert!(out.contains("PASS"), "{out}");
     // Pins nobody has checked on the board's schematic say so where they are set.
-    assert!(files["quartus/cell_demo.qsf"].contains("SIN VERIFICAR"));
+    assert!(files["quartus/cell_demo.qsf"].contains("UNVERIFIED"));
     std::fs::remove_dir_all(&dir).ok();
 }

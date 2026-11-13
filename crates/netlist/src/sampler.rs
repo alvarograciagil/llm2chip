@@ -47,7 +47,7 @@ fn add(l: &mut Logic, adder: &str, a: &[Bit], b: &[Bit], carry_in: Bit) -> (Vec<
 pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
     let (bits, index_bits, entries) = (c.logit_bits as usize, c.index_bits as usize, c.entries as usize);
     let count_bits = selector_bits(&c);
-    let mut b = Builder::new("token_sampler", "Unidad de muestreo", "Conserva los candidatos con mayor logit y elige uno según su probabilidad, con temperatura y top-k.");
+    let mut b = Builder::new("token_sampler", "Sampling unit", "Keeps the candidates with the highest logits and picks one by its probability, with temperature and top-k.");
     let start = b.input("start", 1)[0];
     let greedy = b.input("greedy", 1)[0];
     let seed_write = b.input("seed_write", 1)[0];
@@ -93,7 +93,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
         let used: Vec<Bit> = (0..entries).map(|_| l.fresh()).collect();
         let position = l.fresh_bus(index_bits - lane_bits);
 
-        l.b.group("Filtro de logits");
+        l.b.group("Logit filter");
         // A lane is a candidate only if it beats the worst of a full list, so after the
         // first few logits almost every group passes straight through.
         let handled = l.fresh_bus(lanes);
@@ -198,7 +198,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
             .collect();
         l.connect_flops(&next_position, &position);
 
-        l.b.group("Paso por los candidatos");
+        l.b.group("Pass over the candidates");
         let cursor = l.fresh_bus(count_bits);
         let leaf_count = 1usize << count_bits;
         let value_leaves: Vec<Vec<Bit>> = (0..leaf_count).map(|i| values[i.min(entries - 1)].clone()).collect();
@@ -251,7 +251,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
         let saturated: Vec<Bit> = shifted_index[..TABLE_BITS as usize].iter().map(|v| l.or(*v, overflow)).collect();
         read_address = saturated;
 
-        l.b.group("Suma de probabilidades");
+        l.b.group("Probability sum");
         let in_pass = l.or(first_pass, second_pass);
         let adding = l.and(in_pass, add_phase);
         let extended: Vec<Bit> = table_value.iter().copied().chain(std::iter::repeat_n(Bit::Zero, SUM_BITS - 16)).collect();
@@ -272,7 +272,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
         l.connect_flops(&next_sum, &sum);
         l.connect_flops(&[next_phase], &[add_phase]);
 
-        l.b.group("Número aleatorio");
+        l.b.group("Random number");
         let threshold = l.fresh_bus(SUM_BITS);
         let next_threshold = l.mux_bus(scale, &threshold, &product[16..16 + SUM_BITS]);
         l.connect_flops(&next_threshold, &threshold);
@@ -378,7 +378,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
     let mut address = Vec::with_capacity(TABLE_BITS as usize);
     {
         let mut l = Logic { b: &mut b, next: 100_000 };
-        l.b.group("Tabla exponencial");
+        l.b.group("Exponential table");
         let chosen = l.mux_bus(table_write, &read_address, &table_address);
         address.extend(chosen);
         for (from, to) in read_address.iter().zip(&table_read) {

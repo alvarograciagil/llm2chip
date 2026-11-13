@@ -242,7 +242,7 @@ pub(crate) fn constant(value: u32, width: usize) -> Vec<Bit> {
 }
 
 fn muldiv(gen: &mut Gen) -> String {
-    let mut b = Builder::new("rv32_muldiv", "Multiplicador y divisor", "Unidad iterativa de 32 ciclos: multiplica sumando y desplazando, y divide restando y desplazando, sobre las magnitudes de los operandos.");
+    let mut b = Builder::new("rv32_muldiv", "Multiplier and divider", "32-cycle iterative unit: multiplies by adding and shifting, and divides by subtracting and shifting, on the operands' magnitudes.");
     let start = b.input("start", 1)[0];
     let run = b.input("run", 1)[0];
     let funct3 = b.input("funct3", 3);
@@ -252,7 +252,7 @@ fn muldiv(gen: &mut Gen) -> String {
     let last = b.output("last", 1)[0];
     let mut l = Logic { b: &mut b, next: 0 };
 
-    l.b.group("Signo de los operandos");
+    l.b.group("Operand signs");
     let signed_a = {
         let mulh = l.equals(&funct3, 1);
         let mulhsu = l.equals(&funct3, 2);
@@ -284,14 +284,14 @@ fn muldiv(gen: &mut Gen) -> String {
     let multiply_negative = l.xor(sign_a, sign_b);
     let negative_now = l.mux(is_div, multiply_negative, divide_negative);
 
-    l.b.group("Estado");
+    l.b.group("State");
     let operand = l.fresh_bus(32);
     let hi = l.fresh_bus(32);
     let lo = l.fresh_bus(32);
     let count = l.fresh_bus(5);
     let negative = l.fresh_bus(1)[0];
 
-    l.b.group("Paso de cálculo");
+    l.b.group("Compute step");
     let zero33 = constant(0, 33);
     let hi_wide: Vec<Bit> = hi.iter().copied().chain([Bit::Zero]).collect();
     let shifted: Vec<Bit> = std::iter::once(lo[31]).chain(hi.iter().copied()).collect();
@@ -354,7 +354,7 @@ fn muldiv(gen: &mut Gen) -> String {
 
 pub(crate) fn core(gen: &mut Gen) -> String {
     let unit = muldiv(gen);
-    let mut b = Builder::new("rv32_core", "CPU de control RV32IM", "Núcleo RISC-V de 32 bits que ejecuta el firmware: arranque, tokenizador y bucle principal.");
+    let mut b = Builder::new("rv32_core", "RV32IM control CPU", "32-bit RISC-V core that runs the firmware: boot, tokenizer and main loop.");
     let reset = b.input("reset", 1)[0];
     let imem_rdata = b.input("imem_rdata", 32);
     let dmem_rdata = b.input("dmem_rdata", 32);
@@ -382,13 +382,13 @@ pub(crate) fn core(gen: &mut Gen) -> String {
     let md_run = l.fresh();
     let md_done = l.fresh();
 
-    l.b.group("Instrucción");
+    l.b.group("Instruction");
     let enable_ir = decode;
     let ir = l.fresh_bus(32);
     let next_ir = l.mux_bus(enable_ir, &ir, &imem_rdata);
     l.connect_flops(&next_ir, &ir);
 
-    l.b.group("Decodificación");
+    l.b.group("Decoding");
     let opcode = ir[0..7].to_vec();
     let funct3 = ir[12..15].to_vec();
     let bit30 = ir[30];
@@ -427,7 +427,7 @@ pub(crate) fn core(gen: &mut Gen) -> String {
     imm = l.mux_bus(upper, &imm, &imm_u);
     imm = l.mux_bus(is_jal, &imm, &imm_j);
 
-    l.b.group("Contador de programa");
+    l.b.group("Program counter");
     let pc = l.fresh_bus(32);
     let four = constant(4, 32);
     let (pc_plus4, _) = l.adder(&pc, &four, Bit::Zero);
@@ -498,7 +498,7 @@ pub(crate) fn core(gen: &mut Gen) -> String {
     };
     let pc_next = l.mux_bus(redirect, &pc_plus4, &target_aligned);
 
-    l.b.group("Memoria de datos");
+    l.b.group("Data memory");
     let byte_offset = target[0..2].to_vec();
     for (from, to) in target.iter().zip(&dmem_addr) {
         l.b.or_to(*from, Bit::Zero, *to);
@@ -546,7 +546,7 @@ pub(crate) fn core(gen: &mut Gen) -> String {
     let mut load_value = l.mux_bus(is_half, &moved, &half_value);
     load_value = l.mux_bus(is_byte, &load_value, &byte_value);
 
-    l.b.group("Escritura en registros");
+    l.b.group("Register write");
     let mut write_value = alu_out;
     write_value = l.mux_bus(is_lui, &write_value, &imm);
     write_value = l.mux_bus(is_auipc, &write_value, &target);
@@ -608,13 +608,13 @@ pub(crate) fn core(gen: &mut Gen) -> String {
     let next_pc = l.mux_bus(reset, &updated, &zero32);
     l.connect_flops(&next_pc, &pc);
 
-    l.b.group("Banco de registros");
+    l.b.group("Register file");
     let read_rs1 = l.mux_bus(decode, &ir[15..20], &imem_rdata[15..20]);
     let read_rs2 = l.mux_bus(decode, &ir[20..25], &imem_rdata[20..25]);
     b.ram2p("registers_a", 5, 32, &[("raddr", read_rs1), ("waddr", rf_addr.clone()), ("we", vec![rf_we]), ("wdata", rf_wdata.clone()), ("rdata", rs1_data.clone())]);
     b.ram2p("registers_b", 5, 32, &[("raddr", read_rs2), ("waddr", rf_addr.clone()), ("we", vec![rf_we]), ("wdata", rf_wdata.clone()), ("rdata", rs2_data.clone())]);
 
-    b.group("Multiplicación y división");
+    b.group("Multiplication and division");
     b.inst("muldiv", &unit, &[("start", vec![start_md]), ("run", vec![md_run]), ("funct3", funct3), ("a", rs1_data), ("b", rs2_data), ("result", md_result), ("last", vec![md_last])]);
     gen.add(b.finish())
 }

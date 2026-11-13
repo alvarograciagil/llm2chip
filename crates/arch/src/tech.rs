@@ -75,7 +75,7 @@ pub fn nodes() -> &'static [TechNode] {
     NODES.get_or_init(|| {
         SOURCES
             .iter()
-            .map(|s| serde_json::from_str(s).expect("archivo de tecnología inválido"))
+            .map(|s| serde_json::from_str(s).expect("invalid technology file"))
             .collect()
     })
 }

@@ -28,7 +28,7 @@ impl Gen {
         if self.modules.contains_key(&name) {
             return name;
         }
-        let mut b = Builder::new(&name, "Puerto JTAG", "Controlador TAP estándar: identificación del chip, bypass, lectura de contadores y autotest de memorias.");
+        let mut b = Builder::new(&name, "Puerto JTAG", "Standard TAP controller: chip identification, bypass, reading counters and memory self-test.");
         let tck = b.input("tck", 1)[0];
         let tms = b.input("tms", 1)[0];
         let tdi = b.input("tdi", 1)[0];
@@ -69,7 +69,7 @@ impl Gen {
             let (capture_dr, shift_dr, update_dr) = (l.equals(&state, CAPTURE_DR), l.equals(&state, SHIFT_DR), l.equals(&state, UPDATE_DR));
             let (capture_ir, shift_ir, update_ir) = (l.equals(&state, CAPTURE_IR), l.equals(&state, SHIFT_IR), l.equals(&state, UPDATE_IR));
 
-            l.b.group("Instrucción");
+            l.b.group("Instruction");
             let shift_register = l.fresh_bus(4);
             let instruction = l.fresh_bus(4);
             let moved: Vec<Bit> = (0..4).map(|i| if i == 3 { tdi } else { shift_register[i + 1] }).collect();
@@ -82,7 +82,7 @@ impl Gen {
             let is = |l: &mut Logic, code: u32| l.equals(&instruction, code);
             let (idcode, select, value, self_test) = (is(&mut l, IR_IDCODE), is(&mut l, IR_DEBUG_SELECT), is(&mut l, IR_DEBUG_VALUE), is(&mut l, IR_SELF_TEST));
 
-            l.b.group("Registro de datos");
+            l.b.group("Data register");
             let wide = l.or(idcode, value);
             let short = l.or(select, self_test);
             let data = l.fresh_bus(32);
@@ -130,7 +130,7 @@ impl Gen {
             let cleared = l.and(new_enable[0], clear_override);
             on_edge(&mut l, rising, &[cleared], &[enable_q]);
 
-            l.b.group("Salida");
+            l.b.group("Output");
             let shifting = l.or(shift_dr, shift_ir);
             let source = l.mux(shift_ir, data[0], shift_register[0]);
             let held = l.fresh();

@@ -24,12 +24,12 @@
   --red: #d70015;
   --red-bg: rgba(255, 59, 48, 0.12);
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.18), 0 0 0 0.5px rgba(0, 0, 0, 0.12);
-  --cat-memoria: #007aff;
-  --cat-calculo: #ff9500;
-  --cat-interconexion: #00a3a3;
-  --cat-vectorial: #af52de;
-  --cat-estado: #ff2d55;
-  --cat-sistema: #aeaeb2;
+  --cat-memory: #007aff;
+  --cat-compute: #ff9500;
+  --cat-interconnect: #00a3a3;
+  --cat-vector: #af52de;
+  --cat-state: #ff2d55;
+  --cat-system: #aeaeb2;
   --heat-low: #d6e8ff;
   --heat-high: #004ea8;
 }
@@ -61,12 +61,12 @@
     --red: #ff6961;
     --red-bg: rgba(255, 69, 58, 0.16);
     --shadow: 0 8px 30px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.14);
-    --cat-memoria: #0a84ff;
-    --cat-calculo: #d08000;
-    --cat-interconexion: #1fa5a5;
-    --cat-vectorial: #bf5af2;
-    --cat-estado: #ff375f;
-    --cat-sistema: #636366;
+    --cat-memory: #0a84ff;
+    --cat-compute: #d08000;
+    --cat-interconnect: #1fa5a5;
+    --cat-vector: #bf5af2;
+    --cat-state: #ff375f;
+    --cat-system: #636366;
     --heat-low: #17304f;
     --heat-high: #8cc4ff;
   }
@@ -97,12 +97,12 @@
   --red: #ff6961;
   --red-bg: rgba(255, 69, 58, 0.16);
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.14);
-  --cat-memoria: #0a84ff;
-  --cat-calculo: #d08000;
-  --cat-interconexion: #1fa5a5;
-  --cat-vectorial: #bf5af2;
-  --cat-estado: #ff375f;
-  --cat-sistema: #636366;
+  --cat-memory: #0a84ff;
+  --cat-compute: #d08000;
+  --cat-interconnect: #1fa5a5;
+  --cat-vector: #bf5af2;
+  --cat-state: #ff375f;
+  --cat-system: #636366;
   --heat-low: #17304f;
   --heat-high: #8cc4ff;
 }
@@ -723,15 +723,15 @@ button.link-row {
   display: inline-block;
 }
 
-.risk-ninguno {
+.risk-lossless {
   color: var(--label-2);
 }
 
-.risk-medir {
+.risk-measure {
   color: var(--orange);
 }
 
-.risk-alto {
+.risk-high {
   color: var(--red);
 }
 
@@ -834,12 +834,12 @@ button.link-row {
   border-radius: 3px;
 }
 
-.cat-memoria { background: var(--cat-memoria); }
-.cat-calculo { background: var(--cat-calculo); }
-.cat-interconexion { background: var(--cat-interconexion); }
-.cat-vectorial { background: var(--cat-vectorial); }
-.cat-estado { background: var(--cat-estado); }
-.cat-sistema { background: var(--cat-sistema); }
+.cat-memory { background: var(--cat-memory); }
+.cat-compute { background: var(--cat-compute); }
+.cat-interconnect { background: var(--cat-interconnect); }
+.cat-vector { background: var(--cat-vector); }
+.cat-state { background: var(--cat-state); }
+.cat-system { background: var(--cat-system); }
 
 .zoom {
   display: inline-flex;
@@ -957,7 +957,7 @@ button.link-row {
   background: var(--red-bg);
 }
 
-.issue.aviso {
+.issue.warning {
   background: var(--orange-bg);
 }
 
@@ -976,7 +976,7 @@ button.link-row {
   background: var(--red);
 }
 
-.aviso .issue-icon {
+.warning .issue-icon {
   background: var(--orange);
 }
 
@@ -1205,7 +1205,7 @@ button.link-row {
 }
 
 .box-memory {
-  stroke: var(--cat-memoria);
+  stroke: var(--cat-memory);
   stroke-width: 1.2;
 }
 
@@ -1765,10 +1765,10 @@ button.link-row {
   margin: 0 0 2px;
 }
 
-.tl-matvec { background: var(--cat-memoria); }
-.tl-vector { background: var(--cat-vectorial); }
-.tl-embedding { background: var(--cat-calculo); }
-.tl-link { background: var(--cat-interconexion); }
+.tl-matvec { background: var(--cat-memory); }
+.tl-vector { background: var(--cat-vector); }
+.tl-embedding { background: var(--cat-compute); }
+.tl-link { background: var(--cat-interconnect); }
 
 .legend.flat {
   margin-top: 8px;
@@ -1844,12 +1844,12 @@ button.link-row {
 
 .plot-line {
   fill: none;
-  stroke: var(--cat-memoria);
+  stroke: var(--cat-memory);
   stroke-width: 2;
 }
 
 .plot-dot {
-  fill: var(--cat-memoria);
+  fill: var(--cat-memory);
   stroke: var(--group-solid);
   stroke-width: 2;
 }
@@ -2016,19 +2016,19 @@ button.logic-step:hover {
 }
 
 .weights {
-  --logic-color: var(--cat-memoria);
+  --logic-color: var(--cat-memory);
 }
 
 .vector {
-  --logic-color: var(--cat-vectorial);
+  --logic-color: var(--cat-vector);
 }
 
 .state {
-  --logic-color: var(--cat-estado);
+  --logic-color: var(--cat-state);
 }
 
 .logic-step.system {
-  --logic-color: var(--cat-sistema);
+  --logic-color: var(--cat-system);
 }
 
 .logic-arrow {
@@ -2094,15 +2094,15 @@ button.logic-step:hover {
 }
 
 .kind-0 {
-  --logic-color: var(--cat-memoria);
+  --logic-color: var(--cat-memory);
 }
 
 .kind-1 {
-  --logic-color: var(--cat-calculo);
+  --logic-color: var(--cat-compute);
 }
 
 .kind-2 {
-  --logic-color: var(--cat-interconexion);
+  --logic-color: var(--cat-interconnect);
 }
 
 .logic-legend {
@@ -3207,7 +3207,7 @@ label:hover > .hint-icon {
   color: var(--red);
 }
 
-.issue.aviso .issue-glyph {
+.issue.warning .issue-glyph {
   color: var(--orange);
 }
 

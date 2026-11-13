@@ -18,7 +18,7 @@
   "fixed_die_mm2": 2.0,
   "cpu_mm2": 3.0,
   "io_mm2": 1.0,
-  "label": "GF180 (abierto, fabricable, calibrado con OpenROAD)",
+  "label": "GF180 (open, manufacturable, calibrated with OpenROAD)",
   "id": "gf180",
   "and_um2": 22.5792,
   "or_um2": 22.5792,

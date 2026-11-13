@@ -383,7 +383,7 @@ pub fn switching_per_mac(config: CellConfig, zero_fraction: f64) -> f64 {
     set(&mut sim, "run", 1);
     let shift = 64 - config.activation_bits;
     let counts = sim.switching_activity(CYCLES, |sim, _| {
-        sim.set("x", next() >> shift).expect("puerto de activación");
+        sim.set("x", next() >> shift).expect("activation port");
     });
     let weights = [1.0, 1.0, 1.6, 0.6, 1.4, 2.2];
     let score = |counts: [u64; 6]| counts.iter().zip(weights).map(|(count, weight)| *count as f64 * weight).sum::<f64>() / CYCLES as f64;
@@ -391,7 +391,7 @@ pub fn switching_per_mac(config: CellConfig, zero_fraction: f64) -> f64 {
     // A unit shared by every cell is not paid for by each multiplication.
     let shared = crate::shared_unit_design(config).and_then(|unit| crate::Simulator::new(&unit).ok()).map_or(0.0, |mut unit| {
         score(unit.switching_activity(CYCLES, |sim, _| {
-            sim.set("x", next() >> shift).expect("puerto de activación");
+            sim.set("x", next() >> shift).expect("activation port");
         }))
     });
     (total - shared).max(0.0)

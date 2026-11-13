@@ -89,12 +89,12 @@ fn build(name: &str, family: &str, d: Dims) -> ModelGraph {
         tensors.push(tensor(p("attention_norm"), 1, d.hidden, Block::Norm, l, false));
         tensors.push(tensor(p("ffn_norm"), 1, d.hidden, Block::Norm, l, false));
 
-        stages.push(vector("norm de entrada", l, Block::Norm, 3 * d.hidden, 0));
+        stages.push(vector("input norm", l, Block::Norm, 3 * d.hidden, 0));
         stages.push(matvec("q/k/v", l, a, d.hidden * (query + 2 * kv)));
         stages.push(vector("RoPE", l, a, 4 * (query + kv), 0));
-        stages.push(vector("atención (Q·K, softmax, suma V)", l, a, 3 * d.hidden, 2 * d.hidden));
-        stages.push(matvec("salida", l, a, query * d.hidden));
-        stages.push(vector("residual y norm", l, Block::Norm, 4 * d.hidden, 0));
+        stages.push(vector("attention (Q·K, softmax, V sum)", l, a, 3 * d.hidden, 2 * d.hidden));
+        stages.push(matvec("output", l, a, query * d.hidden));
+        stages.push(vector("residual and norm", l, Block::Norm, 4 * d.hidden, 0));
         stages.push(matvec("gate/up", l, m, 2 * d.hidden * d.intermediate));
         stages.push(vector("SiLU(gate)·up", l, m, 2 * d.intermediate, 0));
         stages.push(matvec("down", l, m, d.intermediate * d.hidden));
@@ -105,8 +105,8 @@ fn build(name: &str, family: &str, d: Dims) -> ModelGraph {
     if !d.tied_embeddings {
         tensors.push(tensor("output".into(), d.vocab, d.hidden, Block::Head, None, true));
     }
-    stages.push(vector("norm final", None, Block::Norm, 3 * d.hidden, 0));
-    stages.push(matvec("salida de vocabulario", None, Block::Head, d.vocab * d.hidden));
+    stages.push(vector("final norm", None, Block::Norm, 3 * d.hidden, 0));
+    stages.push(matvec("vocabulary output", None, Block::Head, d.vocab * d.hidden));
 
     ModelGraph {
         name: name.into(),

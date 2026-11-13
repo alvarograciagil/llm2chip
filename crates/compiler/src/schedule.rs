@@ -37,7 +37,7 @@ fn die_of(plan: &Floorplan, layer: Option<u32>, block: Block) -> u32 {
 pub fn schedule(model: &ModelGraph, p: &ChipParams, plan: &Floorplan, effective_ghz: f64, cycle_factor: f64) -> Schedule {
     let n = p.macs_per_die.max(1) as f64;
     let lanes = p.vector_lanes_per_die.max(1) as f64;
-    let attention = if p.has("atencion_dispersa") { 0.25 } else { 1.0 };
+    let attention = if p.has("sparse_attention") { 0.25 } else { 1.0 };
     let tree = n.log2().ceil().max(1.0);
     let matvec_latency = (p.mac_stages + p.adder_stages) as f64 + 2.0 * tree * p.noc_stages.max(1) as f64;
     let group = if p.group_size > 0 { 1.0 + 1.0 / p.group_size as f64 } else { 1.0 };
@@ -53,7 +53,7 @@ pub fn schedule(model: &ModelGraph, p: &ChipParams, plan: &Floorplan, effective_
     for stage in model.stages.iter().filter(|s| s.block != Block::Mtp) {
         let die = die_of(plan, stage.layer, stage.block);
         if die != previous {
-            stages.push(ScheduledStage { name: "Enlace entre dies".into(), layer: stage.layer, die, kind: "link", start: clock, cycles: hop_cycles });
+            stages.push(ScheduledStage { name: "Die-to-die link".into(), layer: stage.layer, die, kind: "link", start: clock, cycles: hop_cycles });
             clock += hop_cycles;
             previous = die;
         }

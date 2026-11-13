@@ -131,10 +131,10 @@ fn partition(model: &ModelGraph, dies: u32) -> Vec<DieLayers> {
         die.segments.push((format!("Capa {layer}"), Some(layer), weights));
     }
 
-    let last = out.last_mut().expect("al menos un die");
+    let last = out.last_mut().expect("at least one die");
     last.head = true;
     last.weights += head;
-    last.segments.push(("Salida de vocabulario".into(), None, head));
+    last.segments.push(("Vocabulary output".into(), None, head));
     out
 }
 
@@ -289,9 +289,9 @@ pub(crate) fn build_floorplan(
     let external: Option<(&'static str, u32, f64)> = if hbm {
         Some(("HBM4", p.hbm_stacks, HBM_STACK_MM))
     } else if p.weight_backend == WeightBackend::ExternalDdr {
-        Some(("Memoria externa", 1, side * 0.5))
-    } else if p.has("checkpoint_estado") || p.has("embedding_externo") {
-        Some(("DRAM externa", 1, side * 0.35))
+        Some(("External memory", 1, side * 0.5))
+    } else if p.has("state_checkpoints") || p.has("external_embedding") {
+        Some(("External DRAM", 1, side * 0.35))
     } else {
         None
     };
@@ -349,7 +349,7 @@ mod tests {
             for b in &die.blocks[i + 1..] {
                 let overlap_w = (a.rect.x + a.rect.w).min(b.rect.x + b.rect.w) - a.rect.x.max(b.rect.x);
                 let overlap_h = (a.rect.y + a.rect.h).min(b.rect.y + b.rect.h) - a.rect.y.max(b.rect.y);
-                assert!(overlap_w < 1e-6 || overlap_h < 1e-6, "{} y {}", a.id, b.id);
+                assert!(overlap_w < 1e-6 || overlap_h < 1e-6, "{} and {}", a.id, b.id);
             }
         }
     }

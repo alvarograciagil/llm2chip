@@ -593,7 +593,7 @@ impl ControlWord {
 
     /// The word as one number, for the small dies whose words fit in 128 bits.
     pub fn encode(&self, c: &DieConfig) -> u128 {
-        assert!(word_bits(c) <= 128, "la palabra no cabe en 128 bits");
+        assert!(word_bits(c) <= 128, "the word does not fit in 128 bits");
         self.encode_words(c).iter().rev().fold(0, |word, piece| word << 32 | *piece as u128)
     }
 }
@@ -618,76 +618,76 @@ pub fn describe_word(f: &BTreeMap<&'static str, u128>) -> String {
     let get = |name: &str| f.get(name).copied().unwrap_or(0);
     let on = |name: &str| get(name) != 0;
     if on("halt") {
-        return "Fin de la rutina: el die avisa a la CPU de que ha terminado.".into();
+        return "End of the routine: the die tells the CPU it has finished.".into();
     }
     let place = |reg: &str, literal: &str| if on("use_literal") { format!("r{}[{}]", get(reg), get(literal)) } else { format!("r{}", get(reg)) };
     let (a, b, dst) = (place("reg_a", "literal_a"), place("reg_b", "literal_b"), place("reg_dst", "literal_dst"));
     let mut parts: Vec<String> = Vec::new();
     if on("cell_seek_weights") || on("cell_seek_factors") {
-        parts.push(format!("las celdas se colocan al principio de una matriz (pesos en la palabra {})", get("literal_a")));
+        parts.push(format!("the cells move to the start of a matrix (weights at word {})", get("literal_a")));
     }
     if on("cell_run") || on("cell_feed") {
-        parts.push(format!("las celdas reciben {a} por la red de activaciones, lo multiplican por su peso y lo acumulan"));
+        parts.push(format!("the cells receive {a} over the activation network, multiply it by their weight and accumulate it"));
     }
     if on("cell_clear") || on("cell_clear_group") {
-        parts.push("las celdas empiezan una suma nueva".into());
+        parts.push("the cells start a new sum".into());
     }
     if on("cell_flush") || on("wide_write") || on("wide_reduce") {
-        parts.push("las sumas pasan a la memoria ancha de cada unidad".into());
+        parts.push("the sums move to each unit's wide memory".into());
     }
     let written = on("write_en") || on("write_now");
     let what = match get("op") as u32 {
-        OP_ADD => Some(format!("suma {a} + {b}")),
-        OP_SUB => Some(format!("resta {a} − {b}")),
-        OP_MUL => Some(format!("multiplica {a} × {b}")),
+        OP_ADD => Some(format!("adds {a} + {b}")),
+        OP_SUB => Some(format!("subtracts {a} − {b}")),
+        OP_MUL => Some(format!("multiplies {a} × {b}")),
         OP_FUNCTION => {
             let name = match get("function") as u32 {
-                crate::block::FN_EXP => "exponencial",
-                crate::block::FN_SIGMOID => "sigmoide",
-                crate::block::FN_RECIPROCAL => "inverso",
-                crate::block::FN_INV_SQRT => "raíz inversa",
+                crate::block::FN_EXP => "exponential",
+                crate::block::FN_SIGMOID => "sigmoid",
+                crate::block::FN_RECIPROCAL => "reciprocal",
+                crate::block::FN_INV_SQRT => "inverse square root",
                 crate::block::FN_SOFTPLUS => "softplus",
                 crate::block::FN_GELU | crate::block::FN_GELU_TANH => "GELU",
-                crate::block::FN_TANH => "tangente hiperbólica",
-                _ => "función",
+                crate::block::FN_TANH => "hyperbolic tangent",
+                _ => "function",
             };
-            Some(format!("aplica la tabla de {name} a {a}"))
+            Some(format!("applies the {name} table to {a}"))
         }
-        OP_CELLS => Some("recoge el resultado de las celdas".to_string()),
-        OP_MAX => Some(format!("busca el máximo de {a}")),
-        OP_LZC | OP_WIDE_LZC => Some(format!("cuenta los ceros a la izquierda de {a} para normalizarlo")),
-        OP_MOV => Some(format!("copia {a}")),
-        OP_SHIFT_LEFT => Some(format!("desplaza {a} a la izquierda")),
-        OP_ACCUMULATOR => Some("lee el acumulador de la unidad".to_string()),
-        OP_IMMEDIATE => Some("toma un número fijo de la propia instrucción".to_string()),
-        OP_PARITY => Some(format!("calcula la paridad de {a}")),
-        OP_LINK => Some("recibe una palabra del chip anterior".to_string()),
-        OP_WIDE_OUT => Some("lee la memoria ancha y la redondea".to_string()),
-        OP_EQUAL => Some(format!("compara {a} con {b}")),
+        OP_CELLS => Some("collects the cells' result".to_string()),
+        OP_MAX => Some(format!("finds the maximum of {a}")),
+        OP_LZC | OP_WIDE_LZC => Some(format!("counts the leading zeros of {a} to normalize it")),
+        OP_MOV => Some(format!("copies {a}")),
+        OP_SHIFT_LEFT => Some(format!("shifts {a} left")),
+        OP_ACCUMULATOR => Some("reads the unit's accumulator".to_string()),
+        OP_IMMEDIATE => Some("takes a constant from the instruction itself".to_string()),
+        OP_PARITY => Some(format!("computes the parity of {a}")),
+        OP_LINK => Some("receives a word from the previous chip".to_string()),
+        OP_WIDE_OUT => Some("reads the wide memory and rounds it".to_string()),
+        OP_EQUAL => Some(format!("compares {a} with {b}")),
         _ => None,
     };
     if let Some(what) = what {
-        let lanes = if on("vector") { " en todos los carriles a la vez" } else { "" };
-        parts.push(if written { format!("{what}{lanes} y lo guarda en {dst}") } else { format!("{what}{lanes}") });
+        let lanes = if on("vector") { " on every lane at once" } else { "" };
+        parts.push(if written { format!("{what}{lanes} and stores it in {dst}") } else { format!("{what}{lanes}") });
     }
     if on("accumulate") {
-        parts.push("lo suma al acumulador".into());
+        parts.push("adds it to the accumulator".into());
     }
     if on("link_send") {
-        parts.push(if on("link_loop") { "lo envía de vuelta al primer chip del grupo".into() } else { "lo envía al chip siguiente".into() });
+        parts.push(if on("link_loop") { "sends it back to the group's first chip".into() } else { "sends it to the next chip".into() });
     }
     if on("link_take_loop") {
-        parts.push("lo toma del enlace de vuelta del último chip del grupo".into());
+        parts.push("takes it from the return link of the group's last chip".into());
     }
     if get("repeat") > 0 {
         let times = get("repeat");
-        parts.push(format!("repite el paso {times} {} más, avanzando por los elementos", if times == 1 { "vez" } else { "veces" }));
+        parts.push(format!("repeats the step {times} more {}, moving through the elements", if times == 1 { "time" } else { "times" }));
     }
     if on("branch") {
-        parts.push(format!("si el contador x{} no ha llegado a su límite, vuelve a la palabra {}", get("x_src"), get("target")));
+        parts.push(format!("if counter x{} has not reached its limit, goes back to word {}", get("x_src"), get("target")));
     }
     if parts.is_empty() {
-        return "Espera: deja pasar un ciclo mientras termina un resultado anterior.".into();
+        return "Wait: lets a cycle go by while an earlier result finishes.".into();
     }
     let mut text = parts.join("; ");
     if let Some(first) = text.get(..1) {
@@ -885,7 +885,7 @@ impl Gen {
         if self.modules.contains_key(&name) {
             return name;
         }
-        let mut b = Builder::new(&name, "Tabla de registros", "Cada entrada, en biestables, dice dónde empieza un registro en la memoria vectorial y el paso entre los registros que recorre un bucle. Se lee por cada clave en el mismo ciclo.");
+        let mut b = Builder::new(&name, "Register table", "Each entry, in flip-flops, says where a register starts in the vector memory and the step between the registers a loop goes through. It is read for each key in the same cycle.");
         let we = b.input("we", 1)[0];
         let waddr = b.input("waddr", addr_bits);
         let wdata = b.input("wdata", width);
@@ -931,7 +931,7 @@ impl Gen {
         let reg_wide = self.register(wide);
         let mux_wide = self.mux_bus(wide);
 
-        let mut b = Builder::new("scaled_cell", "Celda con escala y sesgo", "Multiplica sus pesos por la activación y, al final de cada grupo, aplica la escala y el sesgo que comparte ese grupo.");
+        let mut b = Builder::new("scaled_cell", "Cell with scale and bias", "Multiplies its weights by the activation and, at the end of each group, applies the scale and bias the group shares.");
         let clear = b.input("clear", 1)[0];
         let clear_group = b.input("clear_group", 1)[0];
         let flush = b.input("flush", 1)[0];
@@ -945,7 +945,7 @@ impl Gen {
         let x = b.input("x", a);
         let total = b.output("total", wide);
 
-        b.group("Celda de cálculo");
+        b.group("Compute cell");
         let group_sum = b.wire("group_sum", acc);
         // A flush takes the group's sum and starts the next group with whatever product
         // arrives in that cycle, so groups can follow each other with no gap.
@@ -959,7 +959,7 @@ impl Gen {
         }
         b.inst("compute", &compute, &compute_pins);
 
-        b.group("Suma de activaciones");
+        b.group("Activation sum");
         // The activations are delayed to arrive with their products, so a flush splits
         // both sums at the same place.
         let reg_x = self.register(a);
@@ -972,7 +972,7 @@ impl Gen {
             b.dff_to(run_late, r);
             run_late = r;
         }
-        let sign = *x_late.last().expect("activación vacía");
+        let sign = *x_late.last().expect("empty activation");
         let x_wide: Vec<Bit> = (0..acc as usize).map(|i| x_late.get(i).copied().unwrap_or(sign)).collect();
         let x_sum = b.wire("x_sum", acc);
         let x_gated = b.wire("x_gated", acc);
@@ -997,7 +997,7 @@ impl Gen {
         }
         b.inst("x_sum_reg", &reg_acc, &[("d", x_d), ("q", x_sum.clone())]);
 
-        b.group("Escala y sesgo");
+        b.group("Scale and bias");
         let factor_load = load.map(|(load_en, load_scale, load_addr, load_data)| {
             let write_scale = b.wire("write_factors", 1)[0];
             b.and_to(load_en, load_scale, write_scale);
@@ -1012,7 +1012,7 @@ impl Gen {
         let (acc, s, wide) = (cfg.accumulator_bits, c.scale_bits, c.wide_bits());
 
         // Scale and bias alternate in memory; a flush takes the scale first.
-        b.group("Escala y sesgo");
+        b.group("Scale and bias");
         let group = b.wire("group_index", cfg.addr_bits);
         let module_counter = self.seek_counter(cfg.addr_bits);
         b.inst("group_index_counter", &module_counter, &[("clear", vec![p.clear]), ("advance", vec![p.advance]), ("seek", vec![p.seek_factors]), ("target", p.seek_addr.clone()), ("address", group.clone())]);
@@ -1067,9 +1067,9 @@ impl Gen {
             }
         };
 
-        b.group("Total de la fila");
+        b.group("Row total");
         let extend = |v: &[Bit]| -> Vec<Bit> {
-            let sign = *v.last().expect("vector vacío");
+            let sign = *v.last().expect("empty vector");
             (0..wide as usize).map(|i| v.get(i).copied().unwrap_or(sign)).collect()
         };
         // The total and both terms meet in a carry-save step with one fast adder.
@@ -1095,7 +1095,7 @@ impl Gen {
         let mut l = Logic { b, next: 0 };
         l.b.set_prefix(&format!("{name}_"));
         let (padded, width) = ((steps * chunk) as usize, value.len());
-        let top = *factor.last().expect("factor vacío");
+        let top = *factor.last().expect("empty factor");
         let wide_factor: Vec<Bit> = (0..padded).map(|i| factor.get(i).copied().unwrap_or(top)).collect();
         // The factor shifts up a chunk a cycle; the value holds still.
         let held_factor = l.fresh_bus(padded);
@@ -1107,7 +1107,7 @@ impl Gen {
         l.connect_flops(&kept, &held_value);
         // The highest chunk carries the sign; the others are positive.
         let piece: Vec<Bit> = held_factor[padded - chunk as usize..].to_vec();
-        let sign = l.and(first, *piece.last().expect("trozo vacío"));
+        let sign = l.and(first, *piece.last().expect("empty piece"));
         let signed_piece: Vec<Bit> = piece.iter().copied().chain(std::iter::once(sign)).collect();
         let product = l.fresh_bus(chunk as usize + 1 + width);
         l.b.inst("chunk_times_value", chunk_mul, &[("weight", signed_piece), ("x", held_value.clone()), ("product", product.clone())]);
@@ -1116,7 +1116,7 @@ impl Gen {
         let up: Vec<Bit> = (0..total_width).map(|i| if i < chunk as usize { Bit::Zero } else { sum[i - chunk as usize] }).collect();
         let restart = l.not(first);
         let before: Vec<Bit> = up.iter().map(|bit| l.and(*bit, restart)).collect();
-        let product_sign = *product.last().expect("producto vacío");
+        let product_sign = *product.last().expect("empty product");
         let extended: Vec<Bit> = (0..total_width).map(|i| product.get(i).copied().unwrap_or(product_sign)).collect();
         let next = l.adder(&before, &extended, Bit::Zero).0;
         l.connect_flops(&next, &sum);
@@ -1140,7 +1140,7 @@ impl Gen {
         for (from, to) in base.iter().zip(&start) {
             b.and_to(keep, *from, *to);
         }
-        let sign = *product.last().expect("producto vacío");
+        let sign = *product.last().expect("empty product");
         let extended: Vec<Bit> = std::iter::repeat_n(Bit::Zero, fraction).chain((0..bits as usize - fraction).map(|i| product.get(i).copied().unwrap_or(sign))).collect();
         let sum = b.wire(&format!("{name}_d"), bits);
         let carry = b.wire(&format!("{name}_carry"), 1);
@@ -1172,7 +1172,7 @@ impl Gen {
         let mult = self.tree_multiplier(crate::multiplier::MultiplierKind::Wallace, a, a, 1);
         let add = self.ripple_adder(a);
 
-        let mut b = Builder::new("llm2chip_die", "Die", "Secuenciador, banco de vectores, unidad vectorial, tabla de funciones, red de activaciones y celdas.");
+        let mut b = Builder::new("llm2chip_die", "Die", "Sequencer, vector bank, vector unit, function table, activation network and cells.");
         let start = b.input("start", 1)[0];
         let entry = b.input("entry", c.microcode_bits);
         let param_write = b.input("param_write", 1)[0];
@@ -1449,7 +1449,7 @@ impl Gen {
             let load_base = b.input("load_base", 1)[0];
             let base_addr = b.input("base_addr", c.reg_bits);
             let base_data = b.input("base_data", mem_bits + BASE_SHIFT_BITS);
-            b.group("Tabla de registros");
+            b.group("Register table");
             let table = self.register_table(c.reg_bits, entry_bits as u32, 3);
             let mut l = Logic { b: &mut b, next: 70_000 };
             let vec_reg = vec_addr[c.index_bits as usize..].to_vec();
@@ -1510,7 +1510,7 @@ impl Gen {
             let wide_from_chain = ctl("wide_from_chain", &mut b, &fields);
             let write_reset = ctl("write_reset", &mut b, &fields);
             // Loops and everything that depends on the token or the position live here.
-            b.group("Registros de índice");
+            b.group("Index registers");
             let x_write = ctl("x_write", &mut b, &fields);
             let branch = ctl("branch", &mut b, &fields);
             let x_adder = self.ripple_adder(c.index_bits);
@@ -1593,7 +1593,7 @@ impl Gen {
             }
 
             // --- Vector registers ---
-            b.group("Banco de vectores");
+            b.group("Vector bank");
             let read_index = index_counter(self, &mut b, ("read_index", 46_000), c.index_bits, (read_reset, read_step), fields["vector"][0], lane_shift);
             if cluster == 0 {
                 // The data arriving now was read with the index of the cycle before.
@@ -1820,7 +1820,7 @@ impl Gen {
             }
 
             // --- Vector unit ---
-            b.group("Desplazamientos dinámicos");
+            b.group("Dynamic shifts");
             let load_shift_a = ctl("load_shift_a", &mut b, &fields);
             let load_shift_b = ctl("load_shift_b", &mut b, &fields);
             let load_shift_left = ctl("load_shift_left", &mut b, &fields);
@@ -1894,7 +1894,7 @@ impl Gen {
             let maximum = b.wire("maximum", a);
             b.inst("max_select", &mux_a, &[("s", vec![a_is_less]), ("a", max_a), ("b", aligned_b), ("y", maximum.clone())]);
 
-            b.group("Detector de magnitud");
+            b.group("Magnitude detector");
             let scan = ctl("magnitude_scan", &mut b, &fields);
             let magnitude_clear = ctl("magnitude_clear", &mut b, &fields);
             let magnitude = b.wire("magnitude", a);
@@ -1934,7 +1934,7 @@ impl Gen {
             let leading = leading_zeros(&mut b, "lzc", &seen_magnitude, a);
 
             let (best, best_used) = if c.features.widths[MAX_SCAN_FIELD] > 0 {
-                b.group("Mayor valor");
+                b.group("Largest value");
                 let best = b.wire("best", a);
                 let (scan_best, clear_best) = (ctl("max_scan", &mut b, &fields), ctl("max_clear", &mut b, &fields));
                 let mut l = Logic { b: &mut b, next: 55_000 };
@@ -1970,7 +1970,7 @@ impl Gen {
                         scanning = late;
                     }
                 }
-                let largest = level.pop().expect("al menos un carril");
+                let largest = level.pop().expect("at least one lane");
                 let updated = larger(&mut l, &best, &largest);
                 let kept = l.mux_bus(scanning, &best, &updated);
                 let lowest: Vec<Bit> = (0..a as usize).map(|i| if i == top { Bit::One } else { Bit::Zero }).collect();
@@ -2023,7 +2023,7 @@ impl Gen {
             let acc_shifted = barrel_right(&mut b, &acc_mux, "acc_shift", &accumulator, &fields["shift"]);
 
             // Each output's full-precision sum waits here until the largest one is known.
-            b.group("Memoria ancha");
+            b.group("Wide memory");
             let wide_scan = ctl("wide_scan", &mut b, &fields);
             let wide_clear = ctl("wide_clear", &mut b, &fields);
             let load_wide_shift = ctl("load_wide_shift", &mut b, &fields);
@@ -2139,7 +2139,7 @@ impl Gen {
             let wide_shift = held_shift(&mut b, "wide_shift", load_wide_shift, &from_a);
             let wide_shifted = self.rounded_right(&mut b, "wide_right", &wide_read, &wide_shift, a as usize);
 
-            b.group("Desplazamiento a la izquierda");
+            b.group("Left shift");
             let left_bits = 2 * a;
             let left_mux = self.mux_bus(left_bits);
             let raw_sign = read_a[top];
@@ -2147,17 +2147,17 @@ impl Gen {
             let moved_left = barrel_left(&mut b, &left_mux, "shift_left_barrel", &widened, &shift_left);
             let saturated = saturate(&mut b, &moved_left, a);
 
-            b.group("Tabla de funciones");
+            b.group("Function table");
             let table_out = b.wire("table_out", a);
             let mut table_index: Vec<Bit> = read_a[(a - c.function_bits) as usize..].to_vec();
             table_index.extend_from_slice(&fields["function"][..(function_address_bits(c) - c.function_bits) as usize]);
             b.ram2p("function_table", function_address_bits(c), a, &[("raddr", table_index), ("waddr", fn_addr.clone()), ("we", vec![load_fn]), ("wdata", cell_data[..a as usize].to_vec()), ("rdata", table_out.clone())]);
 
             // --- Result selection ---
-            b.group("Selección de resultado");
+            b.group("Result selection");
             // An immediate's value rides in the jump target, which no step that computes needs,
             // so the next step's read can share its cycle.
-            let immediate_sign = *fields["target"].last().expect("destino vacío");
+            let immediate_sign = *fields["target"].last().expect("empty target");
             let immediate: Vec<Bit> = (0..a as usize).map(|i| fields["target"].get(i).copied().unwrap_or(immediate_sign)).collect();
             let mut parity = vec![Bit::Zero; a as usize];
             parity[0] = read_a[0];
@@ -2288,7 +2288,7 @@ impl Gen {
             unit_ports.push((read_a, index_a));
         }
         b.set_prefix("");
-        let write_data = first_unit.expect("al menos una unidad");
+        let write_data = first_unit.expect("at least one unit");
         {
             // Each level adds a unit's value to its neighbour's, so after `g` levels every
             // unit in a group of `1 << g` holds the group's total.
@@ -2359,7 +2359,7 @@ impl Gen {
             let draining = fields["wide_from_chain"][0];
             for lane in 0..lanes {
                 let mut values: Vec<Vec<Bit>> = unit_wide.iter().zip(&unit_chains).map(|(unit, chains)| {
-                    let sign = *chains[lane].last().expect("cadena vacía");
+                    let sign = *chains[lane].last().expect("empty chain");
                     let chain: Vec<Bit> = (0..wide_bits as usize).map(|i| chains[lane].get(i).copied().unwrap_or(sign)).collect();
                     l.mux_bus(draining, &unit[lane], &chain)
                 }).collect();
@@ -2379,7 +2379,7 @@ impl Gen {
         let op = fields["op"].clone();
 
         // The sequencer waits when it needs a word that has not arrived or cannot send one.
-        b.group("Enlace entre dies");
+        b.group("Die-to-die link");
         let link_send = ctl("link_send", &mut b, &fields);
         // Which port the word sends on and which it takes from: the word's own bits, not
         // gated by the sequencer's running, as the ports' readiness decides whether it runs.
@@ -2515,7 +2515,7 @@ impl Gen {
         // --- Activation network and cells, one array per vector unit ---
         let per_unit = (c.cells as usize / clusters).max(1);
         for (unit, (read_a, index_a)) in unit_ports.into_iter().enumerate() {
-            b.group("Red de activaciones");
+            b.group("Activation network");
             let mut x_bus = read_a;
             for stage in 0..c.broadcast_stages {
                 let q = b.wire(&format!("x_bus{unit}_{stage}"), a);
@@ -2548,7 +2548,7 @@ impl Gen {
             for row in (0..per_unit).rev() {
                 let i = unit * per_unit + row;
                 let lane = row % lanes;
-                b.group("Celdas");
+                b.group("Cells");
                 let total = b.wire(&format!("cell{i}_total"), wide);
                 let mut cell_pins = vec![("clear", vec![cell_clear]), ("clear_group", vec![cell_clear_group]), ("flush", vec![cell_flush]), ("advance", vec![advance]), ("run", vec![cell_run]), ("x", x_bus.clone()), ("total", total.clone()), ("seek_weights", vec![cell_seek_weights]), ("seek_factors", vec![cell_seek_factors]), ("seek_addr", cell_seek_addr.clone())];
                 cell_pins.extend(factor_pins.iter().cloned());
@@ -2560,7 +2560,7 @@ impl Gen {
                 }
                 b.inst(&format!("cell{i}"), &cell, &cell_pins);
 
-                b.group("Cadena de resultados");
+                b.group("Result chain");
                 let chosen = b.wire(&format!("chain{i}_load"), wide);
                 b.inst(&format!("chain{i}_select"), &mux_wide, &[("s", vec![chain_load]), ("a", chain_in[lane].clone()), ("b", total), ("y", chosen.clone())]);
                 let q = b.wire(&format!("chain{i}"), wide);
@@ -2607,7 +2607,7 @@ struct SumParts {
 /// Arithmetic right shift by the 6-bit `amount`, from selectors.
 fn barrel_right(b: &mut Builder, mux: &str, name: &str, value: &[Bit], amount: &[Bit]) -> Vec<Bit> {
     let width = value.len();
-    let sign = *value.last().expect("vector vacío");
+    let sign = *value.last().expect("empty vector");
     let mut current = value.to_vec();
     for (level, select) in amount.iter().enumerate() {
         let shift = 1usize << level;
@@ -2722,7 +2722,7 @@ impl Gen {
         let bits = crate::link::wire_bits(c.cell.activation_bits);
         let reg = self.register(bits);
         let template = self.modules[&die].clone();
-        let mut b = Builder::new("llm2chip_package", "Paquete", "Varios dies conectados en anillo: cada uno pasa su vector de activación al siguiente.");
+        let mut b = Builder::new("llm2chip_package", "Package", "Several dies connected in a ring: each passes its activation vector to the next.");
 
         let mut wires: Vec<std::collections::HashMap<String, Vec<Bit>>> = Vec::new();
         for d in 0..dies {
@@ -3014,12 +3014,12 @@ impl DieProgram {
             self.parameters.len() - 1
         });
         let register = found as u32 + 1;
-        assert!(!self.in_use.contains(&register), "faltan registros de índice");
+        assert!(!self.in_use.contains(&register), "index registers are missing");
         register
     }
 
     fn allocate(&mut self) -> u32 {
-        let register = ((self.parameters.len() as u32 + 1)..1 << x_bits(&self.config)).rev().find(|r| !self.in_use.contains(r)).expect("faltan registros de índice");
+        let register = ((self.parameters.len() as u32 + 1)..1 << x_bits(&self.config)).rev().find(|r| !self.in_use.contains(r)).expect("index registers are missing");
         self.in_use.insert(register);
         register
     }
@@ -3046,13 +3046,13 @@ impl DieProgram {
         } else if only_parameters(&variable) {
             self.parameter(variable)
         } else {
-            *self.scoped.get(&variable).expect("índice sin registro asignado")
+            *self.scoped.get(&variable).expect("index without an assigned register")
         };
         (index.constant(), register)
     }
 
     fn compile_loop(&mut self, variable: Var, count: Expr, body: &[Step]) {
-        assert!(only_parameters(&count), "el número de vueltas solo puede depender de los parámetros");
+        assert!(only_parameters(&count), "the number of iterations can only depend on the parameters");
         // A loop may take over a pending drain only if every turn leaves the same one behind.
         let lanes = 1u32 << self.config.features.lane_bits;
         let carries = matches!((body.first(), body.last()), (Some(Step::CellPass), Some(Step::CellDrain { rows })) if rows.div_ceil(lanes) == self.drain_pending);
@@ -3102,7 +3102,7 @@ impl DieProgram {
         self.active.pop();
         // A group fed at the end of the last turn is still settling after the jump back.
         let fed_inside = self.cells_settle > self.end();
-        assert_eq!(self.drain_pending, pending, "cada vuelta deja el mismo vaciado pendiente");
+        assert_eq!(self.drain_pending, pending, "each iteration leaves the same drain pending");
 
         for (_, register, stride) in &stepped {
             self.set_index(*register, *register, *stride);
@@ -3283,7 +3283,7 @@ impl DieProgram {
     /// wide memory: one row a cycle, the sum carried in the adders' register.
     fn combine_rows(&mut self, step: &Step) {
         let Step::CombineRows { weights, matrix, start, rows, window, window_a, window_b } = *step else {
-            unreachable!("solo se llama con una combinación de filas");
+            unreachable!("only called with a combination of rows");
         };
         let mut temporaries = Vec::new();
         let offset_a = self.moving_offset(weights.1, &mut temporaries);
@@ -3313,7 +3313,7 @@ impl DieProgram {
     /// Adds a whole row, times one weight, to the sums in the wide memory.
     fn combine(&mut self, step: &Step) {
         let Step::Combine { weights, matrix, start, width, fresh, window, window_a, window_b, moving } = *step else {
-            unreachable!("solo se llama con una combinación");
+            unreachable!("only called with a combination");
         };
         let mut temporaries = Vec::new();
         let (literal_a, offset_a) = if moving { (0, self.moving_offset(weights.1, &mut temporaries)) } else { self.resolve(weights.1) };

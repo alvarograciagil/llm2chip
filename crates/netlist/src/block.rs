@@ -169,10 +169,10 @@ impl Expr {
 
     /// This index divided by `by`, which must divide every part of it.
     pub fn divided_by(&self, by: u32) -> Self {
-        assert!(self.constant.is_multiple_of(by), "{} no es múltiplo de {by}", self.constant);
+        assert!(self.constant.is_multiple_of(by), "{} is not a multiple of {by}", self.constant);
         let mut terms = self.terms;
         for (_, coefficient) in terms.iter_mut().flatten() {
-            assert!(coefficient.is_multiple_of(by), "{coefficient} no es múltiplo de {by}");
+            assert!(coefficient.is_multiple_of(by), "{coefficient} is not a multiple of {by}");
             *coefficient /= by;
         }
         Self { constant: self.constant / by, terms }
@@ -228,7 +228,7 @@ impl std::ops::Add for Expr {
         }
         merged.retain(|(_, c)| *c != 0);
         merged.sort();
-        assert!(merged.len() <= EXPR_TERMS, "índice demasiado complejo para el secuenciador");
+        assert!(merged.len() <= EXPR_TERMS, "index too complex for the sequencer");
         let mut terms = [None; EXPR_TERMS];
         for (slot, term) in terms.iter_mut().zip(merged) {
             *slot = Some(term);
@@ -330,17 +330,17 @@ pub trait BlockOps: Sized {
     /// `offset`. Only a die with cells shares products among chips.
     fn matvec_rows(&mut self, name: &str, matrix: u32, src: u32, dst: u32, rows: u32, offset: u32) {
         let _ = (matrix, src, dst, rows, offset);
-        unimplemented!("{name}: solo un die con celdas reparte los productos entre chips")
+        unimplemented!("{name}: only a die with cells splits the products among chips")
     }
     /// Like `matvec_rows` for products run in one pass: `(matrix, dst, rows, offset)`.
     fn matvecs_rows(&mut self, first: &str, parts: &[(u32, u32, u32, u32)], src: u32) {
         let _ = (parts, src);
-        unimplemented!("{first}: solo un die con celdas reparte los productos entre chips")
+        unimplemented!("{first}: only a die with cells splits the products among chips")
     }
     /// Gives every chip of the ring the blocks of `reg` the others made.
     fn all_gather(&mut self, reg: u32, block: u32, index: u32) {
         let _ = (reg, block, index);
-        unimplemented!("solo un die con celdas reparte los productos entre chips")
+        unimplemented!("only a die with cells splits the products among chips")
     }
     /// True only when an implementation can prove `reg[index]` is zero and may skip work.
     fn known_zero(&self, _reg: u32, _index: Self::N) -> bool {
@@ -1215,7 +1215,7 @@ impl Assembly {
         };
         let (variable, count, step) = (*variable, *count, *step);
         if can_stream(variable, &step, unit, self.rows_stream) {
-            *self.steps.last_mut().expect("bucle") = Step::Stream { variable, count, in_elements: false, body: step };
+            *self.steps.last_mut().expect("loop") = Step::Stream { variable, count, in_elements: false, body: step };
         }
     }
 
@@ -1428,7 +1428,7 @@ impl Assembly {
     /// The rows of a product this chip holds, `rows` of them written into `dst` from
     /// `offset`, narrowed with the same shifts as the whole product on one chip.
     fn ring_matvec_rows(&mut self, name: &str, matrix: u32, src: u32, dst: u32, rows: u32, offset: u32) {
-        let place = *self.in_cells.get(name).unwrap_or_else(|| panic!("{name} se reparte por filas y debe estar en las celdas"));
+        let place = *self.in_cells.get(name).unwrap_or_else(|| panic!("{name} is split by rows and must be in the cells"));
         self.cell_matvec(place, 0.into(), src, rows);
         self.across_chips = true;
         self.narrow_part_at(matrix, src, dst, 0.into(), offset.into(), rows.into());
@@ -1438,7 +1438,7 @@ impl Assembly {
     /// Several products of one vector that run in a single pass of the cells, each part
     /// with the rows this chip holds: `(matrix, dst, rows, offset in dst)`.
     fn ring_matvecs_rows(&mut self, first: &str, parts: &[(u32, u32, u32, u32)], src: u32) {
-        let place = *self.in_cells.get(first).unwrap_or_else(|| panic!("{first} se reparte por filas y debe estar en las celdas"));
+        let place = *self.in_cells.get(first).unwrap_or_else(|| panic!("{first} is split by rows and must be in the cells"));
         let rows: Vec<u32> = parts.iter().map(|p| p.2).collect();
         let (starts, total) = chained_rows(&rows, 1 << self.lane_bits);
         self.cell_matvec(place, 0.into(), src, total);
@@ -1466,7 +1466,7 @@ impl Assembly {
     fn exchange(&mut self, reg: u32, sent: u32, received: u32, len: u32) {
         self.clear_shifts();
         let unit = if self.wide_link { 1 << self.lane_bits } else { 1 };
-        assert!(len.is_multiple_of(unit), "los bloques que se reparten los chips ocupan bloques enteros del enlace");
+        assert!(len.is_multiple_of(unit), "the blocks the chips share take whole blocks of the link");
         let words = len / unit;
         let chunk = EXCHANGE_CHUNK.min(words);
         let pass = |s: &mut Self, first: Expr, count: u32| {
@@ -1570,7 +1570,7 @@ fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32)
                 *window_b = windowed.contains(matrix);
             }
             Step::Clustered { body, .. } => mark_window(body, step, windowed, exponents),
-            Step::CellGroup { src, .. } => assert!(!windowed.contains(src), "las celdas leen de registros fijos"),
+            Step::CellGroup { src, .. } => assert!(!windowed.contains(src), "the cells read from fixed registers"),
             Step::CellSeek { .. } | Step::CellPass | Step::CellDrain { .. } | Step::WideReduce { .. } => {}
         }
     }
@@ -1613,12 +1613,12 @@ impl BlockOps for Assembly {
     type N = Expr;
 
     fn window_length(&self, position: Expr, window: u32) -> Expr {
-        assert_eq!(position, Expr::var(Var::Position), "la ventana se mide desde la posición");
+        assert_eq!(position, Expr::var(Var::Position), "the window is measured from the position");
         Expr::var(Var::WindowLength(window))
     }
 
     fn window_slot(&self, position: Expr, window: u32) -> Expr {
-        assert_eq!(position, Expr::var(Var::Position), "la ventana se mide desde la posición");
+        assert_eq!(position, Expr::var(Var::Position), "the window is measured from the position");
         Expr::var(Var::WindowSlot(window))
     }
 
@@ -2171,7 +2171,7 @@ impl BlockOps for Assembly {
         if start == Expr::from(0) && len == width {
             return self.depthwise(taps, history, dst, width, kernel);
         }
-        assert!(self.combines, "solo un die que suma filas reparte la convolución");
+        assert!(self.combines, "only a die that sums rows splits the convolution");
         let zero = self.sc(10);
         self.immediate(0, zero);
         self.steps.push(Step::Combine { weights: zero, matrix: history, start, width: len.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
@@ -2528,7 +2528,7 @@ impl Behavior {
                         self.walk(&[Step::One(*body)], token, position, loops);
                     }
                 }
-                Step::Clustered { .. } | Step::Combine { .. } | Step::CombineRows { .. } | Step::CellSeek { .. } | Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } | Step::WideReduce { .. } => panic!("este modelo no guarda los pesos de las celdas"),
+                Step::Clustered { .. } | Step::Combine { .. } | Step::CombineRows { .. } | Step::CellSeek { .. } | Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } | Step::WideReduce { .. } => panic!("this model does not keep the cells' weights"),
             }
         }
     }
@@ -2592,7 +2592,7 @@ impl Behavior {
                 let index = ((a as u64 & ((1 << bits) - 1)) >> (bits - self.function_bits)) as usize;
                 self.table[index | (s.function as usize) << self.function_bits]
             }
-            other => panic!("operación sin modelo: {other}"),
+            other => panic!("operation without a model: {other}"),
         };
 
         if s.magnitude_scan {

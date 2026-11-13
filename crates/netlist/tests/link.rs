@@ -63,7 +63,7 @@ fn the_receiver_asks_the_sender_to_wait_before_it_overflows() {
         receive(&mut link, numbered(accepted, accepted % 16));
         accepted += 1;
         link.settle();
-        assert!(accepted < 16, "la cola debe avisar antes de llenarse");
+        assert!(accepted < 16, "the queue must warn before it fills up");
     }
     settle_queue(&mut link);
     for value in 0..accepted {
@@ -164,7 +164,7 @@ fn deliver(words: u64, double_every: u64, a_every: u64, b_every: u64) -> (Vec<u6
 #[test]
 fn damaged_words_are_sent_again_and_arrive_in_order() {
     let (received, doubles) = deliver(300, 12, 1, 1);
-    assert!(doubles > 5, "la prueba debe dañar palabras: {doubles}");
+    assert!(doubles > 5, "the test must damage words: {doubles}");
     assert_eq!(received, (0..300).map(|i| 0x4000 + i).collect::<Vec<_>>());
 }
 
@@ -172,6 +172,6 @@ fn damaged_words_are_sent_again_and_arrive_in_order() {
 fn words_cross_between_two_unrelated_clocks() {
     for (a_every, b_every) in [(2, 3), (3, 2), (1, 5), (5, 1)] {
         let (received, _) = deliver(120, u64::MAX, a_every, b_every);
-        assert_eq!(received, (0..120).map(|i| 0x4000 + i).collect::<Vec<_>>(), "relojes {a_every} y {b_every}");
+        assert_eq!(received, (0..120).map(|i| 0x4000 + i).collect::<Vec<_>>(), "clocks {a_every} and {b_every}");
     }
 }

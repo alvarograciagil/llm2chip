@@ -75,7 +75,7 @@ fn run_die(c: DieConfig) -> Simulator {
     while sim.get("halted").unwrap() == 0 {
         sim.tick();
         guard += 1;
-        assert!(guard < 20_000, "el secuenciador no se detiene");
+        assert!(guard < 20_000, "the sequencer does not stop");
     }
     sim
 }
@@ -100,7 +100,7 @@ fn a_die_with_fixed_weights_runs_the_layer_bit_exact() {
     assert!(total(&fixed) < total(&loadable));
     let top = &fixed.modules[&fixed.top];
     assert!(top.ports.iter().all(|p| !["load_cell", "load_scale", "cell_addr"].contains(&p.name.as_str())));
-    assert!(host_steps(c, &e).len() < host_steps(die(false), &e).len(), "no hay pasos de carga de celdas");
+    assert!(host_steps(c, &e).len() < host_steps(die(false), &e).len(), "there are no cell load steps");
 }
 
 #[test]

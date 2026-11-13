@@ -16,7 +16,7 @@
   "fixed_die_mm2": 6.0,
   "cpu_mm2": 2.0,
   "io_mm2": 4.0,
-  "label": "TSMC N3 (estimado)",
+  "label": "TSMC N3 (estimated)",
   "id": "n3",
   "and_um2": 0.045,
   "or_um2": 0.045,

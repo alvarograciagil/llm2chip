@@ -75,19 +75,19 @@ pub fn boards() -> &'static [FpgaBoard] {
             board!("tang-mega-60k", "Sipeed", "Sipeed Tang Mega 60K Dock", "Gowin GW5AT-60", "https://wiki.sipeed.com/hardware/en/tang/tang-mega-60k/mega-60k.html", Some("https://wiki.sipeed.com/hardware/zh/tang/tang-mega-60k/assets/mega_60k_top.png"), 60.0, "LUT4", 2.1, 118, 0.25, 1.6, 40.0, false, 90.0, "~90 $", "Gowin EDA"),
             board!("tang-mega-138k-dock", "Sipeed", "Sipeed Tang Mega 138K Dock", "Gowin GW5AST-138", "https://wiki.sipeed.com/hardware/en/tang/tang-mega-138k/mega-138k.html", Some("https://wiki.sipeed.com/hardware/zh/tang/tang-mega-138k/assets/mega_138k_top.jpg"), 138.0, "LUT4", 6.1, 298, 0.5, 1.6, 40.0, false, 130.0, "~130 $", "Gowin EDA"),
             board!("tang-mega-138k", "Sipeed", "Sipeed Tang Mega 138K Pro", "Gowin GW5AST-138", "https://wiki.sipeed.com/hardware/en/tang/tang-mega-138k/mega-138k-pro.html", Some("https://wiki.sipeed.com/hardware/en/tang/tang-mega-138k/assets/mega_138k_pro_top.png"), 138.0, "LUT4", 6.1, 298, 1.0, 3.2, 40.0, false, 195.0, "~195 $", "Gowin EDA"),
-            board!("ulx3s-85f", "Radiona", "Radiona ULX3S 85F", "Lattice ECP5 LFE5U-85F", "https://radiona.org/ulx3s/", None, 84.0, "LUT4", 3.7, 156, 0.032, 0.2, 34.5, true, 150.0, "~130-150 $", "Yosys + nextpnr, libres"),
+            board!("ulx3s-85f", "Radiona", "Radiona ULX3S 85F", "Lattice ECP5 LFE5U-85F", "https://radiona.org/ulx3s/", None, 84.0, "LUT4", 3.7, 156, 0.032, 0.2, 34.5, true, 150.0, "~130-150 $", "Yosys + nextpnr, open source"),
             // The usual small boards with this chip carry 32 MB of SDRAM on 16 bits.
-            board!("cyclone-iv-ep4ce10", "Altera", "Placa con Cyclone IV EP4CE10", "Altera Cyclone IV E EP4CE10", "https://www.intel.com/content/www/us/en/products/details/fpga/cyclone/iv/e.html", None, 10.3, "LE", 0.41, 23, 0.008, 0.2, 40.0, false, 30.0, "~25-40 $", "Quartus Prime Lite (gratuito)"),
-            board!("atum-a3-nano", "Terasic", "Terasic Atum A3 Nano", "Altera Agilex 3 A3CZ135", "https://www.terasic.com.tw/cgi-bin/page/archive.pl?Language=English&CategoryNo=44&No=1373", None, 135.0, "LE", 8.3, 368, 0.064, 0.2, 80.0, false, 180.0, "180-245 $", "Quartus Prime Pro (licencia gratuita para Agilex 3)"),
-            board!("pynq-z2", "TUL", "TUL PYNQ-Z2", "Xilinx Zynq XC7Z020", "https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html", None, 53.0, "LUT6", 4.9, 220, 0.5, 2.1, 50.0, false, 200.0, "200-260 $", "Vivado (edición gratuita)"),
-            board!("de10-nano", "Terasic", "Terasic DE10-Nano", "Intel Cyclone V SE 5CSEBA6", "https://www.terasic.com.tw/cgi-bin/page/archive.pl?Language=English&No=1046", None, 110.0, "LE", 5.6, 112, 1.0, 3.2, 40.0, false, 225.0, "~225 $", "Quartus Prime Lite (gratuito)"),
+            board!("cyclone-iv-ep4ce10", "Altera", "Cyclone IV EP4CE10 board", "Altera Cyclone IV E EP4CE10", "https://www.intel.com/content/www/us/en/products/details/fpga/cyclone/iv/e.html", None, 10.3, "LE", 0.41, 23, 0.008, 0.2, 40.0, false, 30.0, "~25-40 $", "Quartus Prime Lite (free)"),
+            board!("atum-a3-nano", "Terasic", "Terasic Atum A3 Nano", "Altera Agilex 3 A3CZ135", "https://www.terasic.com.tw/cgi-bin/page/archive.pl?Language=English&CategoryNo=44&No=1373", None, 135.0, "LE", 8.3, 368, 0.064, 0.2, 80.0, false, 180.0, "180-245 $", "Quartus Prime Pro (free licence for Agilex 3)"),
+            board!("pynq-z2", "TUL", "TUL PYNQ-Z2", "Xilinx Zynq XC7Z020", "https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html", None, 53.0, "LUT6", 4.9, 220, 0.5, 2.1, 50.0, false, 200.0, "200-260 $", "Vivado (free edition)"),
+            board!("de10-nano", "Terasic", "Terasic DE10-Nano", "Intel Cyclone V SE 5CSEBA6", "https://www.terasic.com.tw/cgi-bin/page/archive.pl?Language=English&No=1046", None, 110.0, "LE", 5.6, 112, 1.0, 3.2, 40.0, false, 225.0, "~225 $", "Quartus Prime Lite (free)"),
             board!("kv260", "AMD", "AMD Kria KV260", "Zynq UltraScale+ K26 (clase ZU5EV)", "https://www.amd.com/en/products/system-on-modules/kria/k26/kv260-vision-starter-kit.html", None, 117.0, "LUT6", 23.1, 1248, 4.0, 19.0, 100.0, false, 249.0, "~249 $", "Vivado"),
-            board!("arty-a7-100t", "Digilent", "Digilent Arty A7-100T", "Xilinx XC7A100T", "https://digilent.com/shop/arty-a7-100t-artix-7-fpga-development-board/", None, 63.0, "LUT6", 4.9, 240, 0.25, 2.6, 50.0, false, 250.0, "~250 $", "Vivado (edición gratuita)"),
-            board!("zybo-z7-20", "Digilent", "Digilent Zybo Z7-20", "Xilinx Zynq XC7Z020", "https://digilent.com/shop/zybo-z7-zynq-7000-arm-fpga-soc-development-board/", None, 53.0, "LUT6", 4.9, 220, 1.0, 4.3, 50.0, false, 300.0, "~300 $", "Vivado (edición gratuita)"),
+            board!("arty-a7-100t", "Digilent", "Digilent Arty A7-100T", "Xilinx XC7A100T", "https://digilent.com/shop/arty-a7-100t-artix-7-fpga-development-board/", None, 63.0, "LUT6", 4.9, 240, 0.25, 2.6, 50.0, false, 250.0, "~250 $", "Vivado (free edition)"),
+            board!("zybo-z7-20", "Digilent", "Digilent Zybo Z7-20", "Xilinx Zynq XC7Z020", "https://digilent.com/shop/zybo-z7-zynq-7000-arm-fpga-soc-development-board/", None, 53.0, "LUT6", 4.9, 220, 1.0, 4.3, 50.0, false, 300.0, "~300 $", "Vivado (free edition)"),
             board!("kr260", "AMD", "AMD Kria KR260", "Zynq UltraScale+ K26 (clase ZU5EV)", "https://www.amd.com/en/products/system-on-modules/kria/k26/kr260-robotics-starter-kit.html", None, 117.0, "LUT6", 23.1, 1248, 4.0, 19.0, 100.0, false, 349.0, "~349 $", "Vivado"),
-            board!("alinx-ax7202", "ALINX", "ALINX AX7202", "Xilinx XC7A200T", "https://www.en.alinx.com/Product/FPGA-Development-Boards/Artix-7/AX7202.html", None, 134.0, "LUT6", 13.1, 740, 1.0, 6.4, 50.0, false, 450.0, "400-500 $", "Vivado (edición gratuita)"),
-            board!("nexys-video", "Digilent", "Digilent Nexys Video", "Xilinx XC7A200T", "https://digilent.com/shop/nexys-video-artix-7-fpga-trainer-board-for-multimedia-applications/", None, 134.0, "LUT6", 13.1, 740, 0.5, 3.2, 50.0, false, 550.0, "~500 €", "Vivado (edición gratuita)"),
-            board!("genesys-2", "Digilent", "Digilent Genesys 2", "Xilinx Kintex-7 XC7K325T", "https://digilent.com/shop/genesys-2-kintex-7-fpga-development-board/", None, 204.0, "LUT6", 16.0, 840, 1.0, 7.2, 80.0, false, 1000.0, "~1 000 $", "Vivado (licencia del dispositivo incluida)"),
+            board!("alinx-ax7202", "ALINX", "ALINX AX7202", "Xilinx XC7A200T", "https://www.en.alinx.com/Product/FPGA-Development-Boards/Artix-7/AX7202.html", None, 134.0, "LUT6", 13.1, 740, 1.0, 6.4, 50.0, false, 450.0, "400-500 $", "Vivado (free edition)"),
+            board!("nexys-video", "Digilent", "Digilent Nexys Video", "Xilinx XC7A200T", "https://digilent.com/shop/nexys-video-artix-7-fpga-trainer-board-for-multimedia-applications/", None, 134.0, "LUT6", 13.1, 740, 0.5, 3.2, 50.0, false, 550.0, "~500 €", "Vivado (free edition)"),
+            board!("genesys-2", "Digilent", "Digilent Genesys 2", "Xilinx Kintex-7 XC7K325T", "https://digilent.com/shop/genesys-2-kintex-7-fpga-development-board/", None, 204.0, "LUT6", 16.0, 840, 1.0, 7.2, 80.0, false, 1000.0, "~1 000 $", "Vivado (device licence included)"),
             board!("alveo-u250", "AMD", "AMD Alveo U250", "Xilinx UltraScale+ XCU250", "https://www.amd.com/en/products/accelerators/alveo/u250/a-u250-a64g-pq-g.html", None, 1728.0, "LUT6", 432.0, 12288, 64.0, 77.0, 200.0, false, 9000.0, "~9 000 $", "Vivado"),
         ]
     })
@@ -124,14 +124,14 @@ pub fn check(report: &mut Report, p: &ChipParams, board: &FpgaBoard) {
     let multipliers = report.macs_per_die + p.vector_lanes_per_die.saturating_mul(p.vector_units_per_die.max(1)) + 2;
     let share = |used: f64, total: f64| if total > 0.0 { 100.0 * used / total } else { f64::INFINITY };
     let metric = |id, label, value, unit, confidence, why: String| Metric { id, section: "FPGA", label, value, unit, confidence, why };
-    report.metrics.push(metric("fpga_memory_pct", "Memoria interna usada", share(memory, board.bram_mbit), "%", Confidence::Calibrada, format!("{memory:.1} de {} Mbit: {BASE_MEMORY_MBIT} Mbit del chip básico medidos en síntesis, más los pesos y cachés que viven dentro.", board.bram_mbit)));
-    report.metrics.push(metric("fpga_logic_pct", "Lógica usada", share(logic, board.luts_k), "%", Confidence::Calibrada, format!("{logic:.1} K {} del chip básico sintetizado con Yosys, de {} K. Con más carriles y unidades crece; mídelo con la síntesis real.", board.lut, board.luts_k)));
-    report.metrics.push(metric("fpga_dsp_pct", "Multiplicadores usados", share(multipliers as f64, board.dsp as f64), "%", Confidence::Derivada, format!("{multipliers} productos por ciclo, cada uno en un bloque DSP, de {}.", board.dsp)));
-    report.metrics.push(metric("fpga_clock_mhz", "Reloj en esta placa", board.clock_mhz.min(p.freq_ghz * 1000.0), "MHz", if board.clock_measured { Confidence::Calibrada } else { Confidence::Supuesta }, if board.clock_measured { "Medido colocando y rutando el chip con nextpnr en esta familia.".into() } else { "Sin colocar y rutar aún en esta familia: una cifra prudente para lógica de FPGA sin optimizar a mano.".into() }));
+    report.metrics.push(metric("fpga_memory_pct", "Internal memory used", share(memory, board.bram_mbit), "%", Confidence::Calibrated, format!("{memory:.1} of {} Mbit: {BASE_MEMORY_MBIT} Mbit of the basic chip measured in synthesis, plus the weights and caches that live inside.", board.bram_mbit)));
+    report.metrics.push(metric("fpga_logic_pct", "Logic used", share(logic, board.luts_k), "%", Confidence::Calibrated, format!("{logic:.1} K {} of the basic chip synthesised with Yosys, of {} K. It grows with more lanes and units; measure it with real synthesis.", board.lut, board.luts_k)));
+    report.metrics.push(metric("fpga_dsp_pct", "Multipliers used", share(multipliers as f64, board.dsp as f64), "%", Confidence::Derived, format!("{multipliers} products per cycle, each in a DSP block, of {}.", board.dsp)));
+    report.metrics.push(metric("fpga_clock_mhz", "Clock on this board", board.clock_mhz.min(p.freq_ghz * 1000.0), "MHz", if board.clock_measured { Confidence::Calibrated } else { Confidence::Assumed }, if board.clock_measured { "Measured by placing and routing the chip with nextpnr on this family.".into() } else { "Not yet placed and routed on this family: a cautious figure for FPGA logic not optimised by hand.".into() }));
 
     let error = |message: String, fix: &str, field: &'static str, value: serde_json::Value| Violation { severity: Severity::Error, message, fix: fix.into(), field: Some(field), value: Some(value) };
     if logic > board.luts_k {
-        report.violations.push(error(format!("El chip básico ocupa {logic:.0} K {} y esta FPGA tiene {} K.", board.lut, board.luts_k), "Elige una FPGA mayor.", "fpga_board", serde_json::json!("kv260")));
+        report.violations.push(error(format!("The basic chip takes {logic:.0} K {} and this FPGA has {} K.", board.lut, board.luts_k), "Choose a larger FPGA.", "fpga_board", serde_json::json!("kv260")));
     }
     if memory > board.bram_mbit {
         // What moves out must leave the rest inside: the weights, the caches, both, or else
@@ -139,23 +139,23 @@ pub fn check(report: &mut Report, p: &ChipParams, board: &FpgaBoard) {
         let fits_outside = |gb: f64| board.ddr_gb > 0.0 && gb <= board.ddr_gb * 0.9;
         let inside = |gb: f64| BASE_MEMORY_MBIT + gb * 8000.0 <= board.bram_mbit;
         let (fix, field, value) = if weights > 0.0 && inside(caches) && fits_outside(weights) {
-            ("Lleva los pesos a la memoria de la placa: más lento, pero cabe.", "weight_backend", serde_json::json!("external_ddr"))
+            ("Move the weights to the board's memory: slower, but it fits.", "weight_backend", serde_json::json!("external_ddr"))
         } else if caches > 0.0 && inside(weights) && fits_outside(caches) {
-            ("Lleva la caché a la memoria de la placa, o reduce el contexto.", "kv_backend", serde_json::json!("external_ddr"))
+            ("Move the cache to the board's memory, or reduce the context.", "kv_backend", serde_json::json!("external_ddr"))
         } else {
             let larger = boards().iter().filter(|b| b.bram_mbit >= memory && base_logic_k(b) <= b.luts_k).min_by(|a, b| a.price_usd.total_cmp(&b.price_usd));
             match larger {
-                Some(b) => ("Elige una FPGA con más memoria interna, o reduce bits de peso o contexto.", "fpga_board", serde_json::json!(b.id)),
-                None => ("Ninguna placa del catálogo guarda tanto dentro: reduce bits de peso o contexto.", "context_tokens", serde_json::json!((p.context_tokens / 2).max(64))),
+                Some(b) => ("Choose an FPGA with more internal memory, or reduce weight bits or context.", "fpga_board", serde_json::json!(b.id)),
+                None => ("No board in the catalogue holds that much inside: reduce weight bits or context.", "context_tokens", serde_json::json!((p.context_tokens / 2).max(64))),
             }
         };
-        report.violations.push(error(format!("Hacen falta {memory:.1} Mbit de memoria interna y esta FPGA tiene {}.", board.bram_mbit), fix, field, value));
+        report.violations.push(error(format!("It needs {memory:.1} Mbit of internal memory and this FPGA has {}.", board.bram_mbit), fix, field, value));
     }
     if multipliers > board.dsp {
         report.violations.push(Violation {
-            severity: Severity::Aviso,
-            message: format!("Hay {multipliers} productos por ciclo y {} bloques DSP: el resto se hace con LUT, mucho más grandes.", board.dsp),
-            fix: "Baja los multiplicadores por die.".into(),
+            severity: Severity::Warning,
+            message: format!("There are {multipliers} products per cycle and {} DSP blocks: the rest is done with LUTs, much larger.", board.dsp),
+            fix: "Lower the multipliers per die.".into(),
             field: Some("macs_per_die"),
             value: Some(serde_json::json!(board.dsp.saturating_sub(p.vector_lanes_per_die * p.vector_units_per_die.max(1) + 2).max(1))),
         });
@@ -168,7 +168,7 @@ mod tests {
     use model_ir::ModelGraph;
 
     fn on(board: &str, config: &str, p: ChipParams) -> Report {
-        let model = ModelGraph::from_config_json("modelo", config).unwrap();
+        let model = ModelGraph::from_config_json("model", config).unwrap();
         crate::estimate(&model, &ChipParams { node: "fpga_u250".into(), fpga_board: board.into(), max_params_g: 30.0, ..p }).unwrap()
     }
 
@@ -181,7 +181,7 @@ mod tests {
         let report = on("tang-mega-138k", STORIES, p);
         assert!(report.metric("fpga_memory_pct").unwrap() < 100.0, "{:?}", report.metric("fpga_memory_pct"));
         assert_eq!(report.metric("fpga_clock_mhz"), Some(40.0));
-        assert!(!report.violations.iter().any(|v| v.severity == Severity::Error && v.message.contains("memoria interna")));
+        assert!(!report.violations.iter().any(|v| v.severity == Severity::Error && v.message.contains("internal memory")));
     }
 
     #[test]
@@ -190,7 +190,7 @@ mod tests {
         // 110 M weights do not fit inside the KV260, but do in the memory on its board; with
         // a short context the cache stays inside.
         let report = on("kv260", STORIES_110M, ChipParams { context_tokens: 64, ..p.clone() });
-        let memory = report.violations.iter().find(|v| v.message.contains("memoria interna")).expect("no cabe dentro");
+        let memory = report.violations.iter().find(|v| v.message.contains("internal memory")).expect("it does not fit inside");
         assert_eq!((memory.field, memory.value.clone()), (Some("weight_backend"), Some(serde_json::json!("external_ddr"))));
         // The smallest board has no room even for the basic chip.
         let tiny = on("tang-primer-25k", STORIES, p);
@@ -214,7 +214,7 @@ mod corrections {
 
     #[test]
     fn every_offered_correction_clears_its_warning() {
-        let model = |config: &str| ModelGraph::from_config_json("modelo", config).unwrap();
+        let model = |config: &str| ModelGraph::from_config_json("model", config).unwrap();
         let stories = model(include_str!("../../../models/stories260k.json"));
         let stories_110m = model(include_str!("../../../models/stories110m.json"));
         let qwen = model(include_str!("../../../models/qwen3.8-27b.json"));
@@ -236,10 +236,10 @@ mod corrections {
                 let fixed = crate::estimate(model, &with(&p, field, value)).unwrap();
                 let kind = |m: &str| m.chars().take(24).collect::<String>();
                 let still = fixed.violations.iter().find(|w| w.field == v.field && w.severity == v.severity && kind(&w.message) == kind(&v.message));
-                assert!(still.is_none() || v.severity == Severity::Aviso && field == "target_tok_s", "«{}» sigue tras poner {field} = {value}: {:?}", v.message, still.map(|w| &w.message));
+                assert!(still.is_none() || v.severity == Severity::Warning && field == "target_tok_s", "«{}» sigue tras poner {field} = {value}: {:?}", v.message, still.map(|w| &w.message));
                 checked += 1;
             }
         }
-        assert!(checked >= 6, "solo se comprobaron {checked} correcciones");
+        assert!(checked >= 6, "only {checked} corrections were checked");
     }
 }

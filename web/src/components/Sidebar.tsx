@@ -404,15 +404,15 @@ function ParametersTab() {
 }
 
 const MATURITY: [Maturity, string, string][] = [
-  ["probada", "Probadas", "Técnicas ya usadas en chips reales."],
+  ["proven", "Probadas", "Técnicas ya usadas en chips reales."],
   ["plausible", "Plausibles", "Razonables; hay que medir su efecto aquí."],
   ["experimental", "Experimentales", "Investigación abierta, para probar y comparar."],
 ];
 
 const RISK: Record<QualityRisk, string> = {
-  ninguno: "No altera la salida",
-  medir: "Medir la calidad",
-  alto: "Riesgo alto de calidad",
+  lossless: "No altera la salida",
+  measure: "Medir la calidad",
+  high: "Riesgo alto de calidad",
 };
 
 function OptimizationsTab() {

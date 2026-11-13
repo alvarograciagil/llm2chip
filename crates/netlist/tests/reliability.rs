@@ -32,11 +32,11 @@ fn the_code_corrects_one_error_and_detects_two() {
             }
             let (a, b) = (noise.next() as u32 % data_bits, noise.next() as u32 % data_bits);
             if a != b {
-                assert!(decode(data ^ (1 << a) ^ (1 << b), check, data_bits).failed, "dos errores sin detectar");
+                assert!(decode(data ^ (1 << a) ^ (1 << b), check, data_bits).failed, "two errors not detected");
             }
         }
     }
-    assert_eq!(check_bits(64), 8, "64 bits llevan 8 de comprobación, el 12,5 %");
+    assert_eq!(check_bits(64), 8, "64 bits carry 8 check bits, 12.5 %");
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn the_gates_match_the_code() {
         decoder.set("check", c as u64).unwrap();
         decoder.settle();
         let model = decode(d as u128, c, data_bits);
-        assert_eq!((decoder.get("corrected").unwrap() as u128, decoder.get("fixed").unwrap() == 1, decoder.get("failed").unwrap() == 1), (model.data, model.corrected, model.failed), "datos {d:#x} comprobación {c:#x}");
+        assert_eq!((decoder.get("corrected").unwrap() as u128, decoder.get("fixed").unwrap() == 1, decoder.get("failed").unwrap() == 1), (model.data, model.corrected, model.failed), "data {d:#x} check {c:#x}");
     }
 }
 
@@ -130,7 +130,7 @@ fn a_flipped_weight_bit_does_not_change_the_result() {
     let mut hit = loaded_cell(&weights);
     hit.flip_memory_bit("/weight_sram", 0, 13).unwrap();
     let (total, corrected, failed) = run(&mut hit);
-    assert_eq!(total, clean, "el ECC debe corregir el bit invertido");
+    assert_eq!(total, clean, "the ECC must correct the flipped bit");
     assert!(corrected && !failed);
 
     let mut twice = loaded_cell(&weights);
@@ -147,7 +147,7 @@ fn start_test(sim: &mut Simulator) -> u64 {
     while sim.get("test_done").unwrap() == 0 {
         sim.tick();
         cycles += 1;
-        assert!(cycles < 200_000, "el autotest no termina");
+        assert!(cycles < 200_000, "the self-test does not finish");
     }
     cycles
 }
@@ -189,7 +189,7 @@ fn bad_rows_are_found_and_replaced() {
         write(&mut sim, address, address * 3 + 1);
     }
     for address in 0..WORDS {
-        assert_eq!(read(&mut sim, address), address * 3 + 1, "dirección {address}");
+        assert_eq!(read(&mut sim, address), address * 3 + 1, "address {address}");
     }
 }
 

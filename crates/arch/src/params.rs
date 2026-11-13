@@ -176,7 +176,16 @@ pub struct ChipParams {
     pub tensor_group: u32,
     pub load_interface: LoadInterface,
 
+    #[serde(deserialize_with = "optimization_ids")]
     pub optimizations: BTreeSet<String>,
+}
+
+/// The optimizations of a design, with the ids designs saved before they were in English
+/// read as their English ones.
+fn optimization_ids<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<BTreeSet<String>, D::Error> {
+    const RENAMED: [(&str, &str); 19] = [("embedding_externo", "external_embedding"), ("salto_ceros", "zero_skipping"), ("reparacion_por_compilador", "compiler_repair"), ("apagado_dies_inactivos", "idle_die_power_off"), ("checkpoint_estado", "state_checkpoints"), ("sin_ecc_con_refresco", "refresh_without_ecc"), ("sin_multiplicadores", "multiplier_free"), ("aritmetica_distribuida", "distributed_arithmetic"), ("compresion_pesos", "weight_compression"), ("sram_baja_tension", "low_voltage_sram"), ("sram_apilada_3d", "stacked_sram_3d"), ("poda_pesos", "weight_pruning"), ("compresion_kv", "kv_compression"), ("edram_ganancia", "gain_cell_edram"), ("cim_analogico", "analog_cim"), ("pesos_csd", "csd_weights"), ("baja_rango", "low_rank"), ("cabeza_recortada", "trimmed_head"), ("atencion_dispersa", "sparse_attention")];
+    let ids = BTreeSet::<String>::deserialize(deserializer)?;
+    Ok(ids.into_iter().map(|id| RENAMED.iter().find(|(old, _)| *old == id).map_or(id, |(_, new)| new.to_string())).collect())
 }
 
 fn default_vector_units() -> u64 {
@@ -309,10 +318,10 @@ impl ChipParams {
             addr_bits,
             coding: self.weight_coding,
             exponent_bits: self.weight_coding.legal_exponent_bits(weight_bits, self.weight_exponent_bits),
-            multiplier: if self.has("sin_multiplicadores") { MultiplierKind::Multiples } else { self.multiplier_kind },
-            skip_zeros: self.has("salto_ceros"),
+            multiplier: if self.has("multiplier_free") { MultiplierKind::Multiples } else { self.multiplier_kind },
+            skip_zeros: self.has("zero_skipping"),
             fixed_weights: self.weight_backend == WeightBackend::Rom,
-            ecc: self.weight_backend == WeightBackend::Sram && !self.has("sin_ecc_con_refresco"),
+            ecc: self.weight_backend == WeightBackend::Sram && !self.has("refresh_without_ecc"),
         };
         config.accumulator_bits = config.accumulator_bits.max(config.required_accumulator());
         config

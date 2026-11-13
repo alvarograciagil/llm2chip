@@ -9,7 +9,7 @@ use netlist::{cell_design, to_verilog, CellConfig, Simulator};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--json") {
-        let mut config: CellConfig = serde_json::from_str(args.get(2).expect("configuración")).expect("CellConfig");
+        let mut config: CellConfig = serde_json::from_str(args.get(2).expect("configuration")).expect("CellConfig");
         config.accumulator_bits = config.required_accumulator().max(config.accumulator_bits);
         return write(config);
     }

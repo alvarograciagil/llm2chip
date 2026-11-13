@@ -119,7 +119,7 @@ fn remove_dead(design: &Design, module: &mut Module) {
 /// Folds constants through the top module and drops what no output depends on.
 pub fn trim_top(design: &mut Design) {
     let top = design.top.clone();
-    let mut module = design.modules.remove(&top).expect("módulo superior");
+    let mut module = design.modules.remove(&top).expect("top module");
     simplify(&mut module);
     remove_dead(design, &mut module);
     design.modules.insert(top, module);

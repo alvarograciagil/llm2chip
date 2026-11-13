@@ -136,7 +136,7 @@ impl ModelGraph {
     /// Builds the graph from a checkpoint's `config.json`, without touching its weights.
     pub fn from_config_json(name: &str, json: &str) -> Result<Self, ModelError> {
         let config: Value =
-            serde_json::from_str(json).map_err(|e| ModelError(format!("config inválido: {e}")))?;
+            serde_json::from_str(json).map_err(|e| ModelError(format!("invalid config: {e}")))?;
         let model_type = config.get("model_type").and_then(Value::as_str);
         match model_type {
             Some("qwen3_5") | Some("qwen3_5_text") | Some("qwen3_5_moe") | Some("qwen3_5_moe_text") => qwen3_5::build(name, &config),
@@ -146,10 +146,10 @@ impl ModelGraph {
             Some("janus") => Self::from_config_json(name, &config["text_config"].to_string()),
             Some(family) if llama::FAMILIES.contains(&family) => llama::build_hf(name, family, &config),
             Some(other) => Err(ModelError(format!(
-                "la arquitectura «{other}» todavía no está soportada"
+                "the “{other}” architecture is not supported yet"
             ))),
             None if config.get("n_layers").is_some() => llama::build_llama2c(name, &config),
-            None => Err(ModelError("el config no indica model_type".into())),
+            None => Err(ModelError("the config does not give a model_type".into())),
         }
     }
 
@@ -170,7 +170,7 @@ pub(crate) fn require_u64(config: &Value, key: &str) -> Result<u64, ModelError> 
     config
         .get(key)
         .and_then(Value::as_u64)
-        .ok_or_else(|| ModelError(format!("falta el campo numérico «{key}» en el config")))
+        .ok_or_else(|| ModelError(format!("the numeric field “{key}” is missing from the config")))
 }
 
 pub(crate) fn tensor(
@@ -255,7 +255,7 @@ mod tests {
 
         let gemma = r#"{"model_type":"gemma2","hidden_size":2304,"intermediate_size":9216,"vocab_size":256000,"num_hidden_layers":26,"num_attention_heads":8,"head_dim":288}"#;
         let g = ModelGraph::from_config_json("g", gemma).unwrap();
-        assert!(!g.tensors.iter().any(|t| t.block == Block::Head), "Gemma comparte embedding y salida salvo que el config diga otra cosa");
+        assert!(!g.tensors.iter().any(|t| t.block == Block::Head), "Gemma shares the embedding and the output unless the config says otherwise");
         assert!(approximate_family("phi3") && !approximate_family("gemma2"));
     }
 

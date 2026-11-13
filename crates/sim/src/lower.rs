@@ -690,7 +690,7 @@ impl Layout {
                         _ => false,
                     };
                     if chained {
-                        let leader = leader_of.get(&cell_plan.last().expect("anterior").name).cloned().expect("cadena");
+                        let leader = leader_of.get(&cell_plan.last().expect("previous").name).cloned().expect("cadena");
                         chains.get_mut(&leader).expect("cadena").push((name.clone(), program_dst(&inst.op)));
                         leader_of.insert(name.clone(), leader);
                     } else if let Op::Matvec { dst, .. } = &inst.op {

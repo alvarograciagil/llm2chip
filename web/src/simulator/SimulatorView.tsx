@@ -285,7 +285,7 @@ export function SimulatorPanel() {
     return (
       <aside className="inspector">
         <h2 className="detail-title">Motor local</h2>
-        <div className="issue aviso" role="status">
+        <div className="issue warning" role="status">
           <span className="issue-icon" aria-hidden="true">i</span>
           <div>
             <strong>El motor no está en marcha.</strong>

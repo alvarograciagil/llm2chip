@@ -19,7 +19,7 @@ fn the_estimate_follows_the_measured_layouts() {
         let name = format!("{} en {platform}", m["cell"]);
         // The clock within 15 %; the area within the spread of synthesis, worst for floats.
         assert!((0.85..1.15).contains(&clock_ratio), "{name}: reloj {clock_ratio:.2}");
-        assert!((0.6..1.25).contains(&area_ratio), "{name}: área {area_ratio:.2}");
+        assert!((0.6..1.25).contains(&area_ratio), "{name}: area {area_ratio:.2}");
         // No process caps its clock below what its cells reached.
         assert!(tech.fmax_ghz * 1000.0 >= m["fmax_mhz"].as_f64().unwrap(), "{name}: tope {}", tech.fmax_ghz);
     }

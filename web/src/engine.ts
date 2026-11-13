@@ -14,9 +14,9 @@ import init, {
   tech_nodes,
 } from "./wasm/llm2chip_wasm.js";
 
-export type Confidence = "derivada" | "calibrada" | "supuesta";
-export type Maturity = "probada" | "plausible" | "experimental";
-export type QualityRisk = "ninguno" | "medir" | "alto";
+export type Confidence = "derived" | "calibrated" | "assumed";
+export type Maturity = "proven" | "plausible" | "experimental";
+export type QualityRisk = "lossless" | "measure" | "high";
 
 export interface Metric {
   id: string;
@@ -28,7 +28,7 @@ export interface Metric {
   why: string;
 }
 
-export type Category = "memoria" | "calculo" | "interconexion" | "vectorial" | "estado" | "sistema";
+export type Category = "memory" | "compute" | "interconnect" | "vector" | "state" | "system";
 
 export interface BlockArea {
   id: string;
@@ -84,7 +84,7 @@ export interface Floorplan {
 }
 
 export interface Violation {
-  severity: "error" | "aviso";
+  severity: "error" | "warning";
   message: string;
   fix: string;
   field: string | null;

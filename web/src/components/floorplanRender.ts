@@ -65,12 +65,12 @@ export function readTheme(el: Element): Theme {
     accent: get("--accent"),
     neutral: get("--neutral-fill"),
     categories: {
-      memoria: get("--cat-memoria"),
-      calculo: get("--cat-calculo"),
-      interconexion: get("--cat-interconexion"),
-      vectorial: get("--cat-vectorial"),
-      estado: get("--cat-estado"),
-      sistema: get("--cat-sistema"),
+      memory: get("--cat-memory"),
+      compute: get("--cat-compute"),
+      interconnect: get("--cat-interconnect"),
+      vector: get("--cat-vector"),
+      state: get("--cat-state"),
+      system: get("--cat-system"),
     },
     heatLow: get("--heat-low"),
     heatHigh: get("--heat-high"),
@@ -188,7 +188,7 @@ function drawCell(ctx: CanvasRenderingContext2D, scene: Scene, die: DiePlan, s: 
   ];
 
   if (overlay !== "funcion") {
-    ctx.fillStyle = fillFor(scene, die, arrayMeasure(scene.report), "memoria", true);
+    ctx.fillStyle = fillFor(scene, die, arrayMeasure(scene.report), "memory", true);
     ctx.fillRect(body.x, body.y, body.w, body.h);
     return;
   }
@@ -233,7 +233,7 @@ function drawArray(ctx: CanvasRenderingContext2D, scene: Scene, die: DiePlan) {
   const cellW = world.w / cells.cols;
   const cellH = world.h / cells.rows;
   const px = Math.min(cellW, cellH) * camera.k;
-  const fill = fillFor(scene, die, arrayMeasure(scene.report), "memoria", true);
+  const fill = fillFor(scene, die, arrayMeasure(scene.report), "memory", true);
 
   if (px < CELL_MIN_PX) {
     ctx.fillStyle = fill;

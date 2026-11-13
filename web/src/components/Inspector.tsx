@@ -8,15 +8,15 @@ import { useAdvice } from "../feasibility/useAdvice";
 import { fieldLabel } from "../params";
 import { useDesign, type Selection } from "../store";
 
-const GLYPH: Record<Confidence, string> = { derivada: "●", calibrada: "◐", supuesta: "○" };
-const CONFIDENCE: Record<Confidence, string> = { derivada: "Derivada del modelo", calibrada: "Calibrada", supuesta: "Supuesta, sin calibrar" };
+const GLYPH: Record<Confidence, string> = { derived: "●", calibrated: "◐", assumed: "○" };
+const CONFIDENCE: Record<Confidence, string> = { derived: "Derivada del modelo", calibrated: "Calibrada", assumed: "Supuesta, sin calibrar" };
 export const CATEGORY_LABEL: Record<BlockArea["category"], string> = {
-  memoria: "Memoria de pesos",
-  calculo: "Cálculo",
-  interconexion: "Interconexión",
-  vectorial: "Unidades vectoriales",
-  estado: "Estado",
-  sistema: "Control y sistema",
+  memory: "Memoria de pesos",
+  compute: "Cálculo",
+  interconnect: "Interconexión",
+  vector: "Unidades vectoriales",
+  state: "Estado",
+  system: "Control y sistema",
 };
 
 const HEADLINE = ["tok_s", "dies", "total_area_mm2", "power_w"];

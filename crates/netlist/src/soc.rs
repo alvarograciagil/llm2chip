@@ -57,7 +57,7 @@ fn fifo(gen: &mut Gen, bits: u32) -> String {
     if gen.modules.contains_key(&name) {
         return name;
     }
-    let mut b = Builder::new(&name, "Cola de bytes", "Memoria circular entre el puerto de host y la CPU: guarda los bytes hasta que el otro lado los recoge.");
+    let mut b = Builder::new(&name, "Byte queue", "Circular memory between the host port and the CPU: keeps the bytes until the other side collects them.");
     let reset = b.input("reset", 1)[0];
     let push = b.input("push", 1)[0];
     let data_in = b.input("data_in", 8);
@@ -103,7 +103,7 @@ fn fifo(gen: &mut Gen, bits: u32) -> String {
         read_address = read[..bits as usize].to_vec();
         enable = accepted;
     }
-    b.group("Memoria");
+    b.group("Memory");
     b.ram2p("bytes", bits, 8, &[("raddr", read_address), ("waddr", write_address), ("we", vec![enable]), ("wdata", data_in), ("rdata", data_out)]);
     gen.add(b.finish())
 }
@@ -140,7 +140,7 @@ fn counter_step(l: &mut Logic, value: &[Bit], enable: Bit) -> Vec<Bit> {
 }
 
 fn loader(gen: &mut Gen) -> String {
-    let mut b = Builder::new("load_controller", "Controlador de carga", "Lee la imagen del chip, comprueba su CRC y escribe cada palabra en la memoria de destino. Al arrancar copia el firmware por sí solo.");
+    let mut b = Builder::new("load_controller", "Load controller", "Reads the chip's image, checks its CRC and writes each word into its destination memory. At boot it copies the firmware by itself.");
     let reset = b.input("reset", 1)[0];
     let reg_write = b.input("reg_write", 1)[0];
     let reg_index = b.input("reg_index", 4);
@@ -184,7 +184,7 @@ fn loader(gen: &mut Gen) -> String {
     let start = write_reg(&mut l, 6);
     let in_boot = l.not(running);
 
-    l.b.group("Arranque");
+    l.b.group("Boot");
     // Boot steps: read the program size, copy, read the data size, copy, and release the CPU.
     let steps: Vec<Bit> = boot.clone();
     let [ask_program, wait_program, copy_program, ask_data, wait_data, copy_data, begin] = [steps[0], steps[1], steps[2], steps[3], steps[4], steps[5], steps[6]];
@@ -239,7 +239,7 @@ fn loader(gen: &mut Gen) -> String {
     };
     l.connect_flops(&[next_request, next_wait, next_emit], &[request, wait, emit]);
 
-    l.b.group("Arranque");
+    l.b.group("Boot");
     let keep = l.not(reset);
     let keep_wait_program = {
         let no = l.not(image_valid);
@@ -363,7 +363,7 @@ fn loader(gen: &mut Gen) -> String {
         l.b.or_to(*from, Bit::Zero, *to);
     }
 
-    l.b.group("Datos de salida");
+    l.b.group("Output data");
     for (index, lane) in lanes.iter().enumerate() {
         let selected = l.equals(&beat, index as u32);
         let enable = l.and(response, selected);
@@ -384,7 +384,7 @@ fn loader(gen: &mut Gen) -> String {
         l.b.or_to(*from, Bit::Zero, *to);
     }
 
-    l.b.group("Petición a la imagen");
+    l.b.group("Image request");
     let any_request = l.or(request, header_request);
     l.b.or_to(any_request, Bit::Zero, image_req);
     let one = constant(1, 32);
@@ -403,7 +403,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     let cpu = core(gen);
     let queue = fifo(gen, config.fifo_bits);
     let load = loader(gen);
-    let mut b = Builder::new("soc_control", "Sistema de control", "CPU de control, memorias de programa y datos y puerto de host, unidos por el bus interno.");
+    let mut b = Builder::new("soc_control", "Control system", "Control CPU, program and data memories and host port, joined by the internal bus.");
     let reset = b.input("reset", 1)[0];
     let cpu_hold = b.input("cpu_hold", 1)[0];
     let host_rx_valid = b.input("host_rx_valid", 1)[0];
@@ -450,7 +450,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     b.or_to(held, booting, cpu_reset);
     b.inst("cpu", &cpu, &[("reset", vec![cpu_reset]), ("imem_rdata", imem_rdata.clone()), ("dmem_rdata", dmem_rdata.clone()), ("imem_addr", imem_addr.clone()), ("dmem_addr", dmem_addr.clone()), ("dmem_wdata", dmem_wdata.clone()), ("dmem_we", dmem_we.clone()), ("dmem_re", vec![dmem_re]), ("rf_we", rf_we), ("rf_addr", rf_addr), ("rf_wdata", rf_wdata), ("halted", vec![halted])]);
 
-    b.group("Memoria de programa");
+    b.group("Program memory");
     let program_address = b.wire("program_address", config.program_bits);
     let program_write = b.wire("program_write", 1)[0];
     b.sram("program", config.program_bits, 32, &[("addr", program_address.clone()), ("we", vec![program_write]), ("wdata", load_data[..32].to_vec()), ("rdata", imem_rdata.clone())]);
@@ -464,7 +464,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     let rx_not_full = b.wire("rx_not_full", 1)[0];
     let tx_valid = b.wire("tx_valid", 1)[0];
     let tx_taken = b.wire("tx_taken", 1)[0];
-    b.group("Puerto de host");
+    b.group("Host port");
     b.and_to(host_tx_ready, tx_valid, tx_taken);
 
     let (ram_we, rx_pop, tx_push, read_data, data_address, data_wdata);
@@ -498,7 +498,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
             l.b.or_to(*from, Bit::Zero, *to);
         }
 
-        l.b.group("Carga en las memorias");
+        l.b.group("Loading into the memories");
         let boot_write = l.and(load_valid, booting);
         let to_program = l.equals(&load_target, 0);
         let to_data = l.equals(&load_target, 1);
@@ -528,7 +528,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         tx_push = l.and(host_write, reg_tx_data);
 
         // Reads answer one cycle after the address, like the memories do.
-        l.b.group("Respuesta del bus");
+        l.b.group("Bus response");
         let pick_ram = l.fresh();
         let pick_rx_data = l.fresh();
         let pick_rx_status = l.fresh();
@@ -575,15 +575,15 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         }
     }
 
-    b.group("Memoria de datos");
+    b.group("Data memory");
     for byte in 0..4usize {
         b.sram(&format!("data_{byte}"), config.data_bits, 8, &[("addr", data_address.clone()), ("we", vec![ram_we[byte]]), ("wdata", data_wdata[8 * byte..8 * byte + 8].to_vec()), ("rdata", ram_data[8 * byte..8 * byte + 8].to_vec())]);
     }
 
-    b.group("Controlador de carga");
+    b.group("Load controller");
     b.inst("loader", &load, &[("reset", vec![reset]), ("reg_write", vec![loader_reg_write]), ("reg_index", dmem_addr[2..6].to_vec()), ("reg_data", dmem_wdata.clone()), ("image_resp_valid", vec![image_resp_valid]), ("image_resp_data", image_resp_data), ("image_req_valid", vec![image_req_valid]), ("image_req_addr", image_req_addr), ("write_valid", vec![load_valid]), ("write_target", load_target.clone()), ("write_unit", load_unit), ("write_addr", load_addr.clone()), ("write_data", load_data.clone()), ("busy", vec![loader_busy]), ("cpu_hold", vec![booting]), ("crc", loader_crc)]);
 
-    b.group("Puerto de host");
+    b.group("Host port");
     let rx_head_valid = b.wire("rx_head_valid", 1);
     b.inst("rx_queue", &queue, &[("reset", vec![reset]), ("push", vec![host_rx_valid]), ("data_in", host_rx_data), ("pop", vec![rx_pop]), ("data_out", rx_out), ("not_empty", vec![rx_not_empty]), ("not_full", vec![rx_not_full]), ("valid", rx_head_valid)]);
     b.inst("tx_queue", &queue, &[("reset", vec![reset]), ("push", vec![tx_push]), ("data_in", dmem_wdata[..8].to_vec()), ("pop", vec![tx_taken]), ("data_out", tx_out), ("not_empty", tx_not_empty), ("not_full", vec![tx_not_full]), ("valid", vec![tx_valid])]);
@@ -607,7 +607,7 @@ impl FirmwareImage {
     /// Reads the loadable segments of a 32-bit little-endian ELF file.
     pub fn from_elf(elf: &[u8]) -> Result<Self, String> {
         if elf.len() < 52 || elf[..4] != [0x7F, b'E', b'L', b'F'] || elf[4] != 1 || elf[5] != 1 {
-            return Err("no es un ELF de 32 bits".into());
+            return Err("not a 32-bit ELF".into());
         }
         let half = |at: usize| u16::from_le_bytes([elf[at], elf[at + 1]]) as usize;
         let word = |at: usize| u32::from_le_bytes([elf[at], elf[at + 1], elf[at + 2], elf[at + 3]]) as usize;
@@ -698,7 +698,7 @@ impl<P: Peripheral> SocBus<P> {
     /// The state right after the load controller has copied the firmware from `image`.
     pub fn booted_with(config: SocConfig, image: &[u32], input: &[u8], peripheral: P) -> Result<Self, String> {
         if image.len() < crate::image::HEADER_WORDS || image[0] != crate::image::MAGIC {
-            return Err("la imagen no empieza por la cabecera del chip".into());
+            return Err("the image does not start with the chip's header".into());
         }
         let (program_words, data_words) = (image[1] as usize, image[2] as usize);
         let program_start = crate::image::HEADER_WORDS;

@@ -263,7 +263,7 @@ fn levelize(gates: Vec<Gate>, signals: usize, names: &[String]) -> Result<Vec<Ga
     let mut driver = vec![usize::MAX; signals];
     for (i, g) in gates.iter().enumerate() {
         if driver[g.y] != usize::MAX {
-            return Err(SimError(format!("la señal {} tiene dos fuentes", g.y)));
+            return Err(SimError(format!("signal {} has two drivers", g.y)));
         }
         driver[g.y] = i;
     }
@@ -308,7 +308,7 @@ fn levelize(gates: Vec<Gate>, signals: usize, names: &[String]) -> Result<Vec<Ga
             walk.push(next);
         };
         let through: Vec<String> = cycle.iter().take(12).map(|i| names.get(gates[*i].y).cloned().unwrap_or_else(|| format!("#{}", gates[*i].y))).collect();
-        return Err(SimError(format!("el circuito tiene un bucle combinacional: {}", through.join(" ← "))));
+        return Err(SimError(format!("the circuit has a combinational loop: {}", through.join(" ← "))));
     }
     Ok(order)
 }
@@ -398,21 +398,21 @@ impl Simulator {
 
     /// Writes directly into a memory, as a testbench preloads one.
     pub fn poke_memory(&mut self, path: &str, address: usize, value: u128) -> Result<(), SimError> {
-        let memory = self.memories.iter_mut().find(|m| m.path == path).ok_or_else(|| SimError(format!("memoria desconocida: {path}")))?;
-        let slot = memory.cells.get_mut(address).ok_or_else(|| SimError(format!("dirección fuera de {path}: {address}")))?;
+        let memory = self.memories.iter_mut().find(|m| m.path == path).ok_or_else(|| SimError(format!("unknown memory: {path}")))?;
+        let slot = memory.cells.get_mut(address).ok_or_else(|| SimError(format!("address outside {path}: {address}")))?;
         *slot = value;
         Ok(())
     }
 
     /// Inverts one stored bit, as a particle strike would.
     pub fn flip_memory_bit(&mut self, path: &str, address: usize, bit: u32) -> Result<(), SimError> {
-        let value = self.peek_memory(path, address).ok_or_else(|| SimError(format!("dirección fuera de {path}: {address}")))?;
+        let value = self.peek_memory(path, address).ok_or_else(|| SimError(format!("address outside {path}: {address}")))?;
         self.poke_memory(path, address, value ^ (1 << bit))
     }
 
     /// Makes one bit defective: from now on it reads as `value`, whatever is written.
     pub fn stick_memory_bit(&mut self, path: &str, address: usize, bit: u32, value: bool) -> Result<(), SimError> {
-        let memory = self.memories.iter_mut().find(|m| m.path == path).ok_or_else(|| SimError(format!("memoria desconocida: {path}")))?;
+        let memory = self.memories.iter_mut().find(|m| m.path == path).ok_or_else(|| SimError(format!("unknown memory: {path}")))?;
         memory.stuck.push((address, bit, value));
         Ok(())
     }
@@ -596,7 +596,7 @@ impl Simulator {
                 _ => &[g.a, g.b],
             };
             let delay = match g.op { Op::And => delays[0], Op::Or => delays[1], Op::Xor => delays[2], Op::Not => delays[3], Op::Mux => delays[4] };
-            let latest = *inputs.iter().max_by(|x, y| arrival[**x].total_cmp(&arrival[**y])).expect("puerta sin entradas");
+            let latest = *inputs.iter().max_by(|x, y| arrival[**x].total_cmp(&arrival[**y])).expect("gate without inputs");
             arrival[g.y] = arrival[latest] + delay;
             from[g.y] = latest;
             if arrival[g.y] > worst && ends(self.names.get(g.y).map_or("", String::as_str)) {

@@ -150,7 +150,7 @@ fn gate_trace(program: &[u32], data: &[u32], limit: u64) -> (Vec<Retired>, Vec<u
         instruction = bus.fetch(pc);
         sim.tick();
     }
-    panic!("la CPU no se detuvo en {limit} ciclos");
+    panic!("the CPU did not stop within {limit} cycles");
 }
 
 #[test]

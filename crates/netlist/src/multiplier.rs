@@ -34,7 +34,7 @@ impl Gen {
         if self.modules.contains_key("half_adder") {
             return "half_adder".into();
         }
-        let mut b = Builder::new("half_adder", "Semisumador", "Suma dos bits y produce el bit de suma y el de acarreo.");
+        let mut b = Builder::new("half_adder", "Semisumador", "Adds two bits and gives the sum bit and the carry bit.");
         let a = b.input("a", 1)[0];
         let x = b.input("b", 1)[0];
         let sum = b.output("sum", 1)[0];
@@ -51,12 +51,12 @@ impl Gen {
         if self.modules.contains_key(&name) {
             return name;
         }
-        let mut b = Builder::new(&name, &format!("Sumador rápido de {width} bits"), "Calcula los acarreos en paralelo con una red Kogge-Stone.");
+        let mut b = Builder::new(&name, &format!("{width}-bit fast adder"), "Computes the carries in parallel with a Kogge-Stone network.");
         let a = b.input("a", width);
         let x = b.input("b", width);
         let sum = b.output("sum", width);
         let w = width as usize;
-        b.group("Generar y propagar");
+        b.group("Generate and propagate");
         let mut generate = b.wire("g0", width);
         let mut propagate = b.wire("p0", width);
         for i in 0..w {
@@ -129,7 +129,7 @@ impl Gen {
         while position < m {
             let name = position / 2;
             let (high, mid, low) = (digit_bit(position as isize + 1), digit_bit(position as isize), digit_bit(position as isize - 1));
-            b.group(&format!("Dígito Booth {name}"));
+            b.group(&format!("Booth digit {name}"));
             let one = b.wire(&format!("one{name}"), 1)[0];
             b.xor_to(mid, low, one);
             let (not_high, not_mid, not_low) = (b.wire(&format!("nh{name}"), 1)[0], b.wire(&format!("nm{name}"), 1)[0], b.wire(&format!("nl{name}"), 1)[0]);
@@ -184,7 +184,7 @@ impl Gen {
         let finish = self.prefix_adder(width);
 
         let title = if kind == MultiplierKind::Booth { format!("Multiplicador Booth {weight_bits} × {x_bits}") } else { format!("Multiplicador Wallace {weight_bits} × {x_bits}") };
-        let what = "Genera los productos parciales, los reduce con sumadores sin propagación y acaba con un sumador rápido.";
+        let what = "Generates the partial products, reduces them with carry-save adders and finishes with a fast adder.";
         let mut b = Builder::new(&name, &title, what);
         let weight = b.input("weight", weight_bits);
         let x = b.input("x", x_bits);
@@ -218,7 +218,7 @@ impl Gen {
         }
         while columns.iter().any(|c| c.len() > 2) {
             level += 1;
-            b.group(&format!("Reducción {level}"));
+            b.group(&format!("Reduction {level}"));
             let mut next: Vec<Vec<Bit>> = vec![Vec::new(); width as usize];
             for (i, column) in columns.iter().enumerate() {
                 let (triples, rest) = column.as_chunks::<3>();
@@ -245,7 +245,7 @@ impl Gen {
             }
             columns = next;
             for _ in cuts.iter().filter(|cut| **cut == level) {
-                b.group(&format!("Etapa tras reducción {level}"));
+                b.group(&format!("Stage after reduction {level}"));
                 register(&mut b, &mut columns, &mut unique);
             }
         }

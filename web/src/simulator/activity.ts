@@ -36,11 +36,11 @@ export type GroupId = "host" | "text" | "die" | "sampler" | "control" | "wait";
 /** The CPU's tasks in a few groups, in a fixed order with fixed colours. Waiting is grey:
  * it is the CPU idle while the die or the sampling unit works. */
 export const GROUPS: { id: GroupId; label: string; tasks: CpuTask[]; color: string }[] = [
-  { id: "host", label: "Comunicación con el host", tasks: ["receive", "send"], color: "var(--cat-interconexion)" },
-  { id: "text", label: "Texto y tokens", tasks: ["tokenize", "detokenize"], color: "var(--cat-calculo)" },
-  { id: "die", label: "Órdenes al die", tasks: ["order", "load"], color: "var(--cat-memoria)" },
-  { id: "sampler", label: "Muestreo", tasks: ["sample"], color: "var(--cat-vectorial)" },
-  { id: "control", label: "Arranque y control", tasks: ["start", "control"], color: "var(--cat-estado)" },
+  { id: "host", label: "Comunicación con el host", tasks: ["receive", "send"], color: "var(--cat-interconnect)" },
+  { id: "text", label: "Texto y tokens", tasks: ["tokenize", "detokenize"], color: "var(--cat-compute)" },
+  { id: "die", label: "Órdenes al die", tasks: ["order", "load"], color: "var(--cat-memory)" },
+  { id: "sampler", label: "Muestreo", tasks: ["sample"], color: "var(--cat-vector)" },
+  { id: "control", label: "Arranque y control", tasks: ["start", "control"], color: "var(--cat-state)" },
   { id: "wait", label: "Esperando al die o al muestreo", tasks: ["wait_die", "wait_sampler"], color: "var(--neutral-fill)" },
 ];
 

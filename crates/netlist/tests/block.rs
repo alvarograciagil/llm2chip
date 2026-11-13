@@ -61,7 +61,7 @@ fn run_gates(c: DieConfig, asm: &Assembly) -> Simulator {
     while sim.get("halted").unwrap() == 0 {
         sim.tick();
         cycles += 1;
-        assert!(cycles < 2_000_000, "el secuenciador no se detiene");
+        assert!(cycles < 2_000_000, "the sequencer does not stop");
     }
     sim
 }
@@ -75,10 +75,10 @@ fn gate_value(sim: &mut Simulator, c: DieConfig, reg: u32, index: u32) -> i64 {
 /// Gates and behavioural model must agree on every result mantissa and exponent.
 fn assert_same(sim: &mut Simulator, model: &Behavior, c: DieConfig, reg: u32, len: u32) {
     for i in 0..len {
-        assert_eq!(gate_value(sim, c, reg, i), model.mantissa((reg, i)), "registro {reg}, posición {i}");
+        assert_eq!(gate_value(sim, c, reg, i), model.mantissa((reg, i)), "register {reg}, position {i}");
     }
     let exponents = exponent_register(&c);
-    assert_eq!(gate_value(sim, c, exponents, reg), model.mantissa((exponents, reg)), "exponente de {reg}");
+    assert_eq!(gate_value(sim, c, exponents, reg), model.mantissa((exponents, reg)), "exponent of {reg}");
 }
 
 fn close(a: f64, b: f64, tolerance: f64, what: &str) {
@@ -103,7 +103,7 @@ fn block_multiply_and_add_track_real_numbers() {
     assert_same(&mut sim, &model, c, 3, 4);
     for i in 0..4 {
         close(model.value(2, i as u32), a[i] * b[i], 0.002, "producto");
-        close(model.value(3, i as u32), a[i] + b[i], 0.002, "suma");
+        close(model.value(3, i as u32), a[i] + b[i], 0.002, "sum");
     }
 }
 
@@ -168,7 +168,7 @@ fn softmax_attention_matches_floating_point() {
     }
     for j in 0..width {
         let expected: f64 = (0..tokens).map(|t| p[t] * v[t * width + j]).sum();
-        close(model.value(4, j as u32), expected, 0.10, "atención");
+        close(model.value(4, j as u32), expected, 0.10, "attention");
     }
 }
 
@@ -208,10 +208,10 @@ fn delta_rule_matches_floating_point() {
     }
     let out: Vec<f64> = (0..value).map(|j| (0..key).map(|i| s[i * value + j] * q[i]).sum()).collect();
     for (i, expected) in s.iter().enumerate() {
-        close(model.value(0, i as u32), *expected, 0.01, "estado");
+        close(model.value(0, i as u32), *expected, 0.01, "state");
     }
     for (j, expected) in out.iter().enumerate() {
-        close(model.value(11, j as u32), *expected, 0.01, "salida");
+        close(model.value(11, j as u32), *expected, 0.01, "output");
     }
 }
 
@@ -268,7 +268,7 @@ fn every_single_operation_matches_the_model() {
             wrong.push((d, gate, expected));
         }
     }
-    assert!(wrong.is_empty(), "posición, puertas, modelo: {wrong:?}");
+    assert!(wrong.is_empty(), "position, gates, model: {wrong:?}");
 }
 
 fn execute_demo(c: DieConfig, steps: &[TestStep]) -> Simulator {
@@ -299,7 +299,7 @@ fn app_demos_match_model_and_floating_point() {
         for i in 0..demo.output_len {
             let (mantissa, value) = read_block_value(&mut sim, c, demo.output_reg, i);
             assert_eq!(mantissa, model.mantissa((demo.output_reg, i)));
-            close(value, demo.expected[i as usize], demo.tolerance, "demostración");
+            close(value, demo.expected[i as usize], demo.tolerance, "demonstration");
         }
     }
 }
@@ -368,7 +368,7 @@ fn a_negative_immediate_keeps_its_sign_on_a_die_with_wider_jump_targets() {
     while sim.get("halted").unwrap() == 0 {
         sim.tick();
         cycles += 1;
-        assert!(cycles < 1000, "el secuenciador no se detiene");
+        assert!(cycles < 1000, "the sequencer does not stop");
     }
     assert_eq!(gate_value(&mut sim, wide, exponent_register(&wide), 1), -15);
 }

@@ -38,7 +38,7 @@ fn run_gates(sim: &mut Simulator, config: SamplerConfig, logits: &[i64], inverse
             if ready {
                 break;
             }
-            assert!(stream_cycles < 100_000, "el filtro no termina");
+            assert!(stream_cycles < 100_000, "the filter does not finish");
         }
     }
     sim.set("logit_valid", 0).unwrap();
@@ -48,7 +48,7 @@ fn run_gates(sim: &mut Simulator, config: SamplerConfig, logits: &[i64], inverse
     while sim.get("done").unwrap() == 0 {
         sim.tick();
         finish_cycles += 1;
-        assert!(finish_cycles < 10_000, "la unidad no termina");
+        assert!(finish_cycles < 10_000, "the unit does not finish");
     }
     Sampled { token: sim.get("token").unwrap() as u32, stream_cycles, finish_cycles }
 }

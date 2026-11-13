@@ -149,21 +149,21 @@ pub fn rom_words(e: &Example) -> Vec<(String, usize, u128)> {
 pub fn load(sim: &mut Simulator, config: DieConfig, example: &Example) {
     if config.cell.fixed_weights {
         for (path, address, value) in rom_words(example) {
-            sim.poke_memory(&path, address, value).expect("memoria del die");
+            sim.poke_memory(&path, address, value).expect("die memory");
         }
     }
     for step in host_steps(config, example) {
         for (name, value) in &step.inputs {
-            sim.set_wide(name, *value).expect("puerto del die");
+            sim.set_wide(name, *value).expect("die port");
         }
         sim.tick();
     }
 }
 
 pub fn read_register(sim: &mut Simulator, config: DieConfig, register: u64, index: u64) -> i64 {
-    sim.set("vec_addr", (register << config.index_bits) | index).expect("puerto del die");
+    sim.set("vec_addr", (register << config.index_bits) | index).expect("die port");
     sim.tick();
-    let value = sim.get("vec_out").expect("puerto del die");
+    let value = sim.get("vec_out").expect("die port");
     let unused = 64 - config.cell.activation_bits;
     ((value << unused) as i64) >> unused
 }

@@ -70,7 +70,7 @@ export const ENGINE_TEXT: [string, string][] = [
   ["Cambia la memoria de pesos a SRAM o desactiva la optimización.", "Change the weight memory to SRAM or turn the optimization off."],
   ["«{s}» y «{s}» son incompatibles.", "“{0}” and “{1}” are incompatible."],
   ["Elige una de las dos.", "Choose one of the two."],
-  ["«sin_multiplicadores» solo rinde lo anunciado con pesos de 4 bits o menos.", "“sin_multiplicadores” only delivers what it promises with weights of 4 bits or fewer."],
+  ["«multiplier_free» solo rinde lo anunciado con pesos de 4 bits o menos.", "“multiplier_free” only delivers what it promises with weights of 4 bits or fewer."],
   ["Baja los bits de peso y desactiva la mezcla de 8 bits.", "Lower the weight bits and turn off the 8-bit mix."],
   ["Este formato de pesos necesita un acumulador de {n} bits; se usa ese ancho en lugar de {n}.", "This weight format needs a {0}-bit accumulator; that width is used instead of {1}."],
   ["Sube los bits de acumulador o usa un formato más estrecho.", "Raise the accumulator bits or use a narrower format."],

@@ -124,7 +124,7 @@ pub fn schedule_design(name: &str, config: &str, params: &str) -> Result<String,
     let model = ModelGraph::from_config_json(name, config).map_err(|e| JsError::new(&e.0))?;
     let p: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&e.to_string()))?;
     let report = estimate(&model, &p).map_err(|e| JsError::new(&e))?;
-    let factor = if p.has("aritmetica_distribuida") { 4.0 } else { 1.0 };
+    let factor = if p.has("distributed_arithmetic") { 4.0 } else { 1.0 };
     let ghz = report.metric("freq_ghz").unwrap_or(1.0);
     to_js(&compiler::schedule(&model, &report.resolved, &report.floorplan, ghz, factor))
 }

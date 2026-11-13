@@ -79,7 +79,7 @@ fn check(c: CellConfig, codes: &[u64], base: u64, rng: &mut Rng) {
     for _ in 0..c.latency() {
         sim.tick();
     }
-    assert_eq!(sim.get_wide("total").unwrap(), expected as u128, "{c:?} códigos {codes:?}");
+    assert_eq!(sim.get_wide("total").unwrap(), expected as u128, "{c:?} codes {codes:?}");
 }
 
 fn codes(rng: &mut Rng, bits: u32) -> Vec<u64> {
@@ -141,7 +141,7 @@ fn known_posits_decode_to_their_published_values() {
     assert_eq!(c.decode_code(0b0110_0000), (32, 8));
     assert_eq!(c.decode_code(0b1100_0000), (-32, 7));
     assert_eq!(c.decode_code(0).0, 0);
-    assert_eq!(c.decode_code(0x80).0, 0, "NaR se trata como cero");
+    assert_eq!(c.decode_code(0x80).0, 0, "NaR is treated as zero");
 }
 
 #[test]
@@ -208,13 +208,13 @@ fn the_hardware_grows_with_the_format() {
     assert!(q4 < q8 && q8 < q16, "{q4} {q8} {q16}");
     assert!(f32 > f16, "{f16} {f32}");
     let design = cell_design(config(WeightCoding::Float, 16, 5, 1));
-    assert!(design.modules["compute_cell"].instances.iter().any(|i| i.name == "signed_float_adder"), "la celda incluye el decodificador");
+    assert!(design.modules["compute_cell"].instances.iter().any(|i| i.name == "signed_float_adder"), "the cell includes the decoder");
 }
 
 #[test]
 fn exported_float_cell_matches_the_simulator() {
     if Command::new("iverilog").arg("-V").output().is_err() {
-        eprintln!("iverilog no está instalado: se omite");
+        eprintln!("iverilog is not installed: skipped");
         return;
     }
     let c = config(WeightCoding::Float, 16, 5, 2);
@@ -317,12 +317,12 @@ fn exported_project_simulates_and_synthesises() {
     for _ in 0..c.latency() {
         steps.push(TestStep { inputs: vec![("run".into(), 0)] });
     }
-    let options = ProjectOptions { name: "Celda", description: "Prueba", clock_ns: 1.0, watch: "total", report: "{}".into(), rom: Vec::new() };
+    let options = ProjectOptions { name: "Cell", description: "Prueba", clock_ns: 1.0, watch: "total", report: "{}".into(), rom: Vec::new() };
     let files = project_files(&design, &steps, &options);
     assert!(files.contains_key("rtl/compute_cell.vhd") && files.contains_key("synth/vivado.tcl") && files.contains_key("Makefile"));
 
     if Command::new("iverilog").arg("-V").output().is_err() || Command::new("yosys").arg("-V").output().is_err() {
-        eprintln!("faltan iverilog o yosys: se omite");
+        eprintln!("iverilog or yosys is missing: skipped");
         return;
     }
     let dir = std::env::temp_dir().join(format!("llm2chip-project-{}", std::process::id()));
@@ -383,9 +383,9 @@ fn precomputed_multiples_and_skipped_zeros_match_a_real_multiplier() {
             let activations: Vec<u64> = (0..16).map(|_| next() >> 48).collect();
             let expected = run_weights(base, &codes, &activations);
             let multiples = CellConfig { multiplier: MultiplierKind::Multiples, ..base };
-            assert_eq!(run_weights(multiples, &codes, &activations), expected, "múltiplos, {bits} bits");
+            assert_eq!(run_weights(multiples, &codes, &activations), expected, "multiples, {bits} bits");
             let skipping = CellConfig { skip_zeros: true, ..base };
-            assert_eq!(run_weights(skipping, &codes, &activations), expected, "salto de ceros, {bits} bits");
+            assert_eq!(run_weights(skipping, &codes, &activations), expected, "zero skipping, {bits} bits");
         }
     }
 }

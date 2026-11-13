@@ -62,8 +62,8 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
     let function_address = crate::die::function_address_bits(&c.die) as usize;
     let limit_bits = (c.sampler.entries as usize + 1).next_power_of_two().trailing_zeros() as usize;
 
-    assert_eq!(c.sampler.lanes, 1, "el die reducido solo entrega un logit por ciclo");
-    let mut b = Builder::new("llm2chip_top", "Chip completo", "CPU de control, memorias, controlador de carga, die de inferencia y unidad de muestreo, con el puerto de host y el de imagen como únicos contactos con el exterior.");
+    assert_eq!(c.sampler.lanes, 1, "the reduced die delivers only one logit per cycle");
+    let mut b = Builder::new("llm2chip_top", "Chip completo", "Control CPU, memories, load controller, inference die and sampling unit, with the host and image ports as the only contacts with the outside.");
     let reset = b.input("reset", 1)[0];
     let cpu_hold = b.input("cpu_hold", 1)[0];
     let host_rx_valid = b.input("host_rx_valid", 1);
@@ -132,7 +132,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
     let (bist_done, bist_fail) = (b.wire("bist_done", 1)[0], b.wire("bist_fail", 1)[0]);
     let (tap_select, tap_override, tap_test) = (b.wire("tap_select", 3), b.wire("tap_override", 1)[0], b.wire("tap_test", 1)[0]);
     let debug_bus = b.wire("debug_bus", 32);
-    b.group("Puerto de pruebas");
+    b.group("Test port");
     if alone {
         for bit in tap_select.iter().chain(&[tap_override, tap_test, bist_done, bist_fail]).chain(&jtag_tdo) {
             b.or_to(Bit::Zero, Bit::Zero, *bit);
@@ -157,7 +157,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
     let bus_rdata = b.wire("bus_rdata", 32);
     let internal_reset = b.wire("internal_reset", 1)[0];
     let cpu_pc = b.wire("cpu_pc", 32);
-    b.group("Sistema de control");
+    b.group("Control system");
     b.inst("control", &control, &[
         ("reset", vec![internal_reset]),
         ("debug_pc", cpu_pc.clone()),
@@ -229,7 +229,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         let in_reset = l.or(external_reset, holding);
         l.b.or_to(in_reset, Bit::Zero, internal_reset);
 
-        l.b.group("Registros del die");
+        l.b.group("Die registers");
         let hit = |l: &mut Logic, register: u32| -> Bit {
             let selected = l.equals(&bus_address, register);
             l.and(selected, bus_write)
@@ -277,7 +277,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         let seed_write = hit(&mut l, REG_SAMPLE_SEED);
         let sample_start = hit(&mut l, REG_SAMPLE_START);
 
-        l.b.group("Lectura de logits");
+        l.b.group("Logit reading");
         // The logits go from the vector memory to the sampling unit without the CPU.
         let streaming = l.fresh();
         let count_bits = sample_count.len();
@@ -309,7 +309,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         let wide_index: Vec<Bit> = stream_index.iter().copied().chain(std::iter::repeat_n(Bit::Zero, vector_bits - count_bits.min(vector_bits))).take(vector_bits).collect();
         let stream_address = l.adder(&sample_base, &wide_index, Bit::Zero).0;
 
-        l.b.group("Carga en el die");
+        l.b.group("Loading into the die");
         let load_to = |l: &mut Logic, target: crate::image::Target| -> Bit {
             let selected = l.equals(&load_target, target as u32);
             l.and(selected, load_valid)
@@ -402,7 +402,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
             ("table_data", load_data[..16].to_vec()),
         ]);
 
-        l.b.group("Contadores y depuración");
+        l.b.group("Counters and debug");
         let not_halted = l.not(die_halted[0]);
         // Neither the cycle of the order nor the one it reaches the die in is the die's work.
         let idle_flag = l.any(&[parked, entry_write, start]);
@@ -446,7 +446,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
             l.b.or_to(*from, Bit::Zero, *bus);
         }
 
-        l.b.group("Cadena de control");
+        l.b.group("Control chain");
         let send_word = hit(&mut l, REG_CHAIN_DATA);
         l.b.or_to(send_word, Bit::Zero, chain_send);
         let chain_read = {
@@ -459,7 +459,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         let next_chain = l.mux_bus(chain_read, &chain_held, &chain_word);
         l.connect_flops(&next_chain, &chain_held);
 
-        l.b.group("Lectura de registros");
+        l.b.group("Register read");
         let selected = l.fresh_bus(PERIPHERAL_BITS as usize);
         let held = l.mux_bus(bus_read, &selected, &bus_address);
         l.connect_flops(&held, &selected);
@@ -480,7 +480,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
             l.b.or_to(*from, Bit::Zero, *to);
         }
     }
-    b.group("Cadena de control");
+    b.group("Control chain");
     if alone {
         // Nothing ever arrives and nothing can leave, so the firmware finds itself alone.
         let held: Vec<Bit> = chain_can_send.iter().chain(&chain_has_data).chain(&chain_word).chain(&[chain_corrected, chain_failed]).chain(&chain_tx_valid).chain(&chain_tx_bits).chain(&chain_rx_ready).chain(&chain_rx_ack).copied().collect();
@@ -510,10 +510,10 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         ("failed", vec![chain_failed]),
         ]);
     }
-    b.group("Die de inferencia");
+    b.group("Inference die");
     die_pins.extend(extra_link.iter().map(|(name, bits)| (name.as_str(), bits.clone())));
     b.inst("die", &die, &die_pins);
-    b.group("Unidad de muestreo");
+    b.group("Sampling unit");
     b.inst("sampler", &sample, &sampler_pins);
     gen.add(b.finish())
 }
@@ -793,7 +793,7 @@ pub fn chip_info(c: &DieConfig, code: &Microprogram, logits_register: u32, vocab
     // A model without reasoning tokens never opens it: no token is u32::MAX.
     let (open, close) = setup.think.unwrap_or((u32::MAX, u32::MAX));
     (info[INFO_THINK_OPEN], info[INFO_THINK_CLOSE], info[INFO_THINK_BUDGET]) = (open, close, setup.think_budget);
-    assert!(code.parameters.len() <= INFO_PARAMETER_SLOTS, "demasiados parámetros");
+    assert!(code.parameters.len() <= INFO_PARAMETER_SLOTS, "too many parameters");
     info[INFO_PARAMETER_COUNT] = code.parameters.len() as u32;
     for p in &code.parameters {
         info.extend([p.register, p.token, p.position, p.constant, p.window_length, p.window_slot, p.window]);
@@ -804,7 +804,7 @@ pub fn chip_info(c: &DieConfig, code: &Microprogram, logits_register: u32, vocab
     info[INFO_DRAFT_LOGITS] = setup.draft_logits;
     info[INFO_ENTRIES] = info.len() as u32;
     if c.features.dictionary_bits > 0 {
-        assert!(c.microcode_bits <= crate::die::ENTRY_INDEX_SHIFT, "con diccionario, el microcódigo no puede pasar de 2^16 palabras");
+        assert!(c.microcode_bits <= crate::die::ENTRY_INDEX_SHIFT, "with a dictionary, the microcode cannot go past 2^16 words");
         let (_, index) = crate::die::code_dictionary(code, c);
         info.extend(code.entries.iter().map(|pc| pc | index.get(*pc as usize).copied().unwrap_or(0) << crate::die::ENTRY_INDEX_SHIFT));
     } else {

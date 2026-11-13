@@ -37,7 +37,7 @@ const compact = (n: number) => (n >= 1e9 ? `${formatNumber(n / 1e9)} G` : n >= 1
 function dims(inst: ProgramInst, program: Program) {
   const inputs = reads(inst.op).map((b) => program.buffers[b]);
   const outputs = writes(inst.op).map((b) => program.buffers[b]);
-  return `${inputs.join(" + ") || "token"} → ${outputs.join(" + ") || "memoria"}`;
+  return `${inputs.join(" + ") || "token"} → ${outputs.join(" + ") || "memory"}`;
 }
 
 function Step({ title, text, tag, onClick, unit }: { title: string; text: string; tag?: string; onClick?: () => void; unit?: string }) {

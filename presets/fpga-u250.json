@@ -1,8 +1,8 @@
 {
  "id": "fpga-u250",
- "name": "Qwen3.8-27B en FPGA U250",
+ "name": "Qwen3.8-27B on an FPGA U250",
  "model": "qwen3.8-27b",
- "description": "El modelo completo en una FPGA con DDR4: lento, pero construible.",
+ "description": "The whole model on an FPGA with DDR4: slow, but buildable.",
  "params": {
   "node": "fpga_u250",
   "max_params_g": 28,

@@ -45,7 +45,7 @@ fn with_the_chain_idle_the_design_works_as_before() {
         a.tick();
         b.tick();
         for (name, _) in ports(&plain, Dir::Output) {
-            assert_eq!(a.get_words(&name), b.get_words(&name), "{name} en el ciclo {cycle}");
+            assert_eq!(a.get_words(&name), b.get_words(&name), "{name} at cycle {cycle}");
         }
     }
 }
@@ -66,7 +66,7 @@ fn the_chain_shifts_a_pattern_from_scan_in_to_scan_out() {
         sim.tick();
     }
     for i in 0..40 {
-        assert_eq!(out[length + i], bit(i), "el bit {i} sale {length} ciclos después");
+        assert_eq!(out[length + i], bit(i), "bit {i} comes out {length} cycles later");
     }
 }
 
@@ -94,7 +94,7 @@ fn the_chain_test_finds_the_faults_of_the_shift_path() {
     // Those at a signal's source can be injected; those at a multiplexer's input are the
     // chain's by construction: they stop that flip-flop shifting.
     let stems: Vec<_> = faults.iter().filter(|f| matches!(f.site, Site::Stem(_))).collect();
-    assert!(stems.len() >= 4, "{} fallos de origen en la cadena", stems.len());
+    assert!(stems.len() >= 4, "{} stem faults in the chain", stems.len());
     for fault in stems {
         let Site::Stem(signal) = fault.site else { unreachable!() };
         let mut sim = Simulator::new(&scanned.design).unwrap();
@@ -115,7 +115,7 @@ fn the_event_driven_fault_simulation_agrees_with_simulating_each_faulty_circuit(
         let fast = atpg::faults_found_by_fault_simulation(&scanned.design, &pattern).unwrap();
         assert_eq!(full.len(), fast.len());
         let found = full.iter().filter(|(_, d)| *d).count();
-        assert!(found > 100, "un patrón al azar encuentra {found} de {}", full.len());
+        assert!(found > 100, "a random pattern finds {found} of {}", full.len());
         for ((fault, a), (_, b)) in full.iter().zip(&fast) {
             assert_eq!(a, b, "{fault:?}");
         }
@@ -162,7 +162,7 @@ fn the_patterns_pass_on_the_gate_simulator_and_fail_with_a_fault_they_find() {
     let scanned = insert_scan(small_cell());
     let report = atpg::generate(&scanned.design, 200).unwrap();
     eprintln!(
-        "celda: {} biestables en la cadena, {} fallos, {} detectados, {} por la cadena, {} imposibles, {} abandonados, {} + {} patrones, cobertura {:.2} % ({:.2} % de los posibles)",
+        "cell: {} flip-flops in the chain, {} faults, {} detected, {} by the chain, {} undetectable, {} aborted, {} + {} patterns, coverage {:.2} % ({:.2} % of the possible ones)",
         report.chain_length, report.faults, report.detected, report.chain, report.untestable, report.aborted, report.random_patterns, report.deterministic_patterns,
         report.fault_coverage() * 100.0, report.test_coverage() * 100.0
     );
@@ -174,7 +174,7 @@ fn the_patterns_pass_on_the_gate_simulator_and_fail_with_a_fault_they_find() {
 
     let mut sim = Simulator::new(&scanned.design).unwrap();
     for (i, p) in report.patterns.iter().enumerate() {
-        assert!(replay(&mut sim, p), "el patrón {i} no da lo previsto en el circuito sin fallos");
+        assert!(replay(&mut sim, p), "pattern {i} does not give what was predicted on the fault-free circuit");
     }
     // Faults at a signal's source, a sample of those found and of those no pattern can find.
     let stems: Vec<_> = report.outcomes.iter().filter(|(f, _)| matches!(f.site, Site::Stem(_))).collect();
@@ -186,11 +186,11 @@ fn the_patterns_pass_on_the_gate_simulator_and_fail_with_a_fault_they_find() {
         let caught = !report.patterns.iter().all(|p| replay(&mut faulty, p));
         match outcome {
             Outcome::Detected => {
-                assert!(caught, "{fault:?} debía detectarse");
+                assert!(caught, "{fault:?} should have been detected");
                 checked[0] += 1;
             }
             Outcome::Untestable => {
-                assert!(!caught, "{fault:?} era imposible de detectar");
+                assert!(!caught, "{fault:?} was undetectable");
                 checked[1] += 1;
             }
             Outcome::Aborted => {}
@@ -204,7 +204,7 @@ fn the_scanned_verilog_runs_the_patterns_as_the_gate_simulator() {
     use netlist::{to_verilog, verilog_testbench, TestStep};
     use std::process::Command;
     if Command::new("iverilog").arg("-V").output().is_err() {
-        eprintln!("iverilog no está instalado: se omite");
+        eprintln!("iverilog is not installed: skipped");
         return;
     }
     let scanned = insert_scan(small_cell());
@@ -275,7 +275,7 @@ fn with_the_parallel_chains_idle_the_die_works_as_before() {
         a.tick();
         b.tick();
         for (name, _) in ports(&plain, Dir::Output) {
-            assert_eq!(a.get_words(&name), b.get_words(&name), "{name} en el ciclo {cycle}");
+            assert_eq!(a.get_words(&name), b.get_words(&name), "{name} at cycle {cycle}");
         }
     }
 }
@@ -315,14 +315,14 @@ fn a_cell_s_patterns_test_every_cell_of_the_die_at_once() {
     let report = atpg::generate(&parallel.slice, 200).unwrap();
     assert_eq!(report.chain_length, parallel.cell_length);
     eprintln!(
-        "die: {} biestables en la cadena principal, {} en la de cada celda ({} del envoltorio); celda: {} fallos, cobertura de prueba {:.2} %, {} patrones",
+        "die: {} flip-flops in the main chain, {} in each cell's ({} of the wrapper); cell: {} faults, test coverage {:.2} %, {} patterns",
         parallel.length, parallel.cell_length, parallel.wrapper_width, report.faults, report.test_coverage() * 100.0, report.patterns.len()
     );
     assert!(report.test_coverage() > 0.97, "{}", report.test_coverage());
     let patterns: Vec<_> = report.patterns.iter().step_by(report.patterns.len() / 12 + 1).collect();
     let mut sim = Simulator::new(&parallel.design).unwrap();
     for (i, p) in patterns.iter().enumerate() {
-        assert_eq!(replay_on_cells(&mut sim, p), (true, false), "patrón {i}");
+        assert_eq!(replay_on_cells(&mut sim, p), (true, false), "pattern {i}");
     }
     // Faults the patterns find, put in the last cell and in the first, at their source.
     let names = atpg::describe(&parallel.slice, &report.outcomes.iter().map(|(f, _)| *f).collect::<Vec<_>>()).unwrap();
@@ -330,7 +330,7 @@ fn a_cell_s_patterns_test_every_cell_of_the_die_at_once() {
         .outcomes
         .iter()
         .zip(&names)
-        .filter(|((f, o), name)| *o == atpg::Outcome::Detected && matches!(f.site, Site::Stem(_)) && name.starts_with("/celda/"))
+        .filter(|((f, o), name)| *o == atpg::Outcome::Detected && matches!(f.site, Site::Stem(_)) && name.starts_with("/cell/"))
         .filter_map(|((f, _), name)| {
             let place = name.split(' ').next()?;
             let (path, rest) = place.rsplit_once('/')?;
@@ -344,7 +344,7 @@ fn a_cell_s_patterns_test_every_cell_of_the_die_at_once() {
     for (path, net, bit, stuck) in inside.iter().step_by(inside.len() / 8) {
         for (cell, expect_out_wrong) in [("cell2", false), ("cell0", true)] {
             let mut faulty = Simulator::new(&parallel.design).unwrap();
-            let signal = faulty.signal(&path.replacen("/celda", &format!("/{cell}"), 1), net, *bit).unwrap_or_else(|| panic!("{path}/{net}[{bit}]"));
+            let signal = faulty.signal(&path.replacen("/cell", &format!("/{cell}"), 1), net, *bit).unwrap_or_else(|| panic!("{path}/{net}[{bit}]"));
             faulty.stick_signal(signal, *stuck);
             let (mut wrong, mut differed) = (false, false);
             for p in &all {
@@ -355,9 +355,9 @@ fn a_cell_s_patterns_test_every_cell_of_the_die_at_once() {
                     break;
                 }
             }
-            assert!(differed, "{cell}{path}/{net}[{bit}] a {stuck}: ninguna celda difiere");
+            assert!(differed, "{cell}{path}/{net}[{bit}] stuck at {stuck}: no cell differs");
             if expect_out_wrong {
-                assert!(wrong, "{cell}{path}/{net}[{bit}] a {stuck}: la primera celda da lo previsto");
+                assert!(wrong, "{cell}{path}/{net}[{bit}] stuck at {stuck}: the first cell gives what was predicted");
             }
         }
     }

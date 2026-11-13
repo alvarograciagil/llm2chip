@@ -82,7 +82,7 @@ fn counters_can_be_read_through_the_port() {
         sim.tick();
     }
     let second = scan(&mut sim, false, 0, 32);
-    assert!(second > first, "el contador de ciclos avanza: {first} y {second}");
+    assert!(second > first, "the cycle counter moves on: {first} and {second}");
 }
 
 fn run_self_test(sim: &mut Simulator, cycles: u64) -> (u64, u64) {
@@ -105,5 +105,5 @@ fn every_memory_passes_its_self_test_and_a_stuck_bit_is_found() {
     let mut faulty = chip();
     faulty.stick_memory_bit("/control/data_2", 5, 3, true).unwrap();
     let (done, failed) = run_self_test(&mut faulty, cycles);
-    assert_eq!((done, failed), (1, 1), "un bit pegado en la memoria de datos se detecta");
+    assert_eq!((done, failed), (1, 1), "a stuck bit in the data memory is detected");
 }

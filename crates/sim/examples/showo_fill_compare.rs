@@ -9,7 +9,7 @@
 //! For each, the colour inside the retouched square: its mean, how yellow it is
 //! (`min(R, G) − B`) and how saturated.
 //!
-//! `cargo run --release -p sim --example showo_fill_compare -- <carpeta de Show-o> <carpeta de salida> [semillas] [semillas en el chip] [pasos]`
+//! `cargo run --release -p sim --example showo_fill_compare -- <carpeta de Show-o> <carpeta de salida> [semillas] [semillas en el chip] [pasos] [texto]`
 //!
 //! Seeds go comma-separated, odd: MaskGIT's generators make every seed odd, so 2 is 3. Those of
 //! the chip take about 6 minutes each.
@@ -132,11 +132,12 @@ fn main() -> Result<(), String> {
     let float_seeds = seeds(args.get(3), &[1, 3, 5, 7, 9, 11, 13, 15]);
     let chip_seeds = seeds(args.get(4), &[]);
     let steps: usize = args.get(5).map_or(4, |s| s.parse().unwrap());
+    let prompt = args.get(6).map_or("a yellow lemon", |s| s.as_str());
 
     let model = ShowO::open(dir)?.ok_or("no es un Show-o")?;
     let config: ShowOConfig = model.config.clone();
     let tokenizer = tokenizers::Tokenizer::from_file(dir.join("phi/tokenizer.json")).map_err(|e| e.to_string())?;
-    let text = tokenizer.encode("a yellow lemon", false).map_err(|e| e.to_string())?.get_ids().to_vec();
+    let text = tokenizer.encode(prompt, false).map_err(|e| e.to_string())?.get_ids().to_vec();
     let (ids, first) = config.text_prefix(&text);
     let (plain, plain_first) = config.text_prefix(&[]);
     let side = config.side();

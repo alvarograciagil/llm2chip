@@ -61,7 +61,7 @@ fn run_gates(image: &[u32], input: &[u8], limit: u64) -> GateRun {
         }
         sim.tick();
         boot += 1;
-        assert!(boot < 1_000_000, "el arranque no termina");
+        assert!(boot < 1_000_000, "boot does not finish");
     }
     sim.set("cpu_hold", 0).unwrap();
     sim.set("host_tx_ready", 1).unwrap();
@@ -82,7 +82,7 @@ fn run_gates(image: &[u32], input: &[u8], limit: u64) -> GateRun {
         }
         sim.tick();
     }
-    panic!("el firmware no terminó en {limit} ciclos");
+    panic!("the firmware did not finish within {limit} cycles");
 }
 
 fn run_iss(image: &[u32], input: &[u8]) -> (SocBus, u64) {
@@ -90,7 +90,7 @@ fn run_iss(image: &[u32], input: &[u8]) -> (SocBus, u64) {
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
-        assert!(cpu.cycle < 5_000_000, "el firmware no termina");
+        assert!(cpu.cycle < 5_000_000, "the firmware does not finish");
     }
     (bus, cpu.cycle)
 }
@@ -108,14 +108,14 @@ fn compare(image: &[u32], expected_output: &[u8]) {
     let (bus, cycles) = run_iss(image, input);
     assert_eq!(bus.tx, expected_output, "{}", String::from_utf8_lossy(&bus.tx));
     let run = run_gates(image, input, cycles + 64);
-    assert_eq!(run.output, bus.tx, "salida de las puertas");
+    assert_eq!(run.output, bus.tx, "the gates' output");
     assert_eq!(run.writes.len(), bus.writes.len());
     for (gate, model) in run.writes.iter().zip(&bus.writes) {
         assert_eq!((gate.target, gate.unit, gate.address), (model.target, model.unit, model.address));
         assert_eq!(gate.words[..model.words.len()], model.words[..]);
     }
     assert_eq!(run.cycles, cycles, "ciclos");
-    eprintln!("{cycles} ciclos en puertas y en el simulador de instrucciones");
+    eprintln!("{cycles} cycles in gates and in the instruction-level simulator");
 }
 
 #[test]

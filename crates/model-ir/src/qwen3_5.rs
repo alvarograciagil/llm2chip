@@ -93,14 +93,14 @@ pub(crate) fn build(name: &str, config: &Value) -> Result<ModelGraph, ModelError
             Some("linear_attention") => {
                 add_delta_net(&d, layer, &mut tensors, &mut stages, &mut state)
             }
-            other => return Err(ModelError(format!("tipo de capa desconocido: {other:?}"))),
+            other => return Err(ModelError(format!("unknown layer type: {other:?}"))),
         }
         add_mlp(&d, layer, &mut tensors, &mut stages);
     }
 
     tensors.push(tensor("norm".into(), 1, d.hidden, Block::Norm, None, false));
     tensors.push(tensor("lm_head".into(), d.vocab, d.hidden, Block::Head, None, true));
-    stages.push(vector("norm final", None, Block::Norm, 3 * d.hidden, 0));
+    stages.push(vector("final norm", None, Block::Norm, 3 * d.hidden, 0));
     stages.push(matvec("lm_head", None, Block::Head, d.vocab * d.hidden));
 
     if text.get("mtp_num_hidden_layers").and_then(Value::as_u64).unwrap_or(0) > 0 {
@@ -150,12 +150,12 @@ fn add_full_attention(
     add_layer_norms(d, layer, tensors);
 
     let qkv = d.hidden * (query * 2 + 2 * kv);
-    stages.push(vector("norm de entrada", l, Block::Norm, 3 * d.hidden, 0));
+    stages.push(vector("input norm", l, Block::Norm, 3 * d.hidden, 0));
     stages.push(matvec("q/k/v_proj", l, b, qkv));
     stages.push(vector("norm q/k y RoPE", l, b, 4 * (query + kv), 0));
     // Score against every cached key, then sum every cached value.
-    stages.push(vector("atención (Q·K, softmax, suma V)", l, b, 3 * query, 2 * query));
-    stages.push(vector("puerta sigmoide", l, b, 2 * query, 0));
+    stages.push(vector("attention (Q·K, softmax, V sum)", l, b, 3 * query, 2 * query));
+    stages.push(vector("sigmoid gate", l, b, 2 * query, 0));
     stages.push(matvec("o_proj", l, b, query * d.hidden));
 
     state.kv_values_per_token += 2 * kv;
@@ -188,14 +188,14 @@ fn add_delta_net(
 
     let state_values = d.linear_value_heads * d.linear_key_dim * d.linear_value_dim;
     let input = d.hidden * (conv_dim + value_dim + 2 * d.linear_value_heads);
-    stages.push(vector("norm de entrada", l, Block::Norm, 3 * d.hidden, 0));
+    stages.push(vector("input norm", l, Block::Norm, 3 * d.hidden, 0));
     stages.push(matvec("in_proj qkv/z/a/b", l, b, input));
-    stages.push(vector("convolución causal", l, b, conv_dim * (d.conv_kernel + 1), 0));
-    stages.push(vector("β y decaimiento", l, b, 3 * d.linear_value_heads, 0));
+    stages.push(vector("causal convolution", l, b, conv_dim * (d.conv_kernel + 1), 0));
+    stages.push(vector("β and decay", l, b, 3 * d.linear_value_heads, 0));
     // decay, kv_mem, state update and output each touch the whole state once.
     let l2 = 4 * d.linear_value_heads * d.linear_key_dim;
-    stages.push(vector("regla delta", l, b, 4 * state_values + l2, 0));
-    stages.push(vector("norm con puerta", l, b, 4 * value_dim, 0));
+    stages.push(vector("delta rule", l, b, 4 * state_values + l2, 0));
+    stages.push(vector("gated norm", l, b, 4 * value_dim, 0));
     stages.push(matvec("out_proj", l, b, value_dim * d.hidden));
 
     state.delta_values += state_values;
@@ -228,13 +228,13 @@ fn add_moe(d: &Dims, m: Moe, layer: u32, tensors: &mut Vec<WeightTensor>, stages
     tensors.push(tensor(p("shared_expert.down_proj"), m.shared, d.hidden, b, l, false));
     tensors.push(tensor(p("shared_expert_gate"), d.hidden, 1, b, l, false));
 
-    stages.push(vector("residual y norm", l, Block::Norm, 4 * d.hidden, 0));
-    stages.push(matvec("enrutador de expertos", l, b, d.hidden * m.experts));
-    stages.push(vector("softmax y selección", l, b, 3 * m.experts, 0));
+    stages.push(vector("residual and norm", l, Block::Norm, 4 * d.hidden, 0));
+    stages.push(matvec("expert router", l, b, d.hidden * m.experts));
+    stages.push(vector("softmax and selection", l, b, 3 * m.experts, 0));
     // Only the chosen experts' weights are read for each token.
-    stages.push(matvec("expertos activos", l, b, m.top_k * 3 * d.hidden * m.intermediate));
+    stages.push(matvec("active experts", l, b, m.top_k * 3 * d.hidden * m.intermediate));
     stages.push(vector("SiLU(gate)·up", l, b, 2 * m.top_k * m.intermediate, 0));
-    stages.push(matvec("experto compartido", l, b, 3 * d.hidden * m.shared + d.hidden));
+    stages.push(matvec("shared expert", l, b, 3 * d.hidden * m.shared + d.hidden));
     stages.push(vector("residual", l, Block::Norm, d.hidden, 0));
 }
 
@@ -252,7 +252,7 @@ fn add_mlp(d: &Dims, layer: u32, tensors: &mut Vec<WeightTensor>, stages: &mut V
     tensors.push(tensor(p("up_proj"), d.hidden, d.intermediate, b, l, wide));
     tensors.push(tensor(p("down_proj"), d.intermediate, d.hidden, b, l, wide));
 
-    stages.push(vector("residual y norm", l, Block::Norm, 4 * d.hidden, 0));
+    stages.push(vector("residual and norm", l, Block::Norm, 4 * d.hidden, 0));
     stages.push(matvec("gate/up_proj", l, b, 2 * d.hidden * d.intermediate));
     stages.push(vector("SiLU(gate)·up", l, b, 2 * d.intermediate, 0));
     stages.push(matvec("down_proj", l, b, d.intermediate * d.hidden));
@@ -283,10 +283,10 @@ fn add_mtp_head(d: &Dims, tensors: &mut Vec<WeightTensor>, stages: &mut Vec<Stag
     let mlp = 3 * d.hidden * d.moe.map_or(d.intermediate, |m| m.top_k * m.intermediate);
     stages.push(vector("mtp: normas", None, b, 8 * d.hidden, 0));
     stages.push(matvec("mtp: fc", None, b, fc * d.hidden));
-    stages.push(matvec("mtp: atención", None, b, attn));
-    stages.push(vector("mtp: cálculo de atención", None, b, 8 * query, 0));
+    stages.push(matvec("mtp: attention", None, b, attn));
+    stages.push(vector("mtp: attention compute", None, b, 8 * query, 0));
     stages.push(matvec("mtp: mlp", None, b, mlp));
-    stages.push(vector("mtp: activación", None, b, 2 * d.moe.map_or(d.intermediate, |m| m.top_k * m.intermediate), 0));
+    stages.push(vector("mtp: activation", None, b, 2 * d.moe.map_or(d.intermediate, |m| m.top_k * m.intermediate), 0));
     stages.push(matvec("mtp: lm_head", None, b, d.vocab * d.hidden));
 }
 

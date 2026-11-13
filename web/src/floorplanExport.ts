@@ -1,12 +1,12 @@
 import type { Floorplan, Rect, Report } from "./engine";
 
 const CATEGORY_FILL: Record<string, string> = {
-  memoria: "#4f8cff",
-  calculo: "#ff9f43",
-  interconexion: "#a55eea",
-  vectorial: "#26de81",
-  estado: "#fd79a8",
-  sistema: "#a4b0be",
+  memory: "#4f8cff",
+  compute: "#ff9f43",
+  interconnect: "#a55eea",
+  vector: "#26de81",
+  state: "#fd79a8",
+  system: "#a4b0be",
 };
 
 const escape = (text: string) => text.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
@@ -24,7 +24,7 @@ export function floorplanSvg(report: Report): string {
     parts.push(box(die.rect, "#f5f6f8", `Die ${die.index}`));
     for (const block of die.blocks) {
       const info = labels.get(block.id);
-      parts.push(box(block.rect, CATEGORY_FILL[info?.category ?? "sistema"] ?? "#ccc", info?.label ?? block.id));
+      parts.push(box(block.rect, CATEGORY_FILL[info?.category ?? "system"] ?? "#ccc", info?.label ?? block.id));
     }
   }
   for (const memory of plan.memory) parts.push(box(memory.rect, "#dfe4ea", memory.label));
