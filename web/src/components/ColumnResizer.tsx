@@ -60,8 +60,8 @@ export function ColumnResizers() {
           className={`column-resizer ${side}`}
           role="separator"
           aria-orientation="vertical"
-          aria-label={side === "left" ? "Ancho de la columna de parámetros" : "Ancho de la columna derecha"}
-          title="Arrastra para cambiar el ancho; doble clic para restablecerlo"
+          aria-label={side === "left" ? "Width of the parameter column" : "Width of the right column"}
+          title="Drag to change the width; double-click to reset it"
           onPointerDown={drag(side)}
           onDoubleClick={() => setWidths((w) => ({ ...w, [side]: DEFAULTS[side] }))}
         />

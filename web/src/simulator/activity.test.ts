@@ -23,9 +23,9 @@ describe("chip activity", () => {
   });
 
   it("says what the chip did in the order it does it", () => {
-    const lines = describeStep({ kind: "token", index: 3, text: " París", cycles: 0, activity: step }, String, true);
-    expect(lines[0]).toMatch(/registros de parámetros/);
-    expect(lines.some((l) => l.includes("«pasar un token por todas las capas»: 11000 ciclos"))).toBe(true);
-    expect(lines.at(-1)).toMatch(/« París»/);
+    const lines = describeStep({ kind: "token", index: 3, text: " Paris", cycles: 0, activity: step }, String, true);
+    expect(lines[0]).toMatch(/parameter registers/);
+    expect(lines.some((l) => l.includes("“pass a token through every layer”: 11000 cycles"))).toBe(true);
+    expect(lines.at(-1)).toMatch(/“ Paris”/);
   });
 });

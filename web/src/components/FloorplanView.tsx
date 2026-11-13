@@ -10,19 +10,19 @@ import { IconButton, Segmented } from "./controls";
 import { draw, fitCamera, hitTest, overlayRange, readTheme, type Camera, type Hit, type Theme } from "./floorplanRender";
 
 const OVERLAYS: [Overlay, string][] = [
-  ["funcion", "Función"],
-  ["capa", "Capa"],
-  ["actividad", "Actividad"],
-  ["energia", "Energía"],
-  ["ancho", "Datos"],
-  ["densidad", "Densidad"],
+  ["function", "Function"],
+  ["layer", "Layer"],
+  ["activity", "Activity"],
+  ["energy", "Energy"],
+  ["data", "Data"],
+  ["density", "Density"],
 ];
 
 const OVERLAY_UNIT: Partial<Record<Overlay, [string, (v: number) => string]>> = {
-  actividad: ["del token", (v) => `${formatNumber(v * 100)} %`],
-  energia: ["por token", (v) => `${formatNumber(v)} mJ`],
-  ancho: ["por token", (v) => `${formatNumber(v / 1e9)} GB`],
-  densidad: ["mJ/mm² por token", (v) => formatNumber(v)],
+  activity: ["of the token", (v) => `${formatNumber(v * 100)} %`],
+  energy: ["per token", (v) => `${formatNumber(v)} mJ`],
+  data: ["per token", (v) => `${formatNumber(v / 1e9)} GB`],
+  density: ["mJ/mm² per token", (v) => formatNumber(v)],
 };
 
 const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -32,7 +32,7 @@ const MAX_CELL_PX = 2400;
 
 function Legend({ report, overlay }: { report: Report; overlay: Overlay }) {
   const t = useT();
-  if (overlay === "funcion") {
+  if (overlay === "function") {
     const used = [...new Set(report.blocks.map((b) => b.category))];
     return (
       <div className="legend">
@@ -45,12 +45,12 @@ function Legend({ report, overlay }: { report: Report; overlay: Overlay }) {
       </div>
     );
   }
-  if (overlay === "capa") {
+  if (overlay === "layer") {
     return (
       <div className="legend">
-        <span>Capa 0</span>
+        <span>{t("Layer")} 0</span>
         <i className="ramp" aria-hidden="true" />
-        <span>Capa {report.floorplan.num_layers - 1}</span>
+        <span>{t("Layer")} {report.floorplan.num_layers - 1}</span>
       </div>
     );
   }
@@ -69,8 +69,8 @@ function Legend({ report, overlay }: { report: Report; overlay: Overlay }) {
 function Breadcrumb({ selection, onSystem, onDie }: { selection: Selection; onSystem: () => void; onDie: (die: number) => void }) {
   const t = useT();
   return (
-    <nav className="breadcrumb" aria-label="Posición en el chip">
-      <button onClick={onSystem}>{t("Sistema")}</button>
+    <nav className="breadcrumb" aria-label={t("Position in the chip")}>
+      <button onClick={onSystem}>{t("System")}</button>
       {selection && (
         <>
           <span aria-hidden="true">›</span>
@@ -80,7 +80,7 @@ function Breadcrumb({ selection, onSystem, onDie }: { selection: Selection; onSy
       {selection && (selection.kind === "array" || selection.kind === "cell") && (
         <>
           <span aria-hidden="true">›</span>
-          <span>Matriz de celdas</span>
+          <span>Cell array</span>
         </>
       )}
       {selection?.kind === "cell" && (
@@ -357,7 +357,7 @@ export function FloorplanView() {
       <canvas
         ref={canvas}
         role="img"
-        aria-label={`Plano del chip: ${report.dies} dies de ${formatNumber(report.die_area_mm2)} milímetros cuadrados. La lista de bloques está en el inspector.`}
+        aria-label={`${t("Chip floorplan")}: ${report.dies} dies, ${formatNumber(report.die_area_mm2)} mm². ${t("The list of blocks is in the inspector.")}`}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -377,24 +377,24 @@ export function FloorplanView() {
           }}
           onDie={goToDie}
         />
-        <Segmented label={t("Capa de color")} value={overlay} options={OVERLAYS.map(([id, label]) => [id, t(label)])} onChange={setOverlay} />
+        <Segmented label={t("Colour layer")} value={overlay} options={OVERLAYS.map(([id, label]) => [id, t(label)])} onChange={setOverlay} />
       </div>
       <div className="hud bottom">
         <Legend report={report} overlay={overlay} />
         <div className="zoom">
-          <IconButton label="Exportar plano en SVG" onClick={() => download(floorplanSvg(report), "llm2chip_plano.svg", "image/svg+xml")}>
+          <IconButton label={t("Export floorplan as SVG")} onClick={() => download(floorplanSvg(report), "llm2chip_floorplan.svg", "image/svg+xml")}>
             <path d="M6 3h6l3 3v11H6zM12 3v3h3M8 11l2 2 2-2M10 8v5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
           </IconButton>
-          <IconButton label="Exportar colocación en DEF" onClick={() => download(floorplanDef(report.floorplan, "llm2chip"), "llm2chip_plano.def")}>
+          <IconButton label={t("Export placement as DEF")} onClick={() => download(floorplanDef(report.floorplan, "llm2chip"), "llm2chip_floorplan.def")}>
             <path d="M4 4h12v12H4zM4 10h12M10 4v12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
           </IconButton>
-          <IconButton label="Alejar" onClick={() => zoomAt(0.6, width / 2, height / 2)}>
+          <IconButton label={t("Zoom out")} onClick={() => zoomAt(0.6, width / 2, height / 2)}>
             <path d="M5 10h10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
           </IconButton>
-          <IconButton label="Encajar" onClick={fitAll}>
+          <IconButton label={t("Fit")} onClick={fitAll}>
             <path d="M4 8V4h4M16 8V4h-4M4 12v4h4M16 12v4h-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
           </IconButton>
-          <IconButton label="Acercar" onClick={() => zoomAt(1.6, width / 2, height / 2)}>
+          <IconButton label={t("Zoom in")} onClick={() => zoomAt(1.6, width / 2, height / 2)}>
             <path d="M5 10h10M10 5v10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
           </IconButton>
         </div>

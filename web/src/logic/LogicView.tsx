@@ -69,30 +69,30 @@ function Overview({ program }: { program: Program }) {
   const opStep = (inst: ProgramInst) => <Step key={inst.name} title={inst.name} text={OP_INFO[inst.op.op]?.formula ?? ""} tag={dims(inst, program)} unit={unitClass(inst.op.op)} onClick={() => select(inst)} />;
   return (
     <div className="logic-page">
-      <h2>Recorrido de un token</h2>
+      <h2>A token's path</h2>
       <p className="muted-text">
-        {program.num_layers} capas y {compact(total)} multiplicaciones por token, sin contar la atención, que crece con el contexto, ni la regla delta. Pulsa cualquier paso para ver qué calcula y cómo lo hace el circuito.
+        {program.num_layers} layers and {compact(total)} multiplications per token, not counting attention, which grows with the context, nor the delta rule. Click any step to see what it computes and how the circuit does it.
       </p>
       <div className="logic-flow">
-        <Step title="Texto de entrada" text="Bytes UTF-8 que llegan por el puerto de host" tag="CPU de control: cola de entrada" unit="system" />
+        <Step title="Input text" text="UTF-8 bytes that arrive through the host port" tag="Control CPU: input queue" unit="system" />
         <Arrow />
-        <Step title="Tokenizador" text="El firmware parte el texto en tokens con las tablas BPE del modelo, cargadas con la imagen" tag="CPU de control: firmware RISC-V" unit="system" />
+        <Step title="Tokenizer" text="The firmware splits the text into tokens with the model's BPE tables, loaded with the image" tag="Control CPU: RISC-V firmware" unit="system" />
         <Arrow />
         {outer.filter((i) => i.op.op === "emb_read").map(opStep)}
         <Arrow />
         <div className="logic-layers">
-          <h3>{program.num_layers} capas en serie</h3>
-          <div className="logic-strip" role="img" aria-label="Tipo de cada capa">
+          <h3>{program.num_layers} layers in series</h3>
+          <div className="logic-strip" role="img" aria-label="Type of each layer">
             {Array.from({ length: program.num_layers }, (_, l) => (
-              <i key={l} className={`kind-${kindOf.get(l) ?? 0}`} title={`Capa ${l}: ${kinds[kindOf.get(l) ?? 0]?.label}`} />
+              <i key={l} className={`kind-${kindOf.get(l) ?? 0}`} title={`Layer ${l}: ${kinds[kindOf.get(l) ?? 0]?.label}`} />
             ))}
           </div>
           <div className="logic-kinds">
             {kinds.map((kind, index) => (
               <button key={kind.key} className="logic-step" onClick={() => setKind(kind.key)}>
                 <strong><i className={`logic-dot kind-${index}`} aria-hidden="true" />{kind.label} × {kind.layers.length}</strong>
-                <span>{kind.ops.length} operaciones, {compact(kind.ops.reduce((sum, i) => sum + multiplications(i.op, program), 0))} multiplicaciones cada una</span>
-                <small>Ver dentro ›</small>
+                <span>{kind.ops.length} operations, {compact(kind.ops.reduce((sum, i) => sum + multiplications(i.op, program), 0))} multiplications each</span>
+                <small>See inside ›</small>
               </button>
             ))}
           </div>
@@ -105,9 +105,9 @@ function Overview({ program }: { program: Program }) {
           </div>
         ))}
         <Arrow />
-        <Step title="Muestreo" text="Filtra los logits a medida que salen, guarda los mejores candidatos y sortea uno con la temperatura; el firmware aplica la lista de parada y el presupuesto de razonamiento" tag="Unidad de muestreo y firmware" unit="system" />
+        <Step title="Sampling" text="Filters the logits as they come out, keeps the best candidates and draws one with the temperature; the firmware applies the stop list and the reasoning budget" tag="Sampling unit and firmware" unit="system" />
         <Arrow />
-        <Step title="Texto de salida" text="El firmware convierte el token en bytes UTF-8 y lo devuelve como entrada del siguiente paso" tag="CPU de control: cola de salida" unit="system" />
+        <Step title="Output text" text="The firmware turns the token into UTF-8 bytes and feeds it back as the next step's input" tag="Control CPU: output queue" unit="system" />
       </div>
     </div>
   );
@@ -166,7 +166,7 @@ function LayerFlow({ kind, program }: { kind: LayerKind; program: Program }) {
 
   if (!placed) return null;
   return (
-    <svg className="logic-graph" width={placed.width + 8} height={placed.height + 8} role="img" aria-label={`Operaciones de ${kind.label}`}>
+    <svg className="logic-graph" width={placed.width + 8} height={placed.height + 8} role="img" aria-label={`Operations of the ${kind.label}`}>
       <defs>
         <marker id="logic-head" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L8 4 L0 8 Z" className="logic-head" />
@@ -181,7 +181,7 @@ function LayerFlow({ kind, program }: { kind: LayerKind; program: Program }) {
             return (
               <g key={node.id} transform={`translate(${node.x} ${node.y})`}>
                 <rect className="logic-port" width={170} height={32} rx={16} />
-                <text className="logic-port-text" x={85} y={20} textAnchor="middle">{node.index === ENTRY ? "Entrada de la capa" : "Salida de la capa"}</text>
+                <text className="logic-port-text" x={85} y={20} textAnchor="middle">{node.index === ENTRY ? "Layer input" : "Layer output"}</text>
               </g>
             );
           }
@@ -211,7 +211,7 @@ export function LogicView() {
   if (!program) {
     return (
       <section className="stage logic">
-        <div className="logic-page"><h2>Funcionamiento</h2><p className="muted-text">El compilador aún no admite la arquitectura de este modelo, así que no hay operaciones que mostrar. Admite Qwen3.5, Llama (y llama2.c), Mistral, Qwen2 y 3, Gemma, DeepSeek V3 y Janus.</p></div>
+        <div className="logic-page"><h2>How it works</h2><p className="muted-text">The compiler does not take this model's architecture yet, so there are no operations to show. It takes Qwen3.5, Llama (and llama2.c), Mistral, Qwen2 and 3, Gemma, DeepSeek V3 and Janus.</p></div>
       </section>
     );
   }
@@ -219,16 +219,16 @@ export function LogicView() {
     <section className="stage logic">
       {kind ? (
         <div className="logic-page">
-          <nav className="breadcrumb static" aria-label="Posición">
-            <span className="crumb"><button onClick={() => setKind(null)}>Recorrido de un token</button></span>
+          <nav className="breadcrumb static" aria-label="Position">
+            <span className="crumb"><button onClick={() => setKind(null)}>A token's path</button></span>
             <span className="crumb"><span aria-hidden="true">›</span><span>{kind.label}</span></span>
           </nav>
           <h2>{kind.label}</h2>
-          <p className="muted-text">Capas {kind.layers.length > 12 ? `${kind.layers.slice(0, 12).join(", ")}…` : kind.layers.join(", ")}. Cada caja es una operación real del programa compilado, y las flechas son los vectores que se pasan.</p>
+          <p className="muted-text">Layers {kind.layers.length > 12 ? `${kind.layers.slice(0, 12).join(", ")}…` : kind.layers.join(", ")}. Each box is a real operation of the compiled program, and the arrows are the vectors passed on.</p>
           <div className="legend logic-legend">
-            <span><i className="logic-dot weights" aria-hidden="true" />Celdas de pesos</span>
-            <span><i className="logic-dot vector" aria-hidden="true" />Carril vectorial</span>
-            <span><i className="logic-dot state" aria-hidden="true" />Memoria de estado</span>
+            <span><i className="logic-dot weights" aria-hidden="true" />Weight cells</span>
+            <span><i className="logic-dot vector" aria-hidden="true" />Vector lane</span>
+            <span><i className="logic-dot state" aria-hidden="true" />State memory</span>
           </div>
           <LayerFlow kind={kind} program={program} />
         </div>
@@ -249,9 +249,9 @@ export function LogicPanel() {
   if (!selected) {
     return (
       <aside className="inspector">
-        <h2 className="detail-title">Funcionamiento</h2>
-        <p className="detail-sub">Esta vista explica qué calcula el chip. Sale del programa compilado para el modelo que tengas elegido.</p>
-        <p className="muted-text">Para ver las puertas y los cables que lo hacen, usa el esquemático. Cada operación tiene aquí un enlace al circuito que la ejecuta.</p>
+        <h2 className="detail-title">How it works</h2>
+        <p className="detail-sub">This view explains what the chip computes. It comes from the program compiled for the model you have chosen.</p>
+        <p className="muted-text">To see the gates and wires that do it, use the schematic. Each operation here has a link to the circuit that runs it.</p>
       </aside>
     );
   }
@@ -264,13 +264,13 @@ export function LogicPanel() {
       <p className="logic-big-formula">{info?.formula}</p>
       <p className="detail-sub">{info?.what}</p>
       <dl className="inset metrics">
-        <div><dt>Quién lo ejecuta</dt><dd>{info?.unit}</dd></div>
-        <div><dt>Entradas</dt><dd>{reads(selected.op).map((b) => formatNumber(program.buffers[b])).join(" + ") || "Token"}</dd></div>
-        <div><dt>Salidas</dt><dd>{writes(selected.op).map((b) => formatNumber(program.buffers[b])).join(" + ") || "Memoria"}</dd></div>
-        <div><dt>Multiplicaciones</dt><dd>{mults > 0 ? formatNumber(mults) : "—"}</dd></div>
-        {selected.layer !== null && <div><dt>Primera capa</dt><dd>{selected.layer}</dd></div>}
+        <div><dt>What runs it</dt><dd>{info?.unit}</dd></div>
+        <div><dt>Inputs</dt><dd>{reads(selected.op).map((b) => formatNumber(program.buffers[b])).join(" + ") || "Token"}</dd></div>
+        <div><dt>Outputs</dt><dd>{writes(selected.op).map((b) => formatNumber(program.buffers[b])).join(" + ") || "Memory"}</dd></div>
+        <div><dt>Multiplications</dt><dd>{mults > 0 ? formatNumber(mults) : "—"}</dd></div>
+        {selected.layer !== null && <div><dt>First layer</dt><dd>{selected.layer}</dd></div>}
       </dl>
-      {matrix && <p className="muted-text logic-tensor">Pesos: <code>{matrix}</code></p>}
+      {matrix && <p className="muted-text logic-tensor">Weights: <code>{matrix}</code></p>}
       {info?.circuit && (
         <button
           className="pill primary-pill"
@@ -278,13 +278,13 @@ export function LogicPanel() {
             const circuit = info.circuit!;
             setScope(circuit.scope);
             if (circuit.demo) setDemo(circuit.demo);
-            setView("esquematico");
+            setView("schematic");
           }}
         >
           {info.circuit.label}
         </button>
       )}
-      {!info?.circuit && <p className="muted-text">Esta memoria aún no tiene circuito propio en el esquemático.</p>}
+      {!info?.circuit && <p className="muted-text">This memory does not have a circuit of its own in the schematic yet.</p>}
     </aside>
   );
 }

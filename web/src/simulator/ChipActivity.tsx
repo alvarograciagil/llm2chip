@@ -20,7 +20,7 @@ function TaskBar({ activity, label, work = false }: { activity: StepActivity; la
   return (
     <div className="task-bar" role="img" aria-label={`${label}: ${describe}`}>
       {parts.map((g) => (
-        <i key={g.id} className={g.id === "wait" ? "waiting" : undefined} style={{ flexGrow: g.cycles, background: GROUP[g.id].color }} title={`${t(GROUP[g.id].label)}: ${formatNumber(g.cycles)} ${t("ciclos")} (${formatNumber((g.cycles / total) * 100)} %)`} />
+        <i key={g.id} className={g.id === "wait" ? "waiting" : undefined} style={{ flexGrow: g.cycles, background: GROUP[g.id].color }} title={`${t(GROUP[g.id].label)}: ${formatNumber(g.cycles)} ${t("cycles")} (${formatNumber((g.cycles / total) * 100)} %)`} />
       ))}
     </div>
   );
@@ -34,9 +34,9 @@ function StepRow({ step, open, onToggle, tokenizer }: { step: ChipStep; open: bo
   return (
     <li className={open ? "step open" : "step"}>
       <button className="step-head" onClick={onToggle} aria-expanded={open}>
-        <span className="step-name">{step.kind === "prefill" ? `${t("Prompt")} ${step.index}` : `${t("Respuesta")} ${step.index}`}</span>
-        <span className="step-text">{step.kind === "token" ? (step.text.trim() ? `«${step.text}»` : t("(sin texto aún)")) : routines.map(([name]) => ROUTINE_LABEL[name] ?? name).join(" + ")}</span>
-        <TaskBar activity={step.activity} label={t("Ciclos de la CPU en este paso")} />
+        <span className="step-name">{step.kind === "prefill" ? `${t("Prompt")} ${step.index}` : `${t("Answer")} ${step.index}`}</span>
+        <span className="step-text">{step.kind === "token" ? (step.text.trim() ? `«${step.text}»` : t("(no text yet)")) : routines.map(([name]) => ROUTINE_LABEL[name] ?? name).join(" + ")}</span>
+        <TaskBar activity={step.activity} label={t("CPU cycles in this step")} />
         <span className="step-cycles">{formatNumber(total)}</span>
       </button>
       {open && (
@@ -47,8 +47,8 @@ function StepRow({ step, open, onToggle, tokenizer }: { step: ChipStep; open: bo
             ))}
           </ol>
           <p className="muted-text">
-            {formatNumber(cpuInstructions(step.activity))} {t("instrucciones de la CPU")}
-            {work ? ` · ${t("lo que más le ocupó")}: ${t(GROUP[work].label).toLowerCase()}` : ""}
+            {formatNumber(cpuInstructions(step.activity))} {t("CPU instructions")}
+            {work ? ` · ${t("what took it most")}: ${t(GROUP[work].label).toLowerCase()}` : ""}
           </p>
         </div>
       )}
@@ -77,12 +77,12 @@ export function ChipActivity() {
     return (
       <div className="activity">
         <div className="timeline-head">
-          <strong>{t("Qué hace el chip en cada paso")}</strong>
+          <strong>{t("What the chip does in each step")}</strong>
         </div>
         <p className="muted-text">
           {firmware
-            ? t("Envía un texto para ver, paso a paso, qué hacen la CPU, el die y la unidad de muestreo.")
-            : t("Con el perfil «El die» no hay CPU: el host da los tokens al die directamente. Elige «El chip completo» en el panel para ver qué hace la CPU en cada paso.")}
+            ? t("Send a text to see, step by step, what the CPU, the die and the sampling unit do.")
+            : t("With the “The die” profile there is no CPU: the host gives the tokens to the die directly. Choose “The whole chip” in the panel to see what the CPU does in each step.")}
         </p>
       </div>
     );
@@ -99,19 +99,19 @@ export function ChipActivity() {
   return (
     <div className="activity">
       <div className="timeline-head">
-        <strong>{t("La CPU del chip")}</strong>
-        <span>{now ? `${t("Ahora")}: ${t(GROUP[now].label).toLowerCase()}` : `${formatNumber(all)} ${t("ciclos")}`}</span>
+        <strong>{t("The chip's CPU")}</strong>
+        <span>{now ? `${t("Now")}: ${t(GROUP[now].label).toLowerCase()}` : `${formatNumber(all)} ${t("cycles")}`}</span>
       </div>
       <p className="muted-text">
-        {cpu.isa} · {t("programa")} {bytes(cpu.programBytes)} ({t("firmware de")} {bytes(cpu.firmwareBytes)}) · {t("datos")} {bytes(cpu.dataBytes)}{cpu.tokenizer ? ` ${t("con las tablas del tokenizador")}` : ""}.{" "}
+        {cpu.isa} · {t("program")} {bytes(cpu.programBytes)} ({t("firmware of")} {bytes(cpu.firmwareBytes)}) · {t("data")} {bytes(cpu.dataBytes)}{cpu.tokenizer ? ` ${t("with the tokenizer's tables")}` : ""}.{" "}
         {cpu.tokenizer
-          ? t("Recibe el texto del host, lo convierte en tokens, da al die cada token y su posición, espera mientras calcula, prepara el muestreo y convierte cada token elegido en texto para el host.")
-          : t("Recibe los tokens del host, da al die cada token y su posición, espera mientras calcula, prepara el muestreo y envía al host cada token elegido.")}
+          ? t("It receives the text from the host, turns it into tokens, gives the die each token and its position, waits while it computes, sets up sampling and turns each chosen token into text for the host.")
+          : t("It receives the tokens from the host, gives the die each token and its position, waits while it computes, sets up sampling and sends each chosen token to the host.")}
       </p>
       <p className="activity-wait">
-        {t("Espera al die o al muestreo el")} <strong>{formatNumber(all ? (waiting / all) * 100 : 0)} %</strong> {t("del tiempo. Su propio trabajo se reparte así:")}
+        {t("It waits for the die or the sampler")} <strong>{formatNumber(all ? (waiting / all) * 100 : 0)} %</strong> {t("of the time. Its own work splits like this:")}
       </p>
-      <TaskBar activity={totals} work label={t("Trabajo de la CPU en toda la simulación")} />
+      <TaskBar activity={totals} work label={t("The CPU's work in the whole simulation")} />
       <div className="legend flat">
         {GROUPS.filter((g) => g.id !== "wait").map((g) => {
           const cycles = groupCycles(totals).find((c) => c.id === g.id)?.cycles ?? 0;
@@ -124,20 +124,20 @@ export function ChipActivity() {
         })}
       </div>
       <dl className="metrics activity-metrics">
-        <div><dt>{t("Ciclos del chip")}</dt><dd>{formatNumber(all)}</dd></div>
-        <div><dt>{t("Die ocupado (estimado por el diseño)")}</dt><dd>{formatNumber(die)}</dd></div>
-        <div><dt>{t("CPU trabajando")}</dt><dd>{formatNumber(working)} ({formatNumber(all ? (working / all) * 100 : 0)} %)</dd></div>
-        <div><dt>{t("Instrucciones")}</dt><dd>{formatNumber(cpuInstructions(totals))}</dd></div>
-        <div><dt>{t("Tokens muestreados")}</dt><dd>{formatNumber(totals.samples[0])} · {formatNumber(totals.samples[1])} {t("ciclos")}</dd></div>
+        <div><dt>{t("Chip cycles")}</dt><dd>{formatNumber(all)}</dd></div>
+        <div><dt>{t("Die busy (estimated from the design)")}</dt><dd>{formatNumber(die)}</dd></div>
+        <div><dt>{t("CPU working")}</dt><dd>{formatNumber(working)} ({formatNumber(all ? (working / all) * 100 : 0)} %)</dd></div>
+        <div><dt>{t("Instructions")}</dt><dd>{formatNumber(cpuInstructions(totals))}</dd></div>
+        <div><dt>{t("Sampled tokens")}</dt><dd>{formatNumber(totals.samples[0])} · {formatNumber(totals.samples[1])} {t("cycles")}</dd></div>
       </dl>
       <details className="task-table">
-        <summary>{t("Todas las tareas de la CPU")}</summary>
+        <summary>{t("All the CPU's tasks")}</summary>
         <table>
           <tbody>
             {tasks.map(([task, [cycles, instructions]]) => (
               <tr key={task}>
                 <td>{t(TASK_LABEL[task])}</td>
-                <td>{formatNumber(cycles)} {t("ciclos")}</td>
+                <td>{formatNumber(cycles)} {t("cycles")}</td>
                 <td>{formatNumber(instructions)} {t("instr.")}</td>
               </tr>
             ))}
@@ -146,16 +146,16 @@ export function ChipActivity() {
       </details>
 
       <div className="timeline-head steps-head">
-        <strong>{t("Paso a paso")}</strong>
-        <span>{t("Pulsa un paso para ver qué hizo el chip")}</span>
+        <strong>{t("Step by step")}</strong>
+        <span>{t("Click a step to see what the chip did")}</span>
       </div>
       <div className="legend flat steps-legend">
-        <span>{t("Cada barra es el tiempo del paso:")}</span>
+        <span>{t("Each bar is the step's time:")}</span>
         <span>
           <i className="swatch waiting" style={{ background: GROUP.wait.color }} aria-hidden="true" />
-          {t("la CPU esperando")}
+          {t("the CPU waiting")}
         </span>
-        <span>{t("y en color, su trabajo")}</span>
+        <span>{t("and in colour, its work")}</span>
       </div>
       <ol className="steps" ref={list}>
         {steps.map((step, i) => (

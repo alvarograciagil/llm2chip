@@ -38,38 +38,38 @@ function compactValue(bits: string): string {
   if (full.length <= 6) return full;
   const value = Number(full);
   const [limit, suffix] = Math.abs(value) >= 1e12 ? [1e12, "T"] : Math.abs(value) >= 1e9 ? [1e9, "G"] : Math.abs(value) >= 1e6 ? [1e6, "M"] : [1e3, "k"];
-  return `${(value / limit).toFixed(Math.abs(value / limit) >= 100 ? 0 : 1).replace(".", ",")}${suffix}`;
+  return `${(value / limit).toFixed(Math.abs(value / limit) >= 100 ? 0 : 1)}${suffix}`;
 }
 
 const PIN_HELP: Record<string, string> = {
-  clear: "pone a cero el estado",
-  clear_total: "borra la suma acumulada",
-  clear_group: "borra la suma del grupo",
-  load_en: "escribe un peso en memoria",
-  load_addr: "dirección del peso que se escribe",
-  load_data: "valor del peso que se escribe",
-  load_scale: "escribe la escala o el sesgo del grupo",
-  run: "avanza el cálculo un ciclo",
-  x: "activación de entrada",
-  total: "suma acumulada de la fila",
-  weight: "peso leído de memoria",
-  product: "peso por activación",
-  valid: "el dato de este ciclo es válido",
-  value: "valor que se suma",
-  addr: "dirección de memoria",
-  we: "activa la escritura",
-  wdata: "dato que se escribe",
-  rdata: "dato leído",
-  raddr: "dirección de lectura",
-  waddr: "dirección de escritura",
-  d: "dato que se guarda",
-  q: "dato guardado",
-  advance: "avanza el contador",
-  address: "dirección actual",
-  s: "elige la entrada",
-  a: "entrada a",
-  b: "entrada b",
-  y: "salida",
+  clear: "sets the state to zero",
+  clear_total: "clears the accumulated sum",
+  clear_group: "clears the group's sum",
+  load_en: "writes a weight into memory",
+  load_addr: "address of the weight being written",
+  load_data: "value of the weight being written",
+  load_scale: "writes the group's scale or bias",
+  run: "advances the computation one cycle",
+  x: "input activation",
+  total: "the row's accumulated sum",
+  weight: "weight read from memory",
+  product: "weight times activation",
+  valid: "this cycle's data is valid",
+  value: "value being added",
+  addr: "memory address",
+  we: "enables writing",
+  wdata: "data being written",
+  rdata: "data read",
+  raddr: "read address",
+  waddr: "write address",
+  d: "data being stored",
+  q: "stored data",
+  advance: "advances the counter",
+  address: "current address",
+  s: "selects the input",
+  a: "input a",
+  b: "input b",
+  y: "output",
 };
 
 function GateSymbol({ node, selected }: { node: Node; selected: boolean }) {
@@ -392,11 +392,11 @@ export function SchematicView() {
         if (!(e.target as Element).closest(".hud")) select(null);
       }}
     >
-      <svg role="img" aria-label={module ? `Esquemático: ${module.title}. ${module.description}` : "Esquemático"}>
+      <svg role="img" aria-label={module ? `Schematic: ${module.title}. ${module.description}` : "Schematic"}>
         <g ref={world}>{layout && module && <Diagram module={module} layout={layout} snapshot={snapshot} />}</g>
       </svg>
       <div className="hud top">
-        <nav className="breadcrumb" aria-label="Posición en el circuito">
+        <nav className="breadcrumb" aria-label="Position in the circuit">
           {crumbs.map((name, depth) => (
             <span key={depth} className="crumb">
               {depth > 0 && <span aria-hidden="true">›</span>}
@@ -425,16 +425,16 @@ export function SchematicView() {
             <i className="wire-key thick" aria-hidden="true" />
             Bus
           </span>
-          <span className="legend-hint">Pasa por un cable para seguirlo · Doble clic para entrar · Esc para subir</span>
+          <span className="legend-hint">Hover over a wire to follow it · Double-click to enter · Esc to go up</span>
         </div>
         <div className="zoom">
-          <IconButton label="Alejar" onClick={() => zoom(0.7, ...center())}>
+          <IconButton label="Zoom out" onClick={() => zoom(0.7, ...center())}>
             <path d="M5 10h10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
           </IconButton>
-          <IconButton label="Encajar" onClick={fit}>
+          <IconButton label="Fit" onClick={fit}>
             <path d="M4 8V4h4M16 8V4h-4M4 12v4h4M16 12v4h-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
           </IconButton>
-          <IconButton label="Acercar" onClick={() => zoom(1.4, ...center())}>
+          <IconButton label="Zoom in" onClick={() => zoom(1.4, ...center())}>
             <path d="M5 10h10M10 5v10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
           </IconButton>
         </div>

@@ -2,12 +2,12 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { createPortal } from "react-dom";
 import { fpgaBoards, type Maturity, type QualityRisk } from "../engine";
 import { makers, type FpgaBoard } from "../wizard/plan";
-import { formatNumber, fromLog, toLog } from "../format";
+import { formatNumber, fromLog, locale, toLog } from "../format";
 import { dieLimit, fitDie } from "../dieSize";
 import { matchingPreset, PARAM_GROUPS, type Field } from "../params";
 import { useDesign } from "../store";
 import { useT } from "../i18n";
-import { PARAM_HELP_EN } from "../paramHelpEn";
+import { PARAM_HELP_ES } from "../paramHelpEs";
 import { Disclosure, Segmented, Switch } from "./controls";
 
 const LOG_STEPS = 1000;
@@ -18,7 +18,8 @@ function ValueInput({ field, value, onCommit }: { field: RangeField; value: numb
   const [draft, setDraft] = useState<string | null>(null);
   const commit = () => {
     if (draft === null) return;
-    const parsed = Number(draft.replace(/\./g, "").replace(",", "."));
+    // Thousands separators out, and the decimal mark as JavaScript reads it.
+    const parsed = Number(locale() === "es-ES" ? draft.replace(/\./g, "").replace(",", ".") : draft.replace(/,/g, ""));
     if (Number.isFinite(parsed)) {
       const clamped = Math.min(field.max, Math.max(field.min, parsed));
       onCommit(field.integer ? Math.round(clamped) : clamped);
@@ -30,10 +31,10 @@ function ValueInput({ field, value, onCommit }: { field: RangeField; value: numb
       <input
         type="text"
         inputMode="decimal"
-        aria-label={`Valor de ${field.label}`}
+        aria-label={`Value of ${field.label}`}
         value={draft ?? formatNumber(value)}
         onFocus={(e) => {
-          setDraft(String(value).replace(".", ","));
+          setDraft(locale() === "es-ES" ? String(value).replace(".", ",") : String(value));
           // After the draft is drawn, or the new text would clear the selection.
           const input = e.target;
           requestAnimationFrame(() => input.select());
@@ -64,14 +65,14 @@ function InfoTip({ id, label, text, onOpen }: { id: string; label: string; text:
   };
   return (
     <span className="info">
-      <button className="info-button" aria-label={`Qué es ${label}`} aria-describedby={id} onClick={onOpen} onMouseEnter={show} onMouseLeave={() => setAt(null)} onFocus={show} onBlur={() => setAt(null)}>
+      <button className="info-button" aria-label={`What ${label} is`} aria-describedby={id} onClick={onOpen} onMouseEnter={show} onMouseLeave={() => setAt(null)} onFocus={show} onBlur={() => setAt(null)}>
         ?
       </button>
       {/* The sidebar's blur would make a fixed position its own: the tip lives in the page. */}
       {createPortal(
         <span className={at ? "tooltip shown" : "tooltip"} role="tooltip" id={id} style={at ? { left: at.x, top: at.y, transform: at.above ? "translateY(-100%)" : undefined } : undefined}>
           {text}
-          <em>Pulsa para ver la documentación completa.</em>
+          <em>Click to see the full documentation.</em>
         </span>,
         document.body,
       )}
@@ -95,7 +96,7 @@ function Row({ field, children, below }: { field: Field; children: React.ReactNo
   }, [revealed, field.key]);
 
   const changed = value !== fallback;
-  const help = field.help && (language === "en" ? (PARAM_HELP_EN[field.key] ?? field.help) : field.help);
+  const help = field.help && (language === "es" ? (PARAM_HELP_ES[field.key] ?? field.help) : field.help);
   return (
     <div
       ref={ref}
@@ -109,7 +110,7 @@ function Row({ field, children, below }: { field: Field; children: React.ReactNo
           {t(field.label)}
           {help && <InfoTip id={`ayuda-${field.key}`} label={t(field.label)} text={help} onOpen={() => openDocs(field.key)} />}
           {changed && (
-            <button className="changed" aria-label={`Restablecer ${t(field.label)}`} title="Restablecer" onClick={() => resetParam(field.key)} />
+            <button className="changed" aria-label={`${t("Reset")} ${t(field.label)}`} title="Reset" onClick={() => resetParam(field.key)} />
           )}
         </span>
         {children}
@@ -153,10 +154,10 @@ function RangeRow({ field }: { field: RangeField }) {
 /** A weight format's name: its numbers stay, its words follow the language. */
 function englishLabel(label: string, t: (text: string) => string): string {
   return label
-    .replace("Mezcla de 4 y 8 bits (Qwen real)", t("Mezcla de 4 y 8 bits (Qwen real)"))
-    .replace("escala fina", t("escala fina"))
-    .replace(/(\d+) de fracción/, (_, n: string) => `${n} ${t("de fracción")}`)
-    .replace(/(\d+) valores/, (_, n: string) => `${n} ${t("valores")}`);
+    .replace("Mix of 4 and 8 bits (real Qwen)", t("Mix of 4 and 8 bits (real Qwen)"))
+    .replace("fine scale", t("fine scale"))
+    .replace(/(\d+) de fracción/, (_, n: string) => `${n} ${t("fraction")}`)
+    .replace(/(\d+) valores/, (_, n: string) => `${n} ${t("values")}`);
 }
 
 function PresetRow({ field }: { field: Extract<Field, { kind: "preset" }> }) {
@@ -171,7 +172,7 @@ function PresetRow({ field }: { field: Extract<Field, { kind: "preset" }> }) {
   return (
     <Row field={field}>
       <select aria-label={field.label} value={current} onChange={(e) => choose(e.target.value)}>
-        {current === "" && <option value="">{t("Personalizado")}</option>}
+        {current === "" && <option value="">{t("Custom")}</option>}
         {field.sections.map((section) => (
           <optgroup key={section.title} label={t(section.title)}>
             {section.presets.map((preset) => (
@@ -238,11 +239,11 @@ function TargetRows() {
     <>
       <div className="row">
         <div className="row-head">
-          <span className="row-label">{t("Destino")}</span>
+          <span className="row-label">{t("Target")}</span>
           <Segmented
-            label={t("Destino")}
+            label={t("Target")}
             value={onBoard ? "fpga" : "chip"}
-            options={[["fpga", t("FPGA")], ["chip", t("Chip propio")]]}
+            options={[["fpga", t("FPGA")], ["chip", t("Own chip")]]}
             onChange={(target) =>
               setParams(
                 target === "fpga"
@@ -261,9 +262,9 @@ function TargetRows() {
       {onBoard ? (
         <div className="row">
           <div className="row-head">
-            <span className="row-label">{t("Placa")}</span>
-            <select aria-label={t("Placa")} value={String(params.fpga_board)} onChange={(e) => setParam("fpga_board", e.target.value)}>
-              <option value="">{t("Sin placa: escala genérica")}</option>
+            <span className="row-label">{t("Board")}</span>
+            <select aria-label={t("Board")} value={String(params.fpga_board)} onChange={(e) => setParam("fpga_board", e.target.value)}>
+              <option value="">{t("No board: generic scale")}</option>
               {makers(boards).map((maker) => (
                 <optgroup key={maker} label={maker}>
                   {boards
@@ -282,8 +283,8 @@ function TargetRows() {
         <>
           <div className="row">
             <div className="row-head">
-              <span className="row-label">{t("Proceso")}</span>
-              <select aria-label={t("Proceso")} value={node} onChange={(e) => setParams({ node: e.target.value, ...fitDie(width, height, limitOf(e.target.value)) })}>
+              <span className="row-label">{t("Process")}</span>
+              <select aria-label={t("Process")} value={node} onChange={(e) => setParams({ node: e.target.value, ...fitDie(width, height, limitOf(e.target.value)) })}>
                 {silicon.map((n) => (
                   <option key={n.id} value={n.id}>
                     {t(n.label)}
@@ -294,22 +295,22 @@ function TargetRows() {
           </div>
           <div className="row">
             <div className="row-head">
-              <span className="row-label">{t("Tamaño del die")}</span>
+              <span className="row-label">{t("Die size")}</span>
               <span className="die-size">
-                <input type="number" min={1} max={33} step={0.5} aria-label={t("Ancho del die")} value={width} onChange={(e) => setWidth(Number(e.target.value) || 1)} />
+                <input type="number" min={1} max={33} step={0.5} aria-label={t("Die width")} value={width} onChange={(e) => setWidth(Number(e.target.value) || 1)} />
                 ×
-                <input type="number" min={1} max={33} step={0.5} aria-label={t("Alto del die")} value={height} onChange={(e) => setHeight(Number(e.target.value) || 1)} />
+                <input type="number" min={1} max={33} step={0.5} aria-label={t("Die height")} value={height} onChange={(e) => setHeight(Number(e.target.value) || 1)} />
                 <small>mm</small>
               </span>
             </div>
-            {limit < 858 && <p className="row-note">{t("Este proceso admite dies de hasta")} {formatNumber(limit)} mm².</p>}
+            {limit < 858 && <p className="row-note">{t("This process takes dies of up to")} {formatNumber(limit)} mm².</p>}
           </div>
           <div className="row">
             <div className="row-head">
               <span className="row-label">{t("Chips")}</span>
               <span className="die-size">
-                <Segmented label={t("Chips")} value={dies === 0 ? "auto" : dies === 1 ? "1" : "n"} options={[["1", "1"], ["n", "N"], ["auto", t("Sin límite")]]} onChange={(v) => setParam("dies", v === "1" ? 1 : v === "auto" ? 0 : Math.max(2, dies))} />
-                {dies > 1 && <input type="number" min={2} max={1024} aria-label={t("Número de chips")} value={dies} onChange={(e) => setParam("dies", Math.max(2, Number(e.target.value) || 2))} />}
+                <Segmented label={t("Chips")} value={dies === 0 ? "auto" : dies === 1 ? "1" : "n"} options={[["1", "1"], ["n", "N"], ["auto", t("No limit")]]} onChange={(v) => setParam("dies", v === "1" ? 1 : v === "auto" ? 0 : Math.max(2, dies))} />
+                {dies > 1 && <input type="number" min={2} max={1024} aria-label={t("Number of chips")} value={dies} onChange={(e) => setParam("dies", Math.max(2, Number(e.target.value) || 2))} />}
               </span>
             </div>
           </div>
@@ -337,8 +338,8 @@ function ModelSection() {
     <div className="inset standalone">
       <div className="row">
         <div className="row-head">
-          <span className="row-label">{t("Modelo")}</span>
-          <select aria-label="Modelo" value={model?.id} onChange={(e) => selectModel(e.target.value)}>
+          <span className="row-label">{t("Model")}</span>
+          <select aria-label="Model" value={model?.id} onChange={(e) => selectModel(e.target.value)}>
             {models.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name}
@@ -348,11 +349,11 @@ function ModelSection() {
         </div>
       </div>
       <TargetRows />
-      <button className="row link-row" onClick={() => setView("modelos")}>
-        {t("Buscar otros modelos…")}
+      <button className="row link-row" onClick={() => setView("models")}>
+        {t("Find other models…")}
       </button>
       <label className="row link-row">
-        {t("Cargar config.json de otro modelo…")}
+        {t("Load another model's config.json…")}
         <input type="file" accept=".json,application/json" onChange={onFile} />
       </label>
     </div>
@@ -380,7 +381,7 @@ function ParametersTab() {
 
   return (
     <>
-      <input className="search" type="search" placeholder={t("Buscar parámetro")} aria-label={t("Buscar parámetro")} value={query} onChange={(e) => setQuery(e.target.value)} />
+      <input className="search" type="search" placeholder={t("Search parameter")} aria-label={t("Search parameter")} value={query} onChange={(e) => setQuery(e.target.value)} />
       {!needle && <ModelSection />}
       {groups.map((group) => (
         <Disclosure
@@ -395,27 +396,28 @@ function ParametersTab() {
           ))}
         </Disclosure>
       ))}
-      {groups.length === 0 && <p className="empty">{t("Ningún parámetro coincide.")}</p>}
+      {groups.length === 0 && <p className="empty">{t("No parameter matches.")}</p>}
       <button className="plain" onClick={reset}>
-        {t("Restablecer todo")}
+        {t("Reset all")}
       </button>
     </>
   );
 }
 
 const MATURITY: [Maturity, string, string][] = [
-  ["proven", "Probadas", "Técnicas ya usadas en chips reales."],
-  ["plausible", "Plausibles", "Razonables; hay que medir su efecto aquí."],
-  ["experimental", "Experimentales", "Investigación abierta, para probar y comparar."],
+  ["proven", "Proven", "Techniques already used in real chips."],
+  ["plausible", "Plausible", "Reasonable; their effect must be measured here."],
+  ["experimental", "Experimental", "Open research, to try and compare."],
 ];
 
 const RISK: Record<QualityRisk, string> = {
-  lossless: "No altera la salida",
-  measure: "Medir la calidad",
-  high: "Riesgo alto de calidad",
+  lossless: "Does not change the output",
+  measure: "Measure the quality",
+  high: "High risk to quality",
 };
 
 function OptimizationsTab() {
+  const t = useT();
   const catalog = useDesign((s) => s.catalog);
   const active = useDesign((s) => s.params.optimizations);
   const toggle = useDesign((s) => s.toggleOptimization);
@@ -425,16 +427,16 @@ function OptimizationsTab() {
       {MATURITY.map(([maturity, title, subtitle]) => {
         const items = catalog.filter((o) => o.maturity === maturity);
         return (
-          <Disclosure key={maturity} title={title} defaultOpen={true} summary={`${items.filter((o) => active.includes(o.id)).length} de ${items.length}`}>
-            <p className="group-note">{subtitle}</p>
+          <Disclosure key={maturity} title={t(title)} defaultOpen={true} summary={`${items.filter((o) => active.includes(o.id)).length} / ${items.length}`}>
+            <p className="group-note">{t(subtitle)}</p>
             {items.map((o) => (
-              <div className="opt" key={o.id} title={o.what}>
+              <div className="opt" key={o.id} title={t(o.what)}>
                 <div className="row-head">
-                  <span className="row-label">{o.name}</span>
-                  <Switch checked={active.includes(o.id)} label={o.name} onChange={() => toggle(o.id)} />
+                  <span className="row-label">{t(o.name)}</span>
+                  <Switch checked={active.includes(o.id)} label={t(o.name)} onChange={() => toggle(o.id)} />
                 </div>
-                <p className="opt-effect">{o.effect}</p>
-                <p className={`opt-risk risk-${o.quality_risk}`}>{RISK[o.quality_risk]}</p>
+                <p className="opt-effect">{t(o.effect)}</p>
+                <p className={`opt-risk risk-${o.quality_risk}`}>{t(RISK[o.quality_risk])}</p>
               </div>
             ))}
           </Disclosure>
@@ -457,13 +459,13 @@ export function Sidebar() {
           label="Panel"
           value={tab}
           options={[
-            ["parametros", t("Parámetros")],
-            ["optimizaciones", active > 0 ? `${t("Optimizaciones")} (${active})` : t("Optimizaciones")],
+            ["parameters", t("Parameters")],
+            ["optimizations", active > 0 ? `${t("Optimizations")} (${active})` : t("Optimizations")],
           ]}
           onChange={setTab}
         />
       </div>
-      <div className="sidebar-body">{tab === "parametros" ? <ParametersTab /> : <OptimizationsTab />}</div>
+      <div className="sidebar-body">{tab === "parameters" ? <ParametersTab /> : <OptimizationsTab />}</div>
     </aside>
   );
 }

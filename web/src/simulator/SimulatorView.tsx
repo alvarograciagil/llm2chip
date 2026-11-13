@@ -11,10 +11,10 @@ import { sameModel } from "./sameModel";
 import { ChipActivity } from "./ChipActivity";
 
 const KIND_LABEL: Record<ScheduledStage["kind"], string> = {
-  matvec: "Matriz × vector",
-  vector: "Unidades vectoriales",
+  matvec: "Matrix × vector",
+  vector: "Vector units",
   embedding: "Embedding",
-  link: "Enlace entre dies",
+  link: "Die-to-die link",
 };
 const KIND_CLASS: Record<ScheduledStage["kind"], string> = {
   matvec: "tl-matvec",
@@ -25,10 +25,10 @@ const KIND_CLASS: Record<ScheduledStage["kind"], string> = {
 
 /** What each kind of stage does in the chip, for the stage the reader points at. */
 const KIND_HELP: Record<ScheduledStage["kind"], string> = {
-  matvec: "Las celdas del die multiplican esta matriz por el vector de activación: cada celda lee sus pesos de su SRAM, los multiplica por el valor que le llega por la red de activaciones, y el árbol de sumas junta los productos de cada fila.",
-  vector: "Las unidades vectoriales trabajan elemento a elemento, carril a carril: normas, rotaciones, funciones por tabla, atención sobre la caché o la regla delta sobre su estado.",
-  embedding: "Se lee la fila del token en la tabla de embedding: es el vector con el que empiezan las capas.",
-  link: "El vector oculto pasa al die siguiente por el enlace, y allí siguen las capas.",
+  matvec: "The die's cells multiply this matrix by the activation vector: each cell reads its weights from its SRAM, multiplies them by the value the activation network brings it, and the adder tree gathers each row's products.",
+  vector: "The vector units work element by element, lane by lane: norms, rotations, table functions, attention over the cache or the delta rule over its state.",
+  embedding: "The token's row is read from the embedding table: it is the vector the layers start from.",
+  link: "The hidden vector goes to the next die over the link, and the layers carry on there.",
 };
 
 function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
@@ -51,8 +51,8 @@ function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
   return (
     <div className="timeline">
       <div className="timeline-head">
-        <strong>{t("Recorrido de un token")}</strong>
-        <span>{formatNumber(schedule.total_cycles)} {t("ciclos")} · {formatNumber(schedule.token_ns / 1000)} µs</span>
+        <strong>{t("A token's path")}</strong>
+        <span>{formatNumber(schedule.total_cycles)} {t("cycles")} · {formatNumber(schedule.token_ns / 1000)} µs</span>
       </div>
       <div className="timeline-rows" onMouseLeave={() => setHover(null)}>
         <div className="timeline-playhead" ref={playhead} />
@@ -68,7 +68,7 @@ function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
                     className={s === pinned ? `${KIND_CLASS[s.kind]} pinned` : KIND_CLASS[s.kind]}
                     style={{ left: `${(s.start / schedule.total_cycles) * 100}%`, width: `${Math.max(0.04, (s.cycles / schedule.total_cycles) * 100)}%` }}
                     tabIndex={0}
-                    aria-label={`${s.name}${s.layer !== null ? `, ${t("capa")} ${s.layer}` : ""}, ${formatNumber(Math.round(s.cycles))} ${t("ciclos")}`}
+                    aria-label={`${s.name}${s.layer !== null ? `, ${t("layer")} ${s.layer}` : ""}, ${formatNumber(Math.round(s.cycles))} ${t("cycles")}`}
                     onMouseEnter={() => setHover(s)}
                     onFocus={() => setHover(s)}
                     onBlur={() => setHover(null)}
@@ -95,12 +95,12 @@ function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
           <>
             <p>
               <strong>{shown.name}</strong>
-              {shown.layer !== null ? ` · ${t("capa")} ${shown.layer}` : ""} · die {shown.die} · {formatNumber(Math.round(shown.cycles))} {t("ciclos")} ({percent(shown.cycles / schedule.total_cycles)} % {t("del token")}, {formatNumber(ns(shown.cycles))} ns) · {t("empieza en el ciclo")} {formatNumber(Math.round(shown.start))}
+              {shown.layer !== null ? ` · ${t("layer")} ${shown.layer}` : ""} · die {shown.die} · {formatNumber(Math.round(shown.cycles))} {t("cycles")} ({percent(shown.cycles / schedule.total_cycles)} % {t("of the token")}, {formatNumber(ns(shown.cycles))} ns) · {t("starts at cycle")} {formatNumber(Math.round(shown.start))}
             </p>
             <p className="muted-text">{t(KIND_HELP[shown.kind])}</p>
           </>
         ) : (
-          <p className="muted-text">{t("Pasa por encima de un tramo, o púlsalo para fijarlo, y verás qué hace el die en él.")}</p>
+          <p className="muted-text">{t("Hover over a stretch, or click it to pin it, to see what the die does in it.")}</p>
         )}
       </div>
     </div>
@@ -161,21 +161,21 @@ export function SimulatorView() {
         <div className="transcript" aria-live="polite">
           {picture && draw ? (
             <figure className="picture">
-              <img src={picture.data} width={picture.side} height={picture.side} alt={`Imagen generada: ${prompt}`} />
-              <figcaption>{picture.side} × {picture.side} px, en {formatNumber(picture.seconds)} s</figcaption>
+              <img src={picture.data} width={picture.side} height={picture.side} alt={`Generated image: ${prompt}`} />
+              <figcaption>{picture.side} × {picture.side} px, in {formatNumber(picture.seconds)} s</figcaption>
             </figure>
-          ) : output ? <p>{output}</p> : <p className="placeholder">{loaded ? (draw ? "La imagen aparecerá aquí." : "La respuesta del modelo aparecerá aquí.") : "Carga el chip en el panel de la derecha para simularlo: con el modelo y la aritmética del diseño."}</p>}
+          ) : output ? <p>{output}</p> : <p className="placeholder">{loaded ? (draw ? t("The image will appear here.") : t("The model's answer will appear here.")) : t("Load the chip in the right panel to simulate it: with the design's model and arithmetic.")}</p>}
           {!running && ending && !draw && (
             <p className="note-warning">
-              {ending === "loop" ? "El modelo empezó a repetirse sin escribir su fin de turno y el chip lo detuvo, como hace su firmware." : ending === "context" ? "Se llenó el contexto del chip: no recuerda más tokens. Sube el contexto en el diseño para respuestas más largas." : "El modelo no escribió su fin de turno: se detuvo al llegar al límite de tokens."}
+              {ending === "loop" ? t("The model started repeating itself without writing its end of turn and the chip stopped it, as its firmware does.") : ending === "context" ? t("The chip's context filled up: it remembers no more tokens. Raise the context in the design for longer answers.") : t("The model did not write its end of turn: it stopped at the token limit.")}
             </p>
           )}
           {running && drawing && (
             <p className="placeholder">
-              {drawing.decoding ? "El decodificador convierte los tokens en píxeles…" : `El modelo escribe la imagen: ${drawing.done} de ${drawing.total} tokens visuales (${formatNumber(drawing.seconds)} s)`}
+              {drawing.decoding ? t("The decoder turns the tokens into pixels…") : `${t("The model writes the image")}: ${drawing.done} / ${drawing.total} ${t("visual tokens")} (${formatNumber(drawing.seconds)} s)`}
             </p>
           )}
-          {running && phase === "Leyendo el prompt" && <p className="placeholder">Leyendo el prompt: {prefilled} de {promptTokens} tokens</p>}
+          {running && phase === "Reading the prompt" && <p className="placeholder">{t("Reading the prompt")}: {prefilled} / {promptTokens} tokens</p>}
         </div>
         {error && (
           <div className="issue error" role="alert">
@@ -185,22 +185,22 @@ export function SimulatorView() {
         )}
         {image && (
           <figure className="attached">
-            <img src={image.preview} alt="Imagen adjunta" />
+            <img src={image.preview} alt="Attached image" />
             <figcaption>
-              {image.width} × {image.height} px{imageReport ? ` · ${formatNumber(imageReport.patches)} parches → ${formatNumber(imageReport.tokens)} tokens en ${formatNumber(imageReport.seconds)} s${imageReport.onChip ? ", codificada por el chip con su aritmética" : ", codificada por el anfitrión en coma flotante"}` : ""}
-              <button className="link inline" onClick={() => set({ image: null, imageReport: null })}>Quitar</button>
+              {image.width} × {image.height} px{imageReport ? ` · ${formatNumber(imageReport.patches)} ${t("patches")} → ${formatNumber(imageReport.tokens)} tokens, ${formatNumber(imageReport.seconds)} s${imageReport.onChip ? `, ${t("encoded by the chip with its arithmetic")}` : `, ${t("encoded by the host in floating point")}`}` : ""}
+              <button className="link inline" onClick={() => set({ image: null, imageReport: null })}>Remove</button>
             </figcaption>
           </figure>
         )}
         {makesImages && (
           <>
-            <Segmented label="Qué hace el modelo" value={draw ? "draw" : "answer"} options={[["answer", t("Responder")], ["draw", t("Dibujar")]]} onChange={(mode) => set({ draw: mode === "draw" })} />
-            {draw && <p className="muted-text">El dibujo aún se calcula en coma flotante: el chip no lleva todavía la cabeza de generación de imágenes ni el decodificador.</p>}
+            <Segmented label={t("What the model does")} value={draw ? "draw" : "answer"} options={[["answer", t("Answer")], ["draw", t("Draw")]]} onChange={(mode) => set({ draw: mode === "draw" })} />
+            {draw && <p className="muted-text">{t("With the chip's arithmetic, the language model and its image heads run on the die; the guidance mix, the sampling and the pixel decoder run on the host.")}</p>}
           </>
         )}
         <div className="composer">
-          <label className={readsImages ? "pill attach" : "pill attach disabled"} title={readsImages ? "Adjuntar una imagen: el codificador del modelo la convierte en tokens que se leen antes de la pregunta" : current?.images?.note ?? "Este modelo no lee imágenes"}>
-            Imagen
+          <label className={readsImages ? "pill attach" : "pill attach disabled"} title={readsImages ? t("Attach an image: the model's encoder turns it into tokens read before the question") : current?.images?.note ?? t("This model does not read images")}>
+            Image
             <input type="file" accept="image/*" disabled={!readsImages} onChange={(e) => {
               const file = e.target.files?.[0];
               if (file) void readImage(file).then((picture) => set({ image: picture, imageReport: null }));
@@ -208,19 +208,19 @@ export function SimulatorView() {
             }} />
           </label>
           <textarea
-            aria-label="Texto de entrada"
+            aria-label="Input text"
             rows={3}
             value={prompt}
-            placeholder="Escribe un texto"
+            placeholder={t("Type a text")}
             onChange={(e) => set({ prompt: e.target.value })}
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && loaded && !running) generate();
             }}
           />
           {running ? (
-            <button className="pill" onClick={stop}>Detener</button>
+            <button className="pill" onClick={stop}>Stop</button>
           ) : (
-            <button className="pill primary-pill" disabled={!loaded || !prompt.trim()} onClick={generate}>Enviar</button>
+            <button className="pill primary-pill" disabled={!loaded || !prompt.trim()} onClick={generate}>Send</button>
           )}
         </div>
         {loaded && <ChipActivity />}
@@ -258,7 +258,7 @@ export function SimulatorPanel() {
   const t = useT();
   const state = useSimulator();
   const params = useDesign((s) => s.params);
-  const formatLabel = matchingPreset(params) ?? "personalizado";
+  const formatLabel = matchingPreset(params) ?? t("custom");
   const report = useDesign((s) => s.report);
   const { connect, set, load } = state;
   const setView = useDesign((s) => s.setView);
@@ -284,12 +284,12 @@ export function SimulatorPanel() {
   if (state.online === false) {
     return (
       <aside className="inspector">
-        <h2 className="detail-title">Motor local</h2>
+        <h2 className="detail-title">{t("Local engine")}</h2>
         <div className="issue warning" role="status">
           <span className="issue-icon" aria-hidden="true">i</span>
           <div>
-            <strong>El motor no está en marcha.</strong>
-            <p>Ábrelo con este comando en la carpeta del proyecto: scripts/dev.sh</p>
+            <strong>{t("The engine is not running.")}</strong>
+            <p>{t("Start it with this command in the project folder")}: scripts/dev.sh</p>
           </div>
         </div>
       </aside>
@@ -298,32 +298,32 @@ export function SimulatorPanel() {
 
   return (
     <aside className="inspector">
-      <h2 className="detail-title">Simulador</h2>
-      <p className="detail-sub">Ejecuta el microprograma con pesos reales.</p>
+      <h2 className="detail-title">Simulator</h2>
+      <p className="detail-sub">{t("Runs the microprogram with real weights.")}</p>
 
-      <h3>{t("El chip que se simula")}</h3>
+      <h3>{t("The chip being simulated")}</h3>
       <div className="inset padded form">
         <p className="sim-model">
-          <strong>{design?.name ?? "Sin modelo"}</strong>
-          <span className="muted-text">El modelo del diseño, con su aritmética: enteros de {String(params.activation_bits)} bits y pesos {formatLabel}.</span>
+          <strong>{design?.name ?? t("No model")}</strong>
+          <span className="muted-text">{t("The design's model, with its arithmetic")}: {String(params.activation_bits)}-bit {t("integers and weights")} {formatLabel}.</span>
         </p>
         {candidates.length === 0 ? (
           <>
-            <p className="muted-text">No hay pesos de este modelo en el equipo, así que el chip no se puede simular todavía.</p>
-            <button className="link-button" onClick={() => setView("modelos")}>
-              Descargar sus pesos…
+            <p className="muted-text">{t("There are no weights of this model on this machine, so the chip cannot be simulated yet.")}</p>
+            <button className="link-button" onClick={() => setView("models")}>
+              {t("Download its weights…")}
             </button>
           </>
         ) : (
           <>
             {candidates.length > 1 && (
               <label>
-                Pesos de este modelo
+                {t("Weights of this model")}
                 <select value={state.path} onChange={(e) => set({ path: e.target.value })}>
                   {candidates.map((m) => (
                     <option key={m.path} value={m.path} disabled={!m.supported}>
                       {m.name}
-                      {m.supported ? "" : " (no simulable)"}
+                      {m.supported ? "" : ` (${t("not runnable")})`}
                     </option>
                   ))}
                 </select>
@@ -336,88 +336,88 @@ export function SimulatorPanel() {
             )}
             <label className="check">
               <input type="checkbox" checked={state.useGpu} onChange={(e) => set({ useGpu: e.target.checked })} />
-              {t("Acelerar con la GPU")}
+              {t("Use the GPU")}
             </label>
             <button className="pill primary-pill" disabled={state.loading || !selected?.supported} onClick={() => void load()}>
-              {t(state.loading ? "Cargando…" : state.loaded ? "Recargar" : "Cargar el chip")}
+              {t(state.loading ? "Loading…" : state.loaded ? "Reload" : "Load the chip")}
             </button>
-            {stale && <p className="note-warning">El diseño cambió desde que se cargó: recarga para simular el chip actual.</p>}
-            {state.loaded && <p className="muted-text">Cargado: {state.loaded} · {state.accelerator ?? "CPU"}</p>}
+            {stale && <p className="note-warning">{t("The design changed since it was loaded: reload to simulate the current chip.")}</p>}
+            {state.loaded && <p className="muted-text">{t("Loaded")}: {state.loaded} · {state.accelerator ?? "CPU"}</p>}
           </>
         )}
       </div>
 
-      <h3>{t("Qué se simula")}</h3>
+      <h3>{t("What is simulated")}</h3>
       <div className="inset padded form">
         <Segmented
-          label="Perfil"
+          label={t("Profile")}
           value={profileOf(state)}
-          options={[["die", t("El die")], ["chip", t("El chip completo")], ["custom", t("A medida")]]}
+          options={[["die", t("The die")], ["chip", t("The whole chip")], ["custom", t("Custom")]]}
           onChange={(profile) => {
             if (profile !== "custom") set(PROFILES[profile]);
           }}
         />
         {(
           [
-            ["firmware", "CPU y firmware del chip", "El firmware real corre instrucción a instrucción y gobierna el die por sus registros.", state.firmware, false],
-            ["samplerUnit", "Unidad de muestreo del chip", "Elige cada token con la misma lógica que el circuito, top-k incluido. Con la CPU siempre se usa.", state.samplerUnit || state.firmware, state.firmware],
-            ["firmwareTokenizer", "Tokenizador en el firmware", "El firmware convierte el texto en tokens y los tokens en bytes, y se compara con la biblioteca de referencia.", state.firmware && state.firmwareTokenizer, !state.firmware],
-            ["transactionLoad", "Comprobar la carga de la imagen", "Al cargar, recorre todos los bloques como el controlador real, verifica su CRC y cuenta los ciclos. Hay que recargar el chip.", state.transactionLoad, false],
+            ["firmware", "Chip CPU and firmware", "The real firmware runs instruction by instruction and drives the die through its registers.", state.firmware, false],
+            ["samplerUnit", "Chip sampling unit", "Picks each token with the same logic as the circuit, top-k included. Always used with the CPU.", state.samplerUnit || state.firmware, state.firmware],
+            ["firmwareTokenizer", "Tokenizer in firmware", "The firmware turns the text into tokens and the tokens into bytes, and is compared with the reference library.", state.firmware && state.firmwareTokenizer, !state.firmware],
+            ["transactionLoad", "Check the image load", "On loading, it goes through every block like the real controller, checks its CRC and counts the cycles. The chip must be reloaded.", state.transactionLoad, false],
           ] as const
         ).map(([key, label, help, checked, disabled]) => (
-          <label className="check" key={key} title={help}>
+          <label className="check" key={key} title={t(help)}>
             <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => set({ [key]: e.target.checked })} />
             {t(label)}
-            <span className="hint-icon" aria-label={help}>
+            <span className="hint-icon" aria-label={t(help)}>
               <Icon name="info" size={13} />
             </span>
           </label>
         ))}
         <dl className="metrics">
-          <div><dt>Aritmética</dt><dd>Enteros de {String(params.activation_bits)} bits, la del chip</dd></div>
-          <div><dt>Tokenizador</dt><dd>{state.firmware && state.firmwareTokenizer ? "En el firmware" : "Fuera del chip"}</dd></div>
-          <div><dt>Carga de pesos</dt><dd>{params.weight_backend === "rom" ? "Grabados en el chip (ROM)" : state.transactionLoad ? "Por transacciones" : "Directa del checkpoint"}</dd></div>
+          <div><dt>{t("Arithmetic")}</dt><dd>{String(params.activation_bits)}-bit {t("integers, the chip's")}</dd></div>
+          <div><dt>{t("Tokenizer")}</dt><dd>{t(state.firmware && state.firmwareTokenizer ? "In the firmware" : "Outside the chip")}</dd></div>
+          <div><dt>{t("Weight loading")}</dt><dd>{t(params.weight_backend === "rom" ? "Burnt into the chip (ROM)" : state.transactionLoad ? "By transactions" : "Straight from the checkpoint")}</dd></div>
         </dl>
       </div>
 
-      <h3>{t("Generación")}</h3>
+      <h3>{t("Generation")}</h3>
       <div className="inset padded form">
         <label>
-          Tokens máximos
+          {t("Max tokens")}
           <input type="text" inputMode="numeric" value={state.maxTokens} onChange={(e) => set({ maxTokens: Number(e.target.value) || 1 })} />
         </label>
         <label>
-          Temperatura (0 elige siempre el más probable)
+          {t("Temperature (0 always picks the most likely)")}
           <input type="text" inputMode="decimal" value={state.temperature} onChange={(e) => set({ temperature: Number(e.target.value.replace(",", ".")) || 0 })} />
         </label>
-        <label className="check" title="Con la plantilla de chat del modelo, abre su bloque de razonamiento antes de la respuesta. Sin él, el bloque llega cerrado y el modelo contesta directamente. Es texto del prompt: no cambia el chip.">
+        <label className="check" title={t("With the model's chat template, opens its reasoning block before the answer. Without it, the block arrives closed and the model answers directly. It is prompt text: it does not change the chip.")}>
           <input type="checkbox" checked={state.thinking} onChange={(e) => set({ thinking: e.target.checked })} />
-          Razonar antes de responder
+          {t("Think before answering")}
         </label>
         {state.thinking && (
-          <label title="Cuántos tokens puede razonar el modelo antes de que el firmware del chip cierre el razonamiento por él y pase a la respuesta. Vacío lo deja sin límite; 0 equivale a no razonar.">
-            Presupuesto de razonamiento (tokens, vacío sin límite)
-            <input type="text" inputMode="numeric" value={state.thinkBudget} placeholder="Sin límite" onChange={(e) => set({ thinkBudget: e.target.value.replace(/[^0-9]/g, "") })} />
+          <label title={t("How many tokens the model may reason before the chip's firmware closes the reasoning for it and moves to the answer. Empty means no limit; 0 means no reasoning.")}>
+            {t("Reasoning budget (tokens, empty for no limit)")}
+            <input type="text" inputMode="numeric" value={state.thinkBudget} placeholder={t("No limit")} onChange={(e) => set({ thinkBudget: e.target.value.replace(/[^0-9]/g, "") })} />
           </label>
         )}
-        <p className="muted-text">{draftDepth > 0 ? `La cabeza MTP del diseño adivina ${draftDepth} tokens y se miden sus aciertos.` : "El diseño no lleva cabeza MTP."}</p>
+        <p className="muted-text">{draftDepth > 0 ? `${t("The design's MTP head guesses tokens ahead")}: ${draftDepth}.` : t("The design has no MTP head.")}</p>
       </div>
 
-      <h3>{t("Medidas")}</h3>
+      <h3>{t("Measurements")}</h3>
       <dl className="inset metrics">
-        <div><dt>Fase</dt><dd>{state.phase || "—"}</dd></div>
-        <div><dt>Tokens generados</dt><dd>{state.tokens}</dd></div>
-        <div><dt>Simulación</dt><dd>{mean ? `${formatNumber(mean)} s/token` : "—"}</dd></div>
-        <div><dt>Este chip, estimado</dt><dd>{formatNumber(chipRate)} tok/s</dd></div>
-        <div><dt>Más rápido que simularlo</dt><dd>{mean ? `×${formatNumber(chipRate * mean)}` : "—"}</dd></div>
-        {state.loadReport && <div><dt>Imagen: bloques</dt><dd>{formatNumber(state.loadReport.segments)}{state.loadReport.created ? " (creada)" : ""}</dd></div>}
-        {state.loadReport && <div><dt>Imagen: ciclos de carga</dt><dd>{formatNumber(state.loadReport.cycles)}</dd></div>}
-        {state.loadReport && <div><dt>Imagen: errores de CRC</dt><dd>{state.loadReport.crc_errors.length}</dd></div>}
-        {state.chip && <div><dt>Ciclos del chip, con firmware</dt><dd>{formatNumber(state.chip.cycles)}</dd></div>}
-        {state.chip?.tokenizerMatch != null && <div><dt>Tokenizador frente a la referencia</dt><dd>{state.chip.tokenizerMatch ? "Coincide" : "Difiere"}</dd></div>}
-        {state.chip && <div><dt>Fuera del die (CPU y muestreo)</dt><dd>{formatNumber(state.chip.cycles - state.chip.dieCycles)} ciclos</dd></div>}
+        <div><dt>{t("Phase")}</dt><dd>{state.phase ? t(state.phase) : "—"}</dd></div>
+        <div><dt>{t("Tokens generated")}</dt><dd>{state.tokens}</dd></div>
+        <div><dt>{t("Simulation")}</dt><dd>{mean ? `${formatNumber(mean)} s/token` : "—"}</dd></div>
+        <div><dt>{t("This chip, estimated")}</dt><dd>{formatNumber(chipRate)} tok/s</dd></div>
+        <div><dt>{t("Faster than simulating it")}</dt><dd>{mean ? `×${formatNumber(chipRate * mean)}` : "—"}</dd></div>
+        {state.loadReport && <div><dt>{t("Image: blocks")}</dt><dd>{formatNumber(state.loadReport.segments)}{state.loadReport.created ? ` (${t("created")})` : ""}</dd></div>}
+        {state.loadReport && <div><dt>{t("Image: load cycles")}</dt><dd>{formatNumber(state.loadReport.cycles)}</dd></div>}
+        {state.loadReport && <div><dt>{t("Image: CRC errors")}</dt><dd>{state.loadReport.crc_errors.length}</dd></div>}
+        {state.chip && <div><dt>{t("Chip cycles, with firmware")}</dt><dd>{formatNumber(state.chip.cycles)}</dd></div>}
+        {state.chip?.tokenizerMatch != null && <div><dt>{t("Tokenizer against the reference")}</dt><dd>{t(state.chip.tokenizerMatch ? "Matches" : "Differs")}</dd></div>}
+        {state.chip && <div><dt>{t("Outside the die (CPU and sampling)")}</dt><dd>{formatNumber(state.chip.cycles - state.chip.dieCycles)} {t("cycles")}</dd></div>}
         {state.acceptance.tries.map((tries, depth) => (
-          <div key={depth}><dt>Aciertos MTP a profundidad {depth + 1}</dt><dd>{tries ? `${formatNumber((state.acceptance.hits[depth] / tries) * 100)} %` : "—"}</dd></div>
+          <div key={depth}><dt>{t("MTP hits at depth")} {depth + 1}</dt><dd>{tries ? `${formatNumber((state.acceptance.hits[depth] / tries) * 100)} %` : "—"}</dd></div>
         ))}
       </dl>
     </aside>

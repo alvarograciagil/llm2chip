@@ -3,14 +3,14 @@ import { describe, expect, it } from "vitest";
 import { FIELDS } from "../params";
 import { parametersMarkdown } from "./markdown";
 
-const path = new URL("../../../docs/parametros.md", import.meta.url);
+const path = new URL("../../../docs/parameters.md", import.meta.url);
 
-describe("documentación de parámetros", () => {
-  it("explica cada parámetro del panel", () => {
+describe("parameter documentation", () => {
+  it("explains every parameter of the panel", () => {
     for (const field of FIELDS) expect(field.help, field.key).toBeTruthy();
   });
 
-  it("está al día con la aplicación", () => {
+  it("is up to date with the application", () => {
     const text = parametersMarkdown();
     if (process.env.UPDATE_DOCS) writeFileSync(path, text);
     expect(readFileSync(path, "utf8")).toBe(text);

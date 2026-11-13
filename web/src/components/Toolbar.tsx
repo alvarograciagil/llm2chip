@@ -9,15 +9,15 @@ import { useT, type Language } from "../i18n";
 import type { View } from "../store";
 
 const VIEWS: [View, string][] = [
-  ["plano", "Plano"],
-  ["funcionamiento", "Funcionamiento"],
-  ["esquematico", "Esquemático"],
-  ["simulador", "Simulador"],
-  ["imagenes", "Imágenes"],
-  ["explorador", "Explorador"],
-  ["numerico", "Numérico"],
-  ["modelos", "Modelos"],
-  ["parametros", "Parámetros"],
+  ["floorplan", "Floorplan"],
+  ["logic", "How it works"],
+  ["schematic", "Schematic"],
+  ["simulator", "Simulator"],
+  ["images", "Images"],
+  ["explorer", "Explorer"],
+  ["numeric", "Numerics"],
+  ["models", "Models"],
+  ["parameters", "Parameters"],
 ];
 
 const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round" } as const;
@@ -25,7 +25,7 @@ const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeL
 function SavePopover({ onClose }: { onClose: () => void }) {
   const designName = useDesign((s) => s.designName);
   const saveDesign = useDesign((s) => s.saveDesign);
-  const [name, setName] = useState(designName === "Sin título" ? "" : designName);
+  const [name, setName] = useState(designName === "Untitled" ? "" : designName);
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => input.current?.select(), []);
 
@@ -34,9 +34,9 @@ function SavePopover({ onClose }: { onClose: () => void }) {
     onClose();
   };
   return (
-    <div className="popover" role="dialog" aria-label="Guardar diseño">
+    <div className="popover" role="dialog" aria-label="Save design">
       <label>
-        Nombre del diseño
+        Design name
         <input
           ref={input}
           type="text"
@@ -49,9 +49,9 @@ function SavePopover({ onClose }: { onClose: () => void }) {
         />
       </label>
       <div className="popover-actions">
-        <button onClick={onClose}>Cancelar</button>
+        <button onClick={onClose}>Cancel</button>
         <button className="primary" disabled={!name.trim()} onClick={submit}>
-          Guardar
+          Save
         </button>
       </div>
     </div>
@@ -78,9 +78,9 @@ function DesignMenu() {
       <svg viewBox="0 0 10 14" aria-hidden="true">
         <path d="M2 5l3-3 3 3M2 9l3 3 3-3" {...stroke} strokeWidth={1.4} />
       </svg>
-      <select aria-label="Abrir diseño" value="" onChange={onChange}>
+      <select aria-label="Open design" value="" onChange={onChange}>
         <option value="" disabled hidden />
-        <optgroup label={t("Plantillas")}>
+        <optgroup label={t("Templates")}>
           {presets.map((p) => (
             <option key={p.id} value={`p:${p.id}`}>
               {t(p.name)}
@@ -88,7 +88,7 @@ function DesignMenu() {
           ))}
         </optgroup>
         {saved.length > 0 && (
-          <optgroup label="Mis diseños">
+          <optgroup label="My designs">
             {saved.map((d) => (
               <option key={d.name} value={`s:${d.name}`}>
                 {d.name}
@@ -105,7 +105,7 @@ function AppearanceMenu() {
   const appearance = useDesign((s) => s.appearance);
   const setAppearance = useDesign((s) => s.setAppearance);
   return (
-    <label className="icon-select" title="Apariencia">
+    <label className="icon-select" title="Appearance">
       <svg viewBox="0 0 20 20" aria-hidden="true">
         {appearance === "light" && (
           <path d="M10 6.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7ZM10 2.5v1.6M10 15.9v1.6M2.5 10h1.6M15.9 10h1.6M4.7 4.7l1.1 1.1M14.2 14.2l1.1 1.1M15.3 4.7l-1.1 1.1M5.8 14.2l-1.1 1.1" {...stroke} />
@@ -118,10 +118,10 @@ function AppearanceMenu() {
           </>
         )}
       </svg>
-      <select aria-label="Apariencia" value={appearance} onChange={(e) => setAppearance(e.target.value as Appearance)}>
-        <option value="auto">Automática</option>
-        <option value="light">Clara</option>
-        <option value="dark">Oscura</option>
+      <select aria-label="Appearance" value={appearance} onChange={(e) => setAppearance(e.target.value as Appearance)}>
+        <option value="auto">Automatic</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
       </select>
     </label>
   );
@@ -132,11 +132,11 @@ function LanguageMenu() {
   const setLanguage = useDesign((s) => s.setLanguage);
   const t = useT();
   return (
-    <label className="icon-select language" title={t("Idioma")}>
+    <label className="icon-select language" title={t("Language")}>
       <span aria-hidden="true">{language.toUpperCase()}</span>
-      <select aria-label={t("Idioma")} value={language} onChange={(e) => setLanguage(e.target.value as Language)}>
-        <option value="es">Español</option>
+      <select aria-label={t("Language")} value={language} onChange={(e) => setLanguage(e.target.value as Language)}>
         <option value="en">English</option>
+        <option value="es">Español</option>
       </select>
     </label>
   );
@@ -158,20 +158,20 @@ export function Toolbar() {
   const exportDatasheet = () => {
     const { report, designName, model, params } = useDesign.getState();
     if (!report || !model) return;
-    download(datasheet(designName, model.name, report, params as unknown as Record<string, unknown>), `${designName.replace(/[^\p{L}\p{N}]+/gu, "_")}_hoja_de_datos.md`, "text/markdown");
+    download(datasheet(designName, model.name, report, params as unknown as Record<string, unknown>), `${designName.replace(/[^\p{L}\p{N}]+/gu, "_")}_datasheet.md`, "text/markdown");
   };
 
   return (
     <header className="toolbar">
       <div className="toolbar-side">
         <strong className="app-name">llm2chip</strong>
-        <IconButton label={t("Nuevo proyecto")} onClick={() => setCreating(true)}>
+        <IconButton label={t("New project")} onClick={() => setCreating(true)}>
           <path d="M10 4.5v11M4.5 10h11" {...stroke} />
         </IconButton>
         <DesignMenu />
         {creating && <ProjectWizard onClose={() => setCreating(false)} />}
       </div>
-      <div className="segmented views" role="radiogroup" aria-label={t("Vista")}>
+      <div className="segmented views" role="radiogroup" aria-label={t("View")}>
         {VIEWS.map(([id, label]) => (
           <button key={id} role="radio" aria-checked={view === id} aria-label={t(label)} title={t(label)} className={view === id ? "on" : ""} onClick={() => setView(id)}>
             <Icon name={id} />
@@ -180,23 +180,23 @@ export function Toolbar() {
         ))}
       </div>
       <div className="toolbar-side end">
-        <IconButton label={t("Exportar hoja de datos")} onClick={exportDatasheet}>
+        <IconButton label={t("Export datasheet")} onClick={exportDatasheet}>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2h6l3 3v9H4zM10 2v3h3M6 8.5h5M6 11h5" {...stroke} /></svg>
         </IconButton>
-        <IconButton label={t("Deshacer")} disabled={!canUndo} onClick={undo}>
+        <IconButton label={t("Undo")} disabled={!canUndo} onClick={undo}>
           <path d="M7.5 5 4 8.5 7.5 12M4.5 8.5H12a4 4 0 0 1 0 8h-1.5" {...stroke} />
         </IconButton>
-        <IconButton label={t("Rehacer")} disabled={!canRedo} onClick={redo}>
+        <IconButton label={t("Redo")} disabled={!canRedo} onClick={redo}>
           <path d="M12.5 5 16 8.5 12.5 12M15.5 8.5H8a4 4 0 0 0 0 8h1.5" {...stroke} />
         </IconButton>
         <AppearanceMenu />
         <LanguageMenu />
         <button className={baseline ? "pill on" : "pill"} onClick={baseline ? clearBaseline : pinBaseline}>
-          {t(baseline ? "Quitar" : "Fijar")}<span className="wide-label">{t(baseline ? " referencia" : " como referencia")}</span>
+          {t(baseline ? "Remove" : "Pin")}<span className="wide-label">{t(baseline ? " baseline" : " as baseline")}</span>
         </button>
         <div className="anchor">
           <button className="pill" onClick={() => setSaving(!saving)}>
-            {t("Guardar")}
+            {t("Save")}
           </button>
           {saving && <SavePopover onClose={() => setSaving(false)} />}
         </div>

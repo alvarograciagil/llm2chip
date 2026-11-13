@@ -17,20 +17,20 @@ interface Axis {
 }
 
 const AXES: Axis[] = [
-  { key: "macs_per_die", label: "Multiplicadores por die", unit: "", min: 8000, max: 2000000, log: true, integer: true },
-  { key: "context_tokens", label: "Contexto", unit: "tokens", min: 512, max: 1048576, log: true, integer: true },
-  { key: "max_params_g", label: "Parámetros máximos", unit: "G", min: 8, max: 200, log: true, integer: false },
-  { key: "weight_bits", label: "Bits de peso", unit: "", min: 3, max: 8, log: false, integer: true },
-  { key: "freq_ghz", label: "Frecuencia", unit: "GHz", min: 0.25, max: 3, log: true, integer: false },
-  { key: "vector_lanes_per_die", label: "Carriles vectoriales", unit: "", min: 1024, max: 512000, log: true, integer: true },
+  { key: "macs_per_die", label: "Multipliers per die", unit: "", min: 8000, max: 2000000, log: true, integer: true },
+  { key: "context_tokens", label: "Context", unit: "tokens", min: 512, max: 1048576, log: true, integer: true },
+  { key: "max_params_g", label: "Max parameters", unit: "G", min: 8, max: 200, log: true, integer: false },
+  { key: "weight_bits", label: "Weight bits", unit: "", min: 3, max: 8, log: false, integer: true },
+  { key: "freq_ghz", label: "Frequency", unit: "GHz", min: 0.25, max: 3, log: true, integer: false },
+  { key: "vector_lanes_per_die", label: "Vector lanes", unit: "", min: 1024, max: 512000, log: true, integer: true },
 ];
 
 const METRICS: [string, string, string][] = [
-  ["tok_s", "Velocidad", "tok/s"],
-  ["total_area_mm2", "Área total", "mm²"],
+  ["tok_s", "Speed", "tok/s"],
+  ["total_area_mm2", "Total area", "mm²"],
   ["dies", "Dies", ""],
-  ["power_w", "Potencia", "W"],
-  ["energy_token_mj", "Energía por token", "mJ"],
+  ["power_w", "Power", "W"],
+  ["energy_token_mj", "Energy per token", "mJ"],
 ];
 
 const STEPS = 28;
@@ -165,18 +165,18 @@ export function ExplorerView() {
       <div className="explorer">
         <div className="card">
           <div className="card-title">
-            <h2>Barrido de un parámetro</h2>
+            <h2>Sweep of one parameter</h2>
             <div className="plot-controls">
-              <select aria-label="Parámetro" value={xKey} onChange={(e) => setXKey(e.target.value)}>
+              <select aria-label="Parameter" value={xKey} onChange={(e) => setXKey(e.target.value)}>
                 {AXES.map((a) => <option key={a.key} value={a.key}>{a.label}</option>)}
               </select>
               <span aria-hidden="true">→</span>
-              <select aria-label="Medida" value={yKey} onChange={(e) => setYKey(e.target.value)}>
+              <select aria-label="Measure" value={yKey} onChange={(e) => setYKey(e.target.value)}>
                 {METRICS.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
               </select>
             </div>
           </div>
-          <p className="muted-text plot-sub">{metric[1]}{metric[2] ? ` (${metric[2]})` : ""}. Clic en un punto para aplicarlo al diseño.</p>
+          <p className="muted-text plot-sub">{metric[1]}{metric[2] ? ` (${metric[2]})` : ""}. Click a point to apply it to the design.</p>
           <SweepProgress sweep={curveSweep} />
           {curve.length > 1 && (
             <Plot points={curve} xLabel={axis.label} yLabel={metric[1]} xLog={axis.log} yLog={yKey !== "dies"} line onPick={(p) => {
@@ -187,12 +187,12 @@ export function ExplorerView() {
         </div>
         <div className="card">
           <div className="card-title">
-            <h2>Frontera de Pareto</h2>
+            <h2>Pareto frontier</h2>
           </div>
-          <p className="muted-text plot-sub">Velocidad (tok/s) frente a área total (mm²), variando multiplicadores y bits de peso. Solo diseños que cumplen las restricciones.</p>
+          <p className="muted-text plot-sub">Speed (tok/s) against total area (mm²), varying multipliers and weight bits. Only designs that meet the constraints.</p>
           <SweepProgress sweep={paretoSweep} />
           {pareto.all.length > 1 && (
-            <Plot points={pareto.all} xLabel="Área total (mm²)" yLabel="Velocidad" xLog yLog line={false} onPick={(p) => {
+            <Plot points={pareto.all} xLabel="Total area (mm²)" yLabel="Speed" xLog yLog line={false} onPick={(p) => {
               const chosen = pareto.all.find((o) => o.x === p.x && o.y === p.y);
               if (chosen) {
                 setParam("target_tok_s", 0);
@@ -203,7 +203,7 @@ export function ExplorerView() {
             }} />
           )}
           <table className="front">
-            <thead><tr><th>Multiplicadores</th><th>Bits</th><th>Área</th><th>Velocidad</th></tr></thead>
+            <thead><tr><th>Multipliers</th><th>Bits</th><th>Area</th><th>Speed</th></tr></thead>
             <tbody>
               {pareto.front.map((p) => (
                 <tr key={`${p.macs}-${p.bits}`}>
@@ -233,21 +233,21 @@ interface Reference {
 const REFERENCES: Reference[] = [
   {
     name: "Taalas HC1",
-    source: "Llama 3.1 8B en ROM, 6 nm",
+    source: "Llama 3.1 8B in ROM, 6 nm",
     model: "llama-3.1-8b",
     params: { max_params_g: 8.1, weight_backend: "rom", use_model_mix: false, group_size: 0, weight_bits: 4, context_tokens: 1024, vector_lanes_per_die: 65536, node: "n6" },
     checks: [
-      ["die_area_mm2", "Área", 815, 815, "mm²"],
-      ["tok_s", "Velocidad", 14400, 17000, "tok/s"],
-      ["power_w", "Potencia", 200, 250, "W"],
+      ["die_area_mm2", "Area", 815, 815, "mm²"],
+      ["tok_s", "Speed", 14400, 17000, "tok/s"],
+      ["power_w", "Power", 200, 250, "W"],
     ],
   },
   {
     name: "d-Matrix Raptor",
-    source: "DRAM apilada, más de 100 TB/s, 4 nm",
+    source: "Stacked DRAM, more than 100 TB/s, 4 nm",
     model: "llama-3.1-8b",
     params: { max_params_g: 8.1, weight_backend: "stacked_dram", stacked_dram_tbps: 100, use_model_mix: false, group_size: 0, weight_bits: 4, context_tokens: 2048, node: "n5", macs_per_die: 1000000 },
-    checks: [["weight_bandwidth", "Ancho de banda usado", 0, 100, "TB/s"]],
+    checks: [["weight_bandwidth", "Bandwidth used", 0, 100, "TB/s"]],
   },
 ];
 
@@ -264,14 +264,14 @@ function FormatComparison() {
   return (
     <div className="card">
       <div className="card-title">
-        <h2>Formatos de pesos</h2>
+        <h2>Weight formats</h2>
       </div>
-      <p className="muted-text plot-sub">El circuito de cada formato con este diseño, de menor a mayor área. Clic en una fila para usarlo. Top-1 es la coincidencia con coma flotante en 16 o 64 tokens de Qwen3.8 real. Ese modelo ya viene cuantizado a 4 bits, así que los formatos pequeños pueden salir mejor de lo que saldrían con pesos originales.</p>
+      <p className="muted-text plot-sub">Each format's circuit with this design, from smallest to largest area. Click a row to use it. Top-1 is the agreement with floating point over 16 or 64 tokens of the real Qwen3.8. That model already comes quantized to 4 bits, so small formats may come out better than they would with the original weights.</p>
       <SweepProgress sweep={sweep} />
       <div className="format-table">
         <table className="front">
           <thead>
-            <tr><th>Formato</th><th>Área</th><th>Velocidad</th><th>Potencia</th><th>Energía</th><th>Top-1</th></tr>
+            <tr><th>Format</th><th>Area</th><th>Speed</th><th>Power</th><th>Energy</th><th>Top-1</th></tr>
           </thead>
           <tbody>
             {rows.map(({ preset, metrics, errors }) => {
@@ -318,8 +318,8 @@ export function CalibrationPanel() {
 
   return (
     <aside className="inspector">
-      <h2 className="detail-title">Calibración</h2>
-      <p className="detail-sub">El modelo frente a chips publicados.</p>
+      <h2 className="detail-title">Calibration</h2>
+      <p className="detail-sub">The model against published chips.</p>
       {rows.map((row) => {
         if (!row) return null;
         return (
@@ -345,10 +345,10 @@ export function CalibrationPanel() {
           </div>
         );
       })}
-      <h3>Qué está calibrado</h3>
+      <h3>What is calibrated</h3>
       <div className="inset padded">
         <p className="muted-text">
-          El área de lógica de cada celda sale de las puertas reales de su netlist. La densidad de ROM y la energía se ajustan al HC1, el único chip de este tipo con cifras públicas de área, velocidad y consumo. Las memorias SRAM, HBM y DRAM apilada siguen siendo supuestos y conviene leerlas como orden de magnitud.
+          The logic area of each cell comes from the real gates of its netlist. ROM density and energy are fitted to the HC1, the only chip of this kind with public figures for area, speed and power. The SRAM, HBM and stacked DRAM memories are still assumptions, best read as orders of magnitude.
         </p>
       </div>
     </aside>

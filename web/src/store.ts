@@ -22,9 +22,9 @@ export type Selection =
   | { kind: "cell"; die: number; row: number; col: number }
   | null;
 
-export type Overlay = "funcion" | "capa" | "actividad" | "energia" | "ancho" | "densidad";
-export type SidebarTab = "parametros" | "optimizaciones";
-export type View = "plano" | "funcionamiento" | "esquematico" | "simulador" | "imagenes" | "explorador" | "modelos" | "numerico" | "parametros";
+export type Overlay = "function" | "layer" | "activity" | "energy" | "data" | "density";
+export type SidebarTab = "parameters" | "optimizations";
+export type View = "floorplan" | "logic" | "schematic" | "simulator" | "images" | "explorer" | "models" | "numeric" | "parameters";
 export type Appearance = "auto" | "light" | "dark";
 import { readLanguage, writeLanguage, type Language } from "./i18n";
 
@@ -218,13 +218,13 @@ export const useDesign = create<DesignState>((set, get) => {
     lastEdit: { key: "", at: 0 },
     baseline: null,
     saved: [],
-    designName: "Sin título",
+    designName: "Untitled",
     selection: null,
-    overlay: "funcion",
-    view: "plano",
+    overlay: "function",
+    view: "floorplan",
     appearance: "auto",
     language: readLanguage(),
-    sidebarTab: "parametros",
+    sidebarTab: "parameters",
     help: null,
     docsFocus: null,
     revealed: null,
@@ -279,7 +279,7 @@ export const useDesign = create<DesignState>((set, get) => {
       commit({ ...get().params, ...fitted(model, get().params) } as ChipParams, "", { model, selection: null });
     },
 
-    reset: () => commit(get().defaults, "", { selection: null, designName: "Sin título" }),
+    reset: () => commit(get().defaults, "", { selection: null, designName: "Untitled" }),
 
     undo() {
       const { past, future, params, model } = get();
@@ -304,7 +304,7 @@ export const useDesign = create<DesignState>((set, get) => {
 
     createProject(name, modelId, params) {
       const model = get().models.find((m) => m.id === modelId) ?? get().model;
-      commit({ ...get().defaults, ...params } as ChipParams, "", { model, selection: null, designName: name, view: "plano" });
+      commit({ ...get().defaults, ...params } as ChipParams, "", { model, selection: null, designName: name, view: "floorplan" });
       get().saveDesign(name);
     },
 
@@ -353,7 +353,7 @@ export const useDesign = create<DesignState>((set, get) => {
     },
     setSidebarTab: (sidebarTab) => set({ sidebarTab }),
     setHelp: (help) => set({ help }),
-    openDocs: (key) => set({ view: "parametros", docsFocus: key }),
-    reveal: (key) => set({ sidebarTab: "parametros", revealed: { key, at: performance.now() } }),
+    openDocs: (key) => set({ view: "parameters", docsFocus: key }),
+    reveal: (key) => set({ sidebarTab: "parameters", revealed: { key, at: performance.now() } }),
   };
 });

@@ -1,3 +1,4 @@
+import { locale } from "../format";
 import type { BlockArea, DiePlan, Floorplan, Rect, Report } from "../engine";
 import type { Overlay, Selection } from "../store";
 
@@ -116,13 +117,13 @@ const blockMeasure = (b: BlockArea): Measure => ({ activity: b.activity, energy:
 
 function overlayValue(m: Measure, overlay: Overlay): number {
   switch (overlay) {
-    case "actividad":
+    case "activity":
       return m.activity;
-    case "energia":
+    case "energy":
       return m.energy;
-    case "ancho":
+    case "data":
       return m.bytes;
-    case "densidad":
+    case "density":
       return m.energy / Math.max(m.area, 1e-9);
     default:
       return 0;
@@ -141,8 +142,8 @@ function dieLayerColor(die: DiePlan, plan: Floorplan, theme: Theme): string {
 
 function fillFor(scene: Scene, die: DiePlan, measure: Measure, category: BlockArea["category"], isArray: boolean): string {
   const { overlay, theme, report } = scene;
-  if (overlay === "funcion") return theme.categories[category];
-  if (overlay === "capa") return isArray ? dieLayerColor(die, report.floorplan, theme) : theme.neutral;
+  if (overlay === "function") return theme.categories[category];
+  if (overlay === "layer") return isArray ? dieLayerColor(die, report.floorplan, theme) : theme.neutral;
   const value = overlayValue(measure, overlay);
   if (value <= 0) return theme.neutral;
   return mix(theme.heatLow, theme.heatHigh, value / overlayRange(report, overlay));
@@ -182,12 +183,12 @@ function drawCell(ctx: CanvasRenderingContext2D, scene: Scene, die: DiePlan, s: 
   const body = { x: s.x + inset, y: s.y + inset, w: s.w - 2 * inset, h: s.h - 2 * inset };
   const sramH = body.h * cells.sram_fraction;
   const parts: [number, string][] = [
-    [cells.mac_fraction, theme.categories.calculo],
-    [cells.scale_fraction, theme.categories.calculo],
-    [cells.noc_fraction, theme.categories.interconexion],
+    [cells.mac_fraction, theme.categories.compute],
+    [cells.scale_fraction, theme.categories.compute],
+    [cells.noc_fraction, theme.categories.interconnect],
   ];
 
-  if (overlay !== "funcion") {
+  if (overlay !== "function") {
     ctx.fillStyle = fillFor(scene, die, arrayMeasure(scene.report), "memory", true);
     ctx.fillRect(body.x, body.y, body.w, body.h);
     return;
@@ -197,10 +198,10 @@ function drawCell(ctx: CanvasRenderingContext2D, scene: Scene, die: DiePlan, s: 
     let y = body.y;
     die.cells.segments.forEach((seg, i) => {
       const h = sramH * seg.fraction;
-      ctx.fillStyle = mix(theme.categories.memoria, theme.die, (i % 2) * 0.22);
+      ctx.fillStyle = mix(theme.categories.memory, theme.die, (i % 2) * 0.22);
       ctx.fillRect(body.x, y, body.w, h);
       if (h > 14 && s.w > 120) {
-        ctx.fillStyle = inkFor(theme.categories.memoria);
+        ctx.fillStyle = inkFor(theme.categories.memory);
         ctx.font = `500 10px ${FONT}`;
         ctx.textBaseline = "middle";
         text(ctx, seg.label, body.x + 5, y + h / 2, body.w - 10);
@@ -208,7 +209,7 @@ function drawCell(ctx: CanvasRenderingContext2D, scene: Scene, die: DiePlan, s: 
       y += h;
     });
   } else {
-    ctx.fillStyle = theme.categories.memoria;
+    ctx.fillStyle = theme.categories.memory;
     ctx.fillRect(body.x, body.y, body.w, sramH);
   }
 
@@ -256,7 +257,7 @@ function drawArray(ctx: CanvasRenderingContext2D, scene: Scene, die: DiePlan) {
       ctx.lineTo(s.x + s.w, y);
     }
     ctx.stroke();
-    drawBlockLabel(ctx, s, `Matriz de celdas · ${cells.count.toLocaleString("es-ES")}`, fill);
+    drawBlockLabel(ctx, s, `Cell array · ${cells.count.toLocaleString(locale())}`, fill);
     return;
   }
 
@@ -416,10 +417,10 @@ export function hitTest(report: Report, wx: number, wy: number, cameraK: number)
         const col = Math.floor((wx - array.x) / w);
         const row = Math.floor((wy - array.y) / h);
         if (row * cells.cols + col < cells.count) {
-          return { kind: "cell", die: die.index, row, col, rect: { x: array.x + col * w, y: array.y + row * h, w, h }, label: `Celda ${col}, ${row}` };
+          return { kind: "cell", die: die.index, row, col, rect: { x: array.x + col * w, y: array.y + row * h, w, h }, label: `Cell ${col}, ${row}` };
         }
       }
-      return { kind: "array", die: die.index, rect: array, label: "Matriz de celdas" };
+      return { kind: "array", die: die.index, rect: array, label: "Cell array" };
     }
     for (const placed of die.blocks) {
       const rect = dieOrigin(die, placed.rect);

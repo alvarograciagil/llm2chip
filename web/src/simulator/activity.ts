@@ -36,35 +36,35 @@ export type GroupId = "host" | "text" | "die" | "sampler" | "control" | "wait";
 /** The CPU's tasks in a few groups, in a fixed order with fixed colours. Waiting is grey:
  * it is the CPU idle while the die or the sampling unit works. */
 export const GROUPS: { id: GroupId; label: string; tasks: CpuTask[]; color: string }[] = [
-  { id: "host", label: "Comunicación con el host", tasks: ["receive", "send"], color: "var(--cat-interconnect)" },
-  { id: "text", label: "Texto y tokens", tasks: ["tokenize", "detokenize"], color: "var(--cat-compute)" },
-  { id: "die", label: "Órdenes al die", tasks: ["order", "load"], color: "var(--cat-memory)" },
-  { id: "sampler", label: "Muestreo", tasks: ["sample"], color: "var(--cat-vector)" },
-  { id: "control", label: "Arranque y control", tasks: ["start", "control"], color: "var(--cat-state)" },
-  { id: "wait", label: "Esperando al die o al muestreo", tasks: ["wait_die", "wait_sampler"], color: "var(--neutral-fill)" },
+  { id: "host", label: "Talking to the host", tasks: ["receive", "send"], color: "var(--cat-interconnect)" },
+  { id: "text", label: "Text and tokens", tasks: ["tokenize", "detokenize"], color: "var(--cat-compute)" },
+  { id: "die", label: "Orders to the die", tasks: ["order", "load"], color: "var(--cat-memory)" },
+  { id: "sampler", label: "Sampling", tasks: ["sample"], color: "var(--cat-vector)" },
+  { id: "control", label: "Start-up and control", tasks: ["start", "control"], color: "var(--cat-state)" },
+  { id: "wait", label: "Waiting for the die or the sampler", tasks: ["wait_die", "wait_sampler"], color: "var(--neutral-fill)" },
 ];
 
 export const TASK_LABEL: Record<CpuTask, string> = {
-  start: "Arranque",
-  receive: "Recibir del host",
-  tokenize: "Convertir texto en tokens",
-  load: "Traer filas de la imagen",
-  order: "Dar parámetros y órdenes al die",
-  wait_die: "Esperar al die",
-  sample: "Preparar el muestreo y leer el token",
-  wait_sampler: "Esperar al muestreo",
-  detokenize: "Convertir el token en texto",
-  send: "Enviar al host",
-  control: "Reglas del firmware",
+  start: "Start-up",
+  receive: "Receive from the host",
+  tokenize: "Turn text into tokens",
+  load: "Fetch rows from the image",
+  order: "Give the die its parameters and orders",
+  wait_die: "Wait for the die",
+  sample: "Set up sampling and read the token",
+  wait_sampler: "Wait for the sampler",
+  detokenize: "Turn the token into text",
+  send: "Send to the host",
+  control: "Firmware rules",
 };
 
 export const ROUTINE_LABEL: Record<string, string> = {
-  token: "pasar un token por todas las capas",
-  logits: "calcular los logits",
-  feed_from_main: "dar a la cabeza MTP el estado del modelo",
-  feed_from_draft: "dar a la cabeza MTP su propio estado",
-  draft: "adivinar un token con la cabeza MTP",
-  draft_logits: "logits de la cabeza MTP",
+  token: "pass a token through every layer",
+  logits: "compute the logits",
+  feed_from_main: "give the MTP head the model's state",
+  feed_from_draft: "give the MTP head its own state",
+  draft: "guess a token with the MTP head",
+  draft_logits: "the MTP head's logits",
 };
 
 export const EMPTY_ACTIVITY: StepActivity = { cpu: {}, routines: {}, samples: [0, 0] };
@@ -128,19 +128,19 @@ export function describeStep(step: ChipStep, format: (n: number) => string, toke
   const a = step.activity;
   const lines: string[] = [];
   const cycles = (task: CpuTask) => taskCycles(a, task);
-  if (cycles("start")) lines.push(`La CPU arranca: pone a cero su memoria y lee la descripción del chip que dejó la imagen (${format(cycles("start"))} ciclos).`);
-  if (cycles("receive")) lines.push(`Recibe del host ${tokenizer ? "el texto" : "los números de los tokens"} byte a byte (${format(cycles("receive"))} ciclos).`);
-  if (cycles("tokenize")) lines.push(`Convierte el texto en tokens con las tablas del tokenizador: normaliza, separa y une pares de símbolos (${format(cycles("tokenize"))} ciclos).`);
-  if (cycles("load")) lines.push(`Trae del almacenamiento de la imagen la fila del embedding de este token (${format(cycles("load"))} ciclos).`);
-  if (cycles("order")) lines.push(`Escribe el token y la posición en los registros de parámetros del die y le da las órdenes (${format(cycles("order"))} ciclos).`);
+  if (cycles("start")) lines.push(`The CPU starts: it clears its memory and reads the chip's description the image left (${format(cycles("start"))} cycles).`);
+  if (cycles("receive")) lines.push(`It receives ${tokenizer ? "the text" : "the token numbers"} from the host byte by byte (${format(cycles("receive"))} cycles).`);
+  if (cycles("tokenize")) lines.push(`It turns the text into tokens with the tokenizer's tables: it normalizes, splits and merges pairs of symbols (${format(cycles("tokenize"))} cycles).`);
+  if (cycles("load")) lines.push(`It fetches this token's embedding row from the image's storage (${format(cycles("load"))} cycles).`);
+  if (cycles("order")) lines.push(`It writes the token and the position into the die's parameter registers and gives it its orders (${format(cycles("order"))} cycles).`);
   for (const [name, [runs, routineCycles]] of Object.entries(a.routines)) {
     const what = ROUTINE_LABEL[name] ?? name;
-    lines.push(`El die ejecuta la rutina «${what}»${runs > 1 ? ` ${runs} veces` : ""}${routineCycles ? `: ${format(routineCycles)} ciclos` : ""}.`);
+    lines.push(`The die runs the routine “${what}”${runs > 1 ? ` ${runs} times` : ""}${routineCycles ? `: ${format(routineCycles)} cycles` : ""}.`);
   }
-  if (cycles("wait_die")) lines.push(`Mientras, la CPU espera leyendo el estado del die (${format(cycles("wait_die"))} ciclos).`);
-  if (a.samples[0]) lines.push(`La unidad de muestreo recorre los logits y elige el token (${format(a.samples[1])} ciclos); la CPU le da los ajustes y lee el resultado (${format(cycles("sample") + cycles("wait_sampler"))} ciclos).`);
-  if (cycles("detokenize")) lines.push(`Convierte el token en texto (${format(cycles("detokenize"))} ciclos).`);
-  if (cycles("send")) lines.push(`Envía al host ${step.text ? `«${step.text}»` : "el resultado"} (${format(cycles("send"))} ciclos).`);
-  if (cycles("control")) lines.push(`Aplica sus reglas: fin de turno, repeticiones y presupuesto de razonamiento (${format(cycles("control"))} ciclos).`);
+  if (cycles("wait_die")) lines.push(`Meanwhile, the CPU waits, reading the die's status (${format(cycles("wait_die"))} cycles).`);
+  if (a.samples[0]) lines.push(`The sampling unit goes through the logits and picks the token (${format(a.samples[1])} cycles); the CPU gives it its settings and reads the result (${format(cycles("sample") + cycles("wait_sampler"))} cycles).`);
+  if (cycles("detokenize")) lines.push(`It turns the token into text (${format(cycles("detokenize"))} cycles).`);
+  if (cycles("send")) lines.push(`It sends ${step.text ? `“${step.text}”` : "the result"} to the host (${format(cycles("send"))} cycles).`);
+  if (cycles("control")) lines.push(`It applies its rules: end of turn, repetitions and reasoning budget (${format(cycles("control"))} cycles).`);
   return lines;
 }

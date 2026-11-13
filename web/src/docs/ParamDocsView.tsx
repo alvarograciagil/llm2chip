@@ -2,24 +2,25 @@ import { useEffect } from "react";
 import { EXTRA_DOCS } from "../paramDocs";
 import { PARAM_GROUPS, type Field } from "../params";
 import { useDesign } from "../store";
+import { locale } from "../format";
 
 /** What a field accepts, in words. */
 function accepted(field: Field): string {
   switch (field.kind) {
     case "range": {
       const unit = field.unit ? ` ${field.unit}` : "";
-      return `De ${field.min.toLocaleString("es")} a ${field.max.toLocaleString("es")}${unit}${field.log ? ", en escala logarítmica" : ""}.`;
+      return `From ${field.min.toLocaleString(locale())} to ${field.max.toLocaleString(locale())}${unit}${field.log ? ", on a logarithmic scale" : ""}.`;
     }
     case "select":
-      return `Opciones: ${field.options.map(([, text]) => text).join(", ")}.`;
+      return `Options: ${field.options.map(([, text]) => text).join(", ")}.`;
     case "toggle":
-      return "Activado o desactivado.";
+      return "On or off.";
     case "preset":
-      return `${field.sections.length} familias de formatos ya hechos.`;
+      return `${field.sections.length} families of ready-made formats.`;
   }
 }
 
-export const anchorOf = (key: string) => `parametro-${key}`;
+export const anchorOf = (key: string) => `parameter-${key}`;
 
 /** Every parameter of the chip, explained. */
 export function ParamDocsView() {
@@ -32,20 +33,20 @@ export function ParamDocsView() {
   return (
     <section className="stage docs-stage">
       <article className="docs-column">
-        <h1>Parámetros del chip</h1>
+        <h1>Chip parameters</h1>
         <p className="muted-text">
-          Todo lo que se puede ajustar, qué cambia en el circuito y en qué se nota. Los del panel izquierdo mueven el estimador al momento; los del generador los deduce el compilador del modelo y del microprograma; los de generación se eligen en cada petición.
+          Everything that can be adjusted, what it changes in the circuit and where it shows. Those in the left panel move the estimator at once; the generator's are derived by the compiler from the model and the microprogram; the generation ones are chosen with each request.
         </p>
-        <nav className="docs-index" aria-label="Secciones">
+        <nav className="docs-index" aria-label="Sections">
           {PARAM_GROUPS.map((group) => (
-            <a key={group.title} href={`#grupo-${group.title}`}>{group.title}</a>
+            <a key={group.title} href={`#group-${group.title}`}>{group.title}</a>
           ))}
           {EXTRA_DOCS.map((section) => (
             <a key={section.id} href={`#${section.id}`}>{section.title}</a>
           ))}
         </nav>
         {PARAM_GROUPS.map((group) => (
-          <section key={group.title} id={`grupo-${group.title}`}>
+          <section key={group.title} id={`group-${group.title}`}>
             <h2>{group.title}</h2>
             <dl className="docs-list">
               {group.fields.map((field) => (

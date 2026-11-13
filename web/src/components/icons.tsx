@@ -15,14 +15,14 @@ export type IconName = keyof typeof ICONS;
 
 const ICONS = {
   // A die seen from above: the chip and its blocks.
-  plano: (
+  floorplan: (
     <>
       <rect x="3" y="3" width="14" height="14" rx="2" {...line} />
       <path d="M3 9h8M11 3v14M11 12h6" {...line} />
     </>
   ),
   // A token going through the steps.
-  funcionamiento: (
+  logic: (
     <>
       <circle cx="5" cy="5" r="2" {...line} />
       <circle cx="15" cy="10" r="2" {...line} />
@@ -31,10 +31,10 @@ const ICONS = {
     </>
   ),
   // A logic gate.
-  esquematico: <path d="M4 5h5a5 5 0 0 1 0 10H4zM1.5 8H4M1.5 12H4M14 10h4.5" {...line} />,
-  simulador: <path d="M6 4.5v11l9-5.5z" {...line} />,
+  schematic: <path d="M4 5h5a5 5 0 0 1 0 10H4zM1.5 8H4M1.5 12H4M14 10h4.5" {...line} />,
+  simulator: <path d="M6 4.5v11l9-5.5z" {...line} />,
   // A framed picture: a mountain under the sun.
-  imagenes: (
+  images: (
     <>
       <rect x="3" y="4" width="14" height="12" rx="2" {...line} />
       <circle cx="13" cy="8" r="1.4" {...line} />
@@ -42,12 +42,12 @@ const ICONS = {
     </>
   ),
   // A curve over axes, what the sweeps draw.
-  explorador: <path d="M3 3v14h14M6 13l3.5-4 3 2.5L17 6" {...line} />,
+  explorer: <path d="M3 3v14h14M6 13l3.5-4 3 2.5L17 6" {...line} />,
   // A histogram: how the numbers spread.
-  numerico: <path d="M4 16V11M8 16V6M12 16V9M16 16V13M3 16.5h14" {...line} />,
+  numeric: <path d="M4 16V11M8 16V6M12 16V9M16 16V13M3 16.5h14" {...line} />,
   // Stacked layers of a model.
-  modelos: <path d="M10 3 17 6.5 10 10 3 6.5zM3 10l7 3.5 7-3.5M3 13.5 10 17l7-3.5" {...line} />,
-  parametros: <path d="M4 5h12M4 10h12M4 15h12M7 3.5v3M13 8.5v3M9 13.5v3" {...line} />,
+  models: <path d="M10 3 17 6.5 10 10 3 6.5zM3 10l7 3.5 7-3.5M3 13.5 10 17l7-3.5" {...line} />,
+  parameters: <path d="M4 5h12M4 10h12M4 15h12M7 3.5v3M13 8.5v3M9 13.5v3" {...line} />,
   info: (
     <>
       <circle cx="10" cy="10" r="7" {...line} />

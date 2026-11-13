@@ -45,56 +45,56 @@ export function LayoutPanel({ report, allowed }: { report: Report; allowed: bool
 
   return (
     <>
-      <h3>{t("Layout real de la celda")}</h3>
+      <h3>{t("Real layout of the cell")}</h3>
       <div className="inset padded form">
         {!open ? (
-          <p className="muted-text">{t("Este proceso no tiene un PDK abierto. Elige SkyWater 130, GF180 o ASAP7 en el destino para hacer el layout con OpenROAD.")}</p>
+          <p className="muted-text">{t("This process has no open PDK. Choose SkyWater 130, GF180 or ASAP7 as the target to lay it out with OpenROAD.")}</p>
         ) : (
           <>
-            <p className="muted-text">{t("La celda que el die repite miles de veces, con el circuito elegido para este diseño, colocada y rutada con OpenROAD en")} {open}.</p>
-            {allowed === false && <p className="note-warning">{t("El diseño no se puede fabricar en este proceso tal como está: ajústalo con «Viabilidad» antes de hacer el layout.")}</p>}
+            <p className="muted-text">{t("The cell the die repeats thousands of times, with the circuit chosen for this design, placed and routed with OpenROAD on")} {open}.</p>
+            {allowed === false && <p className="note-warning">{t("The design cannot be built on this process as it stands: adjust it under “Feasibility” before laying it out.")}</p>}
             <button className="pill primary-pill" disabled={layout.state === "running" || !request || allowed !== true} onClick={() => request && void layout.start(request)}>
-              {layout.state === "running" ? `${t(layout.phase)}… ${layout.seconds} s` : result ? t("Repetir el layout") : t("Hacer el layout")}
+              {layout.state === "running" ? `${t(layout.phase)}… ${layout.seconds} s` : result ? t("Lay it out again") : t("Lay it out")}
             </button>
             {layout.state === "error" && <p className="note-warning">{layout.error}</p>}
-            {stale && result && <p className="muted-text">{t("El circuito cambió desde este layout.")}</p>}
+            {stale && result && <p className="muted-text">{t("The circuit changed since this layout.")}</p>}
           </>
         )}
         {result && (
           <>
-            {result.image && <img className="layout-image" src={result.image} alt={t("Layout de la celda")} />}
+            {result.image && <img className="layout-image" src={result.image} alt={t("Layout of the cell")} />}
             <dl className="metrics">
               <div>
-                <dt>{t("Área de la celda")}</dt>
+                <dt>{t("Cell area")}</dt>
                 <dd>
-                  {formatNumber(result.cell_area_um2 ?? 0)} µm²{decision && !applied ? ` · ${t("estimada")} ${formatNumber(decision.area_um2)}` : ""}
+                  {formatNumber(result.cell_area_um2 ?? 0)} µm²{decision && !applied ? ` · ${t("estimated")} ${formatNumber(decision.area_um2)}` : ""}
                 </dd>
               </div>
               <div>
-                <dt>{t("Frecuencia máxima")}</dt>
+                <dt>{t("Maximum frequency")}</dt>
                 <dd>
-                  {formatNumber(result.fmax_mhz ?? 0)} MHz{decision && !applied ? ` · ${t("estimada")} ${formatNumber(decision.fmax_ghz * 1000)}` : ""}
+                  {formatNumber(result.fmax_mhz ?? 0)} MHz{decision && !applied ? ` · ${t("estimated")} ${formatNumber(decision.fmax_ghz * 1000)}` : ""}
                 </dd>
               </div>
               <div>
-                <dt>{t("Potencia")}</dt>
+                <dt>{t("Power")}</dt>
                 <dd>{formatNumber((result.power_w ?? 0) * 1000)} mW</dd>
               </div>
               <div>
-                <dt>{t("Celdas estándar")}</dt>
+                <dt>{t("Standard cells")}</dt>
                 <dd>{formatNumber(result.cells ?? 0)}</dd>
               </div>
               <div>
-                <dt>{t("Violaciones de reglas")}</dt>
+                <dt>{t("Rule violations")}</dt>
                 <dd>{result.drc_errors}</dd>
               </div>
             </dl>
-            <p className="muted-text">{t("El layout lleva unas pocas palabras de pesos en biestables, las justas para conservar su corrección de errores; en el chip, la memoria de pesos es una macro de SRAM aparte.")}</p>
+            <p className="muted-text">{t("The layout carries a few words of weights in flip-flops, just enough to keep its error correction; on the chip, the weight memory is a separate SRAM macro.")}</p>
             {applied ? (
               <>
-                <p className="note-ok">{t("El estimador usa el área y la frecuencia medidas de esta celda.")}</p>
+                <p className="note-ok">{t("The estimator uses this cell's measured area and frequency.")}</p>
                 <button className="pill" onClick={() => setParams({ measured_cell: "", measured_cell_um2: 0, measured_cell_fmax_ghz: 0 })}>
-                  {t("Volver a la estimación")}
+                  {t("Back to the estimate")}
                 </button>
               </>
             ) : (
@@ -103,7 +103,7 @@ export function LayoutPanel({ report, allowed }: { report: Report; allowed: bool
                   className="pill primary-pill"
                   onClick={() => setParams({ measured_cell: key, measured_cell_um2: result.cell_area_um2 ?? 0, measured_cell_fmax_ghz: (result.fmax_mhz ?? 0) / 1000 })}
                 >
-                  {t("Usar las cifras medidas")}
+                  {t("Use the measured figures")}
                 </button>
               )
             )}

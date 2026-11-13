@@ -7,7 +7,7 @@ describe("zip", () => {
   });
 
   it("records every file in the end of central directory", () => {
-    const archive = makeZip({ "rtl/celda.v": "module celda; endmodule\n", "léeme.txt": "ñandú" });
+    const archive = makeZip({ "rtl/cell.v": "module cell; endmodule\n", "léeme.txt": "ñandú" });
     expect(archive.slice(0, 4)).toEqual(new Uint8Array([0x50, 0x4b, 0x03, 0x04]));
     const end = archive.length - 22;
     expect(archive[end]).toBe(0x50);

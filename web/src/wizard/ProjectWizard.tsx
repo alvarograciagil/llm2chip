@@ -8,10 +8,10 @@ import { useT } from "../i18n";
 import { buildable, chipParams, DEFAULT_ANSWERS, fpgaParams, makers, metric, modelParams, suggested, type Answers, type FpgaBoard, type Start } from "./plan";
 
 const STARTS: { id: Start; title: string; text: string }[] = [
-  { id: "fpga", title: "Una FPGA", text: "Eliges una placa y te dice qué modelos le caben, dónde van sus pesos y a qué velocidad irían." },
-  { id: "chip", title: "Un solo chip", text: "Todo en un die: eliges el proceso, el área y la velocidad, y ves qué modelos caben." },
-  { id: "model", title: "Un modelo", text: "Eliges el LLM; el número de chips y su reparto salen de la velocidad que pidas." },
-  { id: "custom", title: "A medida", text: "Los parámetros por defecto con el modelo que elijas, para ajustarlo todo tú." },
+  { id: "fpga", title: "An FPGA", text: "Pick a board and see which models fit, where their weights go and how fast they would run." },
+  { id: "chip", title: "A single chip", text: "Everything on one die: choose the process, the area and the speed, and see which models fit." },
+  { id: "model", title: "A model", text: "Choose the LLM; the number of chips and how they share it follow from the speed you ask for." },
+  { id: "custom", title: "Custom", text: "The default parameters with the model you choose, to tune everything yourself." },
 ];
 
 type Step = "start" | "board" | "questions" | "model" | "name";
@@ -24,11 +24,11 @@ const STEPS: Record<Start, Step[]> = {
 };
 
 const STEP_TITLES: Record<Step, string> = {
-  start: "¿Desde dónde empiezas?",
-  board: "¿Qué placa tienes o quieres comprar?",
-  questions: "Unas preguntas",
-  model: "¿Qué modelo?",
-  name: "Resumen",
+  start: "Where do you start from?",
+  board: "Which board do you have or want to buy?",
+  questions: "A few questions",
+  model: "Which model?",
+  name: "Summary",
 };
 
 interface Row {
@@ -70,14 +70,14 @@ function judge(answers: Answers, models: ModelSource[], defaults: ChipParams, bo
       const { params, report } = placed;
       const fits = buildable(report);
       const problem = report?.violations.find((v) => v.severity === "error")?.message;
-      const where = placed === inside ? `En la memoria de la FPGA: ${Math.round(metric(report, "fpga_memory_pct"))} % ocupada, lógica al ${Math.round(metric(report, "fpga_logic_pct"))} %.` : "Pesos en la memoria de la placa: su ancho de banda marca la velocidad.";
-      const note = !report ? "El estimador no admite este modelo." : fits ? where : (problem ?? "No cabe en esta placa.");
+      const where = placed === inside ? `In the FPGA's memory: ${Math.round(metric(report, "fpga_memory_pct"))} % used, logic at ${Math.round(metric(report, "fpga_logic_pct"))} %.` : "Weights in the board's memory: its bandwidth sets the speed.";
+      const note = !report ? "The estimator does not take this model." : fits ? where : (problem ?? "It does not fit on this board.");
       return { model, id: model.id, params_g: metric(report, "model_params_g"), tok_s: metric(report, "tok_s"), fits, note, params };
     }
     const { params, report } = sized(model, defaults, answers.start === "chip" ? chipParams(answers) : answers.start === "model" ? modelParams(answers) : {});
     const fits = buildable(report) && (answers.start !== "chip" || report?.dies === 1);
     const problem = report?.violations.find((v) => v.severity === "error")?.message;
-    const note = !report ? "El estimador no admite este modelo." : fits ? `${formatNumber(report.die_area_mm2)} mm² por die${report.dies > 1 ? `, ${report.dies} dies` : ""}.` : (problem ?? "No cabe en un die.");
+    const note = !report ? "The estimator does not take this model." : fits ? `${formatNumber(report.die_area_mm2)} mm² per die${report.dies > 1 ? `, ${report.dies} dies` : ""}.` : (problem ?? "It does not fit in one die.");
     return { model, id: model.id, params_g: metric(report, "model_params_g"), tok_s: metric(report, "tok_s"), fits, note, params };
   });
 }
@@ -99,11 +99,12 @@ function Choice({ selected, title, children, onClick, disabled }: { selected: bo
 }
 
 function Question({ label, help, children }: { label: string; help: string; children: ReactNode }) {
+  const t = useT();
   return (
     <div className="wizard-question">
       <div>
-        <strong>{label}</strong>
-        <p>{help}</p>
+        <strong>{t(label)}</strong>
+        <p>{t(help)}</p>
       </div>
       {children}
     </div>
@@ -111,7 +112,7 @@ function Question({ label, help, children }: { label: string; help: string; chil
 }
 
 const CONTEXTS: [number, string][] = [[64, "64"], [128, "128"], [256, "256"], [512, "512"], [1024, "1 K"], [2048, "2 K"], [4096, "4 K"], [8192, "8 K"], [16384, "16 K"], [32768, "32 K"], [65536, "64 K"], [131072, "128 K"], [262144, "256 K"], [1048576, "1 M"]];
-const WEIGHT_BITS: [number, string][] = [[2, "2 bits"], [3, "3 bits"], [4, "4 bits (q4)"], [5, "5 bits"], [6, "6 bits"], [8, "8 bits (q8)"], [16, "16 bits, sin cuantizar"]];
+const WEIGHT_BITS: [number, string][] = [[2, "2 bits"], [3, "3 bits"], [4, "4 bits (q4)"], [5, "5 bits"], [6, "6 bits"], [8, "8 bits (q8)"], [16, "16 bits, unquantized"]];
 const SPEEDS: [string, string][] = [["100", "100"], ["1000", "1 000"], ["5000", "5 000"], ["20000", "20 000"]];
 
 function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<Answers>) => void }) {
@@ -121,12 +122,12 @@ function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<An
   return (
     <div className="wizard-questions">
       {start !== "model" && (
-        <Question label="¿Qué buscas?" help="Decide qué modelo te propongo entre los que caben.">
-          <Segmented label="Objetivo" value={answers.goal} options={[["validate", "Validar que funciona"], ["largest", "El modelo más grande"], ["fastest", "La mayor velocidad"]]} onChange={(goal) => set({ goal })} />
+        <Question label="What are you after?" help="It decides which model I suggest among those that fit.">
+          <Segmented label="Goal" value={answers.goal} options={[["validate", t("Check that it works")], ["largest", t("The largest model")], ["fastest", t("The highest speed")]]} onChange={(goal) => set({ goal })} />
         </Question>
       )}
-      <Question label="Bits de peso" help="Con 8 bits el modelo apenas pierde calidad; con 4 ocupa la mitad y caben modelos el doble de grandes; por debajo de 4 la calidad cae deprisa. Con 16 se guardan como vienen.">
-        <select aria-label="Bits de peso" value={answers.weight_bits} onChange={(e) => set({ weight_bits: Number(e.target.value) })}>
+      <Question label="Weight bits" help="With 8 bits the model barely loses quality; with 4 it takes half and models twice as large fit; below 4 quality drops fast. With 16 they are kept as they come.">
+        <select aria-label="Weight bits" value={answers.weight_bits} onChange={(e) => set({ weight_bits: Number(e.target.value) })}>
           {WEIGHT_BITS.map(([bits, label]) => (
             <option key={bits} value={bits}>
               {label}
@@ -134,8 +135,8 @@ function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<An
           ))}
         </select>
       </Question>
-      <Question label="Contexto" help="Los tokens que el chip recuerda. La caché crece con él, y es lo que más memoria pide después de los pesos.">
-        <select aria-label="Contexto" value={answers.context_tokens} onChange={(e) => set({ context_tokens: Number(e.target.value) })}>
+      <Question label="Context" help="The tokens the chip remembers. The cache grows with it, and it is what needs the most memory after the weights.">
+        <select aria-label="Context" value={answers.context_tokens} onChange={(e) => set({ context_tokens: Number(e.target.value) })}>
           {CONTEXTS.map(([tokens, label]) => (
             <option key={tokens} value={tokens}>
               {label} tokens
@@ -145,11 +146,11 @@ function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<An
       </Question>
       {start !== "fpga" && (
         <>
-          <Question label="Velocidad objetivo" help="Tokens por segundo para un usuario, garantizados con el contexto lleno. De aquí salen los multiplicadores de cada die.">
-            <Segmented label="Velocidad" value={String(answers.target_tok_s)} options={SPEEDS} onChange={(v) => set({ target_tok_s: Number(v) })} />
+          <Question label="Target speed" help="Tokens per second for one user, guaranteed with the context full. The multipliers of each die come from here.">
+            <Segmented label="Speed" value={String(answers.target_tok_s)} options={SPEEDS} onChange={(v) => set({ target_tok_s: Number(v) })} />
           </Question>
-          <Question label="Proceso" help="El nodo de fabricación: fija el área de cada bit de memoria y de cada puerta, y la frecuencia.">
-            <select aria-label="Proceso" value={answers.node} onChange={(e) => set({ node: e.target.value })}>
+          <Question label="Process" help="The manufacturing node: it sets the area of each memory bit and each gate, and the clock.">
+            <select aria-label="Process" value={answers.node} onChange={(e) => set({ node: e.target.value })}>
               {nodes.map((n) => (
                 <option key={n.id} value={n.id}>
                   {t(n.label)}
@@ -157,17 +158,17 @@ function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<An
               ))}
             </select>
           </Question>
-          <Question label="Área máxima por die" help="El límite físico es la retícula, unos 858 mm². Los dies pequeños salen más baratos por oblea.">
-            <Segmented label="Área" value={String(answers.die_max_mm2)} options={[["100", "100 mm²"], ["300", "300 mm²"], ["600", "600 mm²"], ["858", "Retícula"]]} onChange={(v) => set({ die_max_mm2: Number(v) })} />
+          <Question label="Max die area" help="The physical limit is the reticle, about 858 mm². Small dies come out cheaper per wafer.">
+            <Segmented label="Area" value={String(answers.die_max_mm2)} options={[["100", "100 mm²"], ["300", "300 mm²"], ["600", "600 mm²"], ["858", t("Reticle")]]} onChange={(v) => set({ die_max_mm2: Number(v) })} />
           </Question>
-          <Question label="Pesos" help="En SRAM el chip admite otros modelos; en ROM se graban al fabricarlo y ocupan menos.">
-            <Segmented label="Pesos" value={answers.weight_backend} options={[["sram", "SRAM, intercambiables"], ["rom", "ROM, grabados"]]} onChange={(weight_backend) => set({ weight_backend })} />
+          <Question label="Weights" help="In SRAM the chip takes other models; in ROM they are burnt in at manufacturing and take less.">
+            <Segmented label="Weights" value={answers.weight_backend} options={[["sram", t("SRAM, swappable")], ["rom", t("ROM, burnt in")]]} onChange={(weight_backend) => set({ weight_backend })} />
           </Question>
         </>
       )}
       {start === "model" && (
-        <Question label="Reparto entre chips" help="Por capas: cada chip hace unas capas y pasa el vector al siguiente; poca comunicación, pero con un usuario trabaja un chip cada vez. Por tensor: todos trabajan en cada capa a la vez; más velocidad para un usuario, con enlaces rápidos. Mixto: grupos en tensor unidos en cadena.">
-          <Segmented label="Reparto" value={answers.chip_split} options={[["layers", "Por capas"], ["tensor", "Por tensor"], ["mixed", "Mixto"]]} onChange={(chip_split) => set({ chip_split })} />
+        <Question label="Chip split" help="By layers: each chip does some layers and passes the vector to the next; little communication, but with one user one chip works at a time. By tensor: they all work on each layer at once; more speed for one user, with fast links. Mixed: tensor groups joined in a chain.">
+          <Segmented label={t("Split")} value={answers.chip_split} options={[["layers", t("By layers")], ["tensor", t("By tensor")], ["mixed", t("Mixed")]]} onChange={(chip_split) => set({ chip_split })} />
         </Question>
       )}
     </div>
@@ -178,15 +179,15 @@ function ModelList({ rows, answers, choose }: { rows: Row[]; answers: Answers; c
   const judged = answers.start === "fpga" || answers.start === "chip";
   const best = judged ? suggested(rows, answers.goal) : null;
   return (
-    <ul className="wizard-models" role="listbox" aria-label="Modelos">
+    <ul className="wizard-models" role="listbox" aria-label="Models">
       {rows.map((r) => (
         <li key={r.id}>
           <button role="option" aria-selected={answers.model === r.id} className={answers.model === r.id ? "on" : ""} disabled={judged && !r.fits} onClick={() => choose(r.id)}>
             <span className="wizard-model-name">
               {r.model.name}
-              {r.id === best && <em>Recomendado</em>}
+              {r.id === best && <em>Recommended</em>}
             </span>
-            <span className="wizard-model-size">{Number.isFinite(r.params_g) ? `${formatParams(r.params_g)} parámetros` : ""}</span>
+            <span className="wizard-model-size">{Number.isFinite(r.params_g) ? `${formatParams(r.params_g)} parameters` : ""}</span>
             {judged && <span className={r.fits ? "wizard-model-note" : "wizard-model-note bad"}>{r.note}</span>}
             {judged && r.fits && Number.isFinite(r.tok_s) && <span className="wizard-model-speed">{formatNumber(r.tok_s)} tok/s</span>}
           </button>
@@ -199,7 +200,7 @@ function ModelList({ rows, answers, choose }: { rows: Row[]; answers: Answers; c
 /** A drawing of a board, for those whose maker's photo could not be checked. */
 function BoardDrawing({ board }: { board: FpgaBoard }) {
   return (
-    <svg className="board-drawing" viewBox="0 0 320 200" role="img" aria-label={`Ilustración de la placa ${board.name}`}>
+    <svg className="board-drawing" viewBox="0 0 320 200" role="img" aria-label={`Drawing of the ${board.name} board`}>
       <rect x="6" y="6" width="308" height="188" rx="10" className="pcb" />
       {[18, 302].flatMap((x) => [18, 182].map((y) => <circle key={`${x}-${y}`} cx={x} cy={y} r="5" className="hole" />))}
       <rect x="110" y="56" width="92" height="92" rx="4" className="fpga" />
@@ -221,7 +222,7 @@ function BoardDrawing({ board }: { board: FpgaBoard }) {
       <rect x="26" y="70" width="44" height="64" rx="3" className="chip" />
       <rect x="40" y="170" width="240" height="12" rx="2" className="header" />
       <text x="160" y="30" className="sub">
-        Ilustración, no es una foto
+        A drawing, not a photo
       </text>
     </svg>
   );
@@ -239,7 +240,7 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
     <div className="board-picker">
       <div className="board-menus">
         <label>
-          Fabricante
+          Maker
           <select value={current.maker} onChange={(e) => choose([...boards].filter((b) => b.maker === e.target.value).sort((a, b) => a.price_usd - b.price_usd)[0].id)}>
             {makers(boards).map((m) => (
               <option key={m}>{m}</option>
@@ -247,7 +248,7 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
           </select>
         </label>
         <label>
-          Modelo
+          Model
           <select value={current.id} onChange={(e) => choose(e.target.value)}>
             {models.map((b) => (
               <option key={b.id} value={b.id}>
@@ -259,35 +260,35 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
       </div>
       <article className="board-card">
         <div className="board-photo">
-          {current.image && photoFailed !== current.id ? <img src={current.image} alt={`Foto de la placa ${current.name}`} referrerPolicy="no-referrer" onError={() => setPhotoFailed(current.id)} /> : <BoardDrawing board={current} />}
+          {current.image && photoFailed !== current.id ? <img src={current.image} alt={`Photo of the ${current.name} board`} referrerPolicy="no-referrer" onError={() => setPhotoFailed(current.id)} /> : <BoardDrawing board={current} />}
         </div>
         <div className="board-specs">
           <h3>{t(current.name)}</h3>
           <dl>
             <dt>FPGA</dt>
             <dd>{current.fpga}</dd>
-            <dt>Lógica</dt>
+            <dt>{t("Logic")}</dt>
             <dd>
               {current.luts_k} K {current.lut}
-              {logic <= 1 ? ` · el chip básico ocupa ~${Math.round(logic * 100)} %` : " · no cabe el chip básico"}
+              {logic <= 1 ? ` · ${t("the basic chip takes")} ~${Math.round(logic * 100)} %` : ` · ${t("the basic chip does not fit")}`}
             </dd>
-            <dt>Memoria en el chip</dt>
+            <dt>{t("On-chip memory")}</dt>
             <dd>{current.bram_mbit} Mbit</dd>
-            <dt>Multiplicadores</dt>
+            <dt>{t("Multipliers")}</dt>
             <dd>{current.dsp} DSP</dd>
-            <dt>Memoria en la placa</dt>
-            <dd>{current.ddr_gb > 0 ? `${memory(current.ddr_gb)}, ~${current.ddr_gbps} GB/s` : t("Ninguna")}</dd>
-            <dt>Reloj</dt>
+            <dt>{t("On-board memory")}</dt>
+            <dd>{current.ddr_gb > 0 ? `${memory(current.ddr_gb)}, ~${current.ddr_gbps} GB/s` : t("None")}</dd>
+            <dt>{t("Clock")}</dt>
             <dd>
-              {current.clock_mhz} MHz, {current.clock_measured ? t("medido rutando el chip") : t("estimado")}
+              {current.clock_mhz} MHz, {current.clock_measured ? t("measured by routing the chip") : t("estimated")}
             </dd>
-            <dt>Herramientas</dt>
+            <dt>{t("Tools")}</dt>
             <dd>{t(current.tools)}</dd>
-            <dt>Precio</dt>
+            <dt>{t("Price")}</dt>
             <dd>{current.price}</dd>
           </dl>
           <a href={current.url} target="_blank" rel="noopener noreferrer">
-            {t("Web oficial de")} {current.maker} ↗
+            {t("Official site of")} {current.maker} ↗
           </a>
         </div>
       </article>
@@ -297,26 +298,26 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
 
 function Summary({ report, model, board }: { report: Report | null; model: ModelSource | undefined; board: string | null }) {
   const t = useT();
-  if (!report || !model) return <p className="wizard-empty">El estimador no puede con esta combinación. Vuelve atrás y cambia alguna respuesta.</p>;
+  if (!report || !model) return <p className="wizard-empty">{t("The estimator cannot handle this combination. Go back and change an answer.")}</p>;
   const problems = report.violations.filter((v) => v.severity === "error");
   return (
     <div className="wizard-summary">
       <dl>
-        <dt>Modelo</dt>
+        <dt>Model</dt>
         <dd>{model.name}</dd>
         {board && (
           <>
-            <dt>Placa</dt>
+            <dt>Board</dt>
             <dd>{board}</dd>
           </>
         )}
-        <dt>Velocidad</dt>
+        <dt>Speed</dt>
         <dd>{formatNumber(metric(report, "tok_s"))} tok/s</dd>
         <dt>Chips</dt>
         <dd>
-          {report.dies} {report.dies === 1 ? "die" : "dies"} de {formatNumber(report.die_area_mm2)} mm²
+          {report.dies} {report.dies === 1 ? "die" : "dies"} {t("of")} {formatNumber(report.die_area_mm2)} mm²
         </dd>
-        <dt>Consumo</dt>
+        <dt>{t("Power")}</dt>
         <dd>{formatNumber(metric(report, "power_w"))} W</dd>
       </dl>
       {problems.length > 0 && (
@@ -326,7 +327,7 @@ function Summary({ report, model, board }: { report: Report | null; model: Model
           ))}
         </ul>
       )}
-      <p className="wizard-hint">Son cifras del estimador analítico. Todo se puede ajustar después en el panel de parámetros, y el simulador mide los ciclos reales del microprograma.</p>
+      <p className="wizard-hint">{t("These are the analytical estimator's figures. Everything can be adjusted afterwards in the parameter panel, and the simulator measures the microprogram's real cycles.")}</p>
     </div>
   );
 }
@@ -396,7 +397,7 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
   // Over the whole window: the toolbar's blur would otherwise hold it.
   return createPortal(
     <div className="wizard-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="wizard" role="dialog" aria-modal="true" aria-label="Nuevo proyecto" tabIndex={-1} ref={dialog}>
+      <div className="wizard" role="dialog" aria-modal="true" aria-label="New project" tabIndex={-1} ref={dialog}>
         <header>
           <span className="wizard-steps">
             Paso {step + 1} de {steps.length}
@@ -415,29 +416,29 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
           )}
           {current === "board" && <BoardPicker board={answers.board} choose={(board) => set({ board })} />}
           {current === "questions" && <Questions answers={answers} set={set} />}
-          {busy && <p className="wizard-empty">Calculando cada diseño…</p>}
+          {busy && <p className="wizard-empty">Estimating each design…</p>}
           {current === "model" && !busy && <ModelList rows={rows} answers={answers} choose={(id) => set({ model: id })} />}
           {current === "name" && (
             <>
               {!busy && <Summary report={report} model={model} board={board} />}
               <label className="wizard-name">
-                {t("Nombre del proyecto")}
+                {t("Project name")}
                 <input type="text" value={name} placeholder={model ? `${model.name}${board ? ` en ${board}` : ""}` : ""} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && finish()} />
               </label>
             </>
           )}
         </div>
         <footer>
-          <button onClick={onClose}>{t("Cancelar")}</button>
+          <button onClick={onClose}>{t("Cancel")}</button>
           <span />
-          {step > 0 && <button onClick={() => setStep(step - 1)}>{t("Atrás")}</button>}
+          {step > 0 && <button onClick={() => setStep(step - 1)}>{t("Back")}</button>}
           {current === "name" ? (
             <button className="primary" disabled={!model} onClick={finish}>
-              {t("Crear proyecto")}
+              {t("Create project")}
             </button>
           ) : (
             <button className="primary" disabled={!canGo} onClick={() => setStep(step + 1)}>
-              {t("Siguiente")}
+              {t("Next")}
             </button>
           )}
         </footer>

@@ -4,24 +4,24 @@ import { PARAM_GROUPS, type Field } from "../params";
 function accepted(field: Field): string {
   switch (field.kind) {
     case "range":
-      return `De ${field.min} a ${field.max}${field.unit ? ` ${field.unit}` : ""}${field.log ? ", en escala logarítmica" : ""}.`;
+      return `From ${field.min} to ${field.max}${field.unit ? ` ${field.unit}` : ""}${field.log ? ", on a logarithmic scale" : ""}.`;
     case "select":
-      return `Opciones: ${field.options.map(([, text]) => text).join(", ")}.`;
+      return `Options: ${field.options.map(([, text]) => text).join(", ")}.`;
     case "toggle":
-      return "Activado o desactivado.";
+      return "On or off.";
     case "preset":
-      return `Formatos ya hechos: ${field.sections.map((s) => s.title).join(", ")}.`;
+      return `Ready-made formats: ${field.sections.map((s) => s.title).join(", ")}.`;
   }
 }
 
-/** `docs/parametros.md`, from the same text the app shows. */
+/** `docs/parameters.md`, from the same text the app shows. */
 export function parametersMarkdown(): string {
   const lines = [
-    "# Parámetros del chip",
+    "# Chip parameters",
     "",
-    "<!-- Generado desde web/src/params.ts y web/src/paramDocs.ts: UPDATE_DOCS=1 npx vitest run docs -->",
+    "<!-- Generated from web/src/params.ts and web/src/paramDocs.ts: UPDATE_DOCS=1 npx vitest run docs -->",
     "",
-    "Todo lo que se puede ajustar, qué cambia en el circuito y en qué se nota. Los del panel de la aplicación mueven el estimador al momento; los del generador los deduce el compilador del modelo y del microprograma; los de generación se eligen en cada petición. En la aplicación, cada parámetro se explica al pasar el cursor por su «?» y abre esta misma documentación al pulsarlo.",
+    "Everything that can be adjusted, what it changes in the circuit and where it shows. Those in the application's panel move the estimator at once; the generator's are derived by the compiler from the model and the microprogram; the generation ones are chosen with each request. In the application, each parameter is explained when the cursor goes over its \u201c?\u201d, and clicking it opens this same documentation.",
     "",
   ];
   for (const group of PARAM_GROUPS) {

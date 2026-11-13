@@ -27,7 +27,7 @@ export function App() {
   const cellKey = [model?.id, params.weight_bits, params.use_model_mix, params.activation_bits, params.accumulator_bits, params.mac_stages, params.adder_stages, cellKb].join("|");
 
   useEffect(() => {
-    if (view === "esquematico" && model) rebuild(model.config, JSON.stringify(params));
+    if (view === "schematic" && model) rebuild(model.config, JSON.stringify(params));
     // The netlist only depends on the values in cellKey.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, cellKey, rebuild]);
@@ -50,23 +50,23 @@ export function App() {
       <main className="split">
         <ColumnResizers />
         <Sidebar />
-        {view === "plano" && <FloorplanView />}
-        {view === "plano" && <Inspector />}
-        {view === "funcionamiento" && <LogicView />}
-        {view === "funcionamiento" && <LogicPanel />}
-        {view === "esquematico" && <SchematicView />}
-        {view === "esquematico" && <SchematicPanel />}
-        {view === "simulador" && <SimulatorView />}
-        {view === "simulador" && <SimulatorPanel />}
-        {view === "imagenes" && <ImagesView />}
-        {view === "imagenes" && <ImagesPanel />}
-        {view === "explorador" && <ExplorerView />}
-        {view === "explorador" && <CalibrationPanel />}
-        {view === "numerico" && <NumericView />}
-        {view === "numerico" && <NumericPanel />}
-        {view === "modelos" && <ModelsView />}
-        {view === "modelos" && <ModelsPanel />}
-        {view === "parametros" && <ParamDocsView />}
+        {view === "floorplan" && <FloorplanView />}
+        {view === "floorplan" && <Inspector />}
+        {view === "logic" && <LogicView />}
+        {view === "logic" && <LogicPanel />}
+        {view === "schematic" && <SchematicView />}
+        {view === "schematic" && <SchematicPanel />}
+        {view === "simulator" && <SimulatorView />}
+        {view === "simulator" && <SimulatorPanel />}
+        {view === "images" && <ImagesView />}
+        {view === "images" && <ImagesPanel />}
+        {view === "explorer" && <ExplorerView />}
+        {view === "explorer" && <CalibrationPanel />}
+        {view === "numeric" && <NumericView />}
+        {view === "numeric" && <NumericPanel />}
+        {view === "models" && <ModelsView />}
+        {view === "models" && <ModelsPanel />}
+        {view === "parameters" && <ParamDocsView />}
       </main>
     </div>
   );

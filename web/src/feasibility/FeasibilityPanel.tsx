@@ -31,23 +31,23 @@ export function FeasibilityPanel({ advice, checking, searching }: { advice: Advi
   const params = useDesign((s) => s.params);
   const nodes = useDesign((s) => s.nodes);
   const setParams = useDesign((s) => s.setParams);
-  if (!advice) return checking ? <p className="muted-text">{t("Comprobando si se puede fabricar…")}</p> : null;
+  if (!advice) return checking ? <p className="muted-text">{t("Checking whether it can be built…")}</p> : null;
   const v = advice.verdict;
   const chips = (n: number) => (n === 1 ? t("1 chip") : `${formatNumber(n)} ${t("chips")}`);
 
   return (
     <>
-      <h3>{t("Viabilidad")}</h3>
+      <h3>{t("Feasibility")}</h3>
       <div className={`inset padded feasibility ${v.layout ? "ok" : v.possible ? "partial" : "blocked"}`} aria-busy={checking}>
         <p className="feasibility-verdict">
           <Icon name={v.possible ? "check" : "warning"} size={16} />
           <strong>
             {v.possible
-              ? `${t("Se puede fabricar")}: ${chips(v.dies)} ${t("de")} ${formatNumber(v.die_area_mm2)} mm²${v.designs > 1 ? `, ${formatNumber(v.designs)} ${t("diseños distintos")}` : ""}`
-              : t("Con estos parámetros no se puede fabricar")}
+              ? `${t("It can be built")}: ${chips(v.dies)} ${t("of")} ${formatNumber(v.die_area_mm2)} mm²${v.designs > 1 ? `, ${formatNumber(v.designs)} ${t("distinct designs")}` : ""}`
+              : t("It cannot be built with these parameters")}
           </strong>
         </p>
-        {v.possible && v.layout && <p className="muted-text">{t("Y hacer su layout con OpenROAD en este proceso.")}</p>}
+        {v.possible && v.layout && <p className="muted-text">{t("And laid out with OpenROAD on this process.")}</p>}
         {v.reasons.length > 0 && (
           <ul className="feasibility-reasons">
             {v.reasons.map((reason) => (
@@ -62,7 +62,7 @@ export function FeasibilityPanel({ advice, checking, searching }: { advice: Advi
         ))}
         {advice.suggestions.length > 0 && (
           <>
-            <p className="feasibility-heading">{advice.suggestions[0].cheaper ? t("Más barato de fabricar") : t("Cómo hacerlo viable")}</p>
+            <p className="feasibility-heading">{advice.suggestions[0].cheaper ? t("Cheaper to make") : t("How to make it feasible")}</p>
             {advice.suggestions.map((s, i) => (
               <div key={i} className="suggestion">
                 <ul>
@@ -75,19 +75,19 @@ export function FeasibilityPanel({ advice, checking, searching }: { advice: Advi
                 </ul>
                 <div className="suggestion-foot">
                   <span>
-                    {chips(s.dies)} {t("de")} {formatNumber(s.die_area_mm2)} mm²{s.designs < s.dies ? ` · ${s.designs === 1 ? t("un solo diseño") : `${formatNumber(s.designs)} ${t("diseños distintos")}`}` : ""} · {formatNumber(s.tok_s)} tok/s
+                    {chips(s.dies)} {t("of")} {formatNumber(s.die_area_mm2)} mm²{s.designs < s.dies ? ` · ${s.designs === 1 ? t("a single design") : `${formatNumber(s.designs)} ${t("distinct designs")}`}` : ""} · {formatNumber(s.tok_s)} tok/s
                   </span>
                   <button className="pill primary-pill" onClick={() => setParams(applyChanges(params, s.changes, nodes))}>
-                    {t("Aplicar")}
+                    {t("Apply")}
                   </button>
                 </div>
               </div>
             ))}
           </>
         )}
-        {searching && !v.layout && <p className="muted-text">{t("Buscando qué ajustes lo hacen viable…")}</p>}
+        {searching && !v.layout && <p className="muted-text">{t("Looking for changes that make it feasible…")}</p>}
         {!searching && !v.layout && advice.suggestions.length === 0 && !v.possible && (
-          <p className="muted-text">{t("Ningún ajuste de los parámetros lo hace viable en este proceso: hace falta un modelo más pequeño o un proceso con dies mayores.")}</p>
+          <p className="muted-text">{t("No change of the parameters makes it feasible on this process: it needs a smaller model or a process with larger dies.")}</p>
         )}
       </div>
     </>

@@ -86,33 +86,33 @@ export function expectedTotal(weights: bigint[], activations: bigint[], bits: nu
 function buildScript(info: CellInfo, weights: bigint[], activations: bigint[]): ScriptStep[] {
   const { weight_bits, activation_bits, addr_bits } = info.config;
   const off: [string, string][] = [["load_en", "0"], ["run", "0"]];
-  const steps: ScriptStep[] = [{ label: "Puesta a cero", explain: "clear = 1 vacía el acumulador y lleva el contador de direcciones a 0. Con load_en y run a 0, la memoria y el multiplicador no hacen nada.", inputs: [["clear", "1"], ...off, ...(usesShifter(info) ? ([["exp_base", "0"]] as [string, string][]) : [])] }];
+  const steps: ScriptStep[] = [{ label: "Reset", explain: "clear = 1 empties the accumulator and takes the address counter to 0. With load_en and run at 0, the memory and the multiplier do nothing.", inputs: [["clear", "1"], ...off, ...(usesShifter(info) ? ([["exp_base", "0"]] as [string, string][]) : [])] }];
   if (info.config.coding === "codebook" && !info.config.fixed_weights) {
     for (let i = 0; i < 2 ** info.config.weight_bits; i++) {
       const signed = BigInt.asIntN(info.config.weight_bits, BigInt(i));
-      steps.push({ label: `Tabla ${i + 1}`, explain: `Escribe en la tabla de la celda el valor real del código ${signed}: los pesos guardan índices a esta tabla.`, inputs: [["clear", "0"], ["table_en", "1"], ["table_addr", String(i)], ["table_data", toUnsigned(signed, 16)]] });
+      steps.push({ label: `Table ${i + 1}`, explain: `Writes into the cell's table the real value of code ${signed}: the weights keep indices into this table.`, inputs: [["clear", "0"], ["table_en", "1"], ["table_addr", String(i)], ["table_data", toUnsigned(signed, 16)]] });
     }
-    steps.push({ label: "Fin de la tabla", explain: "table_en = 0: la tabla queda fija y la celda solo la lee.", inputs: [["table_en", "0"]] });
+    steps.push({ label: "End of the table", explain: "table_en = 0: the table stays fixed and the cell only reads it.", inputs: [["table_en", "0"]] });
   }
   if (!info.config.fixed_weights) weights.forEach((w, i) =>
     steps.push({
-      label: `Carga de pesos ${i + 1}/${weights.length}`,
-      explain: `load_en = 1 escribe el código ${w} (${BigInt.asUintN(weight_bits, w).toString(2).padStart(weight_bits, "0")} en ${weight_bits} bits) en la dirección ${i} de la memoria de pesos. Así llega cada peso a su celda al arrancar el chip.`,
+      label: `Loading weights ${i + 1}/${weights.length}`,
+      explain: `load_en = 1 writes code ${w} (${BigInt.asUintN(weight_bits, w).toString(2).padStart(weight_bits, "0")} in ${weight_bits} bits) at address ${i} of the weight memory. That is how each weight reaches its cell when the chip boots.`,
       inputs: [["clear", "0"], ["load_en", "1"], ["load_addr", toUnsigned(BigInt(i), addr_bits)], ["load_data", toUnsigned(w, weight_bits)]],
     }),
   );
-  steps.push({ label: info.config.fixed_weights ? "Pesos ya grabados" : "Fin de la carga", explain: info.config.fixed_weights ? "Los pesos están grabados en la ROM desde fábrica: no hay carga. clear = 1 deja el acumulador a cero." : "La carga termina y clear = 1 devuelve el contador a la dirección 0, para que la celda lea los pesos en el mismo orden en que llegan las activaciones.", inputs: [["clear", "1"], ...off] });
+  steps.push({ label: info.config.fixed_weights ? "Weights already burnt in" : "End of loading", explain: info.config.fixed_weights ? "The weights are burnt into the ROM at the factory: there is no loading. clear = 1 leaves the accumulator at zero." : "Loading ends and clear = 1 takes the counter back to address 0, so the cell reads the weights in the same order the activations arrive.", inputs: [["clear", "1"], ...off] });
   let partial = 0n;
   activations.forEach((x, i) => {
     partial += weights[i] * x;
     steps.push({
-      label: `Multiplicación ${i + 1}/${activations.length}`,
-      explain: `run = 1: la red de activaciones trae x = ${x}; la celda lee el peso ${i} (${weights[i]}) de su memoria, los multiplica (${weights[i]} × ${x} = ${weights[i] * x}) y el contador pasa a la dirección ${i + 1}. ${info.latency > 0 ? `El producto atraviesa ${info.latency} etapas de registros antes de sumarse` : "El producto se suma al momento"}: la suma de referencia hasta aquí es ${partial}.`,
+      label: `Multiplication ${i + 1}/${activations.length}`,
+      explain: `run = 1: the activation network brings x = ${x}; the cell reads weight ${i} (${weights[i]}) from its memory, multiplies them (${weights[i]} × ${x} = ${weights[i] * x}) and the counter moves to address ${i + 1}. ${info.latency > 0 ? `The product goes through ${info.latency} register stages before being added` : "The product is added at once"}: the reference sum so far is ${partial}.`,
       inputs: [["clear", "0"], ["load_en", "0"], ["run", "1"], ["x", toUnsigned(x, activation_bits)]],
     });
   });
   for (let i = 0; i < info.latency; i++) {
-    steps.push({ label: `Vaciando etapas ${i + 1}/${info.latency}`, explain: `Ya no entran activaciones (run = 0), pero aún quedan productos en las etapas del multiplicador y del sumador: en ${info.latency - i} ciclo${info.latency - i === 1 ? "" : "s"} más el acumulador tendrá la suma completa, ${partial}.`, inputs: [["clear", "0"], ...off] });
+    steps.push({ label: `Draining stages ${i + 1}/${info.latency}`, explain: `No more activations come in (run = 0), but there are still products in the multiplier's and adder's stages: in ${info.latency - i} more cycle${info.latency - i === 1 ? "" : "s"} the accumulator will have the whole sum, ${partial}.`, inputs: [["clear", "0"], ...off] });
   }
   // A cell with its weights in ROM has no loading ports to drive.
   return info.config.fixed_weights ? steps.map((s) => ({ ...s, inputs: s.inputs.filter(([port]) => !port.startsWith("load_")) })) : steps;
@@ -121,14 +121,14 @@ function buildScript(info: CellInfo, weights: bigint[], activations: bigint[]): 
 export function validateInputs(info: CellInfo, weightsText: string, activationsText: string): { error: string } | { weights: bigint[]; activations: bigint[] } {
   const weights = parseList(weightsText);
   const activations = parseList(activationsText);
-  if (!weights) return { error: "Escribe los pesos como números enteros separados por comas." };
-  if (!activations) return { error: "Escribe las activaciones como números enteros separados por comas." };
-  if (weights.length !== activations.length) return { error: `Hay ${weights.length} pesos y ${activations.length} activaciones: deben ser los mismos.` };
+  if (!weights) return { error: "Write the weights as integers separated by commas." };
+  if (!activations) return { error: "Write the activations as integers separated by commas." };
+  if (weights.length !== activations.length) return { error: `There are ${weights.length} weights and ${activations.length} activations: they must be the same number.` };
   const { weight_bits, activation_bits, addr_bits } = info.config;
-  if (weights.length > 2 ** addr_bits) return { error: `La memoria de la celda solo admite ${2 ** addr_bits} pesos.` };
+  if (weights.length > 2 ** addr_bits) return { error: `The cell's memory only takes ${2 ** addr_bits} weights.` };
   const fits = (v: bigint, bits: number) => BigInt.asIntN(bits, v) === v;
-  if (!weights.every((w) => fits(w, weight_bits))) return { error: `Algún peso no cabe en ${weight_bits} bits con signo.` };
-  if (!activations.every((x) => fits(x, activation_bits))) return { error: `Alguna activación no cabe en ${activation_bits} bits con signo.` };
+  if (!weights.every((w) => fits(w, weight_bits))) return { error: `Some weight does not fit in ${weight_bits} signed bits.` };
+  if (!activations.every((x) => fits(x, activation_bits))) return { error: `Some activation does not fit in ${activation_bits} signed bits.` };
   return { weights, activations };
 }
 

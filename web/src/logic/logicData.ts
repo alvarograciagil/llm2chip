@@ -14,27 +14,27 @@ interface OpInfo {
   circuit?: Circuit;
 }
 
-const CELL: Circuit = { label: "Ver la celda de cálculo", scope: "cell" };
-const LANE: Circuit = { label: "Ver el carril vectorial en el die", scope: "die", demo: "mlp" };
+const CELL: Circuit = { label: "See the compute cell", scope: "cell" };
+const LANE: Circuit = { label: "See the vector lane on the die", scope: "die", demo: "mlp" };
 
 export const OP_INFO: Record<string, OpInfo> = {
-  emb_read: { formula: "x = E[token]", what: "Lee la fila de la tabla de embeddings que corresponde al token. No multiplica nada.", unit: "Celdas de pesos", circuit: CELL },
-  matvec: { formula: "y = W · x", what: "Cada fila de la matriz está guardada en memoria junto a un multiplicador. La red de activaciones reparte x a todas las celdas, y cada una acumula su fila: Σ peso × activación.", unit: "Celdas de pesos y red de activaciones", circuit: CELL },
-  copy: { formula: "y = x", what: "Mueve un vector de un registro a otro.", unit: "Banco de vectores", circuit: LANE },
-  add: { formula: "y = a + b", what: "Suma elemento a elemento, alineando antes los exponentes de los dos vectores.", unit: "Carril vectorial", circuit: LANE },
-  mul_elem: { formula: "y = a ⊙ b", what: "Producto elemento a elemento. Multiplica activación por activación, y por eso no puede hacerse en las celdas de pesos.", unit: "Carril vectorial", circuit: LANE },
-  silu: { formula: "y = x · σ(x)", what: "Función de activación SiLU. El valor sale de una tabla y se multiplica por la entrada.", unit: "Tabla de funciones y carril", circuit: LANE },
-  sigmoid: { formula: "y = σ(x)", what: "Sigmoide por tabla, que deja cada puerta entre 0 y 1.", unit: "Tabla de funciones", circuit: LANE },
-  rms_norm: { formula: "y = x · (1 + w) / √(media(x²) + ε)", what: "Normaliza cada bloque: suma los cuadrados, calcula la raíz inversa por tabla y escala el vector con su peso aprendido.", unit: "Carril vectorial y tabla", circuit: LANE },
-  rms_gated: { formula: "y = x · g(z) / √(media(x²) + ε)", what: "Norma como la anterior, pero el factor depende de otro vector z que hace de puerta.", unit: "Carril vectorial y tabla", circuit: LANE },
-  split_query_gate: { formula: "q, g = separar(x)", what: "La proyección Q intercala la consulta y la puerta de cada cabeza. Aquí se separan.", unit: "Banco de vectores", circuit: LANE },
-  rope: { formula: "(a, b) → (a cos θ − b sin θ, a sin θ + b cos θ)", what: "Codifica la posición del token girando parejas de valores un ángulo que depende de esa posición.", unit: "Carril vectorial y tabla", circuit: LANE },
-  kv_append: { formula: "K[t], V[t] = k, v", what: "Guarda la clave y el valor de este token. La caché crece con cada token del contexto.", unit: "SRAM de caché KV" },
-  attn_sum: { formula: "y = Σ softmax(q · K) · V", what: "Compara la consulta con cada token anterior, convierte las similitudes en probabilidades y suma los valores ponderados. Su coste crece con el contexto.", unit: "Carril vectorial, tabla y caché KV", circuit: { label: "Ver la atención en el die", scope: "die", demo: "attention" } },
-  dconv: { formula: "y[t] = Σ w · x[t − i]", what: "Convolución causal: mezcla el vector con los de los tokens anteriores.", unit: "Carril vectorial y estado de convolución", circuit: LANE },
-  delta_step: { formula: "S ← αS;  v̂ = S·k;  S ← S + β(v − v̂)kᵀ;  y = S·q", what: "Regla delta de Gated DeltaNet. En vez de guardar todo el contexto, actualiza una matriz de estado por cabeza, con lo que el coste no crece con el contexto.", unit: "Carril vectorial y SRAM de estado", circuit: { label: "Ver la regla delta en el die", scope: "die", demo: "delta" } },
-  concat: { formula: "y = [a, b]", what: "Une dos vectores en uno.", unit: "Banco de vectores", circuit: LANE },
-  moe: { formula: "y = Σ pᵢ · MLPᵢ(x), para los k mejores", what: "Una red decide qué expertos atienden este token. Solo se ejecutan esos, más uno compartido.", unit: "Celdas, carril y selector top-k", circuit: LANE },
+  emb_read: { formula: "x = E[token]", what: "Reads the row of the embedding table that belongs to the token. It multiplies nothing.", unit: "Weight cells", circuit: CELL },
+  matvec: { formula: "y = W · x", what: "Each row of the matrix is stored in memory next to a multiplier. The activation network sends x to every cell, and each one accumulates its row: Σ weight × activation.", unit: "Weight cells and activation network", circuit: CELL },
+  copy: { formula: "y = x", what: "Moves a vector from one register to another.", unit: "Vector bank", circuit: LANE },
+  add: { formula: "y = a + b", what: "Adds element by element, first aligning the two vectors' exponents.", unit: "Vector lane", circuit: LANE },
+  mul_elem: { formula: "y = a ⊙ b", what: "Element-wise product. It multiplies activation by activation, which is why it cannot be done in the weight cells.", unit: "Vector lane", circuit: LANE },
+  silu: { formula: "y = x · σ(x)", what: "SiLU activation function. The value comes from a table and is multiplied by the input.", unit: "Function table and lane", circuit: LANE },
+  sigmoid: { formula: "y = σ(x)", what: "Sigmoid from a table, which keeps each gate between 0 and 1.", unit: "Function table", circuit: LANE },
+  rms_norm: { formula: "y = x · (1 + w) / √(mean(x²) + ε)", what: "Normalizes each block: adds up the squares, computes the inverse square root from a table and scales the vector by its learned weight.", unit: "Vector lane and table", circuit: LANE },
+  rms_gated: { formula: "y = x · g(z) / √(mean(x²) + ε)", what: "A norm like the previous one, but the factor depends on another vector z acting as a gate.", unit: "Vector lane and table", circuit: LANE },
+  split_query_gate: { formula: "q, g = split(x)", what: "The Q projection interleaves each head's query and gate. Here they are split.", unit: "Vector bank", circuit: LANE },
+  rope: { formula: "(a, b) → (a cos θ − b sin θ, a sin θ + b cos θ)", what: "Encodes the token's position by rotating pairs of values by an angle that depends on that position.", unit: "Vector lane and table", circuit: LANE },
+  kv_append: { formula: "K[t], V[t] = k, v", what: "Stores this token's key and value. The cache grows with each token of the context.", unit: "KV cache SRAM" },
+  attn_sum: { formula: "y = Σ softmax(q · K) · V", what: "Compares the query with each earlier token, turns the similarities into probabilities and adds up the weighted values. Its cost grows with the context.", unit: "Vector lane, table and KV cache", circuit: { label: "See attention on the die", scope: "die", demo: "attention" } },
+  dconv: { formula: "y[t] = Σ w · x[t − i]", what: "Causal convolution: mixes the vector with those of the earlier tokens.", unit: "Vector lane and convolution state", circuit: LANE },
+  delta_step: { formula: "S ← αS;  v̂ = S·k;  S ← S + β(v − v̂)kᵀ;  y = S·q", what: "Gated DeltaNet's delta rule. Instead of keeping the whole context, it updates a state matrix per head, so the cost does not grow with the context.", unit: "Vector lane and state SRAM", circuit: { label: "See the delta rule on the die", scope: "die", demo: "delta" } },
+  concat: { formula: "y = [a, b]", what: "Joins two vectors into one.", unit: "Vector bank", circuit: LANE },
+  moe: { formula: "y = Σ pᵢ · MLPᵢ(x), for the best k", what: "A network decides which experts handle this token. Only those run, plus a shared one.", unit: "Cells, lane and top-k selector", circuit: LANE },
 };
 
 const fieldNames = (op: ProgramOp, names: string[]) => names.flatMap((n) => (typeof op[n] === "number" ? [op[n] as number] : []));
@@ -93,7 +93,7 @@ export function layerKinds(program: Program): LayerKind[] {
   const kinds = new Map<string, LayerKind>();
   for (const [layer, ops] of byLayer) {
     const key = ops.map((i) => i.name).join("|");
-    const label = ops.some((i) => i.op.op === "delta_step") ? "Capa DeltaNet" : "Capa de atención";
+    const label = ops.some((i) => i.op.op === "delta_step") ? "DeltaNet layer" : "Attention layer";
     const kind = kinds.get(key) ?? { key, label, layers: [], ops };
     kind.layers.push(layer);
     kinds.set(key, kind);

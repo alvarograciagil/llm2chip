@@ -6,26 +6,26 @@ import { formatNumber } from "../format";
 import { currentModule, toSigned, useCellSim, validateInputs, type DieDemo } from "./simStore";
 
 const COVERAGE: [string, boolean][] = [
-  ["Celda: memoria, multiplicador y acumulador", true],
-  ["Escala y sesgo por grupo", true],
-  ["Red de activaciones", true],
-  ["Unidad vectorial y tabla de funciones", true],
-  ["Banco de vectores", true],
-  ["Secuenciador y microprograma", true],
-  ["Exponente por vector", true],
-  ["Atención con softmax, como microprograma", true],
-  ["Regla delta de DeltaNet, como microprograma", true],
-  ["Normas RMS y L2, y tablas de funciones", true],
-  ["Enlaces entre dies", true],
-  ["Un modelo Qwen3.5 completo, compilado y ejecutado en puertas", true],
-  ["Varios carriles vectoriales en paralelo", false],
-  ["Mezcla de expertos y cabeza MTP en puertas", true],
-  ["Microprograma fijo, con bucles y parámetros", true],
-  ["CPU, carga de la imagen y muestreo en el chip", true],
-  ["ECC, BIST y reparación", false],
+  ["Cell: memory, multiplier and accumulator", true],
+  ["Scale and bias per group", true],
+  ["Activation network", true],
+  ["Vector unit and function table", true],
+  ["Vector bank", true],
+  ["Sequencer and microcode", true],
+  ["Exponent per vector", true],
+  ["Attention with softmax, as a microprogram", true],
+  ["DeltaNet delta rule, as a microprogram", true],
+  ["RMS and L2 norms, and function tables", true],
+  ["Die-to-die links", true],
+  ["A whole Qwen3.5 model, compiled and run in gates", true],
+  ["Several vector lanes in parallel", false],
+  ["Mixture of experts and MTP head in gates", true],
+  ["Fixed microprogram, with loops and parameters", true],
+  ["CPU, image loading and sampling on the chip", true],
+  ["ECC, BIST and repair", false],
 ];
 
-const GATE_NAMES: Record<string, string> = { and: "AND", or: "OR", xor: "XOR", not: "NOT", mux: "Selectores", dff: "Biestables", sram: "Memorias", rom: "ROM" };
+const GATE_NAMES: Record<string, string> = { and: "AND", or: "OR", xor: "XOR", not: "NOT", mux: "Selectors", dff: "Flip-flops", sram: "Memories", rom: "ROM" };
 
 function Selected() {
   const design = useCellSim((s) => s.design);
@@ -36,16 +36,16 @@ function Selected() {
   const inst = module?.instances.find((i) => i.name === selected);
   if (!inst || !design) return null;
   const child = inst.kind.kind === "module" ? design.modules[inst.kind.of] : null;
-  const primNames: Record<string, string> = { and2: "Puerta AND", or2: "Puerta OR", xor2: "Puerta XOR", not: "Inversor", mux2: "Selector", dff: "Biestable D", sram: "Memoria SRAM síncrona", rom: "Memoria ROM, grabada al fabricar" };
+  const primNames: Record<string, string> = { and2: "AND gate", or2: "OR gate", xor2: "XOR gate", not: "Inverter", mux2: "Selector", dff: "D flip-flop", sram: "Synchronous SRAM", rom: "ROM, written at manufacturing" };
   return (
     <>
-      <h3>Selección</h3>
+      <h3>Selection</h3>
       <div className="inset padded">
         <strong>{child ? child.title : primNames[(inst.kind as { of: { type: string } }).of.type]}</strong>
-        <p className="muted-text">{child ? child.description : `Instancia ${inst.name}, en ${inst.group}.`}</p>
+        <p className="muted-text">{child ? child.description : `Instance ${inst.name}, in ${inst.group}.`}</p>
         {child && (
           <button className="link" onClick={() => enter(inst.name)}>
-            Entrar en este bloque
+            Enter this block
           </button>
         )}
       </div>
@@ -54,10 +54,10 @@ function Selected() {
 }
 
 const DEMO_TEXT: Record<DieDemo, string> = {
-  mlp: "Tres celdas ejecutan una capa MLP: dos matrices, activación, producto, otra matriz y residual.",
-  attention: "Una consulta contra tres tokens en caché: producto escalar, softmax con tablas y suma ponderada.",
-  delta: "Una cabeza de Gated DeltaNet: decaimiento, memoria, error, actualización del estado y salida.",
-  boot: "El chip completo arranca desde su imagen: el controlador copia el firmware y este carga cada bloque en el die, comprobando su CRC.",
+  mlp: "Three cells run an MLP layer: two matrices, activation, product, another matrix and residual.",
+  attention: "A query against three cached tokens: dot product, softmax with tables and weighted sum.",
+  delta: "A Gated DeltaNet head: decay, memory, error, state update and output.",
+  boot: "The whole chip boots from its image: the controller copies the firmware, and the firmware loads each block into the die, checking its CRC.",
 };
 
 function DiePanel() {
@@ -78,57 +78,57 @@ function DiePanel() {
   return (
     <>
       <div className="scope">
-        <Segmented label="Programa" value={demo} options={[["mlp", "MLP"], ["attention", "Atención"], ["delta", "DeltaNet"], ["boot", "Arranque"]]} onChange={setDemo} />
+        <Segmented label="Program" value={demo} options={[["mlp", "MLP"], ["attention", "Attention"], ["delta", "DeltaNet"], ["boot", "Start-up"]]} onChange={setDemo} />
       </div>
       <p className="detail-sub">{DEMO_TEXT[demo]}</p>
       <div className="sim-actions">
-        <button className="pill primary-pill" disabled={done} onClick={step}>Paso</button>
-        <button className="pill" disabled={done} onClick={runAll}>Ejecutar todo</button>
-        <button className="pill" onClick={restart}>Reiniciar</button>
+        <button className="pill primary-pill" disabled={done} onClick={step}>Step</button>
+        <button className="pill" disabled={done} onClick={runAll}>Run all</button>
+        <button className="pill" onClick={restart}>Restart</button>
       </div>
       {activity && demo !== "boot" && (
         <div className="inset padded sim-explain" aria-live="polite">
-          <strong>{done ? "Programa terminado" : `Palabra ${activity.pc} del microprograma`}</strong>
-          <p>{done ? "El secuenciador se ha detenido: el resultado está en el banco de vectores." : activity.text}</p>
+          <strong>{done ? "Program finished" : `Word ${activity.pc} of the microprogram`}</strong>
+          <p>{done ? "The sequencer has stopped: the result is in the vector bank." : activity.text}</p>
         </div>
       )}
       <dl className="inset metrics">
-        <div><dt>Estado</dt><dd>{done ? "Terminado" : cycle > 0 ? "Ejecutando" : "Cargado"}</dd></div>
-        <div><dt>Ciclo de reloj</dt><dd>{formatNumber(cycle)}</dd></div>
+        <div><dt>State</dt><dd>{done ? "Finished" : cycle > 0 ? "Running" : "Loaded"}</dd></div>
+        <div><dt>Clock cycle</dt><dd>{formatNumber(cycle)}</dd></div>
       </dl>
       {results?.text !== undefined && (
         <>
-          <h3>Salida por el puerto de host</h3>
+          <h3>Output on the host port</h3>
           <div className="inset padded"><code>{results.text}</code></div>
           <div className={`issue ${results.exact ? "ok" : "error"}`} role="status">
             <span className="issue-icon" aria-hidden="true">{results.exact ? "✓" : "!"}</span>
-            <div><strong>{results.exact ? "Todos los bloques han pasado la comprobación de CRC." : "Algún bloque no ha pasado la comprobación de CRC."}</strong></div>
+            <div><strong>{results.exact ? "Every block has passed the CRC check." : "Some block has not passed the CRC check."}</strong></div>
           </div>
         </>
       )}
       {results && results.text === undefined && (
         <>
-          <h3>Resultado de la capa</h3>
+          <h3>Layer result</h3>
           <dl className="inset metrics">
             {results.got.map((v, i) => (
-              <div key={i}><dt>Salida {i} (esperada {formatNumber(results.expected[i])})</dt><dd>{formatNumber(v)}</dd></div>
+              <div key={i}><dt>Output {i} (expected {formatNumber(results.expected[i])})</dt><dd>{formatNumber(v)}</dd></div>
             ))}
           </dl>
           <div className={`issue ${ok ? "ok" : "error"}`} role="status">
             <span className="issue-icon" aria-hidden="true">{ok ? "✓" : "!"}</span>
-            <div><strong>{ok ? (results.tolerance > 0 ? `Coincide bit a bit con el modelo entero y, dentro del ${results.tolerance * 100} %, con la coma flotante.` : "El die reproduce la capa bit a bit.") : "El die no coincide con la referencia."}</strong></div>
+            <div><strong>{ok ? (results.tolerance > 0 ? `It matches the integer model bit for bit and, within ${results.tolerance * 100} %, floating point.` : "The die reproduces the layer bit for bit.") : "The die does not match the reference."}</strong></div>
           </div>
         </>
       )}
-      <h3>{demo === "boot" ? "Circuito del chip" : "Circuito del die"}</h3>
+      <h3>{demo === "boot" ? "Chip circuit" : "Die circuit"}</h3>
       <dl className="inset metrics">
         {Object.entries(counts).map(([name, count]) => (
           <div key={name}><dt>{GATE_NAMES[name] ?? name}</dt><dd>{formatNumber(count)}</dd></div>
         ))}
       </dl>
       <div className="sim-actions">
-        <button className="pill" onClick={() => download(die.verilog(), demo === "boot" ? "llm2chip_chip.v" : "llm2chip_die.v")}>Exportar a Verilog</button>
-        <button className="pill" onClick={() => download(die.vhdl(), demo === "boot" ? "llm2chip_chip.vhd" : "llm2chip_die.vhd")}>Exportar a VHDL</button>
+        <button className="pill" onClick={() => download(die.verilog(), demo === "boot" ? "llm2chip_chip.v" : "llm2chip_die.v")}>Export to Verilog</button>
+        <button className="pill" onClick={() => download(die.vhdl(), demo === "boot" ? "llm2chip_chip.vhd" : "llm2chip_die.vhd")}>Export to VHDL</button>
       </div>
     </>
   );
@@ -137,13 +137,13 @@ function DiePanel() {
 function Coverage() {
   return (
     <>
-      <h3>Qué hay ya en el esquemático</h3>
+      <h3>What the schematic already has</h3>
       <div className="inset">
         {COVERAGE.map(([name, done]) => (
           <div className="coverage" key={name}>
             <span className={done ? "cov-mark done" : "cov-mark"} aria-hidden="true">{done ? "✓" : "○"}</span>
             <span>{name}</span>
-            <small>{done ? "Funcional" : "Pendiente"}</small>
+            <small>{done ? "Working" : "Pending"}</small>
           </div>
         ))}
       </div>
@@ -156,7 +156,7 @@ export function SchematicPanel() {
   const setScope = useCellSim((s) => s.setScope);
   const selector = (
     <div className="scope">
-      <Segmented label="Alcance" value={scope} options={[["cell", "Celda"], ["die", "Die reducido"]]} onChange={setScope} />
+      <Segmented label="Scope" value={scope} options={[["cell", "Cell"], ["die", "Reduced die"]]} onChange={setScope} />
     </div>
   );
   if (scope === "die") {
@@ -199,22 +199,22 @@ function CellPanel({ selector }: { selector: React.ReactNode }) {
   const finished = index >= script.length && script.length > 0;
   const total = topTotal !== undefined ? toSigned(topTotal) : null;
   const done = index > 0 ? script[index - 1] : null;
-  const next = script[index]?.label ?? (finished ? "Nada: la suma está en el acumulador" : "—");
+  const next = script[index]?.label ?? (finished ? "Nothing: the sum is in the accumulator" : "—");
   const counts = Object.entries(info.counts);
 
   return (
     <aside className="inspector">
       {selector}
-      <h2 className="detail-title">Simulación</h2>
-      <p className="detail-sub">Puerta a puerta, sobre el circuito que ves.</p>
+      <h2 className="detail-title">Simulation</h2>
+      <p className="detail-sub">Gate by gate, on the circuit you see.</p>
 
       <div className="inset padded form">
         <label>
-          Códigos de peso ({info.config.weight_bits} bits)
+          Weight codes ({info.config.weight_bits} bits)
           <textarea rows={2} spellCheck={false} value={weightsText} onChange={(e) => setWeights(e.target.value)} />
         </label>
         <label>
-          Activaciones ({info.config.activation_bits} bits con signo)
+          Activations ({info.config.activation_bits} signed bits)
           <textarea rows={2} spellCheck={false} value={activationsText} onChange={(e) => setActivations(e.target.value)} />
         </label>
       </div>
@@ -229,37 +229,37 @@ function CellPanel({ selector }: { selector: React.ReactNode }) {
 
       <div className="sim-actions">
         <button className="pill primary-pill" disabled={finished || script.length === 0} onClick={step}>
-          Paso
+          Step
         </button>
         <button className="pill" disabled={finished || script.length === 0} onClick={runAll}>
-          Ejecutar todo
+          Run all
         </button>
         <button className="pill" onClick={restart}>
-          Reiniciar
+          Restart
         </button>
       </div>
 
       <div className="inset padded sim-explain" aria-live="polite">
-        <strong>{done ? done.label : "Antes de empezar"}</strong>
-        <p>{done ? done.explain : "Pulsa Paso para avanzar un ciclo de reloj: cada paso fija las entradas de la celda, el circuito calcula y los cables con valor se iluminan en el esquemático."}</p>
+        <strong>{done ? done.label : "Before starting"}</strong>
+        <p>{done ? done.explain : "Press Step to advance one clock cycle: each step sets the cell's inputs, the circuit computes and the wires with a value light up in the schematic."}</p>
       </div>
       <dl className="inset metrics">
         <div>
-          <dt>Siguiente paso</dt>
+          <dt>Next step</dt>
           <dd>{next}</dd>
         </div>
         <div>
-          <dt>Ciclo de reloj</dt>
+          <dt>Clock cycle</dt>
           <dd>{formatNumber(cycle)}</dd>
         </div>
         <div>
-          <dt>Resultado en el circuito</dt>
+          <dt>Result in the circuit</dt>
           <dd>{total === null ? (
-            <button className="link inline" onClick={() => goTo(0)}>Ver en la celda</button>
+            <button className="link inline" onClick={() => goTo(0)}>See in the cell</button>
           ) : total.toString()}</dd>
         </div>
         <div>
-          <dt>Esperado (Σ peso × activación)</dt>
+          <dt>Expected (Σ weight × activation)</dt>
           <dd>{expected?.toString() ?? "—"}</dd>
         </div>
       </dl>
@@ -267,14 +267,14 @@ function CellPanel({ selector }: { selector: React.ReactNode }) {
         <div className={`issue ${total === expected ? "ok" : "error"}`} role="status">
           <span className="issue-icon" aria-hidden="true">{total === expected ? "✓" : "!"}</span>
           <div>
-            <strong>{total === expected ? "El circuito da el resultado correcto." : "El circuito no coincide con la referencia."}</strong>
+            <strong>{total === expected ? "The circuit gives the correct result." : "The circuit does not match the reference."}</strong>
           </div>
         </div>
       )}
 
       <Selected />
 
-      <h3>Circuito de la celda</h3>
+      <h3>Cell circuit</h3>
       <dl className="inset metrics">
         {counts.map(([name, count]) => (
           <div key={name}>
@@ -283,23 +283,23 @@ function CellPanel({ selector }: { selector: React.ReactNode }) {
           </div>
         ))}
         <div>
-          <dt>Latencia</dt>
-          <dd>{info.latency} ciclos</dd>
+          <dt>Latency</dt>
+          <dd>{info.latency} cycles</dd>
         </div>
         <div>
-          <dt>Memoria de pesos</dt>
+          <dt>Weight memory</dt>
           <dd>{formatNumber(2 ** info.config.addr_bits)} × {info.config.weight_bits} bits</dd>
         </div>
       </dl>
-      <button className="plain" onClick={() => download(makeZip(JSON.parse(handle.project(1 / Math.max(frequency, 0.001)))) as BlobPart, "llm2chip_celda.zip", "application/zip")}>
-        Exportar proyecto completo
+      <button className="plain" onClick={() => download(makeZip(JSON.parse(handle.project(1 / Math.max(frequency, 0.001)))) as BlobPart, "llm2chip_cell.zip", "application/zip")}>
+        Export the whole project
       </button>
-      <button className="plain" onClick={() => download(handle.verilog(), "llm2chip_celda.v")}>
-        Exportar a Verilog
+      <button className="plain" onClick={() => download(handle.verilog(), "llm2chip_cell.v")}>
+        Export to Verilog
       </button>
 
       <Coverage />
-      {path.length > 0 && <p className="legend-note">Pulsa Esc para subir un nivel.</p>}
+      {path.length > 0 && <p className="legend-note">Press Esc to go up a level.</p>}
     </aside>
   );
 }

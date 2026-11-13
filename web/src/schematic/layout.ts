@@ -118,7 +118,7 @@ function makeNode(inst: Instance, design: Design): Node {
   const rows = Math.max(inputs.length, outputs.length, 1);
   const h = 40 + rows * PIN_STEP + 6;
   const isSram = inst.kind.kind === "prim";
-  const title = isSram ? ((inst.kind.of as { type: PrimType }).type === "rom" ? "Memoria ROM" : "Memoria SRAM") : design.modules[(inst.kind as { of: string }).of].title;
+  const title = isSram ? ((inst.kind.of as { type: PrimType }).type === "rom" ? "ROM" : "SRAM") : design.modules[(inst.kind as { of: string }).of].title;
   const prim = inst.kind.kind === "prim" ? inst.kind.of : null;
   return {
     id: inst.name,

@@ -134,7 +134,7 @@ export const useImages = create<ImagesState>((set, get) => ({
       magvit_on_chip: onChip && magvitOnChip,
       picture: picture && regionIsUsable(region, picture.side) ? { width: picture.side, height: picture.side, rgb: picture.rgb, region } : null,
     };
-    set({ running: true, error: null, phase: "Empezando", step: 0, total: steps });
+    set({ running: true, error: null, phase: "Starting", step: 0, total: steps });
     const response = await fetch("/api/retouch", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     if (!response.ok) {
       set({ running: false, error: await response.text() });
@@ -160,7 +160,7 @@ function poll(set: (partial: Partial<ImagesState>) => void) {
       if (timer) clearInterval(timer);
       timer = null;
       if (status.state === "done") set({ running: false, result: status.result });
-      else if (status.state === "error") set({ running: false, error: status.error === "cancelado" ? null : status.error });
+      else if (status.state === "error") set({ running: false, error: status.error === "cancelled" ? null : status.error });
       else set({ running: false });
     } catch {
       set({ online: false });

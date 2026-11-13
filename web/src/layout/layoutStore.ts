@@ -44,7 +44,7 @@ export const useLayout = create<LayoutState>((set, get) => ({
   error: null,
 
   async start(request) {
-    set({ state: "running", phase: "Empezando", seconds: 0, error: null, request });
+    set({ state: "running", phase: "Starting", seconds: 0, error: null, request });
     try {
       const response = await fetch("/api/layout", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request) });
       if (!response.ok) throw new Error((await response.text()) || `Error ${response.status}`);

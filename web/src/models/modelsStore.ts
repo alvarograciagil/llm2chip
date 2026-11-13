@@ -1,3 +1,4 @@
+import { locale } from "../format";
 import { create } from "zustand";
 
 export interface Adaptation {
@@ -283,15 +284,15 @@ export const useModels = create<ModelsState>((set, get) => ({
 export function formatBytes(bytes: number): string {
   const units: [number, string][] = [[1e12, "TB"], [1e9, "GB"], [1e6, "MB"], [1e3, "kB"]];
   for (const [size, unit] of units) {
-    if (bytes >= size) return `${(bytes / size).toLocaleString("es-ES", { maximumFractionDigits: 1 })} ${unit}`;
+    if (bytes >= size) return `${(bytes / size).toLocaleString(locale(), { maximumFractionDigits: 1 })} ${unit}`;
   }
   return `${bytes} B`;
 }
 
 export function formatCount(value: number): string {
-  if (value >= 1e9) return `${(value / 1e9).toLocaleString("es-ES", { maximumFractionDigits: 1 })} G`;
-  if (value >= 1e6) return `${(value / 1e6).toLocaleString("es-ES", { maximumFractionDigits: 1 })} M`;
-  if (value >= 1e3) return `${(value / 1e3).toLocaleString("es-ES", { maximumFractionDigits: 1 })} k`;
+  if (value >= 1e9) return `${(value / 1e9).toLocaleString(locale(), { maximumFractionDigits: 1 })} G`;
+  if (value >= 1e6) return `${(value / 1e6).toLocaleString(locale(), { maximumFractionDigits: 1 })} M`;
+  if (value >= 1e3) return `${(value / 1e3).toLocaleString(locale(), { maximumFractionDigits: 1 })} k`;
   return String(value);
 }
 
@@ -299,7 +300,7 @@ export function formatCount(value: number): string {
 export function formatRemaining(job: Job, speed: number | undefined): string {
   if (!speed || speed < 1) return "";
   const seconds = (job.total_bytes - job.done_bytes) / speed;
-  if (seconds < 60) return "menos de un minuto";
+  if (seconds < 60) return "less than a minute";
   if (seconds < 3600) return `${Math.ceil(seconds / 60)} min`;
-  return `${(seconds / 3600).toLocaleString("es-ES", { maximumFractionDigits: 1 })} h`;
+  return `${(seconds / 3600).toLocaleString(locale(), { maximumFractionDigits: 1 })} h`;
 }

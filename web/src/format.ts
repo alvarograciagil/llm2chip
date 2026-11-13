@@ -6,9 +6,14 @@ const decimals = (value: number) => {
   return 3;
 };
 
+/** The number format of the interface's language: the page says which, as `writeLanguage` sets it. */
+export function locale(): string {
+  return typeof document !== "undefined" && document.documentElement.lang === "es" ? "es-ES" : "en-US";
+}
+
 export function formatNumber(value: number): string {
   const digits = decimals(value);
-  return value.toLocaleString("es-ES", { maximumFractionDigits: digits, minimumFractionDigits: digits });
+  return value.toLocaleString(locale(), { maximumFractionDigits: digits, minimumFractionDigits: digits });
 }
 
 /** Maps a slider position in [0, 1] onto a logarithmic range. */
