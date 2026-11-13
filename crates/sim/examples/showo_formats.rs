@@ -8,6 +8,9 @@ use sim::showo::ShowO;
 use sim::showo_chip::ShowOChip;
 use std::path::Path;
 
+/// A row of the table: its name and how to open the chip for it.
+type Run<'a> = (&'static str, Box<dyn Fn() -> Result<ShowOChip, String> + 'a>);
+
 fn main() -> Result<(), String> {
     let dir = std::env::args().nth(1).ok_or("falta la carpeta de Show-o")?;
     let dir = Path::new(&dir);
@@ -56,7 +59,7 @@ fn main() -> Result<(), String> {
     println!("| Pesos | Diferencia mayor | Mejor código igual | KL media (nats) | Probabilidad del mejor del chip, frente al mejor | Segundos por pasada |");
     println!("|---|---|---|---|---|---|");
     let affine = |bits, group_size| WeightFormat { coding: WeightCoding::Affine, bits, exponent_bits: 0, bias: true, group_size, fine_scale: false, keep_source: false };
-    let runs: Vec<(&str, Box<dyn Fn() -> Result<ShowOChip, String>>)> = vec![
+    let runs: Vec<Run> = vec![
         ("enteros de 16 bits", Box::new(|| ShowOChip::exact(dir, 16))),
         ("afín de 8 bits, grupos de 64", Box::new(|| ShowOChip::with_format(dir, 16, affine(8, 64)))),
         ("afín de 4 bits, grupos de 32", Box::new(|| ShowOChip::with_format(dir, 16, affine(4, 32)))),
