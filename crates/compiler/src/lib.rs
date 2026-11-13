@@ -54,6 +54,13 @@ pub enum Op {
     LoadRow { store: Buf, dst: Buf },
     /// `src` into row `token` of a store.
     StoreRow { src: Buf, store: Buf },
+    /// The rows `token + offset` of a store, one after another: the neighbours of a pixel
+    /// in a map kept with a border of zeros, for a convolution.
+    LoadRows { store: Buf, dst: Buf, offsets: Vec<usize> },
+    /// GroupNorm with statistics gathered over many rows: `sums` and `squares` hold, for
+    /// each of `groups` groups of channels, the sum of its values and of their squares over
+    /// `count` values. `(x − mean) · rsqrt(var + eps) · w + b`, `w` and `b` per channel.
+    GroupNorm { src: Buf, sums: Buf, squares: Buf, count: usize, weight: String, groups: usize, dst: Buf },
 }
 
 impl Op {
@@ -73,9 +80,10 @@ impl Op {
             Op::DeltaStep { mixed, a, b, dst, .. } => (vec![*mixed, *a, *b], vec![*dst]),
             Op::RmsGated { src, z, dst, .. } => (vec![*src, *z], vec![*dst]),
             Op::LayerNorm { src, dst, .. } => (vec![*src], vec![*dst]),
-            Op::LoadRow { store, dst } => (vec![*store], vec![*dst]),
+            Op::LoadRow { store, dst } | Op::LoadRows { store, dst, .. } => (vec![*store], vec![*dst]),
             // A store keeps its other rows: writing one also reads it.
             Op::StoreRow { src, store } => (vec![*src, *store], vec![*store]),
+            Op::GroupNorm { src, sums, squares, dst, .. } => (vec![*src, *sums, *squares], vec![*dst]),
         }
     }
 }
@@ -114,6 +122,9 @@ pub struct Program {
     pub image: Option<ImageHead>,
     /// An image encoder, for models that read pictures: see `VisionPart`.
     pub vision: Option<VisionPart>,
+    /// Rows of the embedding table when they are not the vocabulary's: Show-o reads text,
+    /// its markers and the image's codes from one table, and scores only the codes.
+    pub embedding_rows: Option<usize>,
 }
 
 /// The two small heads with which a language model draws, as Janus-Pro does: one turns
@@ -176,7 +187,7 @@ impl Program {
     pub fn table_rows(&self, table: &str) -> usize {
         match &self.image {
             Some(image) if image.input_ops.iter().any(|i| matches!(&i.op, Op::EmbRead { table: t, .. } if t == table)) => image.codes,
-            _ => self.vocab,
+            _ => self.embedding_rows.unwrap_or(self.vocab),
         }
     }
 
@@ -724,6 +735,7 @@ fn empty_program(family: &str, vocab: usize, hidden: usize, num_layers: usize, r
         local_rope_theta: None,
         rms_epsilon: 1e-6,
         final_hidden: 0,
+        embedding_rows: None,
         draft: None,
         image: None,
         vision: None,
@@ -992,9 +1004,10 @@ mod tests {
                 Op::DeltaStep { mixed, a, b, dst, .. } => (vec![*mixed, *a, *b], vec![*dst]),
                 Op::RmsGated { src, z, dst, .. } => (vec![*src, *z], vec![*dst]),
             Op::LayerNorm { src, dst, .. } => (vec![*src], vec![*dst]),
-            Op::LoadRow { store, dst } => (vec![*store], vec![*dst]),
+            Op::LoadRow { store, dst } | Op::LoadRows { store, dst, .. } => (vec![*store], vec![*dst]),
             // A store keeps its other rows: writing one also reads it.
             Op::StoreRow { src, store } => (vec![*src, *store], vec![*store]),
+            Op::GroupNorm { src, sums, squares, dst, .. } => (vec![*src, *sums, *squares], vec![*dst]),
                 Op::Concat { a, b, dst } => (vec![*a, *b], vec![*dst]),
                 Op::Moe { src, dst, .. } => (vec![*src], vec![*dst]),
             };
@@ -1067,6 +1080,7 @@ pub fn compile_vision(config: &str, patches: usize) -> Result<VisionProgram, Str
         local_rope_theta: None,
         rms_epsilon: 1e-6,
         final_hidden: 0,
+        embedding_rows: None,
         draft: None,
         image: None,
         vision: None,

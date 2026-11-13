@@ -11,31 +11,6 @@ use std::path::Path;
 mod common;
 use common::*;
 
-fn mask(c: &DieConfig) -> u64 {
-    (1u64 << c.cell.activation_bits) - 1
-}
-
-fn load_assembly(sim: &mut Simulator, c: &DieConfig, initial: &std::collections::HashMap<(u32, u32), i64>) {
-    sim.set("load_vec", 1).unwrap();
-    for ((reg, index), value) in initial {
-        sim.set("vec_addr", ((*reg as u64) << c.index_bits) | *index as u64).unwrap();
-        sim.set("vec_data", *value as u64 & mask(c)).unwrap();
-        sim.tick();
-    }
-    sim.set("load_vec", 0).unwrap();
-}
-
-/// Where each register starts in a compact vector memory, before anything goes into it.
-fn load_register_table(sim: &mut Simulator, c: &DieConfig, layout: &Layout) {
-    sim.set("load_base", 1).unwrap();
-    for (register, entry) in sim::chip::register_table(c, layout).iter().enumerate() {
-        sim.set("base_addr", register as u64).unwrap();
-        sim.set("base_data", *entry as u64).unwrap();
-        sim.tick();
-    }
-    sim.set("load_base", 0).unwrap();
-}
-
 fn make_moe_checkpoint(dir: &Path) {
     let mut rng = Rng(0x0FED_CBA9_8765_4321);
     let mut w = Writer::default();
@@ -64,43 +39,6 @@ fn make_moe_checkpoint(dir: &Path) {
 
 /// The longest context the die of these tests is built for.
 const CHIP_TOKENS: usize = 8;
-
-/// Writes the microprogram, once, as the load controller does at start-up.
-fn load_microprogram(sim: &mut Simulator, c: &DieConfig, code: &Microprogram) {
-    assert!(code.words.len() < 1 << c.microcode_bits, "{} palabras", code.words.len());
-    sim.set("start", 1).unwrap();
-    sim.tick();
-    sim.set("load_code", 1).unwrap();
-    for (i, word) in code.words.iter().enumerate() {
-        sim.set("code_addr", i as u64).unwrap();
-        sim.set_words("code_data", &word.encode_words(c)).unwrap();
-        sim.tick();
-    }
-    sim.set("load_code", 0).unwrap();
-}
-
-/// What the firmware does for each routine: set the parameters and start the die.
-fn enter(sim: &mut Simulator, code: &Microprogram, routine: usize, token: u32, position: u32) -> u64 {
-    sim.set("start", 0).unwrap();
-    sim.set("param_write", 1).unwrap();
-    for parameter in &code.parameters {
-        sim.set("param_index", parameter.register as u64).unwrap();
-        sim.set("param_data", parameter.value(token, position) as u64).unwrap();
-        sim.tick();
-    }
-    sim.set("param_write", 0).unwrap();
-    sim.set("entry", code.entries[routine] as u64).unwrap();
-    sim.set("start", 1).unwrap();
-    sim.tick();
-    sim.set("start", 0).unwrap();
-    let mut cycles = 0u64;
-    while sim.get("halted").unwrap() == 0 {
-        sim.tick();
-        cycles += 1;
-        assert!(cycles < 20_000_000, "el secuenciador no se detiene");
-    }
-    cycles
-}
 
 struct GateRun {
     sim: Simulator,

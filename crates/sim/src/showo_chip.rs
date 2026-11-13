@@ -15,7 +15,7 @@
 use crate::lower::Layout;
 use crate::showo::{fill_with, Magvit, ShowOConfig};
 use crate::vm::BlockVm;
-use crate::weights::Weights;
+use crate::weights::{Tensor, Weights};
 use compiler::{Buf, Inst, KvShape, Op, Program, VisionPart};
 use netlist::block::exponent_register;
 use netlist::DieConfig;
@@ -138,13 +138,33 @@ fn attention_and_mlp(e: &mut Emit, s: &Shape, layer: usize, x: Buf, normed: Buf,
     out
 }
 
+/// The output's rows of the codes, as their own matrix with their biases: the rest of the
+/// output is never needed.
+const CODE_HEAD: &str = "showo.cabeza_de_codigos";
+
 /// The final norm and the scores of the codes.
 fn code_scores(e: &mut Emit, s: &Shape, x: Buf) -> (Buf, Buf) {
     let normed = e.norm("norma final", x, "showo.model.final_layernorm".into(), s.hidden);
-    let all = e.linear("salida", "showo.lm_head".into(), normed, s.vocab);
-    let codes = e.buf(s.codebook);
-    e.op("puntuaciones de los códigos", Op::Slice { src: all, from: s.first_code, dst: codes });
+    let codes = e.linear("puntuaciones de los códigos", CODE_HEAD.into(), normed, s.codebook);
     (normed, codes)
+}
+
+/// Show-o's shape and configuration from its folder, and its weights with the code head
+/// cut out, as `program` reads them.
+pub fn weights(dir: &Path, weights: Weights) -> Result<(Shape, ShowOConfig, Weights), String> {
+    let (shape, config) = Shape::read(dir, &weights)?;
+    let head = code_head(&weights, &shape)?;
+    Ok((shape, config, weights.with_floats(head)?))
+}
+
+/// The code head's matrix and biases, cut from the output's.
+fn code_head(weights: &Weights, s: &Shape) -> Result<Vec<Tensor>, String> {
+    let (weight, bias) = (weights.floats("showo.lm_head.weight")?, weights.floats("showo.lm_head.bias")?);
+    let rows = s.first_code..s.first_code + s.codebook;
+    Ok(vec![
+        (format!("{CODE_HEAD}.weight"), vec![s.codebook, s.hidden], weight[rows.start * s.hidden..rows.end * s.hidden].to_vec()),
+        (format!("{CODE_HEAD}.bias"), vec![s.codebook], bias[rows].to_vec()),
+    ])
 }
 
 /// Show-o as the chip's program: the text's token in `ops`, the image's routines in
@@ -172,13 +192,14 @@ pub fn program(s: &Shape) -> Program {
     let row = e.buf(s.hidden);
     e.op("leer embedding", Op::EmbRead { table: "showo.model.embed_tokens".into(), dst: row });
     let embed = 0..e.ops.len();
-    let start = e.ops.len();
-    e.op("guardar fila", Op::StoreRow { src: row, store: state });
-    let store = start..e.ops.len();
     let mut blocks = Vec::new();
     for layer in 0..s.layers {
         e.layer = Some(layer as u32);
         let first = e.ops.len();
+        // The first layer's first pass starts by keeping the row the embedding left.
+        if layer == 0 {
+            e.op("guardar fila", Op::StoreRow { src: row, store: state });
+        }
         let h = e.buf(s.hidden);
         e.op("leer fila", Op::LoadRow { store: state, dst: h });
         let (_, q, k, v) = attention_inputs(&mut e, s, layer, h);
@@ -195,9 +216,11 @@ pub fn program(s: &Shape) -> Program {
         blocks.push((first..middle, middle..e.ops.len()));
     }
     e.layer = None;
+    let score_start = e.ops.len();
     let h = e.buf(s.hidden);
     e.op("leer fila", Op::LoadRow { store: state, dst: h });
     let (_, scores) = code_scores(&mut e, s, h);
+    let score = score_start..e.ops.len();
     let image_ops = std::mem::take(&mut e.ops);
     let unused = e.buf(1);
 
@@ -218,10 +241,12 @@ pub fn program(s: &Shape) -> Program {
         local_rope_theta: None,
         rms_epsilon: 1e-5,
         final_hidden,
+        embedding_rows: Some(s.vocab),
         draft: None,
         image: None,
-        // The routine that scores a row's codes is the last, after the blocks.
-        vision: Some(VisionPart { ops: image_ops, embed, blocks, merge: store, pixels: unused, position: unused, output: scores, head_dim: s.head_dim(), patches: rows }),
+        // The image's routines, as the chip numbers them: the embedding (by the token), each
+        // layer's two passes (by the row), and the codes' scores (by the row).
+        vision: Some(VisionPart { ops: image_ops, embed, blocks, merge: score, pixels: unused, position: unused, output: scores, head_dim: s.head_dim(), patches: rows }),
     }
 }
 
@@ -238,7 +263,7 @@ pub struct ShowOChip {
 impl ShowOChip {
     /// From Show-o's folder, on a die like `die` with vectors of its activation bits.
     pub fn open(dir: &Path, weights: Weights, die: DieConfig) -> Result<Self, String> {
-        let (shape, config) = Shape::read(dir, &weights)?;
+        let (shape, config, weights) = self::weights(dir, weights)?;
         let program = program(&shape);
         let weights = Arc::new(weights);
         let layout = Layout::new(&program, &weights, die, None)?;
@@ -281,22 +306,22 @@ impl ShowOChip {
         let first_position = text_positions.last().map_or(0, |p| p + 1);
         let ids: Vec<u32> = std::iter::once(self.config.start_of_image()).chain(image.iter().copied()).chain([self.config.end_of_image()]).collect();
         let rows = ids.len() as u32;
-        for (row, id) in ids.iter().enumerate() {
-            self.layout.run_ops(&mut self.vm, &self.program, &part.ops[part.embed.clone()], *id, 0, false)?;
-            self.layout.run_ops(&mut self.vm, &self.program, &part.ops[part.merge.clone()], row as u32, 0, false)?;
-        }
         for row in 0..rows {
             self.layout.place_rotation(&self.program, text + row, [first_position + row as u64; 3], None)?;
         }
-        for (first, rest) in &part.blocks {
+        for (layer, (first, rest)) in part.blocks.iter().enumerate() {
             for row in 0..rows {
+                // Before the first layer, the row's embedding, which its first pass keeps.
+                if layer == 0 {
+                    self.layout.run_ops(&mut self.vm, &self.program, &part.ops[part.embed.clone()], ids[row as usize], 0, false)?;
+                }
                 self.layout.run_ops(&mut self.vm, &self.program, &part.ops[first.clone()], row, text + row, true)?;
             }
             for row in 0..rows {
                 self.layout.run_ops(&mut self.vm, &self.program, &part.ops[rest.clone()], row, text + rows - 1, false)?;
             }
         }
-        let score = part.blocks.last().map_or(part.merge.end, |(_, rest)| rest.end)..part.ops.len();
+        let score = part.merge.clone();
         let (output, width) = (self.layout.register_of(part.output), self.program.buffers[part.output]);
         let mut out = Vec::with_capacity(image.len() * width);
         // The image's places only, without its start and end.
@@ -326,6 +351,21 @@ impl ShowOChip {
         let known = self.config.masked_codes(magvit, rgb, width, height, region)?;
         let filled = self.fill(&known, text, steps, guidance, seed, progress)?;
         magvit.decode(&filled)
+    }
+
+    /// Retouches as `inpaint` does with MAGVIT-v2 on the chip too: `magvit` encodes the
+    /// picture and decodes the result in the die's arithmetic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn inpaint_on_chip(&mut self, magvit: &mut crate::magvit_chip::MagvitPair, rgb: &[u8], width: usize, height: usize, region: &[bool], text: &[u32], steps: usize, guidance: f32, seed: u64, mut progress: impl FnMut(usize, usize) -> Result<(), String>) -> Result<Vec<u8>, String> {
+        let known = self.config.clone().masked_codes_with(|picture| magvit.encoder.encode(picture), rgb, width, height, region)?;
+        let filled = self.fill(&known, text, steps, guidance, seed, &mut progress)?;
+        magvit.decoder.decode(&filled)
+    }
+
+    /// Draws as `draw` does, decoding with MAGVIT-v2 on the chip.
+    pub fn draw_on_chip(&mut self, magvit: &mut crate::magvit_chip::MagvitPair, text: &[u32], steps: usize, guidance: f32, seed: u64, progress: impl FnMut(usize, usize) -> Result<(), String>) -> Result<Vec<u8>, String> {
+        let filled = self.fill(&vec![None; self.config.image_tokens], text, steps, guidance, seed, progress)?;
+        magvit.decoder.decode(&filled)
     }
 
     /// A new picture from `text` alone, every code masked.

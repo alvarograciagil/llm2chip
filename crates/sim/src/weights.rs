@@ -21,6 +21,9 @@ struct TensorRef {
     shape: Vec<usize>,
 }
 
+/// A tensor computed here: its name, its shape and its values.
+pub type Tensor = (String, Vec<usize>, Vec<f32>);
+
 pub struct Weights {
     // The GPU's buffers point into `files`, so it must be dropped first.
     accelerator: Option<Box<dyn Accelerator>>,
@@ -123,6 +126,22 @@ impl Weights {
             files.push(map);
         }
         Ok(Self { accelerator: None, files, tensors, format: None, references: Mutex::new(HashMap::new()), recoded: Mutex::new(HashMap::new()), recode_budget: AtomicUsize::new(default_recode_budget()), gpu_products: AtomicUsize::new(0), largest: Mutex::new(HashMap::new()) })
+    }
+
+    /// Adds tensors computed here, such as a convolution's kernel laid out as the chip reads
+    /// it, in floating point; a tensor of the same name is replaced.
+    pub fn with_floats(mut self, tensors: Vec<Tensor>) -> Result<Self, String> {
+        for (name, shape, values) in tensors {
+            if shape.iter().product::<usize>() != values.len() {
+                return Err(format!("{name}: la forma no casa con los valores"));
+            }
+            let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let mut map = memmap2::MmapMut::map_anon(bytes.len().max(1)).map_err(|e| e.to_string())?;
+            map[..bytes.len()].copy_from_slice(&bytes);
+            self.files.push(map.make_read_only().map_err(|e| e.to_string())?);
+            self.tensors.insert(name, TensorRef { file: self.files.len() - 1, start: 0, end: bytes.len(), dtype: "F32".into(), shape });
+        }
+        Ok(self)
     }
 
     /// How many entries a tensor has along each axis.

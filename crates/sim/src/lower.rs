@@ -298,8 +298,9 @@ fn buffers_read(op: &Op) -> Vec<usize> {
         Op::RmsGated { src, z, .. } => vec![*src, *z],
         Op::Mla { query, latent, rope_key, .. } => vec![*query, *latent, *rope_key],
         Op::LayerNorm { src, .. } => vec![*src],
-        Op::LoadRow { store, .. } => vec![*store],
+        Op::LoadRow { store, .. } | Op::LoadRows { store, .. } => vec![*store],
         Op::StoreRow { src, store } => vec![*src, *store],
+        Op::GroupNorm { src, sums, squares, .. } => vec![*src, *sums, *squares],
     }
 }
 
@@ -709,6 +710,14 @@ impl Layout {
                         store(name, values, &mut setup, &mut small);
                     }
                 }
+                Op::GroupNorm { weight, count, .. } => {
+                    for part in ["weight", "bias"] {
+                        let name = format!("{weight}.{part}");
+                        let values = weights.floats(&name)?.iter().map(|w| *w as f64).collect();
+                        store(name, values, &mut setup, &mut small);
+                    }
+                    store(format!("escala:{}", 1.0 / *count as f32), vec![1.0 / *count as f64], &mut setup, &mut small);
+                }
                 Op::Dconv { slot, weight, .. } => {
                     // Kept as one row per tap, which is how the history is stored too.
                     let (dim, kernel) = program.conv_slots[*slot];
@@ -863,7 +872,14 @@ impl Layout {
         if cell_weights > reach || 2 * cell_factors > 1 << config.cell.addr_bits {
             return Err(format!("las celdas necesitan {cell_weights} posiciones de pesos y {cell_factors} grupos, y solo llegan a {reach}"));
         }
-        Ok(Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: program.vocab.max(program.vision.as_ref().map_or(0, |v| v.patches)) as u32, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside: None })
+        // The token a routine takes is a row of an embedding table, a patch, or one of the
+        // vocabulary: as far as the largest of them, which is how far its registers reach.
+        let table_rows = all_ops(program).filter_map(|i| match &i.op {
+            Op::EmbRead { table, .. } => weights.shape(&format!("{table}.weight")).map(|s| s[0]),
+            _ => None,
+        });
+        let token_range = table_rows.chain([program.vocab, program.vision.as_ref().map_or(0, |v| v.patches)]).max().unwrap_or(0) as u32;
+        Ok(Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: token_range, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside: None })
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -1802,6 +1818,51 @@ impl Layout {
                     ops.gather(&parts, dst);
                 }
                 ops.normalize(dst, (rows * row).into());
+            }
+            Op::LoadRows { store, dst, offsets } => {
+                // A pixel's neighbours: rows at fixed distances in a map with a border of
+                // zeros, side by side on the largest of their exponents.
+                let (exponents, row) = self.row_exponents[store];
+                let (store, dst) = (self.reg(*store), self.reg(*dst));
+                for (k, offset) in offsets.iter().enumerate() {
+                    let at = token + (*offset as u32).into();
+                    ops.copy_part(store, at * row, self.parts[k], zero, row.into());
+                    ops.restore_exponent((exponents, at), self.parts[k]);
+                }
+                let parts: Vec<(u32, u32)> = (0..offsets.len()).map(|k| (self.parts[k], row)).collect();
+                ops.gather(&parts, dst);
+                ops.normalize(dst, (offsets.len() as u32 * row).into());
+            }
+            Op::GroupNorm { src, sums, squares, count, weight, groups, dst } => {
+                let d = (program.buffers[*dst] / groups) as u32;
+                let (w, bias) = (self.small[&format!("{weight}.weight")], self.small[&format!("{weight}.bias")]);
+                let per_value = self.small[&format!("escala:{}", 1.0 / *count as f32)];
+                let (src, sums, squares, first) = (self.reg(*src), self.reg(*sums), self.reg(*squares), self.parts[0]);
+                // Each group in a part of its own, as LayerNorm's blocks: its mean and inverse
+                // deviation from the sums, then its channels moved, scaled and shifted.
+                ops.each_head(*groups as u32, 1, |ops, k, _| {
+                    ops.with_window(k, &[first], |ops, offset| {
+                        let part = first + offset;
+                        ops.copy_part(sums, k, t[47], zero, 1.into());
+                        ops.scale(per_value, t[47], t[48], 1.into());
+                        ops.copy_part(squares, k, t[49], zero, 1.into());
+                        ops.scale(per_value, t[49], t[50], 1.into());
+                        ops.multiply(t[48], t[48], t[51], 1.into());
+                        ops.sub_scalar(t[50], t[51], t[52], 1.into());
+                        ops.add(t[52], self.epsilon, t[53], 1.into());
+                        ops.inverse_sqrt(t[53], t[54]);
+                        ops.copy_part(src, k * d, t[46], zero, d.into());
+                        ops.sub_scalar(t[46], t[48], t[40], d.into());
+                        ops.scale(t[54], t[40], t[41], d.into());
+                        ops.copy_part(w, k * d, t[42], zero, d.into());
+                        ops.multiply(t[41], t[42], t[44], d.into());
+                        ops.copy_part(bias, k * d, t[43], zero, d.into());
+                        ops.add(t[44], t[43], part, d.into());
+                        ops.align_heads(part, d);
+                    });
+                });
+                let parts: Vec<(u32, u32)> = (0..*groups).map(|k| (self.parts[k], d)).collect();
+                ops.gather_heads(&parts, self.reg(*dst));
             }
             Op::StoreRow { src, store } => {
                 let (exponents, row) = self.row_exponents[store];

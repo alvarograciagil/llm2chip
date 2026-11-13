@@ -2,12 +2,12 @@
 
 mod common;
 
-use common::{die_config, Rng, Writer};
+use common::{cell_die_config, die_config, enter, load_assembly, load_microprogram, mask, Rng, Writer};
 use sim::showo::ShowO;
 use sim::showo_chip::ShowOChip;
 use std::path::Path;
 
-const TEXT_VOCABULARY: usize = 50295;
+const TEXT_VOCABULARY: usize = 40;
 const CODEBOOK: usize = 64;
 const IMAGE: usize = 16;
 const HIDDEN: usize = 64;
@@ -16,7 +16,7 @@ const LAYERS: usize = 2;
 /// A Show-o with Phi-1.5's layout and random weights, small: two layers, two heads of 32.
 fn make_toy(dir: &Path) {
     let vocab = TEXT_VOCABULARY + 10 + CODEBOOK + 1;
-    let config = serde_json::json!({ "_class_name": "Showo", "llm_vocab_size": TEXT_VOCABULARY, "codebook_size": CODEBOOK, "mask_token_id": vocab - 1, "num_vq_tokens": IMAGE, "max_text": 8 });
+    let config = serde_json::json!({ "_class_name": "Showo", "llm_vocab_size": TEXT_VOCABULARY, "codebook_size": CODEBOOK, "mask_token_id": vocab - 1, "num_vq_tokens": IMAGE, "max_text": 8, "end_of_text": TEXT_VOCABULARY - 1 });
     std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
     std::fs::create_dir_all(dir.join("phi")).unwrap();
     std::fs::write(dir.join("phi/config.json"), serde_json::json!({ "num_attention_heads": 2, "partial_rotary_factor": 0.5 }).to_string()).unwrap();
@@ -49,7 +49,7 @@ fn make_toy(dir: &Path) {
 
 /// A text, and an image with half its codes known and half masked.
 fn inputs(model: &ShowO) -> (Vec<u32>, Vec<u32>) {
-    let text = vec![464, 3797, 286, 257, 1097];
+    let text = vec![5, 17, 23, 2, 31];
     let first = model.config.first_code();
     let image = (0..IMAGE as u32).map(|i| if i % 2 == 0 { model.config.mask_token } else { first + (i * 7) % CODEBOOK as u32 }).collect();
     (text, image)
@@ -87,7 +87,7 @@ fn show_o_s_scores_in_the_die_arithmetic_match_the_floating_point_ones() {
     assert!(agree * 10 >= masked * 9, "{agree} de {masked}");
     // The text and the image's other rows matter: with another text the scores move far
     // more than the arithmetic's error.
-    let other = model.scores(&[1212, 318], &image);
+    let other = model.scores(&[12, 7], &image);
     let (moved, _, _) = compare(&other, &float, &image, model.config.mask_token, CODEBOOK);
     assert!(moved > 10.0 * error, "otro texto mueve las puntuaciones {moved}");
     std::fs::remove_dir_all(&dir).ok();
@@ -139,4 +139,129 @@ fn the_real_show_o_scores_a_masked_picture_as_in_floating_point() {
     let (error, agree, masked) = compare(&scores, &float, &image, model.config.mask_token, model.config.codebook as usize);
     eprintln!("diferencia mayor {:.2} % de la mayor puntuación; mejor código igual en {agree} de {masked}", error * 100.0);
     assert!(agree * 10 >= masked * 9, "{agree} de {masked}");
+}
+
+/// Show-o's routines, numbered as the chip's microprogram numbers them, on any die: the
+/// text a token at a time, then each layer's two passes over the image's rows, then the
+/// codes' scores of each row. Gives the scores' mantissas, a row after another, as `read`
+/// reads them.
+fn run_show_o(run: &mut dyn FnMut(usize, u32, u32), read: &mut dyn FnMut(u32) -> Vec<i64>, ids: &[u32], image: &[u32], layers: usize) -> Vec<i64> {
+    use sim::lower::{ENTRY_TOKEN, ENTRY_VISION};
+    for (slot, id) in ids.iter().enumerate() {
+        run(ENTRY_TOKEN, *id, slot as u32);
+    }
+    let (text, rows) = (ids.len() as u32, image.len() as u32);
+    for layer in 0..layers {
+        for row in 0..rows {
+            if layer == 0 {
+                run(ENTRY_VISION, image[row as usize], 0);
+            }
+            run(ENTRY_VISION + 1 + 2 * layer, row, text + row);
+        }
+        for row in 0..rows {
+            run(ENTRY_VISION + 2 + 2 * layer, row, text + rows - 1);
+        }
+    }
+    (1..rows - 1)
+        .flat_map(|row| {
+            run(ENTRY_VISION + 1 + 2 * layers, row, 0);
+            read(row)
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "lenta: Show-o de juguete en las puertas del die"]
+fn show_o_s_routines_on_the_die_s_gates_give_the_exact_machine_s_scores() {
+    use netlist::chip::DieEngine;
+    use netlist::demo::read_block_value;
+    use netlist::{die_design, DieConfig, Simulator};
+    use sim::lower::Layout;
+    let dir = std::env::temp_dir().join(format!("llm2chip-showo-gates-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_toy(&dir);
+    let open = || sim::showo_chip::weights(&dir, sim::Weights::open(&dir).unwrap()).unwrap();
+    let (shape, config, weights) = open();
+    let program = sim::showo_chip::program(&shape);
+    // Six words fill the text: then each token's place in the cache is its position.
+    let (ids, positions) = config.text_prefix(&[5, 17, 23, 2, 31, 11]);
+    assert_eq!(positions, (0..ids.len() as u64).collect::<Vec<_>>());
+    let first = config.first_code();
+    let codes: Vec<u32> = (0..IMAGE as u32).map(|i| if i % 3 == 0 { config.mask_token } else { first + (i * 5) % CODEBOOK as u32 }).collect();
+    let image: Vec<u32> = std::iter::once(config.start_of_image()).chain(codes).chain([config.end_of_image()]).collect();
+    let context = ids.len() + image.len();
+
+    // Cells as deep as the weights need, each a mantissa of the vectors' width.
+    let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
+    let base = cell_die_config();
+    let roomy = DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, weight_bits: base.cell.activation_bits, ..base.cell }, features: base.features.with_key_shift(5), ..base };
+    let (depth, groups) = Layout::with_cells(&program, &weights, roomy, context).unwrap().cell_depths();
+    let addr_bits = bits_for(depth.max(2 * groups));
+    let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1).max(context as u64 * 512)).max(addr_bits);
+    let roomy = DieConfig { index_bits, cell: netlist::CellConfig { addr_bits, ..roomy.cell }, ..roomy };
+    let wide = Layout::with_cells(&program, &weights, roomy, context).unwrap();
+    wide.microprogram(&program).unwrap();
+    let die = sim::chip::with_registers_needed(roomy, &wide);
+    let layout = Layout::with_cells(&program, &weights, die, context).unwrap();
+    let code = layout.microprogram(&program).unwrap();
+    let output = layout.register_of(program.vision.as_ref().unwrap().output);
+
+    // The exact machine of the same die, routine by routine.
+    let mut vm = sim::chip::VmEngine::new(program.clone(), open().2, die, context).unwrap();
+    let exact = {
+        let vm = std::cell::RefCell::new(&mut vm);
+        run_show_o(
+            &mut |r, t, p| vm.borrow_mut().run(r, t, p),
+            &mut |_| (0..CODEBOOK as u32).map(|i| vm.borrow_mut().read(output << die.index_bits | i)).collect(),
+            &ids,
+            &image,
+            shape.layers,
+        )
+    };
+
+    let mut sim = Simulator::new(&die_design(die)).unwrap();
+    load_microprogram(&mut sim, &die, &code);
+    load_assembly(&mut sim, &die, &layout.setup().initial);
+    sim.set("load_fn", 1).unwrap();
+    for (address, value) in netlist::block::tables(&die).iter().enumerate() {
+        sim.set("fn_addr", address as u64).unwrap();
+        sim.set("cell_data", *value as u64 & mask(&die)).unwrap();
+        sim.tick();
+    }
+    sim.set("load_fn", 0).unwrap();
+    let data_mask = (1u64 << die.scale_bits.max(die.cell.weight_bits).max(die.cell.activation_bits)) - 1;
+    let put = |sim: &mut Simulator, address: u64, value: i64| {
+        sim.set("cell_addr", address).unwrap();
+        sim.set("cell_data", value as u64 & data_mask).unwrap();
+        sim.tick();
+    };
+    for cell in 0..die.cells {
+        let (codes, factors) = layout.cell_contents(&weights, cell).unwrap();
+        sim.set("load_cell", 1 << cell).unwrap();
+        sim.set("load_scale", 0).unwrap();
+        for (address, code) in codes.iter().enumerate() {
+            put(&mut sim, address as u64, *code);
+        }
+        sim.set("load_scale", 1).unwrap();
+        for (group, (scale, bias)) in factors.iter().enumerate() {
+            put(&mut sim, 2 * group as u64, *scale);
+            put(&mut sim, 2 * group as u64 + 1, *bias);
+        }
+    }
+    sim.set("load_cell", 0).unwrap();
+    sim.set("load_scale", 0).unwrap();
+    let mut cycles = 0;
+    let gates = {
+        let sim = std::cell::RefCell::new(sim);
+        run_show_o(
+            &mut |r, t, p| cycles += enter(&mut sim.borrow_mut(), &code, r, t, p),
+            &mut |_| (0..CODEBOOK as u32).map(|i| read_block_value(&mut sim.borrow_mut(), die, output, i).0).collect(),
+            &ids,
+            &image,
+            shape.layers,
+        )
+    };
+    eprintln!("Show-o de juguete en puertas: {cycles} ciclos");
+    assert_eq!(gates, exact, "puntuaciones de los códigos");
+    std::fs::remove_dir_all(&dir).ok();
 }

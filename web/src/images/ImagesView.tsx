@@ -71,7 +71,7 @@ export function ImagesView() {
           </figure>
           <figure className="picture">
             {s.result ? <img src={s.result.data} width={s.result.side} height={s.result.side} alt={`Resultado: ${s.prompt}`} /> : <div className="images-empty placeholder">{s.running ? s.phase : "El resultado aparecerá aquí."}</div>}
-            <figcaption>{s.result ? `${s.result.side} × ${s.result.side} px, en ${formatNumber(s.result.seconds)} s, semilla ${s.result.seed}${s.result.chip_bits ? `, el transformador en la aritmética del chip (${s.result.chip_bits} bits)` : ", en coma flotante"}` : " "}</figcaption>
+            <figcaption>{s.result ? `${s.result.side} × ${s.result.side} px, en ${formatNumber(s.result.seconds)} s, semilla ${s.result.seed}${s.result.chip_bits ? (s.result.magvit_on_chip ? `, todo en la aritmética del chip (${s.result.chip_bits} bits)` : `, el transformador en la aritmética del chip (${s.result.chip_bits} bits)`) : ", en coma flotante"}` : " "}</figcaption>
           </figure>
         </div>
         {s.running && (
@@ -194,9 +194,15 @@ export function ImagesPanel() {
                   <input type="checkbox" checked={s.onChip} disabled={s.running} onChange={(e) => s.set({ onChip: e.target.checked })} />
                   En la aritmética del chip
                 </label>
+                {s.onChip && (
+                  <label className="check" title="MAGVIT-v2 también en la aritmética del die: codifica la imagen y decodifica el resultado. Cada uno tarda unos 3 minutos.">
+                    <input type="checkbox" checked={s.magvitOnChip} disabled={s.running} onChange={(e) => s.set({ magvitOnChip: e.target.checked })} />
+                    También MAGVIT-v2 en el chip
+                  </label>
+                )}
                 <p className="muted-text">
                   {s.onChip
-                    ? `Con pesos afines de 8 bits, cada pasada tarda unos 80 s, frente a 6 s en coma flotante. Con guía son dos por paso: con ${s.steps} pasos, unos ${formatNumber(Math.ceil((s.steps * (s.guidance > 0 ? 2 : 1) * 80) / 60))} minutos. MAGVIT-v2 sigue en el anfitrión.`
+                    ? `Con pesos afines de 8 bits, cada pasada tarda unos 80 s, frente a 6 s en coma flotante. Con guía son dos por paso: con ${s.steps} pasos, unos ${formatNumber(Math.ceil((s.steps * (s.guidance > 0 ? 2 : 1) * 80) / 60))} minutos. ${s.magvitOnChip ? "MAGVIT-v2 en el chip suma unos 6 minutos." : "MAGVIT-v2 sigue en el anfitrión."}`
                     : "Corre en coma flotante en el anfitrión, fuera del chip. La primera vez tarda unos segundos en leer los pesos."}
                 </p>
               </>

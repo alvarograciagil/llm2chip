@@ -265,3 +265,68 @@ pub fn chip_in_iverilog(design: &netlist::Design, image: &[u32], input: &[u8], l
     std::fs::remove_dir_all(&dir).ok();
     Some((output, cycles.unwrap_or_else(|| panic!("Icarus Verilog no terminó: {}", text.lines().last().unwrap_or_default()))))
 }
+
+// The die driven on its gates as its firmware would, for the tests that need it.
+
+#[allow(dead_code)]
+pub fn mask(c: &DieConfig) -> u64 {
+    (1u64 << c.cell.activation_bits) - 1
+}
+#[allow(dead_code)]
+pub fn load_assembly(sim: &mut netlist::Simulator, c: &DieConfig, initial: &std::collections::HashMap<(u32, u32), i64>) {
+    sim.set("load_vec", 1).unwrap();
+    for ((reg, index), value) in initial {
+        sim.set("vec_addr", ((*reg as u64) << c.index_bits) | *index as u64).unwrap();
+        sim.set("vec_data", *value as u64 & mask(c)).unwrap();
+        sim.tick();
+    }
+    sim.set("load_vec", 0).unwrap();
+}
+/// Where each register starts in a compact vector memory, before anything goes into it.
+#[allow(dead_code)]
+pub fn load_register_table(sim: &mut netlist::Simulator, c: &DieConfig, layout: &sim::lower::Layout) {
+    sim.set("load_base", 1).unwrap();
+    for (register, entry) in sim::chip::register_table(c, layout).iter().enumerate() {
+        sim.set("base_addr", register as u64).unwrap();
+        sim.set("base_data", *entry as u64).unwrap();
+        sim.tick();
+    }
+    sim.set("load_base", 0).unwrap();
+}
+/// Writes the microprogram, once, as the load controller does at start-up.
+#[allow(dead_code)]
+pub fn load_microprogram(sim: &mut netlist::Simulator, c: &DieConfig, code: &netlist::Microprogram) {
+    assert!(code.words.len() < 1 << c.microcode_bits, "{} palabras", code.words.len());
+    sim.set("start", 1).unwrap();
+    sim.tick();
+    sim.set("load_code", 1).unwrap();
+    for (i, word) in code.words.iter().enumerate() {
+        sim.set("code_addr", i as u64).unwrap();
+        sim.set_words("code_data", &word.encode_words(c)).unwrap();
+        sim.tick();
+    }
+    sim.set("load_code", 0).unwrap();
+}
+/// What the firmware does for each routine: set the parameters and start the die.
+#[allow(dead_code)]
+pub fn enter(sim: &mut netlist::Simulator, code: &netlist::Microprogram, routine: usize, token: u32, position: u32) -> u64 {
+    sim.set("start", 0).unwrap();
+    sim.set("param_write", 1).unwrap();
+    for parameter in &code.parameters {
+        sim.set("param_index", parameter.register as u64).unwrap();
+        sim.set("param_data", parameter.value(token, position) as u64).unwrap();
+        sim.tick();
+    }
+    sim.set("param_write", 0).unwrap();
+    sim.set("entry", code.entries[routine] as u64).unwrap();
+    sim.set("start", 1).unwrap();
+    sim.tick();
+    sim.set("start", 0).unwrap();
+    let mut cycles = 0u64;
+    while sim.get("halted").unwrap() == 0 {
+        sim.tick();
+        cycles += 1;
+        assert!(cycles < 20_000_000, "el secuenciador no se detiene");
+    }
+    cycles
+}

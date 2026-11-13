@@ -7,6 +7,7 @@ mod exec;
 pub mod image;
 pub mod janus;
 pub mod lower;
+pub mod magvit_chip;
 pub mod showo;
 pub mod showo_chip;
 pub mod sizing;

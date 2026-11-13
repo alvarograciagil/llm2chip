@@ -748,6 +748,24 @@ impl Engine {
                 let row = self.buffers[*src].clone();
                 self.buffers[*store][token as usize * row.len()..][..row.len()].copy_from_slice(&row);
             }
+            Op::LoadRows { store, dst, offsets } => {
+                let width = self.buffers[*dst].len() / offsets.len();
+                let rows: Vec<f32> = offsets.iter().flat_map(|o| self.buffers[*store][(token as usize + o) * width..][..width].to_vec()).collect();
+                self.buffers[*dst].copy_from_slice(&rows);
+            }
+            Op::GroupNorm { src, sums, squares, count, weight, groups, dst } => {
+                let (w, b) = (self.floats[&format!("{weight}.weight")].clone(), self.floats[&format!("{weight}.bias")].clone());
+                let (sums, squares, x) = (self.buffers[*sums].clone(), self.buffers[*squares].clone(), self.buffers[*src].clone());
+                let per = x.len() / groups;
+                let f = self.functions;
+                for (i, y) in self.buffers[*dst].iter_mut().enumerate() {
+                    let g = i / per;
+                    let mean = sums[g] / *count as f32;
+                    let inv = f.inv_sqrt(squares[g] / *count as f32 - mean * mean + 1e-6);
+                    *y = (x[i] - mean) * inv * w[i] + b[i];
+                }
+                self.quantize(*dst);
+            }
             Op::RmsGated { src, z, weight, block, dst } => {
                 let w = self.floats[&format!("{weight}.weight")].clone();
                 let gate = self.buffers[*z].clone();

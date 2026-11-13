@@ -185,6 +185,33 @@ Se ejecuta con `crates/sim/tests/showo_chip.rs`. La prueba del modelo real es le
 
 En la pantalla Imágenes, la casilla «En la aritmética del chip» hace todo el retoque así, con pesos afines de 8 bits. Con guía son dos pasadas por paso, de unos 80 s cada una: un retoque de 4 pasos tardó 21 minutos con los enteros de 16 bits.
 
+### MAGVIT-v2 en la aritmética del chip
+
+`crates/sim/src/magvit_chip.rs` lleva el codificador y el decodificador de MAGVIT-v2 a las operaciones del chip, también sobre la máquina exacta guiada desde el anfitrión.
+
+- **Los mapas** son almacenes de filas, una por píxel con todos sus canales, con un borde de filas a cero. Así, las ocho vecinas de un píxel son filas a distancias fijas, sea cual sea el píxel. Una convolución 3 × 3 es un producto de las nueve filas puestas en fila (`LoadRows`) por el núcleo reordenado igual. La reducción a la mitad lee las vecinas píxel sí, píxel no, y el borde hace de relleno.
+- **GroupNorm** necesita la media y la dispersión de cada grupo en todo el mapa:
+  1. cada píxel escribe sus sumas por grupo y las de sus cuadrados, con un producto por una matriz de unos en los acumuladores anchos de las celdas;
+  2. esas filas se suman por parejas, un nivel cada vez, hasta que una tiene los totales;
+  3. la operación `GroupNorm` normaliza cada píxel con ellos.
+- **La atención del centro** va en dos pasadas sobre los píxeles, como la imagen de Show-o.
+- **Duplicar el lado** copia cada fila a sus cuatro sitios.
+
+| Pieza | Juguete | MAGVIT-v2 real | Tiempo real |
+|---|---|---|---|
+| Decodificador | 62,5 dB de PSNR frente a la coma flotante | 49,6 dB | 195 s |
+| Codificador | 208 de 208 bits iguales | 3 306 de 3 328 bits (99,3 %), 236 de 256 códigos | 254 s |
+
+En el codificador, los valores cercanos a cero pueden salir con el otro signo, así que algunos bits cambian.
+
+En la pantalla Imágenes, «También MAGVIT-v2 en el chip» hace todo el retoque en la aritmética del chip.
+
+### En las puertas del die
+
+El Show-o de juguete corre en las puertas del die, rutina a rutina, y da las mismas puntuaciones que la máquina exacta del mismo die, bit a bit: 3,1 millones de ciclos (`show_o_s_routines_on_the_die_s_gates_give_the_exact_machine_s_scores`).
+
+Al probarlo salió un fallo: la tabla de embeddings se dimensionaba con el vocabulario de la salida. En Show-o, la salida tiene 8 192 códigos y la tabla, 58 498 filas. Ahora el programa dice las filas de su tabla (`embedding_rows`).
+
 Pendiente:
-- MAGVIT en el chip, que son convoluciones como las del decodificador de Janus;
-- el firmware y las puertas: aquí es la máquina exacta guiada desde el anfitrión;
+- el firmware del RV32 guiando a Show-o y el bucle de MaskGIT en la CPU del chip;
+- MAGVIT en puertas.

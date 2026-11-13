@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use serde_json::Value;
 use std::path::Path;
 
-/// Phi-1.5's end of text, which also starts a text.
+/// Phi-1.5's end of text, which also starts a text, when the config does not say.
 const END_OF_TEXT: u32 = 50256;
 /// Tokens Show-o adds after the text's: padding, then the markers of images, videos and tasks.
 const SPECIAL_TOKENS: u32 = 10;
@@ -31,6 +31,8 @@ pub struct ShowOConfig {
     /// position: 32 and 32 of 64, unless `phi/config.json` says otherwise.
     pub heads: usize,
     pub rotary_fraction: f64,
+    /// Phi-1.5's end of text, which also starts a text: 50256 unless the config says.
+    pub end_of_text: u32,
 }
 
 impl ShowOConfig {
@@ -45,7 +47,8 @@ impl ShowOConfig {
         let heads = phi["num_attention_heads"].as_u64().unwrap_or(32) as usize;
         let rotary_fraction = phi["partial_rotary_factor"].as_f64().unwrap_or(0.5);
         let max_text = config["max_text"].as_u64().unwrap_or(128) as usize;
-        Ok(Some(Self { text_vocabulary: number("llm_vocab_size")? as u32, codebook: number("codebook_size")? as u32, mask_token: number("mask_token_id")? as u32, image_tokens: number("num_vq_tokens")? as usize, max_text, heads, rotary_fraction }))
+        let end_of_text = config["end_of_text"].as_u64().unwrap_or(END_OF_TEXT as u64) as u32;
+        Ok(Some(Self { text_vocabulary: number("llm_vocab_size")? as u32, codebook: number("codebook_size")? as u32, mask_token: number("mask_token_id")? as u32, image_tokens: number("num_vq_tokens")? as usize, max_text, heads, rotary_fraction, end_of_text }))
     }
 
     pub fn start_of_image(&self) -> u32 {
@@ -70,12 +73,12 @@ impl ShowOConfig {
     /// Gives its tokens and their positions, the padding left out: nothing reads it.
     pub fn text_prefix(&self, text: &[u32]) -> (Vec<u32>, Vec<u64>) {
         let mut ids = vec![self.text_to_image()];
-        if text.first() != Some(&END_OF_TEXT) {
-            ids.push(END_OF_TEXT);
+        if text.first() != Some(&self.end_of_text) {
+            ids.push(self.end_of_text);
         }
         ids.extend(text);
         ids.truncate(self.max_text);
-        ids.push(END_OF_TEXT);
+        ids.push(self.end_of_text);
         let length = self.max_text + 1;
         let positions = (length - ids.len()..length).map(|p| p as u64).collect();
         (ids, positions)
@@ -84,9 +87,14 @@ impl ShowOConfig {
     /// The codes of a picture, those of the `region` (one flag a pixel) masked: the picture
     /// resized and cropped to the model's square.
     pub fn masked_codes(&self, magvit: &Magvit, rgb: &[u8], width: usize, height: usize, region: &[bool]) -> Result<Vec<Option<u32>>, String> {
+        self.masked_codes_with(|picture| magvit.encode(picture), rgb, width, height, region)
+    }
+
+    /// The same with any encoder of pictures into codes, such as one on the chip.
+    pub fn masked_codes_with(&self, encode: impl FnOnce(&[f32]) -> Result<Vec<u32>, String>, rgb: &[u8], width: usize, height: usize, region: &[bool]) -> Result<Vec<Option<u32>>, String> {
         let side = self.side();
         let picture = square(&rgb.iter().map(|v| *v as f32 / 127.5 - 1.0).collect::<Vec<_>>(), 3, width, height, side, -0.5);
-        let codes = magvit.encode(&picture)?;
+        let codes = encode(&picture)?;
         // The region on the grid of codes: bicubic samples at their centres, then halfway.
         let mask = square(&region.iter().map(|r| *r as u8 as f32).collect::<Vec<_>>(), 1, width, height, side, -0.5);
         let grid = self.grid();

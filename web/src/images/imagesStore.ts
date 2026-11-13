@@ -21,6 +21,8 @@ interface Result {
   seed: number;
   /** Bits of the die's vectors when the chip's arithmetic made it. */
   chip_bits?: number;
+  /** MAGVIT-v2 ran on the chip too. */
+  magvit_on_chip?: boolean;
 }
 
 interface ImagesState {
@@ -34,6 +36,8 @@ interface ImagesState {
   seed: string;
   /** Run the transformer in the die's arithmetic, much slower. */
   onChip: boolean;
+  /** MAGVIT-v2 on the chip too: some 6 minutes more. */
+  magvitOnChip: boolean;
   picture: SquarePicture | null;
   region: Region | null;
   running: boolean;
@@ -90,6 +94,7 @@ export const useImages = create<ImagesState>((set, get) => ({
   guidance: 1.75,
   seed: "",
   onChip: false,
+  magvitOnChip: false,
   picture: null,
   region: null,
   running: false,
@@ -118,7 +123,7 @@ export const useImages = create<ImagesState>((set, get) => ({
   },
 
   start: async () => {
-    const { path, prompt, steps, guidance, seed, picture, region, onChip } = get();
+    const { path, prompt, steps, guidance, seed, picture, region, onChip, magvitOnChip } = get();
     const body = {
       path,
       prompt,
@@ -126,6 +131,7 @@ export const useImages = create<ImagesState>((set, get) => ({
       guidance,
       seed: seed.trim() ? Number(seed) : null,
       chip_bits: onChip ? 16 : null,
+      magvit_on_chip: onChip && magvitOnChip,
       picture: picture && regionIsUsable(region, picture.side) ? { width: picture.side, height: picture.side, rgb: picture.rgb, region } : null,
     };
     set({ running: true, error: null, phase: "Empezando", step: 0, total: steps });
