@@ -12,5 +12,5 @@ if [ "$(uname)" = "Darwin" ]; then
   echo "App: $(pwd)/target/release/bundle/macos/llm2chip.app"
 else
   cargo tauri build
-  echo "Paquetes en: $(pwd)/target/release/bundle"
+  echo "Packages in: $(pwd)/target/release/bundle"
 fi

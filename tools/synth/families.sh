@@ -8,7 +8,7 @@
 # Needs OSS CAD Suite (the server installs it in ~/.llm2chip/tools/oss-cad-suite).
 # `ecp5-pnr` also places and routes on an ECP5-85F and reports the clock it reaches.
 set -u
-chip=${1:?"Verilog del chip"}
+chip=${1:?"the chip's Verilog"}
 out=${2:-synth-out}
 shift $(( $# < 2 ? $# : 2 ))
 families=${*:-ecp5 xilinx gowin cyclone4}
@@ -27,7 +27,7 @@ run() {
         echo "== $name ($((SECONDS - start)) s)"
         awk '/Number of cells|cells$/{p=1} p && /[0-9]+ +[A-Za-z$]/' "$out/$name.txt" | sort -u -k2 | grep -E "LUT|lcell|ALU|DFF|dff|FD|RAM|DP16|BRAM|DSP|MULT|mac|CCU2|RAMB|SB_" | awk '{print "  " $0}'
     else
-        echo "== $name: sin terminar en $limit s o con error, ver $out/$name.log"
+        echo "== $name: did not finish within $limit s or failed, see $out/$name.log"
     fi
 }
 

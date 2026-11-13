@@ -6,3 +6,5 @@ web/src/wasm/
 *.chipimg
 .DS_Store
 .venv/
+__pycache__/
+*.pyc

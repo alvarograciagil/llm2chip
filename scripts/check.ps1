@@ -1,12 +1,12 @@
 # Local CI on Windows: Rust tests and lints, then the web build and tests.
 #
 #   scripts\check.ps1             the quick set, a couple of minutes: for every change
-#   scripts\check.ps1 -Completa   also the whole chips on gates, about five minutes: before
+#   scripts\check.ps1 -Full       also the whole chips in gates and the slow tests: before
 #                                 changes to the hardware go up
-param([switch]$Completa)
+param([switch]$Full)
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
-if ($Completa) {
+if ($Full) {
     cargo test --release --workspace --exclude llm2chip-wasm -- --include-ignored
 } else {
     cargo test --release --workspace --exclude llm2chip-wasm

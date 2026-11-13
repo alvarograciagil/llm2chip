@@ -3,9 +3,9 @@
 # of the open PDK (OpenRAM's sky130_sram_1rw1r_128x256_8, 32 Kbit), not flip-flops. The
 # cell keeps 4096 weights of 8 bits; each word of the macro holds 16 of them.
 #
-#   tools/asic/tile.sh [periodo_ns] [carpeta]
+#   tools/asic/tile.sh [period_ns] [folder]
 #
-# Writes the GDS, the layout images and resumen.json (area, fmax, power, DRC) in the folder.
+# Writes the GDS, the layout images and summary.json (area, fmax, power, DRC) in the folder.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 period=${1:-10}
@@ -40,7 +40,7 @@ wrapper = f"""module llm2chip_sram #(parameter ADDR_BITS = 12, parameter WIDTH =
   );
   assign rdata = word[lane*8 +: 8];
 endmodule"""
-assert "ADDR_BITS(12), .WIDTH(8)" in text, "la tesela espera una memoria de 4096 × 8"
+assert "ADDR_BITS(12), .WIDTH(8)" in text, "the tile expects a 4096 × 8 memory"
 open(target, "w").write(text[:start] + wrapper + text[end:])
 PY
 
@@ -103,23 +103,23 @@ set_input_delay [expr \$clk_period * 0.2] -clock clk \$non_clock_inputs
 set_output_delay [expr \$clk_period * 0.2] -clock clk [all_outputs]
 SDC
 docker run --rm --platform linux/amd64 -v "$out":/work openroad/orfs:latest bash -c \
-  "source /OpenROAD-flow-scripts/env.sh >/dev/null && cd /OpenROAD-flow-scripts/flow && make DESIGN_CONFIG=/work/config.mk WORK_HOME=/work/out" > "$out/flujo.log" 2>&1
+  "source /OpenROAD-flow-scripts/env.sh >/dev/null && cd /OpenROAD-flow-scripts/flow && make DESIGN_CONFIG=/work/config.mk WORK_HOME=/work/out" > "$out/flow.log" 2>&1
 base="$out/out/logs/sky130hd/tesela/base"
 reports="$out/out/reports/sky130hd/tesela/base"
-python3 - "$base/6_report.json" "$reports/6_finish.rpt" "$out/resumen.json" <<'PY'
+python3 - "$base/6_report.json" "$reports/6_finish.rpt" "$out/summary.json" <<'PY'
 import json, re, sys
 metrics = json.load(open(sys.argv[1]))
 finish = open(sys.argv[2]).read()
 fmax = re.search(r"fmax = ([0-9.]+)", finish)
 summary = {
-    "area_celdas_um2": metrics.get("finish__design__instance__area__stdcell"),
+    "area_cells_um2": metrics.get("finish__design__instance__area__stdcell"),
     "area_macros_um2": metrics.get("finish__design__instance__area__macros"),
     "area_die_um2": metrics.get("finish__design__die__area"),
-    "ocupacion": metrics.get("finish__design__instance__utilization"),
-    "celdas": metrics.get("finish__design__instance__count__stdcell"),
-    "potencia_w": metrics.get("finish__power__total"),
+    "utilization": metrics.get("finish__design__instance__utilization"),
+    "cells": metrics.get("finish__design__instance__count__stdcell"),
+    "power_w": metrics.get("finish__power__total"),
     "fmax_mhz": float(fmax.group(1)) if fmax else None,
-    "violaciones_drc": metrics.get("detailedroute__route__drc_errors"),
+    "drc_violations": metrics.get("detailedroute__route__drc_errors"),
 }
 json.dump(summary, open(sys.argv[3], "w"), indent=2)
 print(json.dumps(summary, ensure_ascii=False))

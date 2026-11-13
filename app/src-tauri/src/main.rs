@@ -30,7 +30,7 @@ fn main() {
             let child = Command::new(resources.join(engine)).env("LLM2CHIP_DIST", resources.join("web")).spawn()?;
             app.manage(Engine(Mutex::new(Some(child))));
             if !wait_for_engine() {
-                return Err("el motor local no ha arrancado".into());
+                return Err("the local engine did not start".into());
             }
             let url = format!("http://{ADDRESS}/").parse()?;
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
@@ -41,7 +41,7 @@ fn main() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("no se pudo crear la aplicación")
+        .expect("the application could not be created")
         .run(|app, event| {
             if let RunEvent::Exit = event {
                 if let Some(mut child) = app.state::<Engine>().0.lock().unwrap().take() {

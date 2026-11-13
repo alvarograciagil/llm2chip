@@ -378,9 +378,9 @@ mod tests {
         let catalog = Catalog::open(home.clone());
         assert!(catalog.models().is_empty());
 
-        let bad = Settings { model_dirs: vec!["~/no-existe".into()], download_dir: None };
+        let bad = Settings { model_dirs: vec!["~/does-not-exist".into()], download_dir: None };
         assert!(catalog.update(bad).unwrap_err().contains("does not exist"));
-        assert!(catalog.update(Settings { model_dirs: vec!["relativa".into()], download_dir: None }).is_err());
+        assert!(catalog.update(Settings { model_dirs: vec!["relative".into()], download_dir: None }).is_err());
 
         let good = Settings { model_dirs: vec!["~/mis modelos".into(), models.to_string_lossy().into()], download_dir: Some("~/bajadas".into()) };
         catalog.update(good).unwrap();

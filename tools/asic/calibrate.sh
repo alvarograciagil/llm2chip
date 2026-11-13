@@ -3,11 +3,11 @@
 # gathers what OpenROAD measured in tests/golden/asic.json, the reference the estimator's
 # tests compare against.
 #
-#   tools/asic/calibrate.sh [plataforma...]
+#   tools/asic/calibrate.sh [platform...]
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cells="$root/tools/asic/cells.json"
-work=$HOME/.llm2chip/asic/calibracion
+work=$HOME/.llm2chip/asic/calibration
 mkdir -p "$work"
 platforms=("$@")
 [ ${#platforms[@]} -eq 0 ] && platforms=($(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['platforms']))" "$cells"))
@@ -28,10 +28,10 @@ run() {
   local period
   period=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['platforms'][sys.argv[2]])" "$cells" "$platform")
   local out="$work/$name-$platform"
-  if [ -f "$out/resumen.json" ]; then echo "ya medido: $name $platform"; return; fi
+  if [ -f "$out/summary.json" ]; then echo "already measured: $name $platform"; return; fi
   "$root/tools/asic/flow.sh" "$work/$name.v" compute_cell "$platform" "$period" "$out" > /dev/null 2>&1 \
-    && echo "medido: $name $platform $(cat "$out/resumen.json" | tr -d '\n ')" \
-    || echo "falló: $name $platform (ver $out/flujo.log)"
+    && echo "measured: $name $platform $(cat "$out/summary.json" | tr -d '\n ')" \
+    || echo "failed: $name $platform (see $out/flow.log)"
 }
 
 export -f run
@@ -44,13 +44,13 @@ spec = json.load(open(sys.argv[1]))
 measures = []
 for name, cell in spec["cells"].items():
     for platform, period in spec["platforms"].items():
-        path = os.path.join(sys.argv[2], f"{name}-{platform}", "resumen.json")
+        path = os.path.join(sys.argv[2], f"{name}-{platform}", "summary.json")
         if not os.path.exists(path):
             continue
         r = json.load(open(path))
         measures.append({"cell": name, "platform": platform, "period_ns": period, "config": cell,
-                         "area_um2": r["area_celdas_um2"], "fmax_mhz": r["fmax_mhz"], "power_w": r["potencia_w"],
-                         "cells": r["celdas"], "drc": r["violaciones_drc"]})
+                         "area_um2": r["area_cells_um2"], "fmax_mhz": r["fmax_mhz"], "power_w": r["power_w"],
+                         "cells": r["cells"], "drc": r["drc_violations"]})
 json.dump({"how": "tools/asic/calibrate.sh: OpenROAD-flow-scripts, CORE_UTILIZATION 40, PLACE_DENSITY 0.60, 4 words of weights in flip-flops", "measures": measures}, open(sys.argv[3], "w"), indent=1, ensure_ascii=False)
 print(f"{len(measures)} medidas en {sys.argv[3]}")
 PY

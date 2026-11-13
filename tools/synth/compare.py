@@ -36,7 +36,7 @@ def optimise(verilog, folder):
 
 def main():
     exporter = ROOT / "target/release/examples/export"
-    print("| Multiplicador | Formato | Bits | Exp | Generador µm² | Tras ABC µm² | Relación | Camino (FA) |\n|---|---|---|---|---|---|---|---|")
+    print("| Multiplier | Format | Bits | Exp | Generator µm² | After ABC µm² | Ratio | Path (FA) |\n|---|---|---|---|---|---|---|---|")
     ratios = {}
     for coding, bits, exponent, kind in CASES:
         result = subprocess.run([exporter, coding, str(bits), str(exponent), kind], check=True, capture_output=True, text=True)

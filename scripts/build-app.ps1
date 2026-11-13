@@ -9,4 +9,4 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Set-Location app/src-tauri
 cargo tauri build
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-Write-Output "Paquetes en: $(Get-Location)/target/release/bundle"
+Write-Output "Packages in: $(Get-Location)/target/release/bundle"
