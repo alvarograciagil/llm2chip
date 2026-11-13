@@ -7,10 +7,11 @@ Qué está verificado del chip, qué reglas debe cumplir la placa y qué falta p
 | Qué | Cómo | Prueba |
 |---|---|---|
 | El chip entero (CPU, firmware, cargador, die, muestreador) escribe lo mismo, en los mismos ciclos, a nivel de instrucciones y de puertas | Modelos de juguete, de texto y con imagen | `crates/sim/tests/chip.rs`, `crates/sim/tests/vision_chip.rs` |
-| Un simulador ajeno, Icarus Verilog, da lo mismo que el nuestro con el netlist exportado | El chip entero con su firmware, puerta a puerta; con `LLM2CHIP_ICARUS=1` | `text_goes_through_the_whole_chip_in_icarus_verilog` (unos 40 min), `the_whole_chip_reads_a_picture_in_icarus_verilog` (horas) |
+| Un simulador ajeno, Icarus Verilog, da lo mismo que el nuestro con el netlist exportado | El chip entero con su firmware, puerta a puerta; con `LLM2CHIP_ICARUS=1` | `text_goes_through_the_whole_chip_in_icarus_verilog` (226 632 ciclos, unos 40 min), `the_whole_chip_reads_a_picture_in_icarus_verilog` (1 296 777 ciclos, unas 4 h) |
 | Un modelo real, stories260K, por el chip entero, a nivel de instrucciones y de puertas | El firmware tokeniza «Once upon a time» y escribe «, there was», lo mismo que la máquina del die dirigida desde el anfitrión y que la coma flotante; las puertas, en los mismos 1 909 169 ciclos | `a_real_model_writes_the_same_text_through_the_whole_chip` (unos 4 min), y solo el die en `a_real_model_s_token_on_the_die_matches_the_exact_machine` |
 | Bloques, die y celdas en Verilog frente al simulador de puertas | Icarus Verilog, ciclo a ciclo | `crates/netlist/tests` |
 | Síntesis y rutado para FPGA | Yosys y nextpnr (ECP5), Gowin y Cyclone IV por síntesis | `docs/fpga.md` |
+| Cadena de scan y patrones de prueba de fábrica | Los patrones del ATPG, aplicados en el simulador de puertas como lo haría un probador, dan lo previsto; con un fallo inyectado, fallan si el ATPG dijo que lo encontraban y no fallan si dijo que era imposible. El Verilog con scan da lo mismo en Icarus | `crates/netlist/tests/scan.rs` |
 
 ### Un fallo que solo salía con un modelo real
 
@@ -32,10 +33,63 @@ Por el camino salió otro fallo, este del simulador de instrucciones: con la tab
 - **JTAG.** TCK, TMS y TDI pasan por dos biestables cada uno. El reloj del chip debe ir al menos 4 veces más rápido que TCK, con cada semiperiodo de TCK de 4 ciclos o más.
 - **Pin `follower`.** Es estático: se fija en la placa y no cambia con el chip en marcha.
 
+## Pruebas de fábrica: scan y ATPG
+
+Cada chip que sale de la oblea hay que probarlo: un defecto deja un cable clavado a 0 o a 1. Para eso hacen falta dos piezas:
+- **La cadena de scan** (`netlist::scan::insert_scan`): une todos los biestables en un registro de desplazamiento, de `scan_in` a `scan_out`.
+  - Con `scan_enable`, cada ciclo desplaza la cadena un puesto: el probador carga cualquier estado y lee lo que el chip guarda.
+  - Sin él, un ciclo de reloj captura lo que calcula la lógica.
+  - `test_mode` pone cada memoria detrás de una sombra: la lógica lee biestables de la cadena en lugar de la memoria, y esos biestables capturan una mezcla de la dirección, los datos y la escritura que entran en ella. El contenido de las memorias lo prueba el autotest de marcha.
+  - Con las tres señales a 0, el circuito funciona igual que sin cadena (comprobado ciclo a ciclo), con un multiplexor más delante de cada biestable.
+- **Los patrones** (`netlist::atpg::generate`): con la cadena, probar el circuito secuencial se reduce a probar la lógica entre biestables.
+  1. Primero, patrones al azar, 64 a la vez, simulando todos los fallos.
+  2. Para lo que queda, PODEM busca un patrón fallo a fallo. Elige los objetivos con medidas SCOAP y descarta pronto los caminos por los que la diferencia ya no puede salir.
+  3. Si la búsqueda se agota, el fallo es imposible de detectar: la lógica en ese punto es redundante.
+
+  Los valores tienen tres estados (0, 1 y desconocido) para lo que sale de las memorias, que la prueba no controla.
+
+La cuenta de fallos es la clásica: cada señal clavada en su origen y cada entrada de puerta donde la señal se reparte. Los fallos del camino de desplazamiento los detecta la prueba de la cadena, que pasa un `0011…` por ella.
+
+`cargo run --release -p netlist --example atpg` da esta tabla:
+
+| Bloque | Biestables en la cadena | Fallos | Detectados | Por la cadena | Imposibles | Abandonados | Patrones | Cobertura de fallos | Cobertura de prueba | Segundos |
+|---|---|---|---|---|---|---|---|---|---|---|
+| celda | 132 | 7134 | 5436 | 405 | 1293 | 0 | 113 + 7 | 81.88 % | 100.00 % | 0.0 |
+| cpu | 236 | 24596 | 21874 | 711 | 1866 | 145 | 272 + 361 | 91.82 % | 99.36 % | 21.7 |
+| muestreo | 363 | 48226 | 32872 | 1090 | 13459 | 805 | 418 + 866 | 70.42 % | 97.68 % | 147.0 |
+
+Los bloques son la celda de pesos de 4 bits y activaciones de 16 con 32 pesos, la CPU RV32 y el muestreador de logits de 16 bits con 8 candidatos. Un die pequeño entero (tres celdas, el secuenciador, la unidad vectorial y las tablas) tarda mucho más con la búsqueda actual, que vuelve a simular todo el circuito en cada decisión: `cargo run --release -p netlist --example atpg -- die`.
+
+- **Cobertura de prueba** es la medida habitual: los fallos encontrados entre los que algún patrón puede encontrar.
+- **Cobertura de fallos** cuenta también los imposibles, que aquí son muchos. No son defectos de la prueba, sino lógica sobrante del netlist, que no se optimiza:
+  - la primera fila del multiplicador suma un cero;
+  - el acarreo de salida de muchos sumadores no se usa;
+  - las comparaciones del muestreador usan un sumador entero y solo leen su acarreo.
+
+  La síntesis con Yosys aplana el circuito y quita esa lógica. Medido con las memorias como cajas negras (`synth -flatten`, `abc -g AND,OR,XOR,MUX`):
+
+  | Bloque | Celdas nuestras | Tras Yosys | Diferencia | Fallos imposibles |
+  |---|---|---|---|---|
+  | celda | 1 380 | 972 | −30 % | 22 % |
+  | cpu | 4 151 | 3 459 | −17 % | 7 % |
+  | muestreo | 9 121 | 5 698 | −38 % | 25 % |
+
+  La reducción va con la proporción de fallos imposibles. Parte de ella es otra cosa: Yosys mete el multiplexor de habilitación dentro del biestable. Falta medir la cobertura sobre el netlist sintetizado, para lo que hay que leer el Verilog que escribe Yosys.
+
+Una prueba de scan escribe en las memorias al desplazar, igual que el autotest de marcha, así que se hace antes de cargar la imagen.
+
+**Para el die entero**, el plan es no aplanarlo en una sola lista de fallos. Las celdas son idénticas: sus patrones se envían a la vez a cadenas paralelas, una por celda, y se comparan sus salidas. Así, el tiempo de prueba es el de una celda y no la suma de todos los biestables. El secuenciador, la unidad vectorial y la CPU llevan sus propias cadenas.
+
+Las cuatro señales son ahora pines propios. La alternativa que ahorra pines es manejar la cadena desde el TAP JTAG con instrucciones de scan interno.
+
 ## Lo que falta para fabricar
 
 - **Un PDK y sus bibliotecas**: celdas estándar en lugar de nuestras puertas genéricas, y las SRAM del compilador de memorias de la fundición, o generadores abiertos como OpenRAM.
 - **Colocación, reloj y rutado**, el análisis de tiempos en todas las esquinas de proceso, la potencia y la caída de tensión, y las comprobaciones DRC y LVS hasta el GDSII. Con un PDK abierto (SKY130, GF180 o IHP SG13G2), OpenROAD lo hace.
 - **Anillo de pads** con protección contra descargas, y encapsulado.
-- **Pruebas de fábrica**: hay autotest de memorias y JTAG, pero no cadenas de scan ni patrones ATPG.
+- **Pruebas de fábrica**:
+  - hay autotest de memorias, JTAG, cadena de scan y patrones ATPG por bloque;
+  - falta meter la cadena en el chip por defecto, con sus pines o detrás del TAP, y montar las cadenas paralelas por celda;
+  - falta el formato de los probadores, STIL o WGL;
+  - faltan los fallos de retardo (transición) a velocidad de reloj.
 - **Silicio**: nada se ha probado en una FPGA física ni en un chip.

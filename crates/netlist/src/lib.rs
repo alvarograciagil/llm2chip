@@ -19,6 +19,8 @@ pub mod export;
 pub mod die;
 pub mod rv32;
 pub mod sampler;
+pub mod scan;
+pub mod atpg;
 mod sim;
 pub mod soc;
 mod verilog;

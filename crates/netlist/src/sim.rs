@@ -20,8 +20,8 @@ impl std::fmt::Display for SimError {
 
 impl std::error::Error for SimError {}
 
-#[derive(Clone, Copy)]
-enum Op {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Op {
     And,
     Or,
     Xor,
@@ -29,13 +29,62 @@ enum Op {
     Mux,
 }
 
-#[derive(Clone, Copy)]
-struct Gate {
-    op: Op,
-    a: usize,
-    b: usize,
-    c: usize,
-    y: usize,
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Gate {
+    pub(crate) op: Op,
+    pub(crate) a: usize,
+    pub(crate) b: usize,
+    /// A multiplexer's select.
+    pub(crate) c: usize,
+    pub(crate) y: usize,
+}
+
+impl Gate {
+    /// The signals it reads: `[a]`, `[a, b]` or `[a, b, c]`.
+    pub(crate) fn inputs(&self) -> &'static [usize] {
+        match self.op {
+            Op::Not => &[0],
+            Op::Mux => &[0, 1, 2],
+            _ => &[0, 1],
+        }
+    }
+
+    pub(crate) fn input(&self, pin: usize) -> usize {
+        [self.a, self.b, self.c][pin]
+    }
+}
+
+/// A design as one level of gates in their order, its flip-flops `(d, q)`, the signals its
+/// memories drive, and the signals of its top ports. Signal 0 is low and 1 is high.
+pub(crate) struct Flat {
+    pub(crate) signals: usize,
+    pub(crate) gates: Vec<Gate>,
+    pub(crate) flops: Vec<(usize, usize)>,
+    pub(crate) memory_outputs: Vec<usize>,
+    pub(crate) inputs: Vec<(String, Vec<usize>)>,
+    pub(crate) outputs: Vec<(String, Vec<usize>)>,
+    /// Each signal's name, when asked for.
+    pub(crate) names: Vec<String>,
+}
+
+pub(crate) fn flatten(design: &Design, named: bool) -> Result<Flat, SimError> {
+    let top = &design.modules[&design.top];
+    let mut e = Elaborator { design, named, names: Vec::new(), next: 2, gates: Vec::new(), flops: Vec::new(), memories: Vec::new(), paths: HashMap::new() };
+    let mut ports = HashMap::new();
+    let (mut inputs, mut outputs) = (Vec::new(), Vec::new());
+    for port in &top.ports {
+        let bits: Vec<usize> = (0..top.nets[port.net].width).map(|_| e.fresh()).collect();
+        ports.insert(port.name.clone(), bits.clone());
+        match port.dir {
+            Dir::Input => inputs.push((port.name.clone(), bits)),
+            Dir::Output => outputs.push((port.name.clone(), bits)),
+        }
+    }
+    e.elaborate(&design.top, "", &ports);
+    let signals = e.next;
+    let gates = levelize(e.gates, signals, &e.names)?;
+    let memory_outputs = e.memories.iter().flat_map(|m| m.rdata.iter().copied()).collect();
+    Ok(Flat { signals, gates, flops: e.flops, memory_outputs, inputs, outputs, names: e.names })
 }
 
 struct Memory {
@@ -67,6 +116,9 @@ pub struct Simulator {
     fanout: Vec<u32>,
     /// Gates to evaluate again, one bit each, by index.
     pending: Vec<u64>,
+    /// Signals held at 0 or 1 whatever drives them, a stuck-at fault each; 2 for the rest.
+    /// Empty while there are none, which is almost always.
+    stuck: Vec<u8>,
 }
 
 struct Elaborator<'a> {
@@ -316,12 +368,26 @@ impl Simulator {
             fanout_start,
             fanout,
             pending,
+            stuck: Vec::new(),
         };
         for port in top.ports.iter().filter(|p| p.dir == Dir::Input) {
             sim.set(&port.name, 0)?;
         }
         sim.settle();
         Ok(sim)
+    }
+
+    /// Holds signal `s`, numbered as `atpg` numbers them, at `value` from now on: a stuck-at
+    /// fault on the wire, to check that the test patterns find it.
+    #[doc(hidden)]
+    pub fn stick_signal(&mut self, s: usize, value: bool) {
+        if self.stuck.is_empty() {
+            self.stuck = vec![2; self.values.len()];
+        }
+        self.stuck[s] = value as u8;
+        self.values[s] = value as u8;
+        self.mark_fanout(s);
+        self.settle();
     }
 
     /// Writes directly into a memory, as a testbench preloads one.
@@ -368,6 +434,10 @@ impl Simulator {
 
     /// Gives signal `s` a value, and if it changes, marks the gates it drives.
     fn drive(&mut self, s: usize, value: u8) {
+        let value = match self.stuck.get(s) {
+            Some(held) if *held < 2 => *held,
+            _ => value,
+        };
         if self.values[s] != value {
             self.values[s] = value;
             self.mark_fanout(s);

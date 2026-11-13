@@ -3169,7 +3169,8 @@ button.model-toggle {
   flex: none;
 }
 
-@media (max-width: 1320px) {
+/* Nine views with their names, centred between both sides of the bar, need some 1 720 px. */
+@media (max-width: 1720px) {
   .segmented.views .view-label {
     display: none;
   }
