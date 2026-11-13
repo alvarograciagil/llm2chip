@@ -204,6 +204,8 @@ En la pantalla Imágenes, la casilla «En la aritmética del chip» hace todo el
 
 En el codificador, los valores cercanos a cero pueden salir con el otro signo, así que algunos bits cambian.
 
+El decodificador lee los ±1 de cada código de una tabla, como un embedding, así que todo su trabajo son rutinas del chip. Su calendario (`decoder_calls`) lo siguen igual la máquina exacta y las puertas. El de juguete corre en las puertas del die y da los mismos colores que la máquina exacta, bit a bit: 664 rutinas y 2,65 millones de ciclos (`magvit_s_decoder_on_the_die_s_gates_gives_the_exact_machine_s_pixels`). Así quedan comprobados en puertas `LoadRows`, `GroupNorm`, la atención, el ampliado y el atajo. Quien ordena las rutinas es la prueba, haciendo de firmware.
+
 En la pantalla Imágenes, «También MAGVIT-v2 en el chip» hace todo el retoque en la aritmética del chip. Un retoque de un paso sin guía tardó 599 s: codificar, una pasada del transformador y decodificar.
 
 ### En las puertas del die
@@ -218,4 +220,4 @@ Al probarlo salió un fallo: la tabla de embeddings se dimensionaba con el vocab
 
 Pendiente:
 - el firmware del RV32 guiando a Show-o, con las rotaciones de un texto más corto, y el bucle de MaskGIT en la CPU del chip;
-- MAGVIT en puertas: el microcódigo de `LoadRows` y `GroupNorm` aún no ha corrido en ellas.
+- el codificador de MAGVIT en puertas: el anfitrión escribe los colores de cada píxel, como hace con los parches de una imagen.

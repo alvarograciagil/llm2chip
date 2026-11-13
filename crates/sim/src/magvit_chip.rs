@@ -338,29 +338,59 @@ pub struct MagvitChip {
     exponents: u32,
     bits: u32,
     passes: Vec<Pass>,
-    /// Where each code's 13 values go in, and the map the pixels come out of.
+    /// Where each input row goes in, and the map the output comes out of. The decoder
+    /// reads its codes' values from a table instead: `input_read` runs with the code.
     input: Buf,
+    input_read: Option<Range<usize>>,
     input_routine: Range<usize>,
     output: Buf,
     output_routine: Range<usize>,
     grid: usize,
     side: usize,
+    weights: Arc<Weights>,
 }
+
+/// One routine as the host runs it: its operations, its token and its position, and
+/// whether the output is read after it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Call {
+    pub routine: Range<usize>,
+    pub token: u32,
+    pub position: u32,
+    pub read: bool,
+}
+
+/// An output read: its mantissas, as the die holds them, and its values.
+type Read = (Vec<i64>, Vec<f32>);
+
+/// The table of each code's 13 values, ±1, its bits from the highest.
+const BITS_TABLE: &str = "magvit.bits";
 
 impl MagvitChip {
     /// MAGVIT-v2's decoder from its folder, for a grid of `grid` × `grid` codes, on a die
     /// like `die` with vectors of its activation bits.
     pub fn decoder(dir: &Path, grid: usize, die: DieConfig) -> Result<Self, String> {
+        Self::decoder_on(dir, grid, die, None)
+    }
+
+    /// The same with the weights in the die's cells, as a chip holds them, and the cache of
+    /// the attention for `tokens` places, when `tokens` is given.
+    pub fn decoder_on(dir: &Path, grid: usize, die: DieConfig, tokens: Option<usize>) -> Result<Self, String> {
         let weights = Weights::open(dir)?;
         let mut b = Builder { weights: &weights, buffers: Vec::new(), ops: Vec::new(), passes: Vec::new(), derived: Vec::new(), stores: HashMap::new(), rows: HashMap::new() };
-        // The codes' values, a row each, through the 1 × 1 convolution, into the first map.
+        // Each code's values come from a table, as a token's embedding: the decoder's work is
+        // all the chip's. Through the 1 × 1 convolution they go into the first map.
+        let values = (0..1usize << CODE_BITS).flat_map(|code| (0..CODE_BITS).map(move |c| if code >> (CODE_BITS - 1 - c) & 1 == 1 { 1.0 } else { -1.0 })).collect();
+        b.derived.push((format!("{BITS_TABLE}.weight"), vec![1 << CODE_BITS, CODE_BITS], values));
         let input = b.buf(CODE_BITS);
         let (post, post_out, _) = b.kernel("decoder.post_quant_conv", 1)?;
         let z = b.store(grid, post_out, "códigos");
-        let input_routine = b.routine(|b| {
-            let projected = b.product("decoder.post_quant_conv", post, input, post_out, "códigos");
-            b.op("guardar píxel", Op::StoreRow { src: projected, store: z });
+        let projected = b.row(post_out, "códigos");
+        let input_read = b.routine(|b| {
+            b.op("leer los valores del código", Op::EmbRead { table: BITS_TABLE.into(), dst: input });
+            b.product("decoder.post_quant_conv", post, input, post_out, "códigos");
         });
+        let input_routine = b.routine(|b| b.op("guardar píxel", Op::StoreRow { src: projected, store: z }));
         let (channels, _) = b.channels("decoder.conv_in")?;
         let mut x = b.store(grid, channels, "principal");
         b.conv3("decoder.conv_in", z, x, grid, None)?;
@@ -400,7 +430,7 @@ impl MagvitChip {
             output = b.product("decoder.conv_out", out_matrix, near, colours, "color");
         });
         let Builder { buffers, ops, passes, derived, .. } = b;
-        Self::finish(weights, (buffers, ops, passes, derived), "decoder.mid.attn_1", (input, input_routine, grid), (output, output_routine, side), die)
+        Self::finish(weights, (buffers, ops, passes, derived), "decoder.mid.attn_1", (input, Some(input_read), input_routine, grid), (output, output_routine, side), die, tokens)
     }
 
     /// MAGVIT-v2's encoder from its folder, for pictures of `side` × `side`, on a die like
@@ -447,11 +477,19 @@ impl MagvitChip {
             output = b.product("encoder.quant_conv", quant, out, bits, "códigos");
         });
         let Builder { buffers, ops, passes, derived, .. } = b;
-        Self::finish(weights, (buffers, ops, passes, derived), "encoder.mid.attn_1", (input, input_routine, side), (output, output_routine, side_now), die)
+        Self::finish(weights, (buffers, ops, passes, derived), "encoder.mid.attn_1", (input, None, input_routine, side), (output, output_routine, side_now), die, None)
     }
 
     /// The program from what `b` built, its layout and its machine.
-    fn finish(weights: Weights, (buffers, ops, passes, derived): (Vec<usize>, Vec<Inst>, Vec<Pass>, Vec<Tensor>), attention: &str, (input, input_routine, input_side): (Buf, Range<usize>, usize), (output, output_routine, side): (Buf, Range<usize>, usize), die: DieConfig) -> Result<Self, String> {
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn finish(weights: Weights, (buffers, ops, passes, derived): (Vec<usize>, Vec<Inst>, Vec<Pass>, Vec<Tensor>), attention: &str, (input, input_read, input_routine, input_side): (Buf, Option<Range<usize>>, Range<usize>, usize), (output, output_routine, side): (Buf, Range<usize>, usize), die: DieConfig, tokens: Option<usize>) -> Result<Self, String> {
+        // The rows a routine reaches: the largest map with its border, or the codes' table.
+        let reach = passes.iter().map(|p| match p {
+            Pass::Pixels { side, .. } => (side + 2) * (side + 2),
+            Pass::Sums { rows, .. } => *rows,
+            Pass::Once { .. } => 1,
+        });
+        let reach = reach.chain([(side + 2) * (side + 2), (input_side + 2) * (input_side + 2)]).max().unwrap_or(1);
         let attention_channels = weights.shape(&format!("{attention}.q.weight")).map(|s| s[0]).ok_or("falta la atención del centro")?;
         let program = Program {
             family: "magvit".into(),
@@ -470,16 +508,19 @@ impl MagvitChip {
             local_rope_theta: None,
             rms_epsilon: 1e-6,
             final_hidden: output,
-            embedding_rows: None,
+            embedding_rows: input_read.is_some().then_some(1 << CODE_BITS),
             draft: None,
             image: None,
-            vision: Some(VisionPart { ops, embed: 0..0, blocks: Vec::new(), merge: 0..0, pixels: input, position: input, output, head_dim: attention_channels, patches: input_side * input_side }),
+            vision: Some(VisionPart { ops, embed: 0..0, blocks: Vec::new(), merge: 0..0, pixels: input, position: input, output, head_dim: attention_channels, patches: reach }),
         };
         let weights = Arc::new(weights.with_floats(derived)?);
-        let layout = Layout::new(&program, &weights, die, None)?;
-        let mut vm = BlockVm::new(&die, layout.registers_used() as usize + 8, Some(weights));
+        let layout = match tokens {
+            Some(tokens) => Layout::with_cells(&program, &weights, die, tokens)?,
+            None => Layout::new(&program, &weights, die, None)?,
+        };
+        let mut vm = BlockVm::new(&die, layout.registers_used() as usize + 8, Some(weights.clone()));
         vm.compute_in_cells();
-        Ok(Self { program, layout, vm, exponents: exponent_register(&die), bits: die.cell.activation_bits, passes, input, input_routine, output, output_routine, grid: input_side, side })
+        Ok(Self { program, layout, vm, exponents: exponent_register(&die), bits: die.cell.activation_bits, passes, input, input_read, input_routine, output, output_routine, grid: input_side, side, weights })
     }
 
     /// Side of the pictures it makes.
@@ -493,11 +534,24 @@ impl MagvitChip {
         self.layout.run_ops(&mut self.vm, &self.program, &list, token as u32, position as u32, false)
     }
 
-    /// Runs every pass after the input is in.
-    fn run_passes(&mut self) -> Result<(), String> {
-        for pass in self.passes.clone() {
+    /// The program, its layout and its weights, to run it elsewhere, such as on gates.
+    pub fn parts(&self) -> (&Program, &Layout, &Weights) {
+        (&self.program, &self.layout, &self.weights)
+    }
+
+    /// The register the output is read from.
+    pub fn output_register(&self) -> u32 {
+        self.layout.register_of(self.output)
+    }
+
+    /// Every routine the host runs after the input is in, in order.
+    fn pass_calls(&self) -> Vec<Call> {
+        let mut calls = Vec::new();
+        let mut call = |routine: &Range<usize>, token: usize, position: usize| calls.push(Call { routine: routine.clone(), token: token as u32, position: position as u32, read: false });
+        for pass in &self.passes {
             match pass {
                 Pass::Pixels { side, steps } => {
+                    let side = *side;
                     let place = |row: Row, y: usize, x: usize| match row {
                         Row::Centre => padded(y, x, side),
                         Row::Corner => y * (side + 2) + x,
@@ -508,84 +562,113 @@ impl MagvitChip {
                     };
                     for y in 0..side {
                         for x in 0..side {
-                            for (routine, token, position) in &steps {
-                                self.run(routine, place(*token, y, x), place(*position, y, x))?;
+                            for (routine, token, position) in steps {
+                                call(routine, place(*token, y, x), place(*position, y, x));
                             }
                         }
                     }
                 }
                 Pass::Sums { load, load_second, add, rows } => {
-                    let mut count = rows;
+                    let mut count = *rows;
                     while count > 1 {
                         let half = count / 2;
                         for i in 0..half {
-                            self.run(&load, i, i)?;
-                            self.run(&load_second, i + half, i + half)?;
-                            self.run(&add, i, i)?;
+                            call(load, i, i);
+                            call(load_second, i + half, i + half);
+                            call(add, i, i);
                         }
                         // An odd row left over goes with the first.
                         if count % 2 == 1 {
-                            self.run(&load, 0, 0)?;
-                            self.run(&load_second, count - 1, count - 1)?;
-                            self.run(&add, 0, 0)?;
+                            call(load, 0, 0);
+                            call(load_second, count - 1, count - 1);
+                            call(add, 0, 0);
                         }
                         count = half;
                     }
                 }
-                Pass::Once { routine } => self.run(&routine, 0, 0)?,
+                Pass::Once { routine } => call(routine, 0, 0),
             }
         }
-        Ok(())
+        calls
     }
 
-    /// Starts over and writes each of the input's rows: `values(i)` for row `i`.
-    fn load_input(&mut self, mut values: impl FnMut(usize) -> Vec<f64>) -> Result<(), String> {
-        self.vm.clear();
-        crate::chip::load_initial(&mut self.vm, &self.layout.setup().initial, self.exponents);
-        let reg = self.layout.register_of(self.input);
-        let routine = self.input_routine.clone();
-        for i in 0..self.grid * self.grid {
-            let (mantissas, exponent) = encode_vector(&values(i), self.bits);
-            self.vm.load_mantissas(reg, &mantissas, exponent);
-            self.run(&routine, padded(i / self.grid, i % self.grid, self.grid), 0)?;
+    /// The output's routine for each pixel, the output read after each.
+    fn output_calls(&self) -> Vec<Call> {
+        let side = self.side;
+        (0..side * side).map(|i| Call { routine: self.output_routine.clone(), token: ((i / side) * (side + 2) + i % side) as u32, position: 0, read: true }).collect()
+    }
+
+    /// Everything the decoder runs for `codes`: each code's values read and kept, every
+    /// pass, and each pixel's colours.
+    pub fn decoder_calls(&self, codes: &[u32]) -> Result<Vec<Call>, String> {
+        let read = self.input_read.clone().ok_or("esto no es el decodificador")?;
+        if codes.len() != self.grid * self.grid {
+            return Err(format!("el decodificador espera {} códigos", self.grid * self.grid));
         }
-        self.run_passes()
+        let mut calls = Vec::new();
+        for (i, code) in codes.iter().enumerate() {
+            calls.push(Call { routine: read.clone(), token: *code, position: 0, read: false });
+            calls.push(Call { routine: self.input_routine.clone(), token: padded(i / self.grid, i % self.grid, self.grid) as u32, position: 0, read: false });
+        }
+        calls.extend(self.pass_calls());
+        calls.extend(self.output_calls());
+        Ok(calls)
     }
 
-    /// Each output pixel's values, a pixel after another.
-    fn outputs(&mut self) -> Result<Vec<Vec<f32>>, String> {
-        let (side, output) = (self.side, self.layout.register_of(self.output));
-        let width = self.program.buffers[self.output];
-        let routine = self.output_routine.clone();
-        let mut out = Vec::with_capacity(side * side);
-        for y in 0..side {
-            for x in 0..side {
-                self.run(&routine, y * (side + 2) + x, 0)?;
-                out.push(self.vm.floats(output, width));
+    /// Runs `calls` from a clean machine; gives the output after each that reads it, as
+    /// mantissas and as values.
+    fn run_calls(&mut self, calls: &[Call]) -> Result<Vec<Read>, String> {
+        let (output, width) = (self.output_register(), self.program.buffers[self.output]);
+        let mut out = Vec::new();
+        for call in calls {
+            self.run(&call.routine, call.token as usize, call.position as usize)?;
+            if call.read {
+                out.push(((0..width as u32).map(|i| self.vm.mantissa(output, i)).collect(), self.vm.floats(output, width)));
             }
         }
         Ok(out)
     }
 
+    /// The decoder's output mantissas for `codes`, a pixel after another, as the die holds
+    /// them: what its gates must give too.
+    pub fn decode_mantissas(&mut self, codes: &[u32]) -> Result<Vec<Vec<i64>>, String> {
+        let calls = self.decoder_calls(codes)?;
+        self.reset();
+        Ok(self.run_calls(&calls)?.into_iter().map(|(m, _)| m).collect())
+    }
+
+    fn reset(&mut self) {
+        self.vm.clear();
+        crate::chip::load_initial(&mut self.vm, &self.layout.setup().initial, self.exponents);
+    }
+
     /// The picture of `codes`, a square grid, as 8-bit RGB a row after another, as
     /// `Magvit::decode` gives it.
     pub fn decode(&mut self, codes: &[u32]) -> Result<Vec<u8>, String> {
-        if codes.len() != self.grid * self.grid {
-            return Err(format!("el decodificador espera {} códigos", self.grid * self.grid));
-        }
-        self.load_input(|i| (0..CODE_BITS).map(|c| if codes[i] >> (CODE_BITS - 1 - c) & 1 == 1 { 1.0 } else { -1.0 }).collect())?;
-        Ok(self.outputs()?.iter().flat_map(|pixel| pixel.iter().map(|v| (((v + 1.0) / 2.0).clamp(0.0, 1.0) * 255.0) as u8).collect::<Vec<_>>()).collect())
+        let calls = self.decoder_calls(codes)?;
+        self.reset();
+        Ok(self.run_calls(&calls)?.iter().flat_map(|(_, pixel)| pixel.iter().map(|v| (((v + 1.0) / 2.0).clamp(0.0, 1.0) * 255.0) as u8).collect::<Vec<_>>()).collect())
     }
 
     /// The codes of a picture of 3 planes of `side × side` in [-1, 1], row after row, as
     /// `Magvit::encode` takes it: each pixel of the grid's 13 values, their signs the bits.
+    /// The host writes each pixel's colours, as it does a picture's patches.
     pub fn encode(&mut self, planes: &[f32]) -> Result<Vec<u32>, String> {
         let area = self.grid * self.grid;
         if planes.len() != 3 * area {
             return Err(format!("el codificador espera una imagen de {} × {}", self.grid, self.grid));
         }
-        self.load_input(|i| (0..3).map(|c| planes[c * area + i] as f64).collect())?;
-        Ok(self.outputs()?.iter().map(|values| values.iter().fold(0u32, |code, v| (code << 1) | (*v > 0.0) as u32)).collect())
+        self.reset();
+        let reg = self.layout.register_of(self.input);
+        let routine = self.input_routine.clone();
+        for i in 0..area {
+            let values: Vec<f64> = (0..3).map(|c| planes[c * area + i] as f64).collect();
+            let (mantissas, exponent) = encode_vector(&values, self.bits);
+            self.vm.load_mantissas(reg, &mantissas, exponent);
+            self.run(&routine, padded(i / self.grid, i % self.grid, self.grid), 0)?;
+        }
+        let calls: Vec<Call> = self.pass_calls().into_iter().chain(self.output_calls()).collect();
+        Ok(self.run_calls(&calls)?.iter().map(|(_, values)| values.iter().fold(0u32, |code, v| (code << 1) | (*v > 0.0) as u32)).collect())
     }
 }
 

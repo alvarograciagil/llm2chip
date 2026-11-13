@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{die_config, Rng, Writer};
+use common::{cell_die_config, die_config, enter, load_assembly, load_microprogram, mask, Rng, Writer};
 use sim::magvit_chip::MagvitChip;
 use sim::showo::Magvit;
 use std::path::Path;
@@ -10,6 +10,11 @@ use std::path::Path;
 /// A MAGVIT-v2 decoder with random weights, small: 64 channels in the middle, a block that
 /// goes down to 32 with its shortcut, and one doubling of the side.
 fn make_toy(dir: &Path) {
+    make_decoder(dir, 64, 32);
+}
+
+/// A decoder with `mid` channels in the middle and `out` after its last block.
+fn make_decoder(dir: &Path, mid: usize, out: usize) {
     let mut rng = Rng(0x0DEC_0DE5_0000_0001);
     let mut w = Writer::default();
     let mut put = |w: &mut Writer, name: &str, shape: &[usize], spread: f32, offset: f32| {
@@ -22,8 +27,8 @@ fn make_toy(dir: &Path) {
         put(w, &format!("{name}.bias"), &[out], 0.1, 0.0);
     };
     conv(&mut w, "decoder.post_quant_conv", 13, 13, 1);
-    conv(&mut w, "decoder.conv_in", 64, 13, 3);
-    let blocks = [("decoder.mid.block_1", 64, 64), ("decoder.mid.block_2", 64, 64), ("decoder.up.1.block.0", 64, 64), ("decoder.up.0.block.0", 64, 32)];
+    conv(&mut w, "decoder.conv_in", mid, 13, 3);
+    let blocks = [("decoder.mid.block_1", mid, mid), ("decoder.mid.block_2", mid, mid), ("decoder.up.1.block.0", mid, mid), ("decoder.up.0.block.0", mid, out)];
     for (name, inp, out) in blocks {
         conv(&mut w, &format!("{name}.conv1"), out, inp, 3);
         conv(&mut w, &format!("{name}.conv2"), out, out, 3);
@@ -32,17 +37,17 @@ fn make_toy(dir: &Path) {
         }
     }
     for part in ["q", "k", "v", "proj_out"] {
-        conv(&mut w, &format!("decoder.mid.attn_1.{part}"), 64, 64, 1);
+        conv(&mut w, &format!("decoder.mid.attn_1.{part}"), mid, mid, 1);
     }
-    conv(&mut w, "decoder.up.1.upsample.conv", 64, 64, 3);
-    conv(&mut w, "decoder.conv_out", 3, 32, 3);
+    conv(&mut w, "decoder.up.1.upsample.conv", mid, mid, 3);
+    conv(&mut w, "decoder.conv_out", 3, out, 3);
     let put = |w: &mut Writer, name: &str, c: usize| {
         let values: Vec<f32> = (0..c).map(|i| 1.0 + 0.2 * ((i * 7 % 11) as f32 / 11.0 - 0.5)).collect();
         w.tensor(&format!("{name}.weight"), "F32", &[c], values.iter().flat_map(|v| v.to_le_bytes()).collect());
         let bias: Vec<f32> = (0..c).map(|i| 0.05 * ((i * 5 % 13) as f32 / 13.0 - 0.5)).collect();
         w.tensor(&format!("{name}.bias"), "F32", &[c], bias.iter().flat_map(|v| v.to_le_bytes()).collect());
     };
-    for (name, c) in [("decoder.mid.block_1.norm1", 64), ("decoder.mid.block_1.norm2", 64), ("decoder.mid.block_2.norm1", 64), ("decoder.mid.block_2.norm2", 64), ("decoder.up.1.block.0.norm1", 64), ("decoder.up.1.block.0.norm2", 64), ("decoder.up.0.block.0.norm1", 64), ("decoder.up.0.block.0.norm2", 32), ("decoder.mid.attn_1.norm", 64), ("decoder.norm_out", 32)] {
+    for (name, c) in [("decoder.mid.block_1.norm1", mid), ("decoder.mid.block_1.norm2", mid), ("decoder.mid.block_2.norm1", mid), ("decoder.mid.block_2.norm2", mid), ("decoder.up.1.block.0.norm1", mid), ("decoder.up.1.block.0.norm2", mid), ("decoder.up.0.block.0.norm1", mid), ("decoder.up.0.block.0.norm2", out), ("decoder.mid.attn_1.norm", mid), ("decoder.norm_out", out)] {
         put(&mut w, name, c);
     }
     w.write(&dir.join("model.safetensors"));
@@ -207,4 +212,93 @@ fn the_real_magvit_encodes_a_picture_as_in_floating_point() {
     let total = 13 * codes.len() as u32;
     eprintln!("bits iguales: {same} de {total}; códigos iguales: {} de {}", codes.iter().zip(&float).filter(|(a, b)| a == b).count(), codes.len());
     assert!(same * 100 >= total * 95, "{same} de {total}");
+}
+
+#[test]
+#[ignore = "lenta: el decodificador de MAGVIT-v2 de juguete en las puertas del die"]
+fn magvit_s_decoder_on_the_die_s_gates_gives_the_exact_machine_s_pixels() {
+    use netlist::demo::read_block_value;
+    use netlist::{die_design, DieConfig, Simulator};
+    let dir = std::env::temp_dir().join(format!("llm2chip-magvit-gates-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_decoder(&dir, 32, 64);
+    let grid = 2;
+    let codes: Vec<u32> = vec![0x1A2B, 0x0F0F, 0x1234, 0x0777];
+    let tokens = grid * grid;
+    // Cells as deep as the weights need, each a mantissa of the vectors' width, as many
+    // registers as the routines reach, and key columns as long as the rows the maps reach.
+    let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
+    let base = cell_die_config();
+    let roomy = DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, weight_bits: base.cell.activation_bits, ..base.cell }, features: base.features.with_key_shift(6), ..base };
+    let probe = MagvitChip::decoder_on(&dir, grid, roomy, Some(tokens)).unwrap();
+    let (program, layout, _) = probe.parts();
+    let (depth, groups) = layout.cell_depths();
+    let addr_bits = bits_for(depth.max(2 * groups));
+    let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1)).max(addr_bits);
+    let sized = DieConfig { index_bits, cell: netlist::CellConfig { addr_bits, ..roomy.cell }, ..roomy };
+    let calls = probe.decoder_calls(&codes).unwrap();
+    let mut routines: Vec<std::ops::Range<usize>> = Vec::new();
+    for call in &calls {
+        if !routines.contains(&call.routine) {
+            routines.push(call.routine.clone());
+        }
+    }
+    let lists = |program: &compiler::Program| -> Vec<Vec<compiler::Inst>> { routines.iter().map(|r| program.vision.as_ref().unwrap().ops[r.clone()].to_vec()).collect() };
+    let wide = MagvitChip::decoder_on(&dir, grid, sized, Some(tokens)).unwrap();
+    {
+        let (program, layout, _) = wide.parts();
+        let lists = lists(program);
+        layout.routines_microprogram(program, &lists.iter().map(|l| (l.as_slice(), false)).collect::<Vec<_>>()).unwrap();
+    }
+    let die = sim::chip::with_registers_needed(sized, wide.parts().1);
+    let mut chip = MagvitChip::decoder_on(&dir, grid, die, Some(tokens)).unwrap();
+    let exact = chip.decode_mantissas(&codes).unwrap();
+    let (program, layout, weights) = chip.parts();
+    let lists = lists(program);
+    let code = layout.routines_microprogram(program, &lists.iter().map(|l| (l.as_slice(), false)).collect::<Vec<_>>()).unwrap();
+    let output = chip.output_register();
+
+    let mut sim = Simulator::new(&die_design(die)).unwrap();
+    load_microprogram(&mut sim, &die, &code);
+    load_assembly(&mut sim, &die, &layout.setup().initial);
+    sim.set("load_fn", 1).unwrap();
+    for (address, value) in netlist::block::tables(&die).iter().enumerate() {
+        sim.set("fn_addr", address as u64).unwrap();
+        sim.set("cell_data", *value as u64 & mask(&die)).unwrap();
+        sim.tick();
+    }
+    sim.set("load_fn", 0).unwrap();
+    let data_mask = (1u64 << die.scale_bits.max(die.cell.weight_bits).max(die.cell.activation_bits)) - 1;
+    let put = |sim: &mut Simulator, address: u64, value: i64| {
+        sim.set("cell_addr", address).unwrap();
+        sim.set("cell_data", value as u64 & data_mask).unwrap();
+        sim.tick();
+    };
+    for cell in 0..die.cells {
+        let (codes, factors) = layout.cell_contents(weights, cell).unwrap();
+        sim.set("load_cell", 1 << cell).unwrap();
+        sim.set("load_scale", 0).unwrap();
+        for (address, code) in codes.iter().enumerate() {
+            put(&mut sim, address as u64, *code);
+        }
+        sim.set("load_scale", 1).unwrap();
+        for (group, (scale, bias)) in factors.iter().enumerate() {
+            put(&mut sim, 2 * group as u64, *scale);
+            put(&mut sim, 2 * group as u64 + 1, *bias);
+        }
+    }
+    sim.set("load_cell", 0).unwrap();
+    sim.set("load_scale", 0).unwrap();
+    let mut cycles = 0;
+    let mut gates = Vec::new();
+    for call in &calls {
+        let index = routines.iter().position(|r| *r == call.routine).unwrap();
+        cycles += enter(&mut sim, &code, index, call.token, call.position);
+        if call.read {
+            gates.push((0..3).map(|i| read_block_value(&mut sim, die, output, i).0).collect::<Vec<i64>>());
+        }
+    }
+    eprintln!("MAGVIT-v2 de juguete en puertas: {} rutinas, {cycles} ciclos", calls.len());
+    assert_eq!(gates, exact, "colores de los píxeles");
+    std::fs::remove_dir_all(&dir).ok();
 }
