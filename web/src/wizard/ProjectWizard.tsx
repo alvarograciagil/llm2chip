@@ -390,7 +390,7 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
   const canGo = current !== "model" || (!!model && (!(answers.start === "fpga" || answers.start === "chip") || !!row?.fits));
   const finish = () => {
     if (!model) return;
-    createProject(name.trim() || `${model.name}${board ? ` en ${board}` : ""}`, model.id, params);
+    createProject(name.trim() || `${model.name}${board ? ` on ${board}` : ""}`, model.id, params);
     onClose();
   };
 
@@ -400,7 +400,7 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
       <div className="wizard" role="dialog" aria-modal="true" aria-label="New project" tabIndex={-1} ref={dialog}>
         <header>
           <span className="wizard-steps">
-            Paso {step + 1} de {steps.length}
+            {t("Step")} {step + 1} / {steps.length}
           </span>
           <h2>{t(STEP_TITLES[current])}</h2>
         </header>
@@ -423,7 +423,7 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
               {!busy && <Summary report={report} model={model} board={board} />}
               <label className="wizard-name">
                 {t("Project name")}
-                <input type="text" value={name} placeholder={model ? `${model.name}${board ? ` en ${board}` : ""}` : ""} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && finish()} />
+                <input type="text" value={name} placeholder={model ? `${model.name}${board ? ` on ${board}` : ""}` : ""} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && finish()} />
               </label>
             </>
           )}

@@ -177,7 +177,7 @@ function Summary({ report }: { report: Report }) {
       ))}
 
       <p className="legend-note">
-        ● derivada del modelo · ◐ calibrada · ○ supuesta. Recalculado en {estimateMs.toFixed(1)} ms.
+        ● {t("derived from the model")} · ◐ {t("calibrated")} · ○ {t("assumed")}. {t("Recomputed in")} {estimateMs.toFixed(1)} ms.
       </p>
     </>
   );

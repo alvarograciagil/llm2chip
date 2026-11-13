@@ -415,11 +415,11 @@ export function SchematicView() {
         <div className="legend">
           <span>
             <i className="wire-key on" aria-hidden="true" />
-            Con valor
+            With a value
           </span>
           <span>
             <i className="wire-key" aria-hidden="true" />
-            A cero
+            At zero
           </span>
           <span>
             <i className="wire-key thick" aria-hidden="true" />

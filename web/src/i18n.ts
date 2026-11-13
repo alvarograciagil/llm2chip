@@ -552,6 +552,11 @@ const ES: Record<string, string> = {
   "Finished": "Terminado",
   "Stopped": "Detenido",
   "Starting": "Empezando",
+  "derived from the model": "derivada del modelo",
+  "calibrated": "calibrada",
+  "assumed": "supuesta",
+  "Recomputed in": "Recalculado en",
+  "Step": "Paso",
 };
 
 

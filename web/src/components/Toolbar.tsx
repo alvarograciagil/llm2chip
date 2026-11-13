@@ -74,7 +74,7 @@ function DesignMenu() {
   };
   return (
     <label className="design-menu">
-      <span>{designName}</span>
+      <span>{designName === "Untitled" ? t(designName) : designName}</span>
       <svg viewBox="0 0 10 14" aria-hidden="true">
         <path d="M2 5l3-3 3 3M2 9l3 3 3-3" {...stroke} strokeWidth={1.4} />
       </svg>
