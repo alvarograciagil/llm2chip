@@ -109,7 +109,7 @@ Acceleration uses Metal on macOS and Vulkan on Windows and Linux. Full gate-by-g
 You need Rust with the `wasm32-unknown-unknown` target, `wasm-pack` and Node 22.12 or newer. A Metal or Vulkan GPU speeds up the simulation; Docker, Icarus Verilog and OSS CAD Suite are optional. The [installation guide](docs/install.md) has the steps for macOS, Linux and Windows, every start-up option and the troubleshooting.
 
 ```bash
-git clone https://github.com/Xenogears/llm2chip.git
+git clone https://github.com/alvarograciagil/llm2chip.git
 cd llm2chip
 npm --prefix web ci
 scripts/dev.sh
@@ -204,4 +204,4 @@ Issues and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explain
 
 llm2chip is released under the [PolyForm Noncommercial License 1.0.0](LICENSE.md): you may use, modify and share it for any noncommercial purpose, including personal projects, research and education. Commercial use is not permitted under this license; for commercial licensing, open an issue to get in touch.
 
-Required Notice: Copyright 2026 Álvaro Graciá Gil (Xenogears, https://github.com/Xenogears/llm2chip)
+Required Notice: Copyright 2026 Álvaro Graciá Gil (https://github.com/alvarograciagil/llm2chip)

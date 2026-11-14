@@ -61,7 +61,7 @@ The GPU backend is Vulkan, which comes with current NVIDIA, AMD and Intel driver
 ## Installing
 
 ```bash
-git clone https://github.com/Xenogears/llm2chip.git
+git clone https://github.com/alvarograciagil/llm2chip.git
 cd llm2chip
 npm --prefix web ci
 ```
