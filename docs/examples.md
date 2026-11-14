@@ -153,8 +153,37 @@ scripts/dev.sh
 Open `http://localhost:5173`:
 
 1. **New project** (the + button): pick an FPGA board, a single chip, a base model or a custom design.
-2. **Models:** choose a checkpoint. The chip is resized for it and its compatibility report appears.
-3. **Floorplan:** move parameters on the left; areas, dies, speed and power update as you drag.
-4. **Simulator:** type a prompt. Choose *Fast*, *Real arithmetic* or *Real flow*. With *Real flow*, each token shows what the CPU, the die and the sampling unit did, with their cycles.
-5. **Images:** load a picture, drag over the region to change, type what it should become. *As on the chip* runs the retouch as the chip would.
-6. **Schematic:** open any block down to its gates and step through a simulation with the values on the wires.
+2. **Models:** the checkpoints found on this machine, with what each can do. *Design chip* resizes the chip for one; *Simulate* runs it.
+
+   ![Models view](screenshots/models.png)
+
+3. **Floorplan:** move parameters on the left; areas, dies, speed and power update as you drag. Here, Qwen3.8-27B on 14 dies of TSMC N6 (estimated), with the area of each block on the right.
+
+   ![Floorplan of Qwen3.8-27B](screenshots/floorplan.png)
+
+4. **How it works:** a token's path through the chip, and inside each kind of layer the real operations of the compiled program, coloured by where they run.
+
+   ![A token's path](screenshots/logic.png)
+   ![Inside a DeltaNet layer](screenshots/logic-layer.png)
+
+5. **Schematic:** open any block down to its gates and step through a simulation with the values on the wires. Here, one compute cell: its weight memory, error correction and multiplier.
+
+   ![Schematic of a compute cell](screenshots/schematic.png)
+
+6. **Simulator:** load the chip and type a prompt. *The die* runs only the die's microprogram; *The whole chip* adds the CPU, firmware and sampling unit, and shows what each did in every step. Below, the cycles of one token across the die. Here, Qwen3-0.6B answering with the chip's 16-bit integer arithmetic on the GPU.
+
+   ![Simulator answering a question](screenshots/simulator.png)
+
+7. **Images:** type what to draw, or load a picture and drag over the region to change. *As on the chip* runs it as the chip would. Here, Show-o drawing "a red apple on a wooden table" in floating point (144 s).
+
+   ![Show-o drawing an apple](screenshots/images.png)
+
+8. **Explorer:** sweep one parameter and see the Pareto frontier of speed against area, with the calibration against published chips on the right.
+
+   ![Explorer](screenshots/explorer.png)
+
+9. **Numerics:** run a model in floating point and in the chip's arithmetic side by side. Here, SmolLM2-135M at 16 bits: the error per layer grows from 0.07 % to 1 %, and all 17 tokens match.
+
+   ![Numerics lab](screenshots/numeric.png)
+
+The screenshots were taken with the app as it is in the repository, on an Apple M2 Max with 64 GB.

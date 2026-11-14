@@ -337,7 +337,7 @@ function drawDie(ctx: CanvasRenderingContext2D, scene: Scene, die: DiePlan) {
   ctx.fillStyle = theme.secondary;
   ctx.font = `500 11px ${FONT}`;
   ctx.textBaseline = "bottom";
-  const range = die.first_layer === null ? "" : die.first_layer === die.last_layer ? ` · capa ${die.first_layer}` : ` · capas ${die.first_layer}–${die.last_layer}`;
+  const range = die.first_layer === null ? "" : die.first_layer === die.last_layer ? ` · layer ${die.first_layer}` : ` · layers ${die.first_layer}–${die.last_layer}`;
   if (s.w > 36) text(ctx, s.w > 110 ? `Die ${die.index}${range}` : `${die.index}`, s.x, s.y - 4, s.w);
 }
 

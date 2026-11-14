@@ -4,6 +4,8 @@
 
 The idea is to take specialization all the way: instead of a general accelerator that streams weights from external memory, every multiplier sits next to the weights it uses, and the whole chip is sized for one model, or one family of models.
 
+![The floorplan of a chip for Qwen3.8-27B](docs/screenshots/floorplan.png)
+
 > **Status.** llm2chip is a research project. Everything below runs in simulation: the generated netlists are simulated gate by gate and checked against the software models, but nothing has been built on an FPGA board or in silicon yet. Area, power and cost figures for modern nodes are estimates. See [What is verified](#what-is-verified) and [Limits](#limits).
 
 ## What it is for
@@ -70,6 +72,15 @@ A web interface backed by a local engine (or a desktop app):
 - **New project assistant:** start from an FPGA board, a single chip, a base model or a fully custom design.
 
 The interface is in English, with a Spanish translation.
+
+| | |
+|---|---|
+| ![Simulator](docs/screenshots/simulator.png) | ![Schematic](docs/screenshots/schematic.png) |
+| **Simulator:** Qwen3-0.6B answering with the chip's integer arithmetic | **Schematic:** a compute cell, simulated gate by gate |
+| ![Inside a DeltaNet layer](docs/screenshots/logic-layer.png) | ![Images](docs/screenshots/images.png) |
+| **How it works:** the operations of a DeltaNet layer | **Images:** Show-o drawing from a text |
+
+More in the [walk through the application](docs/examples.md#the-application).
 
 ### Supported models
 

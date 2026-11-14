@@ -73,7 +73,7 @@ function LocalList() {
           </div>
           <div className="model-actions">
             <button className="pill" disabled={!m.adaptation.design} onClick={() => toDesigner(m.name, m.config, m.adaptation, m.path)}>Design chip</button>
-            <button className="pill" disabled={!m.supported} onClick={() => simulate(m)}>Simular</button>
+            <button className="pill" disabled={!m.supported} onClick={() => simulate(m)}>Simulate</button>
             <button className="pill" disabled={!m.supported || writing} onClick={() => makeImage(m)} title="Prepares the chip's boot image: microcode, weights and tables the firmware loads at power-on">Boot image</button>
             <button className="pill" disabled={!m.supported || measuring} onClick={() => measure(m)}>Measure speed</button>
           </div>
