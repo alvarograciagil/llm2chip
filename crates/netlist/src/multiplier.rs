@@ -34,12 +34,12 @@ impl Gen {
         if self.modules.contains_key("half_adder") {
             return "half_adder".into();
         }
-        let mut b = Builder::new("half_adder", "Semisumador", "Adds two bits and gives the sum bit and the carry bit.");
+        let mut b = Builder::new("half_adder", "Half adder", "Adds two bits and gives the sum bit and the carry bit.");
         let a = b.input("a", 1)[0];
         let x = b.input("b", 1)[0];
         let sum = b.output("sum", 1)[0];
         let cout = b.output("cout", 1)[0];
-        b.group("Puertas");
+        b.group("Gates");
         b.xor_to(a, x, sum);
         b.and_to(a, x, cout);
         self.add(b.finish())
@@ -66,7 +66,7 @@ impl Gen {
         let half_sum = propagate.clone();
         let levels = 32 - width.saturating_sub(1).leading_zeros();
         for level in 0..levels as usize {
-            b.group(&format!("Nivel {}", level + 1));
+            b.group(&format!("Level {}", level + 1));
             let span = 1usize << level;
             let next_g = b.wire(&format!("g{}", level + 1), width);
             let next_p = b.wire(&format!("p{}", level + 1), width);
@@ -84,7 +84,7 @@ impl Gen {
             generate = next_g;
             propagate = next_p;
         }
-        b.group("Suma");
+        b.group("Sum");
         for i in 0..w {
             let carry = if i == 0 { Bit::Zero } else { generate[i - 1] };
             b.xor_to(half_sum[i], carry, sum[i]);
@@ -183,7 +183,7 @@ impl Gen {
         let half = self.half_adder();
         let finish = self.prefix_adder(width);
 
-        let title = if kind == MultiplierKind::Booth { format!("Multiplicador Booth {weight_bits} × {x_bits}") } else { format!("Multiplicador Wallace {weight_bits} × {x_bits}") };
+        let title = if kind == MultiplierKind::Booth { format!("Booth multiplier {weight_bits} × {x_bits}") } else { format!("Wallace multiplier {weight_bits} × {x_bits}") };
         let what = "Generates the partial products, reduces them with carry-save adders and finishes with a fast adder.";
         let mut b = Builder::new(&name, &title, what);
         let weight = b.input("weight", weight_bits);
@@ -191,7 +191,7 @@ impl Gen {
         let product = b.output("product", width);
 
         let mut columns: Vec<Vec<Bit>> = vec![Vec::new(); width as usize];
-        b.group("Productos parciales");
+        b.group("Partial products");
         if kind == MultiplierKind::Booth {
             self.booth_rows(&mut b, &mut columns, &weight, &x);
         } else {
@@ -213,7 +213,7 @@ impl Gen {
             }
         };
         for _ in cuts.iter().filter(|cut| **cut == 0) {
-            b.group("Etapa inicial");
+            b.group("First stage");
             register(&mut b, &mut columns, &mut unique);
         }
         while columns.iter().any(|c| c.len() > 2) {
@@ -250,11 +250,11 @@ impl Gen {
             }
         }
         for _ in cuts.iter().filter(|cut| **cut > level) {
-            b.group("Etapa final");
+            b.group("Final stage");
             register(&mut b, &mut columns, &mut unique);
         }
 
-        b.group("Suma final");
+        b.group("Final sum");
         let first: Vec<Bit> = columns.iter().map(|c| c.first().copied().unwrap_or(Bit::Zero)).collect();
         let second: Vec<Bit> = columns.iter().map(|c| c.get(1).copied().unwrap_or(Bit::Zero)).collect();
         let sum = b.wire("final_sum", width);

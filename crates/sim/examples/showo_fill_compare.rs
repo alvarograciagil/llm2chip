@@ -134,7 +134,7 @@ fn main() -> Result<(), String> {
     let steps: usize = args.get(5).map_or(4, |s| s.parse().unwrap());
     let prompt = args.get(6).map_or("a yellow lemon", |s| s.as_str());
 
-    let model = ShowO::open(dir)?.ok_or("no es un Show-o")?;
+    let model = ShowO::open(dir)?.ok_or("not a Show-o")?;
     let config: ShowOConfig = model.config.clone();
     let tokenizer = tokenizers::Tokenizer::from_file(dir.join("phi/tokenizer.json")).map_err(|e| e.to_string())?;
     let text = tokenizer.encode(prompt, false).map_err(|e| e.to_string())?.get_ids().to_vec();

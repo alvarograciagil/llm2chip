@@ -193,7 +193,7 @@ fn the_firmware_reads_the_picture_and_the_model_answers_as_the_host_ordered_it()
     let (expected, last_logits) = host_ordered(&chip);
     let (image, input) = image_and_input(&chip);
     let (output, cycles, logits) = instruction_level(&chip, &image, &input);
-    eprintln!("{cycles} ciclos, tokens {:?}", tokens_of(&output));
+    eprintln!("{cycles} cycles, tokens {:?}", tokens_of(&output));
     assert_eq!(tokens_of(&output), expected);
     assert_eq!(logits, last_logits, "the last token's logits");
     std::fs::remove_dir_all(&chip.dir).ok();
@@ -211,9 +211,9 @@ fn the_whole_chip_reads_a_picture_in_gates_as_at_instruction_level() {
     let config = ChipConfig { soc: soc(), die: chip.die, sampler: sampler_config() };
     let started = std::time::Instant::now();
     let (output, gate_cycles) = gates(&chip_design(config), &image, &input, cycles + 4096);
-    eprintln!("puertas: {gate_cycles} ciclos en {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("gates: {gate_cycles} cycles in {:.0} s", started.elapsed().as_secs_f64());
     assert_eq!(output, expected);
-    assert_eq!(gate_cycles, cycles, "ciclos");
+    assert_eq!(gate_cycles, cycles, "cycles");
     std::fs::remove_dir_all(&chip.dir).ok();
 }
 
@@ -308,8 +308,8 @@ fn the_whole_chip_reads_a_picture_in_icarus_verilog() {
     let config = ChipConfig { soc: soc(), die: chip.die, sampler: sampler_config() };
     let started = std::time::Instant::now();
     let Some((output, simulated)) = chip_in_iverilog(&chip_design(config), &image, &input, cycles + 4096, "vision") else { return };
-    eprintln!("Icarus Verilog: {simulated} ciclos en {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("Icarus Verilog: {simulated} cycles in {:.0} s", started.elapsed().as_secs_f64());
     assert_eq!(output, expected);
-    assert_eq!(simulated, cycles, "ciclos");
+    assert_eq!(simulated, cycles, "cycles");
     std::fs::remove_dir_all(&chip.dir).ok();
 }

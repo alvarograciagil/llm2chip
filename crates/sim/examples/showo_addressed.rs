@@ -55,7 +55,7 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
 
-    let model = ShowO::open(dir)?.ok_or("no es un Show-o")?;
+    let model = ShowO::open(dir)?.ok_or("not a Show-o")?;
     let tokenizer = tokenizers::Tokenizer::from_file(dir.join("phi/tokenizer.json")).map_err(|e| e.to_string())?;
     let text = tokenizer.encode("a green apple on a wooden table", false).map_err(|e| e.to_string())?.get_ids().to_vec();
     let side = config.side();
@@ -69,12 +69,12 @@ fn main() -> Result<(), String> {
     let codes = model.masked_codes(&rgb, side, side, &region)?;
     let image: Vec<u32> = codes.iter().map(|c| c.map_or(config.mask_token, |c| config.first_code() + c)).collect();
     let float = model.scores(&text, &image);
-    eprintln!("coma flotante en {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("floating point in {:.0} s", started.elapsed().as_secs_f64());
 
     let layout = Layout::with_cells_table_outside(&program, &w, die, context)?;
     let info = firmware_info(&program, &layout, &die)?;
     let mut engine = VmEngine::new_table_outside(program.clone(), open()?.2, die, context)?;
-    eprintln!("die preparado en {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("die ready in {:.0} s", started.elapsed().as_secs_f64());
     let mut chip = Addressed { engine: &mut engine, layout: &layout, program: &program, info: &info, bits: die.cell.activation_bits };
     let (ids, first) = config.text_prefix(&text);
     let rows: Vec<u32> = std::iter::once(config.start_of_image()).chain(image.iter().copied()).chain([config.end_of_image()]).collect();

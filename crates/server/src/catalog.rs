@@ -326,7 +326,7 @@ mod tests {
     fn folders_are_searched_a_few_levels_down_and_partial_downloads_are_skipped() {
         let root = scratch("depth");
         write_model(&root.join("author/group/one"), LLAMA, true);
-        write_model(&root.join("demasiado/profundo/por/aqui/dos"), LLAMA, true);
+        write_model(&root.join("too/deep/down/here/two"), LLAMA, true);
         write_model(&root.join("a--b.partial"), LLAMA, true);
         let names: Vec<String> = scan(std::slice::from_ref(&root)).into_iter().map(|m| m.name).collect();
         assert_eq!(names, ["one"]);
@@ -336,10 +336,10 @@ mod tests {
     #[test]
     fn the_hugging_face_cache_is_named_after_the_repository_and_measured_through_links() {
         let root = scratch("cache");
-        let snapshot = root.join("models--org--modelo/snapshots/abc123");
-        std::fs::create_dir_all(root.join("models--org--modelo/blobs")).unwrap();
+        let snapshot = root.join("models--org--model/snapshots/abc123");
+        std::fs::create_dir_all(root.join("models--org--model/blobs")).unwrap();
         write_model(&snapshot, LLAMA, true);
-        let blob = root.join("models--org--modelo/blobs/peso");
+        let blob = root.join("models--org--model/blobs/weight");
         std::fs::write(&blob, vec![0u8; 5_000]).unwrap();
         std::fs::remove_file(snapshot.join("model.safetensors")).unwrap();
         #[cfg(unix)]
@@ -348,7 +348,7 @@ mod tests {
         std::fs::copy(&blob, snapshot.join("model.safetensors")).unwrap();
         let list = scan(std::slice::from_ref(&root));
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].name, "org/modelo");
+        assert_eq!(list[0].name, "org/model");
         assert_eq!(list[0].size_gb, 5e-6);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -356,24 +356,24 @@ mod tests {
     #[test]
     fn each_model_says_how_far_it_can_be_adapted() {
         let root = scratch("tiers");
-        write_model(&root.join("corre"), LLAMA, true);
+        write_model(&root.join("runs"), LLAMA, true);
         write_model(&root.join("no-tokenizer"), LLAMA, false);
-        write_model(&root.join("solo-diseno"), &LLAMA.replace("llama", "phi3"), true);
+        write_model(&root.join("design-only"), &LLAMA.replace("llama", "phi3"), true);
         write_model(&root.join("unknown"), r#"{"model_type":"bert"}"#, true);
         let list = scan(std::slice::from_ref(&root));
         let of = |name: &str| list.iter().find(|m| m.name == name).unwrap();
-        assert!(of("corre").supported && of("corre").adaptation.parameters.is_some());
+        assert!(of("runs").supported && of("runs").adaptation.parameters.is_some());
         assert!(!of("no-tokenizer").supported && of("no-tokenizer").adaptation.reason.as_ref().unwrap().contains("tokenizer"));
-        assert!(of("solo-diseno").adaptation.design && of("solo-diseno").adaptation.approximate && !of("solo-diseno").supported);
+        assert!(of("design-only").adaptation.design && of("design-only").adaptation.approximate && !of("design-only").supported);
         assert!(!of("unknown").adaptation.design && of("unknown").adaptation.reason.as_ref().unwrap().contains("bert"));
-        assert_eq!(list[0].name, "corre");
+        assert_eq!(list[0].name, "runs");
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn settings_are_checked_kept_and_survive_a_restart() {
         let home = scratch("settings");
-        let models = home.join("mis modelos");
+        let models = home.join("my models");
         write_model(&models.join("one"), LLAMA, true);
         let catalog = Catalog::open(home.clone());
         assert!(catalog.models().is_empty());
@@ -382,11 +382,11 @@ mod tests {
         assert!(catalog.update(bad).unwrap_err().contains("does not exist"));
         assert!(catalog.update(Settings { model_dirs: vec!["relative".into()], download_dir: None }).is_err());
 
-        let good = Settings { model_dirs: vec!["~/mis modelos".into(), models.to_string_lossy().into()], download_dir: Some("~/bajadas".into()) };
+        let good = Settings { model_dirs: vec!["~/my models".into(), models.to_string_lossy().into()], download_dir: Some("~/downloads".into()) };
         catalog.update(good).unwrap();
         assert_eq!(catalog.models().len(), 1);
-        assert_eq!(catalog.download_dir(), home.join("bajadas"));
-        assert!(home.join("bajadas").is_dir());
+        assert_eq!(catalog.download_dir(), home.join("downloads"));
+        assert!(home.join("downloads").is_dir());
 
         let again = Catalog::open(home.clone());
         assert_eq!(again.view().model_dirs.len(), 1);

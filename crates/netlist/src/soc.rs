@@ -69,7 +69,7 @@ fn fifo(gen: &mut Gen, bits: u32) -> String {
     let (write_address, read_address, enable);
     {
         let mut l = Logic { b: &mut b, next: 0 };
-        l.b.group("Punteros");
+        l.b.group("Pointers");
         let width = bits as usize + 1;
         let write = l.fresh_bus(width);
         let read = l.fresh_bus(width);
@@ -159,7 +159,7 @@ fn loader(gen: &mut Gen) -> String {
     let crc_out = b.output("crc", 32);
     let mut l = Logic { b: &mut b, next: 0 };
 
-    l.b.group("Registros");
+    l.b.group("Registers");
     let source = l.fresh_bus(32);
     let target = l.fresh_bus(TARGET_BITS as usize);
     let unit = l.fresh_bus(16);
@@ -193,7 +193,7 @@ fn loader(gen: &mut Gen) -> String {
     let got_data = l.and(wait_data, image_valid);
     let got_header = l.or(got_program, got_data);
 
-    l.b.group("Transferencia");
+    l.b.group("Transfer");
     let dma_active = l.any(&[request, wait, emit]);
     let response = l.and(wait, image_valid);
     let last_beat = {
@@ -288,7 +288,7 @@ fn loader(gen: &mut Gen) -> String {
     let not_running = l.not(running);
     l.b.or_to(not_running, Bit::Zero, cpu_hold);
 
-    l.b.group("Registros");
+    l.b.group("Registers");
     let advance_source = response;
     let incremented_source = counter_step(&mut l, &source, advance_source);
     let mut next_source = incremented_source;
@@ -470,7 +470,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     let (ram_we, rx_pop, tx_push, read_data, data_address, data_wdata);
     {
         let mut l = Logic { b: &mut b, next: 0 };
-        l.b.group("Bus interno");
+        l.b.group("Internal bus");
         let top = dmem_addr[28..32].to_vec();
         let is_ram = l.equals(&top, RAM_BASE >> 28);
         let is_host = l.equals(&top, HOST_BASE >> 28);
@@ -516,7 +516,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         data_address = l.mux_bus(booting, &cpu_word, &load_data_word);
         data_wdata = l.mux_bus(booting, &dmem_wdata, &load_data[..32]);
 
-        l.b.group("Bus interno");
+        l.b.group("Internal bus");
         ram_we = dmem_we
             .iter()
             .map(|w| {

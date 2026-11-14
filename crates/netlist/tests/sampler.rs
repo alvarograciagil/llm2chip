@@ -86,7 +86,7 @@ fn gates_match_the_model() {
             let greedy = noise.next().is_multiple_of(8);
             let got = run_gates(&mut sim, config, &logits, inverse, limit, greedy);
             let expected = model.sample(&logits, inverse, limit, greedy);
-            assert_eq!(got, expected, "{lanes} carriles, ronda {round}, {length} logits, k={limit}, inversa {inverse}, voraz {greedy}");
+            assert_eq!(got, expected, "{lanes} lanes, round {round}, {length} logits, k={limit}, inverse {inverse}, greedy {greedy}");
         }
     }
 }
@@ -99,7 +99,7 @@ fn more_lanes_choose_the_same_token_faster() {
     let (serial, parallel) = (run(1), run(64));
     assert_eq!(serial.token, parallel.token);
     assert_eq!(serial.stream_cycles, 4096);
-    assert!(parallel.stream_cycles < 4096 / 32, "{} ciclos", parallel.stream_cycles);
+    assert!(parallel.stream_cycles < 4096 / 32, "{} cycles", parallel.stream_cycles);
 }
 
 #[test]

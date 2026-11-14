@@ -70,7 +70,7 @@ mod chip_image {
     #[test]
     fn an_image_holds_every_chip_count_and_each_cells_weights() {
         let dir = fixture("whole");
-        let out = dir.join("modelo.chipimg");
+        let out = dir.join("model.chipimg");
         let request = ImageRequest { chips: vec![1, 2], context_tokens: 64, cells: 3, activation_bits: 16, lane_bits: 0, cluster_bits: 0, add_special: false, stop: vec![2], sharing: Default::default() };
         let (done, total, cancel) = (AtomicU64::new(0), AtomicU64::new(0), AtomicBool::new(false));
         let report = write_chip_image(&dir, &firmware(), &request, &out, &done, &total, &cancel).unwrap();
@@ -112,7 +112,7 @@ mod chip_image {
     #[test]
     fn chips_that_share_rows_each_read_their_slice_of_every_cell() {
         let dir = fixture("rows");
-        let out = dir.join("filas.chipimg");
+        let out = dir.join("rows.chipimg");
         let request = ImageRequest { chips: vec![1, 2], context_tokens: 64, cells: 3, activation_bits: 16, lane_bits: 0, cluster_bits: 0, add_special: false, stop: vec![2], sharing: sim::chip::Sharing::Rows };
         let (done, total, cancel) = (AtomicU64::new(0), AtomicU64::new(0), AtomicBool::new(false));
         write_chip_image(&dir, &firmware(), &request, &out, &done, &total, &cancel).unwrap();

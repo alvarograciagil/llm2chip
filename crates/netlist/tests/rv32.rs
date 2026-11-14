@@ -162,11 +162,11 @@ fn gates_match_the_instruction_simulator_on_random_programs() {
         let (expected, expected_data, cycles) = iss_trace(&program, &data);
         let (got, got_data, got_cycles) = gate_trace(&program, &data, cycles + 16);
         for (index, (a, b)) in expected.iter().zip(&got).enumerate() {
-            assert_eq!(a, b, "ronda {round}, escritura {index}");
+            assert_eq!(a, b, "round {round}, write {index}");
         }
-        assert_eq!(expected.len(), got.len(), "ronda {round}");
-        assert_eq!(expected_data, got_data, "ronda {round}");
-        assert_eq!(cycles, got_cycles, "ronda {round}");
+        assert_eq!(expected.len(), got.len(), "round {round}");
+        assert_eq!(expected_data, got_data, "round {round}");
+        assert_eq!(cycles, got_cycles, "round {round}");
     }
 }
 

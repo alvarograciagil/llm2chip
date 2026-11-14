@@ -348,8 +348,8 @@ fn emit_attention(e: &mut Emit, s: &Shape, prefix: &str, normed: Buf) -> Buf {
     e.op("Split query and gate", Op::SplitQueryGate { src: qg, query, gate, block: s.head_dim });
     let query = e.norm("Normalize Q", query, p("q_norm"), s.head_dim, query_len);
     let key = e.norm("Normalize K", k, p("k_norm"), s.head_dim, kv_len);
-    e.op("RoPE en Q", Op::Rope { buf: query, block: s.head_dim, rotary: s.rotary, table: 0 });
-    e.op("RoPE en K", Op::Rope { buf: key, block: s.head_dim, rotary: s.rotary, table: 0 });
+    e.op("RoPE on Q", Op::Rope { buf: query, block: s.head_dim, rotary: s.rotary, table: 0 });
+    e.op("RoPE on K", Op::Rope { buf: key, block: s.head_dim, rotary: s.rotary, table: 0 });
     let slot = e.program.kv_slots.len();
     e.program.kv_slots.push(KvShape { head_dim: s.head_dim, heads: s.kv_heads });
     e.op("Store in the KV cache", Op::KvAppend { slot, key, value: v, window: None });
@@ -475,8 +475,8 @@ fn plain_attention(e: &mut Emit, s: &Shape, prefix: &str, normed: Buf, layer: &P
         query = e.norm("Normalize Q", query, p("q_norm"), s.head_dim, query_len);
         key = e.norm("Normalize K", key, p("k_norm"), s.head_dim, kv_len);
     }
-    e.op("RoPE en Q", Op::Rope { buf: query, block: s.head_dim, rotary: s.rotary, table: layer.rope_table });
-    e.op("RoPE en K", Op::Rope { buf: key, block: s.head_dim, rotary: s.rotary, table: layer.rope_table });
+    e.op("RoPE on Q", Op::Rope { buf: query, block: s.head_dim, rotary: s.rotary, table: layer.rope_table });
+    e.op("RoPE on K", Op::Rope { buf: key, block: s.head_dim, rotary: s.rotary, table: layer.rope_table });
     let slot = e.program.kv_slots.len();
     e.program.kv_slots.push(KvShape { head_dim: s.head_dim, heads: s.kv_heads });
     e.op("Store in the KV cache", Op::KvAppend { slot, key, value, window: layer.window });
@@ -1108,7 +1108,7 @@ pub fn attach_vision(mut program: Program, config: &str, patches: usize) -> Resu
 
 fn vision_part(root: &Value, patches: usize, program: &mut Program) -> Result<VisionPart, String> {
     let v = &root["vision_config"];
-    let number = |key: &str| v[key].as_u64().map(|n| n as usize).ok_or(format!("vision_config sin {key}"));
+    let number = |key: &str| v[key].as_u64().map(|n| n as usize).ok_or(format!("vision_config has no {key}"));
     let (hidden, heads, depth, intermediate) = (number("hidden_size")?, number("num_heads")?, number("depth")?, number("intermediate_size")?);
     let (patch, temporal, merge, out) = (number("patch_size")?, number("temporal_patch_size")?, number("spatial_merge_size")?, number("out_hidden_size")?);
     let head_dim = hidden / heads;
@@ -1144,7 +1144,7 @@ fn vision_part(root: &Value, patches: usize, program: &mut Program) -> Result<Vi
         let (h, normed, qkv, qkv_b, q, k, v_) = (buf(hidden), buf(hidden), buf(3 * hidden), buf(3 * hidden), buf(hidden), buf(hidden), buf(hidden));
         emit(Op::LoadRow { store: state, dst: h }, "read patch", layer);
         emit(Op::LayerNorm { src: h, weight: b("norm1"), block: hidden, dst: normed }, "norm 1", layer);
-        emit(Op::Matvec { matrix: b("attn.qkv"), src: normed, dst: qkv }, "q, k y v", layer);
+        emit(Op::Matvec { matrix: b("attn.qkv"), src: normed, dst: qkv }, "q, k and v", layer);
         emit(Op::AddWeight { src: qkv, weight: b("attn.qkv.bias"), dst: qkv_b }, "q, k and v bias", layer);
         emit(Op::Slice { src: qkv_b, from: 0, dst: q }, "query", layer);
         emit(Op::Slice { src: qkv_b, from: hidden, dst: k }, "key", layer);

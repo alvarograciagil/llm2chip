@@ -135,7 +135,7 @@ fn main() {
         let (depth, groups) = layout.cell_depths();
         eprintln!("{} registers used (2^{} in the table), {} weight words and {} factor groups per cell", layout.registers_needed(), die.reg_bits, depth, groups);
         let distinct: std::collections::HashSet<_> = code.words.iter().map(|w| format!("{w:?}")).collect();
-        eprintln!("microprograma: {} palabras, {} distintas", code.words.len(), distinct.len());
+        eprintln!("microprogram: {} words, {} distinct", code.words.len(), distinct.len());
         // The die's cycles for one generated token at the last position, with its logits.
         let token = code.cycles(&die, sim::lower::ENTRY_TOKEN, 1, last) + code.cycles(&die, sim::lower::ENTRY_LOGITS, 1, last);
         eprintln!("{token} die cycles per token generated at position {last}");
@@ -180,7 +180,7 @@ fn main() {
         let mut sorted: Vec<_> = groups.into_iter().collect();
         sorted.sort_by_key(|(_, (g, _))| std::cmp::Reverse(*g));
         for (group, (g, f)) in sorted {
-            eprintln!("  {g:8} puertas {f:7} biestables  {group}");
+            eprintln!("  {g:8} gates {f:7} flip-flops  {group}");
         }
     }
     // `--path NET`: the deepest path into a net whose name has NET, in gates, as the FPGA

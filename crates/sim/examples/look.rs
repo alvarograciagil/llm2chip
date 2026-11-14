@@ -28,7 +28,7 @@ fn read_bmp(path: &Path) -> (Vec<u8>, usize, usize) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let dir = Path::new(&args[1]);
-    let eye = JanusEye::open(dir)?.ok_or("no es un Janus")?;
+    let eye = JanusEye::open(dir)?.ok_or("not a Janus")?;
     let started = std::time::Instant::now();
     // With "-" for the image, only text: to tell the image's path from the model's.
     let vectors = if args[2] == "-" { Vec::new() } else {

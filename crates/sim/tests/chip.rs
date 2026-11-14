@@ -157,7 +157,7 @@ fn says_the_same_in_gates(config: ChipConfig, design: &netlist::Design, layout: 
     let (output, cycles, sim) = run_gates(design, &image, input, cpu.cycle + 4096);
     eprintln!("gates: {cycles} cycles in {:.1} s, output {:?}", start.elapsed().as_secs_f64(), String::from_utf8_lossy(&output));
     assert_eq!(String::from_utf8_lossy(&output), String::from_utf8_lossy(&expected));
-    assert_eq!(cycles, cpu.cycle, "ciclos");
+    assert_eq!(cycles, cpu.cycle, "cycles");
     (sim, bus.peripheral.die_busy)
 }
 
@@ -218,7 +218,7 @@ fn text_goes_through_the_whole_chip_in_icarus_verilog() {
     let Some((output, cycles)) = chip_in_iverilog(&chip_design(config), &image, &input, cpu.cycle + 4096, "text") else { return };
     eprintln!("Icarus Verilog: {cycles} cycles in {:.0} s, output {:?}", started.elapsed().as_secs_f64(), String::from_utf8_lossy(&output));
     assert_eq!(String::from_utf8_lossy(&output), String::from_utf8_lossy(&bus.tx));
-    assert_eq!(cycles, cpu.cycle, "ciclos");
+    assert_eq!(cycles, cpu.cycle, "cycles");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -416,7 +416,7 @@ fn a_real_model_writes_the_same_text_through_the_whole_chip() {
 
     let started = std::time::Instant::now();
     let (output, cycles, _) = run_gates(&design, &image, &input, cpu.cycle + 4096);
-    eprintln!("puertas: {cycles} ciclos en {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("gates: {cycles} cycles in {:.0} s", started.elapsed().as_secs_f64());
     assert_eq!(String::from_utf8_lossy(&output), String::from_utf8_lossy(&bus.tx));
-    assert_eq!(cycles, cpu.cycle, "ciclos");
+    assert_eq!(cycles, cpu.cycle, "cycles");
 }

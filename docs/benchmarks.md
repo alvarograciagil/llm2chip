@@ -57,7 +57,21 @@ For reference, the same estimator gives 787 mm² and 15,234 tok/s for the Taalas
 
 The estimator assumes the cells stream weights at full rate. `sim::sizing` checks that against the real circuit: for each die shape it generates the model's microprogram, follows its loops and jumps to the last position of the context, and takes the clock from the generated circuit's critical path. That figure is guaranteed with the context full.
 
-FRONTIER_PLACEHOLDER
+One token at the last position of an 8,192-token context, on a die with 128 vector units of 128 lanes and 262,144 cells, following the real microprogram's jumps (`kinds` example):
+
+| Operation | Cycles | Share |
+|---|---|---|
+| Attention sum (scores × values) | 181,440 | 34 % |
+| Matrix products in the cells | 157,708 | 30 % |
+| DeltaNet delta rule | 73,104 | 14 % |
+| RMSNorm | 35,238 | 7 % |
+| SiLU, element-wise products, RoPE, gated norms, the rest | 86,518 | 16 % |
+| **Total** | **534,008** | |
+
+The generated die's critical path is about 25 full-adder delays (measured on small dies and extrapolated by the sizing search), which in N6 (0.04 ns per full adder, estimated) allows about 1 GHz: **about 1,870 tok/s** for one user with the context full, half of what the estimator gives. Matrix products take only 30 % of the circuit's cycles; attention at full context and the element-wise work in the vector lanes take the rest, which is where the estimator is optimistic. Attention grows with the context, so these figures are the slowest case.
+
+**Known limit of the sizing search.** `size` and `frontier` should find the smallest set of dies that reaches a target speed within the reticle. For Qwen3.8-27B at 8,192 tokens they currently find none: in the compact vector memory, each vector unit reserves address space for the whole KV cache of its chip's attention layers, not only for the heads it serves, so the vector memory grows with the number of units and no die fits. The tiny models and the FPGA chip are not affected. Giving each unit only its own heads' part of the KV cache is the next hardware change; until then the cycle counts above are valid, but the area of a die sized from the circuit is not.
+
 
 ## Quality of the chip's arithmetic
 

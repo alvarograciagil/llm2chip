@@ -16,6 +16,6 @@ fn main() {
                 hidden = 0;
             }
         }
-        println!("{} unidades x {} carriles: {path:.1} sumadores completos, {:.2} ns en N6", 1 << units, 1 << lanes, path * 0.04);
+        println!("{} units x {} lanes: {path:.1} full adders, {:.2} ns in N6", 1 << units, 1 << lanes, path * 0.04);
     }
 }

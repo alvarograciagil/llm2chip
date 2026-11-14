@@ -560,6 +560,13 @@ impl Layout {
         Self::build(program, weights, config, Some(chip_tokens), false, true, false)
     }
 
+    /// As a large model's chip is laid out: matrices in the cells and the embedding table
+    /// in the image, a row brought before each token. Only the layout is wanted, so the
+    /// table's rows are not read: the outside table keeps none of them.
+    pub fn for_image_table_outside(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: usize) -> Result<Self, String> {
+        Self::build(program, weights, config, Some(chip_tokens), false, true, true)
+    }
+
     fn build(program: &Program, weights: &Weights, config: DieConfig, chip_tokens: Option<usize>, matrices_in_registers: bool, cells: bool, table_out: bool) -> Result<Self, String> {
         let mut outside: Option<OutsideTable> = None;
         let next = Cell::new(1u32);
@@ -641,12 +648,17 @@ impl Layout {
                     }
                     let matrix = weights.matrix(&name)?;
                     let exponent = matrix.exponent(cols);
-                    let mut mantissas = Vec::with_capacity(rows * cols);
-                    for r in 0..rows {
+                    // A layout for the image alone reads only the first row.
+                    let kept = if matrices_in_registers { rows } else { 1 };
+                    let mut mantissas = Vec::with_capacity(kept * cols);
+                    for r in 0..kept {
                         mantissas.extend(matrix.fixed_row(r, cols, exponent, config.cell.activation_bits)?);
                     }
                     // The register holds one row, the one the firmware brings before each token.
                     setup.load_mantissas(reg, &mantissas[..cols], exponent);
+                    if !matrices_in_registers {
+                        mantissas.clear();
+                    }
                     outside = Some(OutsideTable { name: name.clone(), register: reg, cols: cols as u32, mantissas });
                 } else if chip_tokens.is_some() && matrices_in_registers && (!cells || table) && in_registers.insert(name.clone()) {
                     if rows * cols > 1 << config.index_bits {
@@ -690,8 +702,8 @@ impl Layout {
                         _ => false,
                     };
                     if chained {
-                        let leader = leader_of.get(&cell_plan.last().expect("previous").name).cloned().expect("cadena");
-                        chains.get_mut(&leader).expect("cadena").push((name.clone(), program_dst(&inst.op)));
+                        let leader = leader_of.get(&cell_plan.last().expect("previous").name).cloned().expect("chain");
+                        chains.get_mut(&leader).expect("chain").push((name.clone(), program_dst(&inst.op)));
                         leader_of.insert(name.clone(), leader);
                     } else if let Op::Matvec { dst, .. } = &inst.op {
                         chains.insert(name.clone(), vec![(name.clone(), *dst)]);
@@ -1411,11 +1423,11 @@ impl Layout {
             other if other > ENTRY_TOKEN_FROM_IMAGE && program.vision.is_some() => {
                 let vision = program.vision.as_ref().unwrap();
                 let index = other - ENTRY_VISION;
-                let range = vision.routines().into_iter().nth(index).ok_or_else(|| format!("rutina desconocida: {other}"))?;
+                let range = vision.routines().into_iter().nth(index).ok_or_else(|| format!("unknown routine: {other}"))?;
                 let rope = index % 2 == 1 && index < 2 * vision.blocks.len();
                 self.run_list(ops, program, &vision.ops[range], token, position, rope)
             }
-            other => Err(format!("rutina desconocida: {other}")),
+            other => Err(format!("unknown routine: {other}")),
         }
     }
 

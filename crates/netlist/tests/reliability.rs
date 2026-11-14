@@ -28,7 +28,7 @@ fn the_code_corrects_one_error_and_detects_two() {
             for bit in 0..data_bits + r {
                 let (d, c) = if bit < data_bits { (data ^ (1 << bit), check) } else { (data, check ^ (1 << (bit - data_bits))) };
                 let got = decode(d, c, data_bits);
-                assert!(got.corrected && !got.failed && got.data == data, "{data_bits} bits, error en {bit}: {got:?}");
+                assert!(got.corrected && !got.failed && got.data == data, "{data_bits} bits, error at {bit}: {got:?}");
             }
             let (a, b) = (noise.next() as u32 % data_bits, noise.next() as u32 % data_bits);
             if a != b {
@@ -174,7 +174,7 @@ fn a_good_memory_passes_in_eleven_cycles_per_word() {
     let cycles = start_test(&mut sim);
     assert_eq!(sim.get("test_failed"), Some(0));
     assert_eq!(sim.get("spares_used"), Some(0));
-    assert!((11 * WORDS..12 * WORDS).contains(&cycles), "{cycles} ciclos");
+    assert!((11 * WORDS..12 * WORDS).contains(&cycles), "{cycles} cycles");
 }
 
 #[test]

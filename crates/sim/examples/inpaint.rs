@@ -97,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = Path::new(&args[1]);
     let started = std::time::Instant::now();
     let model = ShowO::open(dir)?.ok_or("the folder does not have Show-o")?;
-    eprintln!("Show-o abierto en {:.1} s", started.elapsed().as_secs_f64());
+    eprintln!("Show-o opened in {:.1} s", started.elapsed().as_secs_f64());
     let side = model.config.side();
     let tokenizer = Tokenizer::from_file(dir.join("phi/tokenizer.json")).map_err(|e| e.to_string())?;
     let text = |t: &str| tokenizer.encode(t, false).map(|e| e.get_ids().to_vec()).map_err(|e| e.to_string());
@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let region: Vec<bool> = (0..width * height).map(|i| (corners[0]..corners[2]).contains(&(i % width)) && (corners[1]..corners[3]).contains(&(i / width))).collect();
             (model.inpaint(&rgb, width, height, &region, &text(&args[5])?, number(7, 16.0) as usize, number(8, 1.75) as f32, number(9, 1.0) as u64, progress)?, &args[6])
         }
-        other => return Err(format!("modo desconocido «{other}»: retocar, dibujar o reconstruir").into()),
+        other => return Err(format!("unknown mode “{other}”: retouch, draw or reconstruct").into()),
     };
     std::fs::write(out, bmp(&rgb, side))?;
     eprintln!("{out}: {side} × {side}, {:.0} s", started.elapsed().as_secs_f64());

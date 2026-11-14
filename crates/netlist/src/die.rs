@@ -891,7 +891,7 @@ impl Gen {
         let wdata = b.input("wdata", width);
         let keys: Vec<Vec<Bit>> = (0..reads).map(|i| b.input(&format!("key{i}"), addr_bits)).collect();
         let outs: Vec<Vec<Bit>> = (0..reads).map(|i| b.output(&format!("entry{i}"), width)).collect();
-        b.group("Entradas");
+        b.group("Inputs");
         let mut l = Logic { b: &mut b, next: 0 };
         let entries: Vec<Vec<Bit>> = (0..1u32 << addr_bits)
             .map(|e| {
@@ -903,7 +903,7 @@ impl Gen {
                 q
             })
             .collect();
-        l.b.group("Lectura");
+        l.b.group("Read");
         for (key, out) in keys.iter().zip(&outs) {
             let entry = l.select(key, &entries);
             for (from, to) in entry.iter().zip(out) {
@@ -1214,7 +1214,7 @@ impl Gen {
         let loop_pins = c.features.uses_loop().then(|| LinkPins::new(&mut b, "loop", a));
 
         // --- Sequencer ---
-        b.group("Secuenciador");
+        b.group("Sequencer");
         let pc = b.wire("pc", c.microcode_bits);
         let pc_next = b.wire("pc_next", c.microcode_bits);
         let code = b.wire("code", word);
@@ -1851,7 +1851,7 @@ impl Gen {
             let aligned_a = self.rounded_right(&mut b, "align_a", &read_a, &shift_a, a as usize);
             let aligned_b = self.rounded_right(&mut b, "align_b", &read_b, &shift_b, a as usize);
 
-            b.group("Unidad vectorial");
+            b.group("Vector unit");
             let product = b.wire("product", 2 * a);
             b.inst("multiplier", &mult, &[("weight", read_a.clone()), ("x", read_b.clone()), ("product", product.clone())]);
             Logic { b: &mut b, next: 59_300 }.connect_flops(&product, &held_products[0]);
@@ -1867,7 +1867,7 @@ impl Gen {
             b.inst("adder", &add, &[("a", aligned_a.clone()), ("b", flipped), ("cin", vec![subtract]), ("sum", sum.clone()), ("cout", unused)]);
             let shifted = self.rounded_right(&mut b, "product_shift", &held_products[0], &fields["shift"], a as usize);
 
-            b.group("Comparador");
+            b.group("Comparator");
             // A unit sitting out a loop offers the smallest value, so it never wins.
             let max_a = if shares_max {
                 let smallest: Vec<Bit> = (0..a as usize).map(|i| if i + 1 == a as usize { Bit::One } else { Bit::Zero }).collect();
@@ -1981,7 +1981,7 @@ impl Gen {
                 (Vec::new(), false)
             };
 
-            b.group("Acumulador vectorial");
+            b.group("Vector accumulator");
             let accumulator_bits = 2 * a + 16;
             let acc_reg = self.register(accumulator_bits);
             let acc_mux = self.mux_bus(accumulator_bits);
@@ -2220,7 +2220,7 @@ impl Gen {
             // Every further lane repeats the element-wise operations on its own bank.
             for lane in 1..lanes {
                 let name = |part: &str| format!("lane{lane}_{part}");
-                b.group(&format!("Carril {lane}"));
+                b.group(&format!("Lane {lane}"));
                 let operand_a = {
                     let y = b.wire(&name("a"), a);
                     b.inst(&name("a_select"), &mux_a, &[("s", vec![fields["broadcast_a"][0]]), ("a", banks_a[lane].clone()), ("b", read_a.clone()), ("y", y.clone())]);
@@ -2747,7 +2747,7 @@ impl Gen {
             let conns: Vec<(&str, Vec<Bit>)> = template.ports.iter().map(|p| (p.name.as_str(), wires[d][&p.name].clone())).collect();
             b.inst(&format!("die{d}"), &die, &conns);
 
-            b.group("Enlaces");
+            b.group("Links");
             let target = (d + 1) % dies as usize;
             for lane in 0..c.features.link_lanes() {
                 let p = if lane == 0 { "link".to_string() } else { format!("link{lane}") };

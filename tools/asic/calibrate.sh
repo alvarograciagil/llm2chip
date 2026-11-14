@@ -52,5 +52,5 @@ for name, cell in spec["cells"].items():
                          "area_um2": r["area_cells_um2"], "fmax_mhz": r["fmax_mhz"], "power_w": r["power_w"],
                          "cells": r["cells"], "drc": r["drc_violations"]})
 json.dump({"how": "tools/asic/calibrate.sh: OpenROAD-flow-scripts, CORE_UTILIZATION 40, PLACE_DENSITY 0.60, 4 words of weights in flip-flops", "measures": measures}, open(sys.argv[3], "w"), indent=1, ensure_ascii=False)
-print(f"{len(measures)} medidas en {sys.argv[3]}")
+print(f"{len(measures)} measurements in {sys.argv[3]}")
 PY

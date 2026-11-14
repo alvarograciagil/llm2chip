@@ -152,7 +152,7 @@ fn an_fpga_gets_the_register_table_as_a_memory_that_does_what_the_gates_do() {
 fn die_contains_every_block() {
     let design = die_design(config());
     let groups: Vec<&str> = design.modules["llm2chip_die"].instances.iter().map(|i| i.group.as_str()).collect();
-    for name in ["Secuenciador", "Vector bank", "Unidad vectorial", "Function table", "Activation network", "Cells", "Result chain"] {
+    for name in ["Sequencer", "Vector bank", "Vector unit", "Function table", "Activation network", "Cells", "Result chain"] {
         assert!(groups.contains(&name), "{name} is missing");
     }
 }

@@ -309,7 +309,7 @@ fn muldiv(gen: &mut Gen) -> String {
     let step_hi = l.mux_bus(is_div, &multiply_hi, &divide_hi);
     let step_lo = l.mux_bus(is_div, &multiply_lo, &divide_lo);
 
-    l.b.group("Registros");
+    l.b.group("Registers");
     let first_lo = l.mux_bus(is_div, &magnitude_b, &magnitude_a);
     let first_operand = l.mux_bus(is_div, &magnitude_a, &magnitude_b);
     let zero32 = constant(0, 32);
@@ -337,7 +337,7 @@ fn muldiv(gen: &mut Gen) -> String {
     let done_running = l.and(done, run);
     l.b.or_to(done_running, Bit::Zero, last);
 
-    l.b.group("Resultado");
+    l.b.group("Result");
     let wide: Vec<Bit> = lo.iter().chain(&hi).copied().collect();
     let product = l.negate_if(negative, &wide);
     let high_part = product[32..].to_vec();
@@ -414,7 +414,7 @@ pub(crate) fn core(gen: &mut Gen) -> String {
     };
     let writes_now = l.any(&[is_lui, is_auipc, is_jump, is_alu]);
 
-    l.b.group("Inmediato");
+    l.b.group("Immediate");
     let sign = ir[31];
     let imm_i: Vec<Bit> = ir[20..32].iter().copied().chain(std::iter::repeat_n(sign, 20)).collect();
     let imm_s: Vec<Bit> = ir[7..12].iter().chain(&ir[25..32]).copied().chain(std::iter::repeat_n(sign, 20)).collect();
@@ -484,7 +484,7 @@ pub(crate) fn core(gen: &mut Gen) -> String {
     let sltu_out: Vec<Bit> = std::iter::once(less_unsigned).chain(std::iter::repeat_n(Bit::Zero, 31)).collect();
     let alu_out = l.select(&funct3, &[difference.clone(), shift_out.clone(), slt_out, sltu_out, xor_out, shift_out, or_out, and_out]);
 
-    l.b.group("Saltos");
+    l.b.group("Jumps");
     let not_zero = l.not(is_zero);
     let not_less = l.not(less_signed);
     let not_less_u = l.not(less_unsigned);

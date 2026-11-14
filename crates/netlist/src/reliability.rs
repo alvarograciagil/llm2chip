@@ -116,7 +116,7 @@ impl Gen {
             return name;
         }
         let hamming = check_bits(data_bits) - 1;
-        let mut b = Builder::new(&name, "Codificador ECC", "Computes the check bits stored with each word.");
+        let mut b = Builder::new(&name, "ECC encoder", "Computes the check bits stored with each word.");
         let data = b.input("data", data_bits);
         let check = b.output("check", hamming + 1);
         {
@@ -137,7 +137,7 @@ impl Gen {
             return name;
         }
         let hamming = check_bits(data_bits) - 1;
-        let mut b = Builder::new(&name, "Corrector ECC", "Corrects one wrong bit in each word read and flags it if there are two.");
+        let mut b = Builder::new(&name, "ECC corrector", "Corrects one wrong bit in each word read and flags it if there are two.");
         let data = b.input("data", data_bits);
         let stored = b.input("check", hamming + 1);
         let corrected = b.output("corrected", data_bits);
@@ -300,7 +300,7 @@ impl Gen {
         let fail_addr = b.output("fail_addr", addr_bits);
         {
             let mut l = Logic { b: &mut b, next: 0 };
-            l.b.group("Secuencia");
+            l.b.group("Sequence");
             let (running, sub, failed, finished) = (l.fresh(), l.fresh(), l.fresh(), l.fresh());
             let phase = l.fresh_bus(3);
             let address = l.fresh_bus(a);
@@ -343,7 +343,7 @@ impl Gen {
                 l.and(t, any_wrong)
             };
 
-            l.b.group("Direcciones");
+            l.b.group("Addresses");
             let last_address = {
                 let literals: Vec<Bit> = address.iter().map(|bit| l.xor(*bit, down)).collect();
                 l.all(&literals)
@@ -371,7 +371,7 @@ impl Gen {
             let next_address = l.mux_bus(start, &stepped, &zero_address);
             l.connect_flops(&next_address, &address);
 
-            l.b.group("Secuencia");
+            l.b.group("Sequence");
             let phase_step = {
                 let more = l.not(last_phase);
                 l.and(step_on, more)
@@ -457,7 +457,7 @@ impl Gen {
         let (march_addr, march_we, march_wdata) = (b.wire("march_addr", addr_bits), b.wire("march_we", 1)[0], b.wire("march_wdata", width));
         let (march_done, march_fail, fail_addr) = (b.wire("march_done", 1)[0], b.wire("march_fail", 1)[0], b.wire("fail_addr", addr_bits));
         let restart = b.wire("restart", 1)[0];
-        b.group("Autotest");
+        b.group("Self-test");
         b.inst("march", &march, &[("start", vec![restart]), ("mem_rdata", rdata.clone()), ("mem_addr", march_addr.clone()), ("mem_we", vec![march_we]), ("mem_wdata", march_wdata.clone()), ("done", vec![march_done]), ("fail", vec![march_fail]), ("fail_addr", fail_addr.clone())]);
         let (physical, chosen_we, chosen_wdata);
         {

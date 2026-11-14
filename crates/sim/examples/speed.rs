@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let time = started.elapsed().as_secs_f64() / (ids.len() + count - 1) as f64;
-        println!("| coma flotante, {} | {time:.3} | {} |", if gpu { "GPU" } else { "CPU" }, if gpu { format!("{matches} of {outputs} in top-1") } else { "referencia".into() });
+        println!("| floating point, {} | {time:.3} | {} |", if gpu { "GPU" } else { "CPU" }, if gpu { format!("{matches} of {outputs} in top-1") } else { "referencia".into() });
     }
 
     let mut exact_cpu: Vec<Vec<f32>> = Vec::new();

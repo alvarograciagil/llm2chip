@@ -1221,7 +1221,7 @@ async fn main() {
         .fallback(static_file)
         .with_state(app);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", PORT)).await.expect("port 7878 is in use");
-    println!("llm2chip en http://127.0.0.1:{PORT}");
+    println!("llm2chip at http://127.0.0.1:{PORT}");
     axum::serve(listener, routes).await.expect("the server failed");
 }
 

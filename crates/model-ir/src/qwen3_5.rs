@@ -152,7 +152,7 @@ fn add_full_attention(
     let qkv = d.hidden * (query * 2 + 2 * kv);
     stages.push(vector("input norm", l, Block::Norm, 3 * d.hidden, 0));
     stages.push(matvec("q/k/v_proj", l, b, qkv));
-    stages.push(vector("norm q/k y RoPE", l, b, 4 * (query + kv), 0));
+    stages.push(vector("q/k norm and RoPE", l, b, 4 * (query + kv), 0));
     // Score against every cached key, then sum every cached value.
     stages.push(vector("attention (Q·K, softmax, V sum)", l, b, 3 * query, 2 * query));
     stages.push(vector("sigmoid gate", l, b, 2 * query, 0));

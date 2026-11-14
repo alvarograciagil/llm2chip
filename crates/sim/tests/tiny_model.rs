@@ -234,7 +234,7 @@ fn tiny_model_runs_whole_on_the_gates() {
     let logits_reg = layout.logits_register(&program);
     let got: Vec<f32> = (0..8).map(|i| read_block_value(&mut sim, c, logits_reg, i).1 as f32).collect();
     let best = |v: &[f32]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
-    eprintln!("ciclos: {total_cycles}\nreferencia: {expected:?}\npuertas:    {got:?}");
+    eprintln!("cycles: {total_cycles}\nreference: {expected:?}\ngates:      {got:?}");
     assert_eq!(best(&got), best(&expected), "the most likely token must match");
     let spread: f32 = expected.iter().map(|v| v.abs()).sum::<f32>() / 8.0;
     let error: f32 = got.iter().zip(&expected).map(|(a, b)| (a - b).abs()).sum::<f32>() / 8.0;
@@ -268,7 +268,7 @@ fn a_die_built_for_its_program_runs_it_identically_with_less_logic() {
     let trimmed = DieConfig { features: netlist::DieFeatures::of(&general.code), ..c };
     let mut specific = gates_after(&program, &dir, trimmed, &[3, 5]);
     assert_eq!(specific.code.words.len(), general.code.words.len(), "the program does not depend on the trimming");
-    assert_eq!(specific.cycles, general.cycles, "ciclos");
+    assert_eq!(specific.cycles, general.cycles, "cycles");
     let register = general.layout.logits_register(&program);
     let read = |run: &mut GateRun, config: &DieConfig| -> Vec<u64> {
         (0..8u32).map(|i| {
@@ -601,7 +601,7 @@ fn the_firmware_scores_the_draft_head_like_the_software() {
     let tokens: Vec<u32> = bus.tx.as_chunks::<4>().0.iter().map(|t| u32::from_le_bytes(*t)).collect();
     assert_eq!(tokens[..count], output[..count], "the generated tokens");
     assert_eq!(bus.peripheral.draft_tries[..depth], tries[..depth], "intentos");
-    assert_eq!(bus.peripheral.draft_hits[..depth], hits[..depth], "aciertos");
+    assert_eq!(bus.peripheral.draft_hits[..depth], hits[..depth], "hits");
     assert!(tries[0] > 0);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -740,7 +740,7 @@ fn the_cpu_profile_adds_up_and_tells_waiting_from_work() {
     assert_eq!(chip.routines[ENTRY_TOKEN].0, 3 + 4, "one step per prompt token and per generated one");
     // The CPU waits while the die works: at most the few cycles of one poll apart per order.
     let waited = counts.cycles_of(CpuTask::WaitDie);
-    assert!(waited.abs_diff(chip.die_busy) <= 16 * orders, "espera {waited}, die {}", chip.die_busy);
+    assert!(waited.abs_diff(chip.die_busy) <= 16 * orders, "wait {waited}, die {}", chip.die_busy);
     for task in [CpuTask::Receive, CpuTask::Order, CpuTask::Sample, CpuTask::Send] {
         assert!(counts.cycles_of(task) > 0, "{task:?}: {:?}", counts.entries());
     }
@@ -993,7 +993,7 @@ fn two_groups_of_two_dies_run_a_token_over_their_links() {
                 panic!("routine {routine}: the dies do not finish: {pcs:?}; words per wire {:?}", wires.iter().zip(&traffic).collect::<Vec<_>>());
             }
         }
-        eprintln!("rutina {routine}: {cycles} ciclos");
+        eprintln!("routine {routine}: {cycles} cycles");
     }
     // The logits the first chip made are, bit for bit, those of one die on its own.
     let mut alone = gates_in_cells(&program, &dir, base, &[3]);

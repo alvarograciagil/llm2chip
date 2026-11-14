@@ -178,7 +178,7 @@ fn testable_module(gen: &mut Gen, name: &str) -> (String, u32) {
     let names = module.nets.iter().map(|net| net.name.clone()).collect();
     let mut b = Builder { prefix: String::new(), module, counter: 3_000_000, group: "Test wrapper".into(), names };
     // What each input becomes inside: the pin, or in test mode its part of `test_in`.
-    let inner: HashMap<usize, Vec<Bit>> = inputs.iter().map(|(net, w)| (*net, b.wire(&format!("{}_en_prueba", b.module.nets[*net].name), *w))).collect();
+    let inner: HashMap<usize, Vec<Bit>> = inputs.iter().map(|(net, w)| (*net, b.wire(&format!("{}_in_test", b.module.nets[*net].name), *w))).collect();
     for inst in &mut b.module.instances {
         for bits in inst.conns.values_mut() {
             for bit in bits.iter_mut() {

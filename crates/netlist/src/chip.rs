@@ -63,7 +63,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
     let limit_bits = (c.sampler.entries as usize + 1).next_power_of_two().trailing_zeros() as usize;
 
     assert_eq!(c.sampler.lanes, 1, "the reduced die delivers only one logit per cycle");
-    let mut b = Builder::new("llm2chip_top", "Chip completo", "Control CPU, memories, load controller, inference die and sampling unit, with the host and image ports as the only contacts with the outside.");
+    let mut b = Builder::new("llm2chip_top", "Complete chip", "Control CPU, memories, load controller, inference die and sampling unit, with the host and image ports as the only contacts with the outside.");
     let reset = b.input("reset", 1)[0];
     let cpu_hold = b.input("cpu_hold", 1)[0];
     let host_rx_valid = b.input("host_rx_valid", 1);
@@ -607,7 +607,7 @@ impl<E: DieEngine> Peripheral for ChipModel<E> {
             REG_ENTRY => {
                 // Above the PC may come the entry's number in a microcode dictionary.
                 let pc = value & ((1 << crate::die::ENTRY_INDEX_SHIFT) - 1);
-                let routine = self.code.entries.iter().position(|e| *e == value || *e == pc).expect("rutina desconocida");
+                let routine = self.code.entries.iter().position(|e| *e == value || *e == pc).expect("unknown routine");
                 let (token, position) = self.token_and_position();
                 self.engine.run(routine, token, position);
                 let cycles = self.engine.cycles(routine, token, position);

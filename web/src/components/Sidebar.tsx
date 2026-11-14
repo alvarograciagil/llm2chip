@@ -15,6 +15,7 @@ const LOG_STEPS = 1000;
 type RangeField = Extract<Field, { kind: "range" }>;
 
 function ValueInput({ field, value, onCommit }: { field: RangeField; value: number; onCommit: (v: number) => void }) {
+  const t = useT();
   const [draft, setDraft] = useState<string | null>(null);
   const commit = () => {
     if (draft === null) return;
@@ -49,7 +50,7 @@ function ValueInput({ field, value, onCommit }: { field: RangeField; value: numb
           }
         }}
       />
-      {field.unit && <small>{field.unit}</small>}
+      {field.unit && <small>{t(field.unit)}</small>}
     </span>
   );
 }

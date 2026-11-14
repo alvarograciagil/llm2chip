@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let dir = Path::new(&args[1]);
     let (rgb, width, height) = read_bmp(Path::new(&args[2]));
-    let eye = JanusEye::open(dir)?.ok_or("no es un Janus")?;
+    let eye = JanusEye::open(dir)?.ok_or("not a Janus")?;
     let vectors = eye.encode(&rgb, width, height)?;
     let peak = |v: &[f32]| v.iter().fold(0f32, |m, x| m.max(x.abs()));
     // The vector with the largest value, where trouble would show first.

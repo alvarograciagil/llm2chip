@@ -126,7 +126,7 @@ impl Builder<'_> {
     fn kernel(&mut self, name: &str, size: usize) -> Result<(String, usize, usize), String> {
         let (outputs, inputs) = self.channels(name)?;
         let weight = self.weights.floats(&format!("{name}.weight"))?;
-        let derived = format!("{name}.filas");
+        let derived = format!("{name}.rows");
         let taps = size * size;
         let mut laid = vec![0f32; outputs * taps * inputs];
         for o in 0..outputs {

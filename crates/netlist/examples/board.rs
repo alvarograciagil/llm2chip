@@ -16,5 +16,5 @@ fn main() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, text).unwrap();
     }
-    eprintln!("proyecto en {}", dir.display());
+    eprintln!("project in {}", dir.display());
 }

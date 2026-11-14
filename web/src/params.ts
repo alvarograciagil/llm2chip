@@ -212,7 +212,7 @@ export const PARAM_GROUPS: Group[] = [
     open: false,
     fields: [
       { kind: "select", key: "link", label: "Die-to-die link", options: [["auto", "Automatic by package"], ["ucie", "UCIe"], ["serdes", "Board SerDes"], ["pins", "I/O pins"]], help: "UCIe joins dies inside one package: fast (about 10 ns per hop) and small. SerDes joins them across the board: slow (about 150 ns) and larger. I/O pins are all that chips from an open shuttle have, each in its own package: 16 pins each way at 50 MHz and about 60 ns per hop. Automatic fills packages and joins them with SerDes, except on an open shuttle, which uses the pins." },
-      { kind: "range", key: "link_words", label: "Link width", min: 1, max: 4096, log: true, integer: true, unit: "activaciones/ciclo", help: "How many activations each link passes per cycle. The hidden vector crosses every boundary between dies on every token: a narrow link adds thousands of cycles per boundary; a wide one needs more UCIe or SerDes modules." },
+      { kind: "range", key: "link_words", label: "Link width", min: 1, max: 4096, log: true, integer: true, unit: "activations/cycle", help: "How many activations each link passes per cycle. The hidden vector crosses every boundary between dies on every token: a narrow link adds thousands of cycles per boundary; a wide one needs more UCIe or SerDes modules." },
       { kind: "select", key: "load_interface", label: "Weight loading", options: [["nvme", "NVMe"], ["pcie5", "PCIe 5.0 x16"], ["uart", "UART"]], help: "Where the weights arrive from when the chip powers up: NVMe, PCIe 5.0 or UART. It only affects start-up time, not generation speed.", when: (p) => p.weight_backend !== "rom" },
     ],
   },

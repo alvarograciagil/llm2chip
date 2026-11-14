@@ -171,7 +171,7 @@ fn compare(name: &str, json: &str, rounds: usize, failures: &mut Vec<String>) {
         let written = String::from_utf8_lossy(&tables.decode(&expected)).into_owned();
         let decoded = reference.decode(&expected, true).unwrap();
         if written != decoded {
-            failures.push(format!("{name} {text:?}\n  chip escribe:  {written:?}\n  referencia:    {decoded:?}"));
+            failures.push(format!("{name} {text:?}\n  chip writes:  {written:?}\n  reference:    {decoded:?}"));
         }
     }
 }
@@ -294,7 +294,7 @@ fn the_firmware_tokenizes_like_the_reference() {
 fn firmware_matches(firmware: &FirmwareImage, path: &Path, failures: &mut Vec<String>) {
     let reference = Tokenizer::from_file(path).unwrap();
     let tables = TokenizerTables::from_file(path, 8192).unwrap().to_words();
-    eprintln!("tablas: {} palabras", tables.len());
+    eprintln!("tables: {} words", tables.len());
 
     let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 32, mac_stages: 1, adder_stages: 1, addr_bits: 3, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Array, fixed_weights: false, ecc: false, skip_zeros: false };
     let die = DieConfig { cells: 1, cell, scale_bits: 16, reg_bits: 12, index_bits: 18, microcode_bits: 2, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: Default::default() };
@@ -321,7 +321,7 @@ fn firmware_matches(firmware: &FirmwareImage, path: &Path, failures: &mut Vec<St
             assert!(cpu.cycle < 2_000_000_000, "the firmware does not finish with {text:?}");
         }
         let got = tokens.borrow().clone();
-        eprintln!("{:>9} ciclos, {:>3} tokens: {:?}", cpu.cycle, got.len(), &text[..text.len().min(40)]);
+        eprintln!("{:>9} cycles, {:>3} tokens: {:?}", cpu.cycle, got.len(), &text[..text.len().min(40)]);
         if got != expected {
             failures.push(format!("{} {text:?}\n  firmware:   {got:?}\n  referencia: {expected:?}", path.display()));
         }

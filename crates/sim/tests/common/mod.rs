@@ -261,7 +261,7 @@ pub fn chip_in_iverilog(design: &netlist::Design, image: &[u32], input: &[u8], l
     let run = std::process::Command::new("vvp").current_dir(&dir).arg(&binary).output().unwrap();
     let text = String::from_utf8_lossy(&run.stdout);
     let output = text.lines().filter_map(|l| l.strip_prefix("B ")).map(|b| b.trim().parse().unwrap()).collect();
-    let cycles = text.lines().find_map(|l| l.strip_prefix("CICLOS ")).map(|c| c.trim().parse().unwrap());
+    let cycles = text.lines().find_map(|l| l.strip_prefix("CYCLES ")).map(|c| c.trim().parse().unwrap());
     std::fs::remove_dir_all(&dir).ok();
     Some((output, cycles.unwrap_or_else(|| panic!("Icarus Verilog did not finish: {}", text.lines().last().unwrap_or_default()))))
 }
@@ -296,7 +296,7 @@ pub fn load_register_table(sim: &mut netlist::Simulator, c: &DieConfig, layout: 
 /// Writes the microprogram, once, as the load controller does at start-up.
 #[allow(dead_code)]
 pub fn load_microprogram(sim: &mut netlist::Simulator, c: &DieConfig, code: &netlist::Microprogram) {
-    assert!(code.words.len() < 1 << c.microcode_bits, "{} palabras", code.words.len());
+    assert!(code.words.len() < 1 << c.microcode_bits, "{} words", code.words.len());
     sim.set("start", 1).unwrap();
     sim.tick();
     sim.set("load_code", 1).unwrap();

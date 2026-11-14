@@ -367,7 +367,7 @@ pub fn chip_testbench(design: &Design, image_words: usize, input_bytes: usize, l
       step;
       if (host_tx_valid) $display("B %0d", host_tx_data);
       if (halted) begin
-        $display("CICLOS %0d", cycle + 1);
+        $display("CYCLES %0d", cycle + 1);
         $finish;
       end
       tick;

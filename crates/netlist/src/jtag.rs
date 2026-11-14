@@ -28,7 +28,7 @@ impl Gen {
         if self.modules.contains_key(&name) {
             return name;
         }
-        let mut b = Builder::new(&name, "Puerto JTAG", "Standard TAP controller: chip identification, bypass, reading counters and memory self-test.");
+        let mut b = Builder::new(&name, "JTAG port", "Standard TAP controller: chip identification, bypass, reading counters and memory self-test.");
         let tck = b.input("tck", 1)[0];
         let tms = b.input("tms", 1)[0];
         let tdi = b.input("tdi", 1)[0];
@@ -60,7 +60,7 @@ impl Gen {
                 l.connect_flops(&kept, q);
             };
 
-            l.b.group("Estados");
+            l.b.group("States");
             let state = l.fresh_bus(4);
             let leaves: Vec<Vec<Bit>> = TRANSITIONS.iter().map(|(low, high)| l.mux_bus(tms, &constant(*low, 4), &constant(*high, 4))).collect();
             let next = l.select(&state, &leaves);

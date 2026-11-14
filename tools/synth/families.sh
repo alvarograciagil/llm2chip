@@ -44,6 +44,6 @@ for family in $families; do
         # Yosys fails to map memories to the Cyclone IV's M9K blocks, so they stay black
         # boxes: the count is the logic alone, which is what this family runs short of.
         cyclone4) run cyclone4 "blackbox llm2chip_sram llm2chip_ram2p llm2chip_rom; synth_intel -family cycloneive -nobram -top llm2chip_top" ;;
-        *) echo "familia desconocida: $family" ;;
+        *) echo "unknown family: $family" ;;
     esac
 done

@@ -127,6 +127,8 @@ function applyAppearance(appearance: Appearance) {
 }
 
 const ADDED_MODELS_KEY = "llm2chip-added-models";
+/** Models added from a file; `archivo:` is how earlier versions named them. */
+const isAddedFile = (id: string) => id.startsWith("file:") || id.startsWith("archivo:");
 
 /** Models chosen from a config or from Hugging Face, kept between visits. */
 function readAddedModels(): ModelSource[] {
@@ -139,7 +141,7 @@ function readAddedModels(): ModelSource[] {
 
 function writeAddedModels(models: ModelSource[]) {
   try {
-    localStorage.setItem(ADDED_MODELS_KEY, JSON.stringify(models.filter((m) => m.id.startsWith("archivo:"))));
+    localStorage.setItem(ADDED_MODELS_KEY, JSON.stringify(models.filter((m) => isAddedFile(m.id))));
   } catch {
     // Without storage they simply last until the page reloads.
   }
@@ -159,7 +161,7 @@ let hashTimer: ReturnType<typeof setTimeout> | undefined;
 function writeHash(model: ModelSource | null, params: ChipParams) {
   clearTimeout(hashTimer);
   hashTimer = setTimeout(() => {
-    if (!model || model.id.startsWith("archivo:")) return;
+    if (!model || isAddedFile(model.id)) return;
     const payload = btoa(encodeURIComponent(JSON.stringify({ model: model.id, params })));
     history.replaceState(null, "", `#d=${payload}`);
   }, 300);
@@ -272,7 +274,7 @@ export const useDesign = create<DesignState>((set, get) => {
     },
 
     addModel(name, config, path) {
-      const model = { id: `archivo:${name}`, name, config, ...(path ? { path } : {}) };
+      const model = { id: `file:${name}`, name, config, ...(path ? { path } : {}) };
       const added = [...get().models.filter((m) => m.id !== model.id), model];
       writeAddedModels(added);
       set({ models: added });

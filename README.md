@@ -148,7 +148,7 @@ Details and measurements are in [`docs/`](docs) and [`tests/golden/`](tests/gold
 
 From [`docs/benchmarks.md`](docs/benchmarks.md), where each figure says whether it was measured or estimated:
 
-- **Qwen3.8-27B, default design (estimated):** 13 dies of 806 mm² in TSMC N6, 1.77 million weight multipliers, about 3,750 tok/s for one user at 240 W. Weight memory is 89 % of the silicon.
+- **Qwen3.8-27B, default design (estimated):** 13 dies of 806 mm² in TSMC N6, 1.77 million weight multipliers, about 3,750 tok/s for one user at 240 W. Weight memory is 89 % of the silicon. Counted on the real microprogram with an 8,192-token context full, a token takes 534,000 cycles: about 1,870 tok/s at 1 GHz.
 - **Quality on the real weights (measured):** the chip's 16-bit block floating point picks the same token as floating point in 29 of 30 steps on Qwen3.8-27B and 11 of 12 on Qwen3.6-35B-A3B. DeltaNet's state holds at 16 and even 12 bits; plain fixed point does not.
 - **Images (measured):** Qwen3.8-27B's vision encoder runs in the die's arithmetic within 1.5 % of floating point; Show-o on 8-bit cells picks the same code as floating point in 61 of 64 places; MAGVIT-v2 decodes at 49.6 dB PSNR from floating point.
 - **FPGA (measured in synthesis):** the smallest complete chip takes 11,166 LUT6 on Xilinx 7 series or 17,872 LUT4 on ECP5, and routes at 35.4 MHz on an ECP5-85F.
@@ -159,6 +159,7 @@ This is an architecture and logic design, not a manufacturable layout: there is 
 
 - **Area, energy and speed are estimates,** partly derived from the generated circuit and partly calibrated against published chips and OpenROAD runs. The application shows where each figure comes from.
 - **Real models are not simulated gate by gate,** but with an exact machine that is verified against the gates on tiny models.
+- **Sizing from the circuit does not yet work for Qwen3.8-27B:** each vector unit reserves room for its chip's whole KV cache, so the search finds no die within the reticle. Cycle counts are right; the area of a circuit-sized die is not ([benchmarks](docs/benchmarks.md#speed-from-the-circuit)).
 - **The microprograms of large models are still unrolled per head and per layer,** so the program grows with the number of heads; folding heads into loops is needed to fit all of Qwen3.8 in the sequencer's memory.
 - **Manufacturing tests are not complete:** there are memory self-test, JTAG, scan chains and ATPG patterns per block, but the scan chain is not in the default chip, there is no tester format (STIL or WGL), and no at-speed delay faults.
 - **Nothing has run on physical hardware.** The FPGA flow, board recommendations and the expected speed are in [`docs/fpga.md`](docs/fpga.md).

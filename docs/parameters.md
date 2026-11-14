@@ -322,7 +322,7 @@ UCIe joins dies inside one package: fast (about 10 ns per hop) and small. SerDes
 
 How many activations each link passes per cycle. The hidden vector crosses every boundary between dies on every token: a narrow link adds thousands of cycles per boundary; a wide one needs more UCIe or SerDes modules.
 
-*From 1 to 4096 activaciones/ciclo, on a logarithmic scale.*
+*From 1 to 4096 activations/cycle, on a logarithmic scale.*
 
 ### Weight loading (`load_interface`)
 

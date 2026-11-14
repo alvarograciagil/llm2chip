@@ -87,7 +87,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
         let add_phase = l.fresh();
         l.b.or_to(done, Bit::Zero, done_out);
 
-        l.b.group("Candidatos");
+        l.b.group("Candidates");
         let values: Vec<Vec<Bit>> = (0..entries).map(|_| l.fresh_bus(bits)).collect();
         let indices: Vec<Vec<Bit>> = (0..entries).map(|_| l.fresh_bus(index_bits)).collect();
         let used: Vec<Bit> = (0..entries).map(|_| l.fresh()).collect();
@@ -149,7 +149,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
         l.connect_flops(&next_handled, &handled);
         let candidate_index: Vec<Bit> = chosen_lane.iter().chain(&position).copied().collect();
 
-        l.b.group("Candidatos");
+        l.b.group("Candidates");
         let accept = l.and(streaming, seen);
         let stays: Vec<Bit> = (0..entries)
             .map(|j| {
@@ -226,7 +226,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
             l.or(at_limit, none)
         };
 
-        l.b.group("Multiplicador");
+        l.b.group("Multiplier");
         let delta = {
             let widen = |v: &[Bit]| -> Vec<Bit> { v.iter().copied().chain([v[bits - 1]]).collect() };
             let (left, right) = (widen(&values[0]), widen(&current_value));
@@ -364,7 +364,7 @@ pub(crate) fn sampler(gen: &mut Gen, c: SamplerConfig) -> String {
         };
         l.connect_flops(&[next_streaming, next_first, next_scale, next_second, next_done], &[streaming, first_pass, scale, second_pass, done]);
 
-        l.b.group("Resultado");
+        l.b.group("Result");
         // A greedy choice is simply the head of the list, once the last logit is in it.
         let token_reg = l.fresh_bus(index_bits);
         let next_token = l.mux_bus(second_ends, &token_reg, &current_index);

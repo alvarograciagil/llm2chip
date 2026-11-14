@@ -29,7 +29,7 @@ fn run_gates(c: DieConfig, asm: &Assembly) -> Simulator {
     let mut program = DieProgram::new(c);
     program.assemble(&asm.steps);
     let words = program.finish();
-    assert!(words.len() < 1 << c.microcode_bits, "microprograma demasiado largo: {}", words.len());
+    assert!(words.len() < 1 << c.microcode_bits, "microprogram too long: {}", words.len());
 
     let mut sim = Simulator::new(&die_design(c)).unwrap();
     sim.set("start", 1).unwrap();

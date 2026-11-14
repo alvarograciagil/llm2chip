@@ -31,12 +31,12 @@ fn main() -> Result<(), String> {
     let region: Vec<bool> = (0..side * side).map(|i| (48..208).contains(&(i % side)) && (48..208).contains(&(i / side))).collect();
     let magvit = Magvit::open(&dir.join("magvitv2"))?;
     let codes = config.masked_codes(&magvit, &rgb, side, side, &region)?;
-    eprintln!("preparado en {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("ready in {:.0} s", started.elapsed().as_secs_f64());
     let filled = chip.fill(&codes, &text, steps, seed as u64, |step, steps| {
         eprintln!("step {step} of {steps}: {:.0} s", started.elapsed().as_secs_f64());
         Ok(())
     })?;
-    eprintln!("rellenado en {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("filled in {:.0} s", started.elapsed().as_secs_f64());
     let picture = magvit.decode(&filled)?;
     let row = (side * 3).next_multiple_of(4);
     let mut bmp = b"BM".to_vec();

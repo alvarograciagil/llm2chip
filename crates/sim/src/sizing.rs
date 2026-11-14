@@ -152,7 +152,13 @@ pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32,
     let (mut cell_bits, mut vector) = (0, 0);
     let codes = (0..plan.len())
         .map(|chip| {
-            let mut layout = Layout::for_image(program, weights, die, context as usize)?;
+            // The embedding table stays in the image, as on a large model's chip: the
+            // firmware brings each token's row, so the vector memory holds one.
+            // A model with more than one table keeps them all inside.
+            let mut layout = match Layout::for_image_table_outside(program, weights, die, context as usize) {
+                Ok(layout) => layout,
+                Err(_) => Layout::for_image(program, weights, die, context as usize)?,
+            };
             let by_rows = sharing == Sharing::Rows && chips > 1;
             if by_rows {
                 layout.share_rows(program, Shard { index: chip as u32, chips, grouped: false });

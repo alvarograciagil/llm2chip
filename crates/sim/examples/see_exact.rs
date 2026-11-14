@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let count = image.rows * image.cols;
     let started = std::time::Instant::now();
     let float = tower.encode(&image)?;
-    eprintln!("coma flotante: {count} parches, {:.1} s", started.elapsed().as_secs_f64());
+    eprintln!("floating point: {count} patches, {:.1} s", started.elapsed().as_secs_f64());
     let mut config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("config.json"))?)?;
     if let Some(d) = depth { config["vision_config"]["depth"] = d.into(); }
     let config = config.to_string();

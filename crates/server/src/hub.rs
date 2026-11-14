@@ -594,7 +594,7 @@ mod tests {
         if headers.contains_key(header::AUTHORIZATION) {
             fake.authorized.fetch_add(1, Relaxed);
         }
-        if owner == "cerrado" {
+        if owner == "gated" {
             return StatusCode::UNAUTHORIZED.into_response();
         }
         if name != "model" {
@@ -622,7 +622,7 @@ mod tests {
         match file.as_str() {
             "config.json" => LLAMA.into_response(),
             "tokenizer.json" => "{}".into_response(),
-            "model.safetensors" => (StatusCode::FOUND, [(header::LOCATION, "/cdn/peso")]).into_response(),
+            "model.safetensors" => (StatusCode::FOUND, [(header::LOCATION, "/cdn/weight")]).into_response(),
             _ => StatusCode::NOT_FOUND.into_response(),
         }
     }
@@ -655,7 +655,7 @@ mod tests {
 
     async fn serve() -> (String, Arc<Fake>) {
         let fake = Arc::new(Fake::default());
-        let routes = Router::new().route("/api/models/{owner}/{name}", get(repo)).route("/{owner}/{name}/resolve/{revision}/{file}", get(resolve)).route("/cdn/peso", get(cdn)).with_state(fake.clone());
+        let routes = Router::new().route("/api/models/{owner}/{name}", get(repo)).route("/{owner}/{name}/resolve/{revision}/{file}", get(resolve)).route("/cdn/weight", get(cdn)).with_state(fake.clone());
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, routes).await.unwrap() });
@@ -714,7 +714,7 @@ mod tests {
         assert_eq!(details.total_bytes as usize, 200_000 + LLAMA.len() + 2);
         assert!(details.adaptation.design && details.adaptation.simulate);
         assert_eq!(*fake.fetched.lock().unwrap(), ["config.json"]);
-        assert!(hub.details("cerrado/modelo", &home).await.err().unwrap().contains("token"));
+        assert!(hub.details("gated/model", &home).await.err().unwrap().contains("token"));
         assert!(hub.details("author/other", &home).await.err().unwrap().contains("does not exist"));
         std::fs::remove_dir_all(home).unwrap();
     }

@@ -212,7 +212,7 @@ pub fn vhdl_testbench(design: &Design, steps: &[crate::TestStep], watch: &str, e
         out.push_str("    wait for 1 ns; clk <= '1'; wait for 1 ns; clk <= '0'; wait for 1 ns;\n");
     }
     let width = top.ports.iter().find(|p| p.name == watch).map_or(1, |p| top.nets[p.net].width);
-    let _ = writeln!(out, "    assert {} = \"{}\" report \"resultado distinto\" severity failure;", name(watch), bits_of(expected as u128, width));
+    let _ = writeln!(out, "    assert {} = \"{}\" report \"different result\" severity failure;", name(watch), bits_of(expected as u128, width));
     out.push_str("    std.env.finish;\n  end process;\nend architecture;\n");
     out
 }

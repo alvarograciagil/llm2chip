@@ -126,13 +126,13 @@ fn the_real_show_o_scores_a_masked_picture_as_in_floating_point() {
         .collect();
     let started = std::time::Instant::now();
     let float = model.scores(&text, &image);
-    eprintln!("coma flotante: {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("floating point: {:.0} s", started.elapsed().as_secs_f64());
     let (ids, positions) = model.text_prefix(&text);
     let base = die_config();
     let die = netlist::DieConfig { reg_bits: 16, index_bits: 20, cell: netlist::CellConfig { weight_bits: 16, accumulator_bits: 40, ..base.cell }, ..base };
     let started = std::time::Instant::now();
     let mut chip = ShowOChip::open(&dir, sim::Weights::open(&dir).unwrap(), die).unwrap();
-    eprintln!("chip preparado en {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("chip ready in {:.0} s", started.elapsed().as_secs_f64());
     let started = std::time::Instant::now();
     let scores = chip.scores(&ids, &positions, &image).unwrap();
     eprintln!("die arithmetic: {:.0} s", started.elapsed().as_secs_f64());
@@ -523,9 +523,9 @@ fn the_whole_chip_fills_an_image_in_gates_as_at_instruction_level() {
     let config = netlist::chip::ChipConfig { soc: fill_soc(), die: chip.die, sampler: fill_sampler() };
     let started = std::time::Instant::now();
     let (output, gate_cycles) = common::gates(&netlist::chip::chip_design(config), &chip.image, &chip.input, cycles + 4096);
-    eprintln!("puertas: {gate_cycles} ciclos en {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("gates: {gate_cycles} cycles in {:.0} s", started.elapsed().as_secs_f64());
     assert_eq!(output, expected);
-    assert_eq!(gate_cycles, cycles, "ciclos");
+    assert_eq!(gate_cycles, cycles, "cycles");
     std::fs::remove_dir_all(&chip.dir).ok();
 }
 

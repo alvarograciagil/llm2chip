@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let drawn = std::time::Instant::now();
     let rgb = janus.decode(&tokens)?;
-    eprintln!("decodificada en {:.0} s", drawn.elapsed().as_secs_f64());
+    eprintln!("decoded in {:.0} s", drawn.elapsed().as_secs_f64());
     std::fs::write(&args[3], bmp(&rgb, janus.config.side()))?;
     println!("{}", args[3]);
     Ok(())

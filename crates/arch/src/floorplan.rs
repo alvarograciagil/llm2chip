@@ -128,7 +128,7 @@ fn partition(model: &ModelGraph, dies: u32) -> Vec<DieLayers> {
         die.first.get_or_insert(layer);
         die.last = Some(layer);
         die.weights += weights;
-        die.segments.push((format!("Capa {layer}"), Some(layer), weights));
+        die.segments.push((format!("Layer {layer}"), Some(layer), weights));
     }
 
     let last = out.last_mut().expect("at least one die");

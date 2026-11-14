@@ -24,7 +24,7 @@ fn kind(w: &ControlWord) -> &'static str {
     if w.cell_run || w.cell_flush || w.cell_feed || w.chain_shift || w.chain_load || w.cell_clear_group {
         "cells"
     } else if w.x_write {
-        "bucles"
+        "loops"
     } else if w.read_step && w.vector {
         "vector"
     } else if w.read_step {
@@ -32,7 +32,7 @@ fn kind(w: &ControlWord) -> &'static str {
     } else if w.use_literal && (w.write_en || w.op != 0 || w.literal_a != 0 || w.reg_a != 0) {
         "alu"
     } else {
-        "espera"
+        "wait"
     }
 }
 
@@ -99,10 +99,10 @@ fn main() {
             *tally.entry(kind(w)).or_default() += cycles;
             // Capitalised: not cycles of their own, but where some of them went.
             if *visits == 1 && w.repeat == 0 {
-                *tally.entry("RECTA").or_default() += cycles;
+                *tally.entry("STRAIGHT").or_default() += cycles;
             }
             if w.load_shift_a || w.load_shift_b || w.load_shift_left || w.load_wide_shift {
-                *tally.entry("CARGAS").or_default() += visits;
+                *tally.entry("LOADS").or_default() += visits;
             }
         }
         if pick.is_some() {
@@ -115,7 +115,7 @@ fn main() {
     let mut rows: Vec<_> = table.into_iter().map(|(name, t)| (t.iter().filter(|(k, _)| !k.starts_with(char::is_uppercase)).map(|(_, v)| v).sum::<u64>(), name, t)).collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     let total: u64 = rows.iter().map(|r| r.0).sum();
-    println!("TOTAL {total} ciclos, {:.0} tok/s a 1 GHz", 1e9 / total as f64);
+    println!("TOTAL {total} cycles, {:.0} tok/s at 1 GHz", 1e9 / total as f64);
     for (cycles, name, t) in rows.iter().take(12) {
         println!("{cycles:>9} {name:<14} {}", t.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "));
     }

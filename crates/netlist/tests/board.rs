@@ -10,7 +10,7 @@ fn the_cell_behind_the_serial_port_multiplies_a_matrix_exactly() {
         return;
     }
     let files = cell_demo_files(&OMDAZZ_EP4CE10, 4, 16);
-    let dir = std::env::temp_dir().join(format!("llm2chip-placa-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("llm2chip-board-{}", std::process::id()));
     for (path, text) in &files {
         let path = dir.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

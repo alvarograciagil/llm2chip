@@ -16,9 +16,9 @@ fn the_estimate_follows_the_measured_layouts() {
         let (area, fmax_ghz) = laid_out_cell(tech, config);
         let area_ratio = area / m["area_um2"].as_f64().unwrap();
         let clock_ratio = fmax_ghz * 1000.0 / m["fmax_mhz"].as_f64().unwrap();
-        let name = format!("{} en {platform}", m["cell"]);
+        let name = format!("{} on {platform}", m["cell"]);
         // The clock within 15 %; the area within the spread of synthesis, worst for floats.
-        assert!((0.85..1.15).contains(&clock_ratio), "{name}: reloj {clock_ratio:.2}");
+        assert!((0.85..1.15).contains(&clock_ratio), "{name}: clock {clock_ratio:.2}");
         assert!((0.6..1.25).contains(&area_ratio), "{name}: area {area_ratio:.2}");
         // No process caps its clock below what its cells reached.
         assert!(tech.fmax_ghz * 1000.0 >= m["fmax_mhz"].as_f64().unwrap(), "{name}: tope {}", tech.fmax_ghz);

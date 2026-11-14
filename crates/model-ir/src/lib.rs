@@ -243,7 +243,7 @@ mod tests {
         let total = m.total_params() as f64;
         assert!((total / 35e9 - 1.0).abs() < 0.08, "total {total}");
         let read: u64 = m.stages.iter().filter(|s| s.block != Block::Mtp).map(|s| if let StageKind::Matvec { weights } = s.kind { weights } else { 0 }).sum();
-        assert!(read as f64 / total < 0.2, "lee {read} de {total}");
+        assert!(read as f64 / total < 0.2, "reads {read} of {total}");
     }
 
     #[test]

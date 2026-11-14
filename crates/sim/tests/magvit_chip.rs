@@ -168,7 +168,7 @@ fn the_real_magvit_decodes_a_picture_as_in_floating_point() {
     let codes = magvit.encode(&planes).unwrap();
     let started = std::time::Instant::now();
     let float = magvit.decode(&codes).unwrap();
-    eprintln!("coma flotante: {:.0} s", started.elapsed().as_secs_f64());
+    eprintln!("floating point: {:.0} s", started.elapsed().as_secs_f64());
     let base = die_config();
     let die = netlist::DieConfig { reg_bits: 16, index_bits: 24, cell: netlist::CellConfig { weight_bits: 16, accumulator_bits: 40, ..base.cell }, ..base };
     let started = std::time::Instant::now();

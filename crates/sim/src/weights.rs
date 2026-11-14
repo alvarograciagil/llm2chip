@@ -109,7 +109,7 @@ impl Weights {
             // SAFETY: checkpoints are treated as read-only for the life of the engine.
             let map = unsafe { Mmap::map(&file) }.map_err(|e| e.to_string())?;
             if map.len() < 8 {
-                return Err("archivo safetensors truncado".into());
+                return Err("truncated safetensors file".into());
             }
             let size = u64::from_le_bytes(map[..8].try_into().unwrap()) as usize;
             let header: Value = serde_json::from_slice(&map[8..8 + size]).map_err(|e| e.to_string())?;

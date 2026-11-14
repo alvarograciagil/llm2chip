@@ -348,6 +348,7 @@ const ES: Record<string, string> = {
   "Send to the host": "Enviar al host",
   "Firmware rules": "Reglas del firmware",
   "cycles": "ciclos",
+  "activations/cycle": "activaciones/ciclo",
   "(no text yet)": "(sin texto aún)",
   "CPU cycles in this step": "Ciclos de la CPU en este paso",
   "CPU instructions": "instrucciones de la CPU",

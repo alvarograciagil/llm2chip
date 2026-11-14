@@ -114,7 +114,7 @@ fn compare(image: &[u32], expected_output: &[u8]) {
         assert_eq!((gate.target, gate.unit, gate.address), (model.target, model.unit, model.address));
         assert_eq!(gate.words[..model.words.len()], model.words[..]);
     }
-    assert_eq!(run.cycles, cycles, "ciclos");
+    assert_eq!(run.cycles, cycles, "cycles");
     eprintln!("{cycles} cycles in gates and in the instruction-level simulator");
 }
 

@@ -140,7 +140,7 @@ fn attention_and_mlp(e: &mut Emit, s: &Shape, layer: usize, x: Buf, normed: Buf,
 
 /// The output's rows of the codes, as their own matrix with their biases: the rest of the
 /// output is never needed.
-const CODE_HEAD: &str = "showo.cabeza_de_codigos";
+const CODE_HEAD: &str = "showo.code_head";
 
 /// The final norm and the scores of the codes.
 fn code_scores(e: &mut Emit, s: &Shape, x: Buf) -> (Buf, Buf) {

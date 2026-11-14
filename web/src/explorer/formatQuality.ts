@@ -33,7 +33,7 @@ export const FORMAT_QUALITY: Record<string, { top1: number; kl: number }> = {
   "Posit16 es1": { top1: 100, kl: 0 },
   "LNS 8 (4 fraction bits)": { top1: 81.2, kl: 0.18 },
   "LNS 16 (8 fraction bits)": { top1: 100, kl: 0 },
-  "4 bits (16 valores)": { top1: 57.8, kl: 1.3339 },
-  "8 bits (256 valores)": { top1: 73.4, kl: 0.8838 },
+  "4 bits (16 values)": { top1: 57.8, kl: 1.3339 },
+  "8 bits (256 values)": { top1: 73.4, kl: 0.8838 },
   "NVFP4 (E2M1 / 16, fine scale)": { top1: 90.6, kl: 0.051 },
 };

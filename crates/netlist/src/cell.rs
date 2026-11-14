@@ -123,7 +123,7 @@ impl Gen {
         if self.modules.contains_key("full_adder") {
             return "full_adder".into();
         }
-        let mut b = Builder::new("full_adder", "Sumador completo", "Adds three bits and gives the sum bit and the carry bit.");
+        let mut b = Builder::new("full_adder", "Full adder", "Adds three bits and gives the sum bit and the carry bit.");
         let a = b.input("a", 1)[0];
         let x = b.input("b", 1)[0];
         let cin = b.input("cin", 1)[0];
@@ -132,10 +132,10 @@ impl Gen {
         let p = b.wire("p", 1)[0];
         let g1 = b.wire("g1", 1)[0];
         let g2 = b.wire("g2", 1)[0];
-        b.group("Suma");
+        b.group("Sum");
         b.xor_to(a, x, p);
         b.xor_to(p, cin, sum);
-        b.group("Acarreo");
+        b.group("Carry");
         b.and_to(a, x, g1);
         b.and_to(p, cin, g2);
         b.or_to(g1, g2, cout);
@@ -185,7 +185,7 @@ impl Gen {
         let mut b = Builder::new(&name, &format!("{width}-bit register"), "Stores the input value on each clock edge.");
         let d = b.input("d", width);
         let q = b.output("q", width);
-        b.group("Biestables");
+        b.group("Flip-flops");
         for i in 0..width as usize {
             b.dff_to(d[i], q[i]);
         }
@@ -202,7 +202,7 @@ impl Gen {
         let a = b.input("a", width);
         let x = b.input("b", width);
         let y = b.output("y", width);
-        b.group("Selectores");
+        b.group("Selectors");
         for i in 0..width as usize {
             b.mux_to(s, a[i], x[i], y[i]);
         }
@@ -220,11 +220,11 @@ impl Gen {
         } else {
             "Passes the shifted value if the weight's bit is 1."
         };
-        let mut b = Builder::new(&name, "Producto parcial", what);
+        let mut b = Builder::new(&name, "Partial product", what);
         let enable = b.input("enable", 1)[0];
         let value = b.input("value", width);
         let out = b.output("out", width);
-        b.group("Puertas");
+        b.group("Gates");
         for i in 0..width as usize {
             if negate {
                 let inverted = b.wire(&format!("inv{i}"), 1)[0];
@@ -303,7 +303,7 @@ impl Gen {
             }
         }
 
-        b.group("Resultado");
+        b.group("Result");
         for (i, bit) in running.iter().enumerate() {
             b.xor_to(*bit, Bit::Zero, product[i]);
         }
@@ -346,7 +346,7 @@ impl Gen {
         let chosen = b.wire("chosen", width);
         let next = b.wire("next", width);
 
-        b.group("Suma");
+        b.group("Sum");
         sum_ports.extend([("a", kept.clone()), ("b", value), ("sum", sum.clone())]);
         if !fast {
             sum_ports.extend([("cin", vec![Bit::Zero]), ("cout", unused)]);
@@ -358,7 +358,7 @@ impl Gen {
         for i in 0..width as usize {
             b.and_to(not_clear, chosen[i], next[i]);
         }
-        b.group("Registro");
+        b.group("Register");
         b.inst("total_reg", &reg, &[("d", next), ("q", total)]);
         self.add(b.finish())
     }
@@ -379,14 +379,14 @@ impl Gen {
         let unused = b.wire("carry_out", 1);
         let next = b.wire("next", width);
 
-        b.group("Incremento");
+        b.group("Increment");
         b.inst("adder", &adder, &[("a", address.clone()), ("b", vec![Bit::Zero; width as usize]), ("cin", vec![advance]), ("sum", sum.clone()), ("cout", unused)]);
-        b.group("Puesta a cero");
+        b.group("Clear");
         b.not_to(clear, not_clear);
         for i in 0..width as usize {
             b.and_to(not_clear, sum[i], next[i]);
         }
-        b.group("Registro");
+        b.group("Register");
         b.inst("address_reg", &reg, &[("d", next), ("q", address)]);
         self.add(b.finish())
     }
@@ -411,16 +411,16 @@ impl Gen {
         let next = b.wire("next", width);
         let chosen = b.wire("chosen", width);
         let not_clear = b.wire("not_clear", 1)[0];
-        b.group("Incremento");
+        b.group("Increment");
         b.inst("adder", &adder, &[("a", address.clone()), ("b", vec![Bit::Zero; width as usize]), ("cin", vec![advance]), ("sum", sum.clone()), ("cout", unused)]);
-        b.group("Puesta a cero");
+        b.group("Clear");
         b.not_to(clear, not_clear);
         for i in 0..width as usize {
             b.and_to(not_clear, sum[i], next[i]);
         }
-        b.group("Salto");
+        b.group("Jump");
         b.inst("target_select", &mux, &[("s", vec![seek]), ("a", next), ("b", target), ("y", chosen.clone())]);
-        b.group("Registro");
+        b.group("Register");
         b.inst("address_reg", &reg, &[("d", chosen), ("q", address)]);
         self.add(b.finish())
     }
@@ -556,7 +556,7 @@ impl Gen {
         let table_ports = (c.coding == WeightCoding::Codebook && !c.fixed_weights).then(|| (b.input("table_en", 1)[0], b.input("table_addr", w), b.input("table_data", significand)));
         let exp_base = c.shifts().then(|| b.input("exp_base", c.exponent_width()));
 
-        b.group("Direcciones");
+        b.group("Addresses");
         let address = b.wire("address", c.addr_bits);
         let seek_ports = seekable.then(|| (b.input("seek", 1), b.input("seek_addr", c.addr_bits)));
         // A matrix whose codes are narrower keeps 2^p of them in each word: the cell takes them
@@ -677,7 +677,7 @@ impl Gen {
         };
         let window = exp_base.map(|base| self.exponent_window(&mut b, &c, &decoded.exponent, &base));
 
-        b.group("Multiplicador");
+        b.group("Multiplier");
         let product = b.wire("product", product_bits);
         match &multiples {
             Some(bus) => Self::pick_multiple(&mut b, &decoded.significand, bus, product_bits as usize, &product),
@@ -723,7 +723,7 @@ impl Gen {
             valid = next;
         }
 
-        b.group("Acumulador");
+        b.group("Accumulator");
         let clear_acc = b.wire("clear_acc", 1)[0];
         b.or_to(clear, clear_total, clear_acc);
         let mut pins = vec![("clear", vec![clear_acc]), ("valid", vec![valid]), ("value", value), ("total", total)];
