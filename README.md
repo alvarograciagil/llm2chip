@@ -200,4 +200,4 @@ This is an architecture and logic design, not a manufacturable layout: there is 
 
 llm2chip is released under the [PolyForm Noncommercial License 1.0.0](LICENSE.md): you may use, modify and share it for any noncommercial purpose, including personal projects, research and education. Commercial use is not permitted under this license; for commercial licensing, open an issue to get in touch.
 
-Required Notice: Copyright 2026 Xenogears (https://github.com/Xenogears/llm2chip)
+Required Notice: Copyright 2026 Álvaro Graciá Gil (Xenogears, https://github.com/Xenogears/llm2chip)

@@ -1,4 +1,4 @@
-Required Notice: Copyright 2026 Xenogears (https://github.com/Xenogears/llm2chip)
+Required Notice: Copyright 2026 Álvaro Graciá Gil (Xenogears, https://github.com/Xenogears/llm2chip)
 
 # PolyForm Noncommercial License 1.0.0
 
