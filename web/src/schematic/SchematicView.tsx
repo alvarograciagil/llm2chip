@@ -3,6 +3,7 @@ import type { Bit, NetlistModule } from "../engine";
 import { IconButton } from "../components/controls";
 import { AREA_VIEW_THRESHOLD, layoutAreas, layoutModule, type Edge, type Layout, type Node, type Pin } from "./layout";
 import { currentModule, useCellSim } from "./simStore";
+import { useT } from "../i18n";
 
 const MIN_FIT = 0.7;
 /** More marks than this would be noise rather than information. */
@@ -99,18 +100,19 @@ function GateSymbol({ node, selected }: { node: Node; selected: boolean }) {
 }
 
 function BoxSymbol({ node, selected, value }: { node: Node; selected: boolean; value: (pin: Pin) => string }) {
+  const t = useT();
   const clickable = node.instance?.kind.kind === "module";
   return (
     <g>
       <rect className={`${selected ? "box selected" : "box"} ${node.prim === "sram" || node.prim === "ram2p" || node.prim === "rom" ? "box-memory" : ""}`} width={node.w} height={node.h} rx={8} />
-      <text className="box-title" x={10} y={17}>{node.title}</text>
-      {node.subtitle && <text className="box-sub" x={10} y={31}>{node.subtitle}</text>}
+      <text className="box-title" x={10} y={17}>{t(node.title)}</text>
+      {node.subtitle && <text className="box-sub" x={10} y={31}>{t(node.subtitle)}</text>}
       {clickable && (
         <path className="box-chevron" d={`M${node.w - 14} 12 l5 5 l-5 5`} />
       )}
       {node.pins.map((p) => (
         <g key={p.name}>
-          <title>{`${p.name}${PIN_HELP[p.name] ? `: ${PIN_HELP[p.name]}` : ""} (${p.width} ${p.width === 1 ? "bit" : "bits"}) = ${showValue(value(p))}`}</title>
+          <title>{`${p.name}${PIN_HELP[p.name] ? `: ${t(PIN_HELP[p.name])}` : ""} (${p.width} ${p.width === 1 ? "bit" : "bits"}) = ${showValue(value(p))}`}</title>
           <circle className="pin" cx={p.x} cy={p.y} r={2.5} />
           <text className="pin-name" x={p.side === "left" ? 8 : node.w - 8} y={p.y + 3.5} textAnchor={p.side === "left" ? "start" : "end"}>
             {p.name}
@@ -127,11 +129,12 @@ function BoxSymbol({ node, selected, value }: { node: Node; selected: boolean; v
 }
 
 function AreaSymbol({ node }: { node: Node }) {
+  const t = useT();
   return (
     <g>
       <rect className="box area" width={node.w} height={node.h} rx={10} />
-      <text className="box-title" x={14} y={27}>{node.title}</text>
-      <text className="box-sub" x={14} y={44}>{node.subtitle}</text>
+      <text className="box-title" x={14} y={27}>{t(node.title)}</text>
+      <text className="box-sub" x={14} y={44}>{node.subtitle && t(node.subtitle)}</text>
       <path className="box-chevron" d={`M${node.w - 18} ${node.h / 2 - 5} l5 5 l-5 5`} />
     </g>
   );
@@ -181,6 +184,7 @@ function EdgePath({ edge, value, state, showWidth, onHover }: { edge: Edge; valu
 }
 
 function Diagram({ module, layout, snapshot }: { module: NetlistModule; layout: Layout; snapshot: Record<string, string> }) {
+  const t = useT();
   const selected = useCellSim((s) => s.selected);
   const select = useCellSim((s) => s.select);
   const enter = useCellSim((s) => s.enter);
@@ -206,7 +210,7 @@ function Diagram({ module, layout, snapshot }: { module: NetlistModule; layout: 
       {layout.groups.map((g) => (
         <g key={g.name}>
           <rect className="group-frame" x={g.x} y={g.y} width={g.w} height={g.h} rx={12} />
-          <text className="group-title" x={g.x + 12} y={g.y + 16}>{g.name}</text>
+          <text className="group-title" x={g.x + 12} y={g.y + 16}>{t(g.name)}</text>
         </g>
       ))}
       {layout.edges.map((edge) => (
@@ -255,6 +259,7 @@ function Diagram({ module, layout, snapshot }: { module: NetlistModule; layout: 
 }
 
 export function SchematicView() {
+  const t = useT();
   const design = useCellSim((s) => s.design);
   const path = useCellSim((s) => s.path);
   const goTo = useCellSim((s) => s.goTo);
@@ -392,21 +397,21 @@ export function SchematicView() {
         if (!(e.target as Element).closest(".hud")) select(null);
       }}
     >
-      <svg role="img" aria-label={module ? `Schematic: ${module.title}. ${module.description}` : "Schematic"}>
+      <svg role="img" aria-label={module ? `${t("Schematic")}: ${t(module.title)}. ${t(module.description)}` : t("Schematic")}>
         <g ref={world}>{layout && module && <Diagram module={module} layout={layout} snapshot={snapshot} />}</g>
       </svg>
       <div className="hud top">
-        <nav className="breadcrumb" aria-label="Position in the circuit">
+        <nav className="breadcrumb" aria-label={t("Position in the circuit")}>
           {crumbs.map((name, depth) => (
             <span key={depth} className="crumb">
               {depth > 0 && <span aria-hidden="true">›</span>}
-              {depth < crumbs.length - 1 || area ? <button onClick={() => goTo(depth)}>{name}</button> : <span>{name}</span>}
+              {depth < crumbs.length - 1 || area ? <button onClick={() => goTo(depth)}>{t(name)}</button> : <span>{t(name)}</span>}
             </span>
           ))}
           {area && (
             <span className="crumb">
               <span aria-hidden="true">›</span>
-              <span>{area}</span>
+              <span>{t(area)}</span>
             </span>
           )}
         </nav>
@@ -415,26 +420,26 @@ export function SchematicView() {
         <div className="legend">
           <span>
             <i className="wire-key on" aria-hidden="true" />
-            With a value
+            {t("With a value")}
           </span>
           <span>
             <i className="wire-key" aria-hidden="true" />
-            At zero
+            {t("At zero")}
           </span>
           <span>
             <i className="wire-key thick" aria-hidden="true" />
-            Bus
+            {t("Bus")}
           </span>
-          <span className="legend-hint">Hover over a wire to follow it · Double-click to enter · Esc to go up</span>
+          <span className="legend-hint">{t("Hover over a wire to follow it · Double-click to enter · Esc to go up")}</span>
         </div>
         <div className="zoom">
-          <IconButton label="Zoom out" onClick={() => zoom(0.7, ...center())}>
+          <IconButton label={t("Zoom out")} onClick={() => zoom(0.7, ...center())}>
             <path d="M5 10h10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
           </IconButton>
-          <IconButton label="Fit" onClick={fit}>
+          <IconButton label={t("Fit")} onClick={fit}>
             <path d="M4 8V4h4M16 8V4h-4M4 12v4h4M16 12v4h-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
           </IconButton>
-          <IconButton label="Zoom in" onClick={() => zoom(1.4, ...center())}>
+          <IconButton label={t("Zoom in")} onClick={() => zoom(1.4, ...center())}>
             <path d="M5 10h10M10 5v10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
           </IconButton>
         </div>

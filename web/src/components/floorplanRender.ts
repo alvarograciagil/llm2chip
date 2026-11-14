@@ -38,6 +38,8 @@ export interface Scene {
   width: number;
   height: number;
   camera: Camera;
+  /** The interface's language for the words drawn; English if not given. */
+  t?: (text: string) => string;
 }
 
 const ARRAY_IDS = ["cell_weights", "cell_macs", "scale_units", "activation_noc"];
@@ -257,7 +259,7 @@ function drawArray(ctx: CanvasRenderingContext2D, scene: Scene, die: DiePlan) {
       ctx.lineTo(s.x + s.w, y);
     }
     ctx.stroke();
-    drawBlockLabel(ctx, s, `Cell array · ${cells.count.toLocaleString(locale())}`, fill);
+    drawBlockLabel(ctx, s, (scene.t ?? String)(`Cell array · ${cells.count.toLocaleString(locale())}`), fill);
     return;
   }
 
@@ -337,7 +339,8 @@ function drawDie(ctx: CanvasRenderingContext2D, scene: Scene, die: DiePlan) {
   ctx.fillStyle = theme.secondary;
   ctx.font = `500 11px ${FONT}`;
   ctx.textBaseline = "bottom";
-  const range = die.first_layer === null ? "" : die.first_layer === die.last_layer ? ` · layer ${die.first_layer}` : ` · layers ${die.first_layer}–${die.last_layer}`;
+  const t = scene.t ?? String;
+  const range = die.first_layer === null ? "" : die.first_layer === die.last_layer ? ` · ${t(`layer ${die.first_layer}`)}` : ` · ${t(`layers ${die.first_layer}–${die.last_layer}`)}`;
   if (s.w > 36) text(ctx, s.w > 110 ? `Die ${die.index}${range}` : `${die.index}`, s.x, s.y - 4, s.w);
 }
 

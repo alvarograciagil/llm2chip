@@ -3,6 +3,7 @@ import { useDesign } from "../store";
 import { download } from "../download";
 import { makeZip } from "../zip";
 import { formatNumber } from "../format";
+import { useT } from "../i18n";
 import { currentModule, toSigned, useCellSim, validateInputs, type DieDemo } from "./simStore";
 
 const COVERAGE: [string, boolean][] = [
@@ -28,6 +29,7 @@ const COVERAGE: [string, boolean][] = [
 const GATE_NAMES: Record<string, string> = { and: "AND", or: "OR", xor: "XOR", not: "NOT", mux: "Selectors", dff: "Flip-flops", sram: "Memories", rom: "ROM" };
 
 function Selected() {
+  const t = useT();
   const design = useCellSim((s) => s.design);
   const path = useCellSim((s) => s.path);
   const selected = useCellSim((s) => s.selected);
@@ -39,13 +41,13 @@ function Selected() {
   const primNames: Record<string, string> = { and2: "AND gate", or2: "OR gate", xor2: "XOR gate", not: "Inverter", mux2: "Selector", dff: "D flip-flop", sram: "Synchronous SRAM", rom: "ROM, written at manufacturing" };
   return (
     <>
-      <h3>Selection</h3>
+      <h3>{t("Selection")}</h3>
       <div className="inset padded">
-        <strong>{child ? child.title : primNames[(inst.kind as { of: { type: string } }).of.type]}</strong>
-        <p className="muted-text">{child ? child.description : `Instance ${inst.name}, in ${inst.group}.`}</p>
+        <strong>{t(child ? child.title : primNames[(inst.kind as { of: { type: string } }).of.type])}</strong>
+        <p className="muted-text">{child ? t(child.description) : t(`Instance ${inst.name}, in ${t(inst.group)}.`)}</p>
         {child && (
           <button className="link" onClick={() => enter(inst.name)}>
-            Enter this block
+            {t("Enter this block")}
           </button>
         )}
       </div>
@@ -61,6 +63,7 @@ const DEMO_TEXT: Record<DieDemo, string> = {
 };
 
 function DiePanel() {
+  const t = useT();
   const die = useCellSim((s) => s.die);
   const counts = useCellSim((s) => s.dieCounts);
   const cycle = useCellSim((s) => s.cycle);
@@ -78,72 +81,73 @@ function DiePanel() {
   return (
     <>
       <div className="scope">
-        <Segmented label="Program" value={demo} options={[["mlp", "MLP"], ["attention", "Attention"], ["delta", "DeltaNet"], ["boot", "Start-up"]]} onChange={setDemo} />
+        <Segmented label={t("Program")} value={demo} options={[["mlp", "MLP"], ["attention", t("Attention")], ["delta", "DeltaNet"], ["boot", t("Start-up")]]} onChange={setDemo} />
       </div>
-      <p className="detail-sub">{DEMO_TEXT[demo]}</p>
+      <p className="detail-sub">{t(DEMO_TEXT[demo])}</p>
       <div className="sim-actions">
-        <button className="pill primary-pill" disabled={done} onClick={step}>Step</button>
-        <button className="pill" disabled={done} onClick={runAll}>Run all</button>
-        <button className="pill" onClick={restart}>Restart</button>
+        <button className="pill primary-pill" disabled={done} onClick={step}>{t("Step")}</button>
+        <button className="pill" disabled={done} onClick={runAll}>{t("Run all")}</button>
+        <button className="pill" onClick={restart}>{t("Restart")}</button>
       </div>
       {activity && demo !== "boot" && (
         <div className="inset padded sim-explain" aria-live="polite">
-          <strong>{done ? "Program finished" : `Word ${activity.pc} of the microprogram`}</strong>
-          <p>{done ? "The sequencer has stopped: the result is in the vector bank." : activity.text}</p>
+          <strong>{done ? t("Program finished") : t(`Word ${activity.pc} of the microprogram`)}</strong>
+          <p>{done ? t("The sequencer has stopped: the result is in the vector bank.") : t(activity.text)}</p>
         </div>
       )}
       <dl className="inset metrics">
-        <div><dt>State</dt><dd>{done ? "Finished" : cycle > 0 ? "Running" : "Loaded"}</dd></div>
-        <div><dt>Clock cycle</dt><dd>{formatNumber(cycle)}</dd></div>
+        <div><dt>{t("State")}</dt><dd>{done ? t("Finished") : cycle > 0 ? t("Running") : t("Loaded")}</dd></div>
+        <div><dt>{t("Clock cycle")}</dt><dd>{formatNumber(cycle)}</dd></div>
       </dl>
       {results?.text !== undefined && (
         <>
-          <h3>Output on the host port</h3>
+          <h3>{t("Output on the host port")}</h3>
           <div className="inset padded"><code>{results.text}</code></div>
           <div className={`issue ${results.exact ? "ok" : "error"}`} role="status">
             <span className="issue-icon" aria-hidden="true">{results.exact ? "✓" : "!"}</span>
-            <div><strong>{results.exact ? "Every block has passed the CRC check." : "Some block has not passed the CRC check."}</strong></div>
+            <div><strong>{results.exact ? t("Every block has passed the CRC check.") : t("Some block has not passed the CRC check.")}</strong></div>
           </div>
         </>
       )}
       {results && results.text === undefined && (
         <>
-          <h3>Layer result</h3>
+          <h3>{t("Layer result")}</h3>
           <dl className="inset metrics">
             {results.got.map((v, i) => (
-              <div key={i}><dt>Output {i} (expected {formatNumber(results.expected[i])})</dt><dd>{formatNumber(v)}</dd></div>
+              <div key={i}><dt>{t(`Output ${i} (expected ${formatNumber(results.expected[i])})`)}</dt><dd>{formatNumber(v)}</dd></div>
             ))}
           </dl>
           <div className={`issue ${ok ? "ok" : "error"}`} role="status">
             <span className="issue-icon" aria-hidden="true">{ok ? "✓" : "!"}</span>
-            <div><strong>{ok ? (results.tolerance > 0 ? `It matches the integer model bit for bit and, within ${results.tolerance * 100} %, floating point.` : "The die reproduces the layer bit for bit.") : "The die does not match the reference."}</strong></div>
+            <div><strong>{ok ? (results.tolerance > 0 ? t(`It matches the integer model bit for bit and, within ${results.tolerance * 100} %, floating point.`) : t("The die reproduces the layer bit for bit.")) : t("The die does not match the reference.")}</strong></div>
           </div>
         </>
       )}
-      <h3>{demo === "boot" ? "Chip circuit" : "Die circuit"}</h3>
+      <h3>{demo === "boot" ? t("Chip circuit") : t("Die circuit")}</h3>
       <dl className="inset metrics">
         {Object.entries(counts).map(([name, count]) => (
-          <div key={name}><dt>{GATE_NAMES[name] ?? name}</dt><dd>{formatNumber(count)}</dd></div>
+          <div key={name}><dt>{t(GATE_NAMES[name] ?? name)}</dt><dd>{formatNumber(count)}</dd></div>
         ))}
       </dl>
       <div className="sim-actions">
-        <button className="pill" onClick={() => download(die.verilog(), demo === "boot" ? "llm2chip_chip.v" : "llm2chip_die.v")}>Export to Verilog</button>
-        <button className="pill" onClick={() => download(die.vhdl(), demo === "boot" ? "llm2chip_chip.vhd" : "llm2chip_die.vhd")}>Export to VHDL</button>
+        <button className="pill" onClick={() => download(die.verilog(), demo === "boot" ? "llm2chip_chip.v" : "llm2chip_die.v")}>{t("Export to Verilog")}</button>
+        <button className="pill" onClick={() => download(die.vhdl(), demo === "boot" ? "llm2chip_chip.vhd" : "llm2chip_die.vhd")}>{t("Export to VHDL")}</button>
       </div>
     </>
   );
 }
 
 function Coverage() {
+  const t = useT();
   return (
     <>
-      <h3>What the schematic already has</h3>
+      <h3>{t("What the schematic already has")}</h3>
       <div className="inset">
         {COVERAGE.map(([name, done]) => (
           <div className="coverage" key={name}>
             <span className={done ? "cov-mark done" : "cov-mark"} aria-hidden="true">{done ? "✓" : "○"}</span>
-            <span>{name}</span>
-            <small>{done ? "Working" : "Pending"}</small>
+            <span>{t(name)}</span>
+            <small>{done ? t("Working") : t("Pending")}</small>
           </div>
         ))}
       </div>
@@ -152,18 +156,19 @@ function Coverage() {
 }
 
 export function SchematicPanel() {
+  const t = useT();
   const scope = useCellSim((s) => s.scope);
   const setScope = useCellSim((s) => s.setScope);
   const selector = (
     <div className="scope">
-      <Segmented label="Scope" value={scope} options={[["cell", "Cell"], ["die", "Reduced die"]]} onChange={setScope} />
+      <Segmented label={t("Scope")} value={scope} options={[["cell", t("Cell")], ["die", t("Reduced die")]]} onChange={setScope} />
     </div>
   );
   if (scope === "die") {
     return (
       <aside className="inspector">
         {selector}
-        <h2 className="detail-title">Die</h2>
+        <h2 className="detail-title">{t("Die")}</h2>
         <DiePanel />
         <Selected />
         <Coverage />
@@ -174,6 +179,7 @@ export function SchematicPanel() {
 }
 
 function CellPanel({ selector }: { selector: React.ReactNode }) {
+  const t = useT();
   const frequency = useDesign((s) => s.report?.metrics.find((m) => m.id === "freq_ghz")?.value ?? 1);
   const info = useCellSim((s) => s.info);
   const handle = useCellSim((s) => s.handle);
@@ -199,22 +205,22 @@ function CellPanel({ selector }: { selector: React.ReactNode }) {
   const finished = index >= script.length && script.length > 0;
   const total = topTotal !== undefined ? toSigned(topTotal) : null;
   const done = index > 0 ? script[index - 1] : null;
-  const next = script[index]?.label ?? (finished ? "Nothing: the sum is in the accumulator" : "—");
+  const next = script[index]?.label ? t(script[index].label) : finished ? t("Nothing: the sum is in the accumulator") : "—";
   const counts = Object.entries(info.counts);
 
   return (
     <aside className="inspector">
       {selector}
-      <h2 className="detail-title">Simulation</h2>
-      <p className="detail-sub">Gate by gate, on the circuit you see.</p>
+      <h2 className="detail-title">{t("Simulation")}</h2>
+      <p className="detail-sub">{t("Gate by gate, on the circuit you see.")}</p>
 
       <div className="inset padded form">
         <label>
-          Weight codes ({info.config.weight_bits} bits)
+          {t(`Weight codes (${info.config.weight_bits} bits)`)}
           <textarea rows={2} spellCheck={false} value={weightsText} onChange={(e) => setWeights(e.target.value)} />
         </label>
         <label>
-          Activations ({info.config.activation_bits} signed bits)
+          {t(`Activations (${info.config.activation_bits} signed bits)`)}
           <textarea rows={2} spellCheck={false} value={activationsText} onChange={(e) => setActivations(e.target.value)} />
         </label>
       </div>
@@ -222,44 +228,44 @@ function CellPanel({ selector }: { selector: React.ReactNode }) {
         <div className="issue error" role="alert">
           <span className="issue-icon" aria-hidden="true">!</span>
           <div>
-            <strong>{inputError}</strong>
+            <strong>{t(inputError)}</strong>
           </div>
         </div>
       )}
 
       <div className="sim-actions">
         <button className="pill primary-pill" disabled={finished || script.length === 0} onClick={step}>
-          Step
+          {t("Step")}
         </button>
         <button className="pill" disabled={finished || script.length === 0} onClick={runAll}>
-          Run all
+          {t("Run all")}
         </button>
         <button className="pill" onClick={restart}>
-          Restart
+          {t("Restart")}
         </button>
       </div>
 
       <div className="inset padded sim-explain" aria-live="polite">
-        <strong>{done ? done.label : "Before starting"}</strong>
-        <p>{done ? done.explain : "Press Step to advance one clock cycle: each step sets the cell's inputs, the circuit computes and the wires with a value light up in the schematic."}</p>
+        <strong>{done ? t(done.label) : t("Before starting")}</strong>
+        <p>{done ? t(done.explain) : t("Press Step to advance one clock cycle: each step sets the cell's inputs, the circuit computes and the wires with a value light up in the schematic.")}</p>
       </div>
       <dl className="inset metrics">
         <div>
-          <dt>Next step</dt>
+          <dt>{t("Next step")}</dt>
           <dd>{next}</dd>
         </div>
         <div>
-          <dt>Clock cycle</dt>
+          <dt>{t("Clock cycle")}</dt>
           <dd>{formatNumber(cycle)}</dd>
         </div>
         <div>
-          <dt>Result in the circuit</dt>
+          <dt>{t("Result in the circuit")}</dt>
           <dd>{total === null ? (
-            <button className="link inline" onClick={() => goTo(0)}>See in the cell</button>
+            <button className="link inline" onClick={() => goTo(0)}>{t("See in the cell")}</button>
           ) : total.toString()}</dd>
         </div>
         <div>
-          <dt>Expected (Σ weight × activation)</dt>
+          <dt>{t("Expected (Σ weight × activation)")}</dt>
           <dd>{expected?.toString() ?? "—"}</dd>
         </div>
       </dl>
@@ -267,39 +273,39 @@ function CellPanel({ selector }: { selector: React.ReactNode }) {
         <div className={`issue ${total === expected ? "ok" : "error"}`} role="status">
           <span className="issue-icon" aria-hidden="true">{total === expected ? "✓" : "!"}</span>
           <div>
-            <strong>{total === expected ? "The circuit gives the correct result." : "The circuit does not match the reference."}</strong>
+            <strong>{total === expected ? t("The circuit gives the correct result.") : t("The circuit does not match the reference.")}</strong>
           </div>
         </div>
       )}
 
       <Selected />
 
-      <h3>Cell circuit</h3>
+      <h3>{t("Cell circuit")}</h3>
       <dl className="inset metrics">
         {counts.map(([name, count]) => (
           <div key={name}>
-            <dt>{GATE_NAMES[name] ?? name}</dt>
+            <dt>{t(GATE_NAMES[name] ?? name)}</dt>
             <dd>{formatNumber(count)}</dd>
           </div>
         ))}
         <div>
-          <dt>Latency</dt>
-          <dd>{info.latency} cycles</dd>
+          <dt>{t("Latency")}</dt>
+          <dd>{t(`${info.latency} cycles`)}</dd>
         </div>
         <div>
-          <dt>Weight memory</dt>
+          <dt>{t("Weight memory")}</dt>
           <dd>{formatNumber(2 ** info.config.addr_bits)} × {info.config.weight_bits} bits</dd>
         </div>
       </dl>
       <button className="plain" onClick={() => download(makeZip(JSON.parse(handle.project(1 / Math.max(frequency, 0.001)))) as BlobPart, "llm2chip_cell.zip", "application/zip")}>
-        Export the whole project
+        {t("Export the whole project")}
       </button>
       <button className="plain" onClick={() => download(handle.verilog(), "llm2chip_cell.v")}>
-        Export to Verilog
+        {t("Export to Verilog")}
       </button>
 
       <Coverage />
-      {path.length > 0 && <p className="legend-note">Press Esc to go up a level.</p>}
+      {path.length > 0 && <p className="legend-note">{t("Press Esc to go up a level.")}</p>}
     </aside>
   );
 }

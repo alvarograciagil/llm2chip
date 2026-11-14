@@ -4,6 +4,7 @@ import { useSweep, type Sweep } from "./useSweep";
 import { formatNumber } from "../format";
 import { matchingPreset, WEIGHT_PRESETS } from "../params";
 import { useDesign } from "../store";
+import { useT } from "../i18n";
 import { FORMAT_QUALITY } from "./formatQuality";
 
 interface Axis {
@@ -66,6 +67,7 @@ interface Point {
 }
 
 function Plot({ points, xLabel, yLabel, xLog, yLog, line, onPick }: { points: Point[]; xLabel: string; yLabel: string; xLog: boolean; yLog: boolean; line: boolean; onPick?: (p: Point) => void }) {
+  const tr = useT();
   const [hover, setHover] = useState<Point | null>(null);
   const xs = points.map((p) => p.x);
   const ys = points.map((p) => p.y);
@@ -79,7 +81,7 @@ function Plot({ points, xLabel, yLabel, xLog, yLog, line, onPick }: { points: Po
   const path = points.map((p, i) => `${i ? "L" : "M"}${px(p.x).toFixed(1)} ${py(p.y).toFixed(1)}`).join(" ");
 
   return (
-    <svg className="plot" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${yLabel} frente a ${xLabel}`} onMouseLeave={() => setHover(null)}>
+    <svg className="plot" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={tr(`${yLabel} against ${xLabel}`)} onMouseLeave={() => setHover(null)}>
       {yTicks.map((t) => (
         <g key={t}>
           <line className="plot-grid" x1={PAD.l} x2={W - PAD.r} y1={py(t)} y2={py(t)} />
@@ -115,11 +117,13 @@ const FORMAT_PRESETS = WEIGHT_PRESETS.flatMap((section) => section.presets.map((
 const FORMAT_VARIANTS = FORMAT_PRESETS.map((preset) => preset.values);
 
 function SweepProgress<V extends Record<string, unknown>>({ sweep }: { sweep: Sweep<V> }) {
+  const t = useT();
   if (sweep.total === 0 || sweep.done >= sweep.total) return null;
-  return <p className="note" role="status">Generando circuitos: {sweep.done} de {sweep.total}</p>;
+  return <p className="note" role="status">{t(`Generating circuits: ${sweep.done} of ${sweep.total}`)}</p>;
 }
 
 export function ExplorerView() {
+  const t = useT();
   const model = useDesign((s) => s.model);
   const params = useDesign((s) => s.params);
   const setParam = useDesign((s) => s.setParam);
@@ -138,10 +142,10 @@ export function ExplorerView() {
           x: v,
           y: r.metrics[yKey],
           ok: r.errors === 0,
-          label: `${axis.label}: ${formatNumber(v)} · ${metric[1]}: ${formatNumber(r.metrics[yKey])} ${metric[2]}`,
+          label: `${t(axis.label)}: ${formatNumber(v)} · ${t(metric[1])}: ${formatNumber(r.metrics[yKey])} ${metric[2]}`,
         };
       }),
-    [curveSweep, axis, yKey, metric],
+    [curveSweep, axis, yKey, metric, t],
   );
 
   const paretoSweep = useSweep("pareto", model, params, PARETO_VARIANTS);
@@ -153,33 +157,33 @@ export function ExplorerView() {
         ok: r.errors === 0,
         macs: paretoSweep.variants[i].macs_per_die,
         bits: paretoSweep.variants[i].weight_bits,
-        label: `${formatNumber(paretoSweep.variants[i].macs_per_die)} mult. · ${paretoSweep.variants[i].weight_bits} bits · ${formatNumber(r.metrics.tok_s)} tok/s`,
+        label: t(`${formatNumber(paretoSweep.variants[i].macs_per_die)} mult. · ${paretoSweep.variants[i].weight_bits} bits · ${formatNumber(r.metrics.tok_s)} tok/s`),
       }))
       .filter((p) => p.ok);
     const front = all.filter((p) => !all.some((o) => o !== p && o.x <= p.x && o.y >= p.y && (o.x < p.x || o.y > p.y))).sort((a, b) => a.x - b.x);
     return { all, front };
-  }, [paretoSweep]);
+  }, [paretoSweep, t]);
 
   return (
     <section className="stage explorer-stage">
       <div className="explorer">
         <div className="card">
           <div className="card-title">
-            <h2>Sweep of one parameter</h2>
+            <h2>{t("Sweep of one parameter")}</h2>
             <div className="plot-controls">
-              <select aria-label="Parameter" value={xKey} onChange={(e) => setXKey(e.target.value)}>
-                {AXES.map((a) => <option key={a.key} value={a.key}>{a.label}</option>)}
+              <select aria-label={t("Parameter")} value={xKey} onChange={(e) => setXKey(e.target.value)}>
+                {AXES.map((a) => <option key={a.key} value={a.key}>{t(a.label)}</option>)}
               </select>
               <span aria-hidden="true">→</span>
-              <select aria-label="Measure" value={yKey} onChange={(e) => setYKey(e.target.value)}>
-                {METRICS.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+              <select aria-label={t("Measure")} value={yKey} onChange={(e) => setYKey(e.target.value)}>
+                {METRICS.map(([id, name]) => <option key={id} value={id}>{t(name)}</option>)}
               </select>
             </div>
           </div>
-          <p className="muted-text plot-sub">{metric[1]}{metric[2] ? ` (${metric[2]})` : ""}. Click a point to apply it to the design.</p>
+          <p className="muted-text plot-sub">{t(metric[1])}{metric[2] ? ` (${metric[2]})` : ""}. {t("Click a point to apply it to the design.")}</p>
           <SweepProgress sweep={curveSweep} />
           {curve.length > 1 && (
-            <Plot points={curve} xLabel={axis.label} yLabel={metric[1]} xLog={axis.log} yLog={yKey !== "dies"} line onPick={(p) => {
+            <Plot points={curve} xLabel={t(axis.label)} yLabel={t(metric[1])} xLog={axis.log} yLog={yKey !== "dies"} line onPick={(p) => {
               if (axis.key === "macs_per_die") setParam("target_tok_s", 0);
               setParam(axis.key, p.x);
             }} />
@@ -187,12 +191,12 @@ export function ExplorerView() {
         </div>
         <div className="card">
           <div className="card-title">
-            <h2>Pareto frontier</h2>
+            <h2>{t("Pareto frontier")}</h2>
           </div>
-          <p className="muted-text plot-sub">Speed (tok/s) against total area (mm²), varying multipliers and weight bits. Only designs that meet the constraints.</p>
+          <p className="muted-text plot-sub">{t("Speed (tok/s) against total area (mm²), varying multipliers and weight bits. Only designs that meet the constraints.")}</p>
           <SweepProgress sweep={paretoSweep} />
           {pareto.all.length > 1 && (
-            <Plot points={pareto.all} xLabel="Total area (mm²)" yLabel="Speed" xLog yLog line={false} onPick={(p) => {
+            <Plot points={pareto.all} xLabel={t("Total area (mm²)")} yLabel={t("Speed")} xLog yLog line={false} onPick={(p) => {
               const chosen = pareto.all.find((o) => o.x === p.x && o.y === p.y);
               if (chosen) {
                 setParam("target_tok_s", 0);
@@ -203,7 +207,7 @@ export function ExplorerView() {
             }} />
           )}
           <table className="front">
-            <thead><tr><th>Multipliers</th><th>Bits</th><th>Area</th><th>Speed</th></tr></thead>
+            <thead><tr><th>{t("Multipliers")}</th><th>Bits</th><th>{t("Area")}</th><th>{t("Speed")}</th></tr></thead>
             <tbody>
               {pareto.front.map((p) => (
                 <tr key={`${p.macs}-${p.bits}`}>
@@ -252,6 +256,7 @@ const REFERENCES: Reference[] = [
 ];
 
 function FormatComparison() {
+  const t = useT();
   const model = useDesign((s) => s.model);
   const params = useDesign((s) => s.params);
   const setParam = useDesign((s) => s.setParam);
@@ -264,14 +269,14 @@ function FormatComparison() {
   return (
     <div className="card">
       <div className="card-title">
-        <h2>Weight formats</h2>
+        <h2>{t("Weight formats")}</h2>
       </div>
-      <p className="muted-text plot-sub">Each format's circuit with this design, from smallest to largest area. Click a row to use it. Top-1 is the agreement with floating point over 16 or 64 tokens of the real Qwen3.8. That model already comes quantized to 4 bits, so small formats may come out better than they would with the original weights.</p>
+      <p className="muted-text plot-sub">{t("Each format's circuit with this design, from smallest to largest area. Click a row to use it. Top-1 is the agreement with floating point over 16 or 64 tokens of the real Qwen3.8. That model already comes quantized to 4 bits, so small formats may come out better than they would with the original weights.")}</p>
       <SweepProgress sweep={sweep} />
       <div className="format-table">
         <table className="front">
           <thead>
-            <tr><th>Format</th><th>Area</th><th>Speed</th><th>Power</th><th>Energy</th><th>Top-1</th></tr>
+            <tr><th>{t("Format")}</th><th>{t("Area")}</th><th>{t("Speed")}</th><th>{t("Power")}</th><th>{t("Energy")}</th><th>Top-1</th></tr>
           </thead>
           <tbody>
             {rows.map(({ preset, metrics, errors }) => {
@@ -286,7 +291,7 @@ function FormatComparison() {
                     if (e.key === "Enter") Object.entries(preset.values).forEach(([key, value]) => setParam(key, value));
                   }}
                 >
-                  <td>{preset.label}{errors > 0 ? " ⚠" : ""}</td>
+                  <td>{t(preset.label)}{errors > 0 ? " ⚠" : ""}</td>
                   <td>{formatNumber(metrics.total_area_mm2)} mm²</td>
                   <td>{formatNumber(metrics.tok_s)} tok/s</td>
                   <td>{formatNumber(metrics.power_w)} W</td>
@@ -303,6 +308,7 @@ function FormatComparison() {
 }
 
 export function CalibrationPanel() {
+  const t = useT();
   const models = useDesign((s) => s.models);
   const defaults = useDesign((s) => s.defaults);
   const rows = useMemo(
@@ -318,25 +324,25 @@ export function CalibrationPanel() {
 
   return (
     <aside className="inspector">
-      <h2 className="detail-title">Calibration</h2>
-      <p className="detail-sub">The model against published chips.</p>
+      <h2 className="detail-title">{t("Calibration")}</h2>
+      <p className="detail-sub">{t("The model against published chips.")}</p>
       {rows.map((row) => {
         if (!row) return null;
         return (
           <div key={row.ref.name}>
             <h3>{row.ref.name}</h3>
-            <p className="note">{row.ref.source}</p>
+            <p className="note">{t(row.ref.source)}</p>
             <dl className="inset metrics">
               {row.ref.checks.map(([id, label, low, high, unit]) => {
                 const value = id === "die_area_mm2" ? row.report.die_area_mm2 : row.report.metrics.find((m) => m.id === id)?.value ?? 0;
                 const inRange = value >= low * 0.8 && value <= high * 1.2;
                 return (
                   <div key={id}>
-                    <dt>{label}</dt>
+                    <dt>{t(label)}</dt>
                     <dd>
                       {inRange ? "✓ " : "✕ "}
                       {formatNumber(value)} {unit}
-                      <small className="delta">real {low === high ? formatNumber(low) : `${formatNumber(low)}–${formatNumber(high)}`}</small>
+                      <small className="delta">{t("real")} {low === high ? formatNumber(low) : `${formatNumber(low)}–${formatNumber(high)}`}</small>
                     </dd>
                   </div>
                 );
@@ -345,10 +351,10 @@ export function CalibrationPanel() {
           </div>
         );
       })}
-      <h3>What is calibrated</h3>
+      <h3>{t("What is calibrated")}</h3>
       <div className="inset padded">
         <p className="muted-text">
-          The logic area of each cell comes from the real gates of its netlist. ROM density and energy are fitted to the HC1, the only chip of this kind with public figures for area, speed and power. The SRAM, HBM and stacked DRAM memories are still assumptions, best read as orders of magnitude.
+          {t("The logic area of each cell comes from the real gates of its netlist. ROM density and energy are fitted to the HC1, the only chip of this kind with public figures for area, speed and power. The SRAM, HBM and stacked DRAM memories are still assumptions, best read as orders of magnitude.")}
         </p>
       </div>
     </aside>

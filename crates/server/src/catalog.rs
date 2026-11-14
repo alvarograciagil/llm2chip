@@ -108,6 +108,9 @@ pub struct Settings {
     pub model_dirs: Vec<String>,
     #[serde(default)]
     pub download_dir: Option<String>,
+    /// Folders searched by default that the user turned off.
+    #[serde(default)]
+    pub disabled_defaults: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -115,8 +118,12 @@ pub struct SettingsView {
     model_dirs: Vec<String>,
     download_dir: String,
     download_is_default: bool,
-    /// Searched whether or not the user adds anything.
+    /// Searched unless turned off: the download folder, MTPLX's, the Hugging Face cache and
+    /// those in `LLM2CHIP_MODEL_DIRS`.
     default_dirs: Vec<String>,
+    disabled_defaults: Vec<String>,
+    /// The home folder, so the interface can show paths under it as `~`.
+    home: String,
 }
 
 pub struct Catalog {
@@ -216,7 +223,18 @@ impl Catalog {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HF_HOME").map(|home| PathBuf::from(home).join("hub")))
             .unwrap_or_else(|| self.home.join(".cache/huggingface/hub"));
-        vec![self.default_download(), self.home.join(".mtplx/models"), hub]
+        let mut roots = vec![self.default_download(), self.home.join(".mtplx/models"), hub];
+        // Folders set outside the interface, separated as in PATH.
+        if let Some(extra) = std::env::var_os("LLM2CHIP_MODEL_DIRS") {
+            roots.extend(std::env::split_paths(&extra).filter(|p| !p.as_os_str().is_empty()).map(|p| self.expand(&p.to_string_lossy())));
+        }
+        roots
+    }
+
+    /// The default folders the user has not turned off.
+    fn enabled_defaults(&self) -> Vec<PathBuf> {
+        let disabled = self.settings.lock().unwrap().disabled_defaults.clone();
+        self.default_roots().into_iter().filter(|p| !disabled.iter().any(|d| self.expand(d) == *p)).collect()
     }
 
     fn default_download(&self) -> PathBuf {
@@ -235,6 +253,8 @@ impl Catalog {
             download_dir: self.download_dir().to_string_lossy().into_owned(),
             download_is_default: settings.download_dir.is_none(),
             default_dirs: self.default_roots().iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+            disabled_defaults: settings.disabled_defaults.iter().map(|d| self.expand(d).to_string_lossy().into_owned()).collect(),
+            home: self.home.to_string_lossy().into_owned(),
         }
     }
 
@@ -262,7 +282,16 @@ impl Catalog {
             }
             std::fs::create_dir_all(&path).map_err(|e| format!("“{raw}” cannot be used: {e}"))?;
         }
-        let settings = Settings { model_dirs, download_dir };
+        let defaults = self.default_roots();
+        let mut disabled_defaults: Vec<String> = Vec::new();
+        for raw in &wanted.disabled_defaults {
+            let path = self.expand(raw);
+            let text = path.to_string_lossy().into_owned();
+            if defaults.contains(&path) && !disabled_defaults.contains(&text) {
+                disabled_defaults.push(text);
+            }
+        }
+        let settings = Settings { model_dirs, download_dir, disabled_defaults };
         let dir = self.home.join(".llm2chip");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let draft = dir.join("settings.json.tmp");
@@ -284,7 +313,8 @@ impl Catalog {
                 return list.clone();
             }
         }
-        let mut roots = self.default_roots();
+        let mut roots = self.enabled_defaults();
+        // Where downloads go is always searched: a model just downloaded must show up.
         roots.push(self.download_dir());
         roots.extend(self.settings.lock().unwrap().model_dirs.iter().map(|d| self.expand(d)));
         let list = scan(&roots);
@@ -378,11 +408,11 @@ mod tests {
         let catalog = Catalog::open(home.clone());
         assert!(catalog.models().is_empty());
 
-        let bad = Settings { model_dirs: vec!["~/does-not-exist".into()], download_dir: None };
+        let bad = Settings { model_dirs: vec!["~/does-not-exist".into()], ..Settings::default() };
         assert!(catalog.update(bad).unwrap_err().contains("does not exist"));
-        assert!(catalog.update(Settings { model_dirs: vec!["relative".into()], download_dir: None }).is_err());
+        assert!(catalog.update(Settings { model_dirs: vec!["relative".into()], ..Settings::default() }).is_err());
 
-        let good = Settings { model_dirs: vec!["~/my models".into(), models.to_string_lossy().into()], download_dir: Some("~/downloads".into()) };
+        let good = Settings { model_dirs: vec!["~/my models".into(), models.to_string_lossy().into()], download_dir: Some("~/downloads".into()), ..Settings::default() };
         catalog.update(good).unwrap();
         assert_eq!(catalog.models().len(), 1);
         assert_eq!(catalog.download_dir(), home.join("downloads"));
@@ -390,6 +420,15 @@ mod tests {
 
         let again = Catalog::open(home.clone());
         assert_eq!(again.view().model_dirs.len(), 1);
+        assert_eq!(again.models().len(), 1);
+
+        // A default folder can be turned off, and only default folders are kept as such.
+        write_model(&home.join(".mtplx/models/two"), LLAMA, true);
+        again.forget();
+        assert_eq!(again.models().len(), 2);
+        let off = Settings { model_dirs: vec![models.to_string_lossy().into()], download_dir: Some("~/downloads".into()), disabled_defaults: vec!["~/.mtplx/models".into(), "~/elsewhere".into()] };
+        again.update(off).unwrap();
+        assert_eq!(again.view().disabled_defaults, vec![home.join(".mtplx/models").to_string_lossy().into_owned()]);
         assert_eq!(again.models().len(), 1);
         std::fs::remove_dir_all(home).unwrap();
     }

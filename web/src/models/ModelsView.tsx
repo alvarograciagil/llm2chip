@@ -3,12 +3,21 @@ import { Segmented } from "../components/controls";
 import { useSimulator, type ServerModel } from "../simulator/simulatorStore";
 import { formatNumber, locale } from "../format";
 import { useDesign } from "../store";
+import { useT } from "../i18n";
 import { formatBytes, formatCount, formatRemaining, useModels, type Adaptation, type Details, type Job } from "./modelsStore";
 
 /** With `family`, only the architecture is known: the repository's config may refuse it later. */
 function Tier({ adaptation, known = true, family = false }: { adaptation: Adaptation; known?: boolean; family?: boolean }) {
+  const t = useT();
   const [label, tone] = !known ? ["No data", "none"] : adaptation.simulate ? [family ? "Runnable family" : "Runnable", "full"] : adaptation.design ? [adaptation.approximate ? "Approximate design" : "Design only", "part"] : ["Not adaptable", "none"];
-  return <span className={`tier ${tone}`}>{label}</span>;
+  return <span className={`tier ${tone}`}>{t(label)}</span>;
+}
+
+/** A path as the person reads it: under their home folder it starts with `~`. */
+export function shortPath(path: string, home: string | undefined): string {
+  if (!home || !path.startsWith(home)) return path;
+  const rest = path.slice(home.length);
+  return rest === "" || rest.startsWith("/") || rest.startsWith("\\") ? `~${rest}` : path;
 }
 
 function useToDesigner() {
@@ -24,6 +33,8 @@ function useToDesigner() {
 }
 
 function LocalList() {
+  const t = useT();
+  const home = useModels((s) => s.settings?.home);
   const models = useSimulator((s) => s.models);
   const setSimulator = useSimulator((s) => s.set);
   const setView = useDesign((s) => s.setView);
@@ -50,7 +61,7 @@ function LocalList() {
   };
 
   if (!models.length) {
-    return <p className="placeholder models-empty">No models with safetensors weights in the folders. Add a folder in the right panel or search Hugging Face.</p>;
+    return <p className="placeholder models-empty">{t("No models with safetensors weights in the folders. Add a folder in the right panel or search Hugging Face.")}</p>;
   }
   return (
     <ul className="model-list">
@@ -60,22 +71,22 @@ function LocalList() {
             <div className="model-title">
               <strong>{m.name}</strong>
               <Tier adaptation={m.adaptation} />
-              {m.images?.reads && <span className="tier" title="Its image encoder runs in the simulator: an image can be attached to the question.">Reads images</span>}
-              {m.images?.makes && <span className="tier" title="Its image decoder runs in the simulator: it can generate images from text.">Generates images</span>}
+              {m.images?.reads && <span className="tier" title={t("Its image encoder runs in the simulator: an image can be attached to the question.")}>{t("Reads images")}</span>}
+              {m.images?.makes && <span className="tier" title={t("Its image decoder runs in the simulator: it can generate images from text.")}>{t("Generates images")}</span>}
             </div>
             <p className="muted-text">
               {m.architecture} · {formatBytes(m.size_gb * 1e9)}
-              {m.adaptation.parameters ? ` · ${formatCount(m.adaptation.parameters)} parameters · ${m.adaptation.layers} layers` : ""}
+              {m.adaptation.parameters ? ` · ${t(`${formatCount(m.adaptation.parameters)} parameters · ${m.adaptation.layers} layers`)}` : ""}
             </p>
-            {m.adaptation.reason && <p className="model-reason">{m.adaptation.reason}</p>}
-            {m.images?.note && <p className="model-reason">{m.images.note}</p>}
-            <p className="model-path" title={m.path}>{m.path}</p>
+            {m.adaptation.reason && <p className="model-reason">{t(m.adaptation.reason)}</p>}
+            {m.images?.note && <p className="model-reason">{t(m.images.note)}</p>}
+            <p className="model-path" title={shortPath(m.path, home)}>{shortPath(m.path, home)}</p>
           </div>
           <div className="model-actions">
-            <button className="pill" disabled={!m.adaptation.design} onClick={() => toDesigner(m.name, m.config, m.adaptation, m.path)}>Design chip</button>
-            <button className="pill" disabled={!m.supported} onClick={() => simulate(m)}>Simulate</button>
-            <button className="pill" disabled={!m.supported || writing} onClick={() => makeImage(m)} title="Prepares the chip's boot image: microcode, weights and tables the firmware loads at power-on">Boot image</button>
-            <button className="pill" disabled={!m.supported || measuring} onClick={() => measure(m)}>Measure speed</button>
+            <button className="pill" disabled={!m.adaptation.design} onClick={() => toDesigner(m.name, m.config, m.adaptation, m.path)}>{t("Design chip")}</button>
+            <button className="pill" disabled={!m.supported} onClick={() => simulate(m)}>{t("Simulate")}</button>
+            <button className="pill" disabled={!m.supported || writing} onClick={() => makeImage(m)} title={t("Prepares the chip's boot image: microcode, weights and tables the firmware loads at power-on")}>{t("Boot image")}</button>
+            <button className="pill" disabled={!m.supported || measuring} onClick={() => measure(m)}>{t("Measure speed")}</button>
           </div>
         </li>
       ))}
@@ -84,6 +95,7 @@ function LocalList() {
 }
 
 function RepoDetails({ details }: { details: Details }) {
+  const t = useT();
   const jobs = useModels((s) => s.jobs);
   const download = useModels((s) => s.download);
   const discard = useModels((s) => s.discard);
@@ -95,31 +107,32 @@ function RepoDetails({ details }: { details: Details }) {
   return (
     <div className="repo-details">
       <p className="muted-text">
-        {details.architecture ?? "unknown architecture"}
-        {adaptation.parameters ? ` · ${formatCount(adaptation.parameters)} parameters · ${adaptation.layers} layers` : ""}
-        {details.gated ? " · gated access" : ""}
+        {details.architecture ?? t("unknown architecture")}
+        {adaptation.parameters ? ` · ${t(`${formatCount(adaptation.parameters)} parameters · ${adaptation.layers} layers`)}` : ""}
+        {details.gated ? ` · ${t("gated access")}` : ""}
       </p>
-      {adaptation.approximate && adaptation.design && <p className="model-reason">The circuit is estimated from the shape of its layers. Its activation or extra norms are not modelled.</p>}
-      {adaptation.reason && <p className="model-reason">{adaptation.reason}</p>}
+      {adaptation.approximate && adaptation.design && <p className="model-reason">{t("The circuit is estimated from the shape of its layers. Its activation or extra norms are not modelled.")}</p>}
+      {adaptation.reason && <p className="model-reason">{t(adaptation.reason)}</p>}
       {details.files.length > 0 && (
         <p className="muted-text">
-          {details.files.filter((f) => f.name.endsWith(".safetensors")).length} weight file(s) · {formatBytes(details.total_bytes)} in total
-          {details.free_bytes !== null ? ` · ${formatBytes(details.free_bytes)} libres` : ""}
+          {t(`${details.files.filter((f) => f.name.endsWith(".safetensors")).length} weight file(s) · ${formatBytes(details.total_bytes)} in total`)}
+          {details.free_bytes !== null ? ` · ${t(`${formatBytes(details.free_bytes)} free`)}` : ""}
         </p>
       )}
-      {details.resumable_bytes > 0 && <p className="muted-text">{formatBytes(details.resumable_bytes)} from an earlier download will be reused.</p>}
+      {details.resumable_bytes > 0 && <p className="muted-text">{t(`${formatBytes(details.resumable_bytes)} from an earlier download will be reused.`)}</p>}
       <div className="model-actions inline">
-        <button className="pill" disabled={!adaptation.design || !config} onClick={() => config && toDesigner(details.id, config, adaptation)}>Design chip without downloading</button>
+        <button className="pill" disabled={!adaptation.design || !config} onClick={() => config && toDesigner(details.id, config, adaptation)}>{t("Design chip without downloading")}</button>
         <button className="pill primary-pill" disabled={details.present || running || !details.files.length || short} onClick={() => void download(details.id)}>
-          {details.present ? "Already downloaded" : running ? "Downloading…" : short ? "Does not fit on the disk" : `Download ${formatBytes(details.total_bytes)}`}
+          {details.present ? t("Already downloaded") : running ? t("Downloading…") : short ? t("Does not fit on the disk") : t(`Download ${formatBytes(details.total_bytes)}`)}
         </button>
-        {details.resumable_bytes > 0 && !running && <button className="pill" onClick={() => void discard(details.id)}>Delete the partial download</button>}
+        {details.resumable_bytes > 0 && !running && <button className="pill" onClick={() => void discard(details.id)}>{t("Delete the partial download")}</button>}
       </div>
     </div>
   );
 }
 
 function HubSearch() {
+  const t = useT();
   const { query, searched, hits, searching, selected, details, error, set, search, select } = useModels();
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -130,16 +143,16 @@ function HubSearch() {
   return (
     <>
       <form className="model-search" onSubmit={submit}>
-        <input type="search" aria-label="Search Hugging Face" placeholder="Search, or type author/model" value={query} onChange={(e) => set({ query: e.target.value })} />
-        <button className="pill primary-pill" disabled={!query.trim() || searching}>{searching ? "Searching…" : "Search"}</button>
+        <input type="search" aria-label={t("Search Hugging Face")} placeholder={t("Search, or type author/model")} value={query} onChange={(e) => set({ query: e.target.value })} />
+        <button className="pill primary-pill" disabled={!query.trim() || searching}>{searching ? t("Searching…") : t("Search")}</button>
       </form>
       {error && (
         <div className="issue error" role="alert">
           <span className="issue-icon" aria-hidden="true">!</span>
-          <div><p>{error}</p></div>
+          <div><p>{t(error)}</p></div>
         </div>
       )}
-      {searched !== null && !searching && !hits.length && !selected && !error && <p className="placeholder models-empty">No results for “{searched}” with safetensors weights.</p>}
+      {searched !== null && !searching && !hits.length && !selected && !error && <p className="placeholder models-empty">{t(`No results for “${searched}” with safetensors weights.`)}</p>}
       {direct && (
         <ul className="model-list">
           <li className="model-row open">
@@ -148,7 +161,7 @@ function HubSearch() {
                 <strong>{selected}</strong>
                 {details && <Tier adaptation={details.adaptation} />}
               </div>
-              {details ? <RepoDetails details={details} /> : !error && <p className="muted-text">Looking it up…</p>}
+              {details ? <RepoDetails details={details} /> : !error && <p className="muted-text">{t("Looking it up…")}</p>}
             </div>
           </li>
         </ul>
@@ -165,8 +178,8 @@ function HubSearch() {
                     {!(open && details) && <Tier adaptation={hit.adaptation} known={hit.architecture !== null} family />}
                     {open && details && <Tier adaptation={details.adaptation} />}
                   </button>
-                  <p className="muted-text">{hit.architecture ?? "unknown architecture"} · {formatCount(hit.downloads)} descargas · {formatCount(hit.likes)} me gusta</p>
-                  {open && (details ? <RepoDetails details={details} /> : !error && <p className="muted-text">Looking it up…</p>)}
+                  <p className="muted-text">{hit.architecture ?? t("unknown architecture")} · {t(`${formatCount(hit.downloads)} downloads · ${formatCount(hit.likes)} likes`)}</p>
+                  {open && (details ? <RepoDetails details={details} /> : !error && <p className="muted-text">{t("Looking it up…")}</p>)}
                 </div>
               </li>
             );
@@ -178,6 +191,7 @@ function HubSearch() {
 }
 
 export function ModelsView() {
+  const t = useT();
   const source = useModels((s) => s.source);
   const set = useModels((s) => s.set);
   const loadSettings = useModels((s) => s.loadSettings);
@@ -208,46 +222,48 @@ export function ModelsView() {
     <section className="stage models-stage">
       <div className="models-column">
         <Segmented
-          label="Source"
+          label={t("Source")}
           value={source}
           options={[
-            ["local", "On this machine"],
+            ["local", t("On this machine")],
             ["hub", "Hugging Face"],
           ]}
           onChange={(value) => set({ source: value })}
         />
-        {online === false ? <p className="placeholder models-empty">The local engine is not running. Start it with scripts/dev.sh.</p> : source === "local" ? <LocalList /> : <HubSearch />}
+        {online === false ? <p className="placeholder models-empty">{t("The local engine is not running. Start it with scripts/dev.sh.")}</p> : source === "local" ? <LocalList /> : <HubSearch />}
       </div>
     </section>
   );
 }
 
 function JobRow({ job }: { job: Job }) {
+  const t = useT();
   const speed = useModels((s) => s.speeds[job.id]);
   const cancel = useModels((s) => s.cancel);
   const discard = useModels((s) => s.discard);
   const share = job.total_bytes ? Math.min(100, (100 * job.done_bytes) / job.total_bytes) : 0;
   const status = {
-    queued: "Queued",
-    downloading: [formatBytes(job.done_bytes), "of", formatBytes(job.total_bytes), speed ? `· ${formatBytes(speed)}/s` : "", formatRemaining(job, speed) ? `· ${formatRemaining(job, speed)}` : ""].filter(Boolean).join(" "),
-    done: "Finished and checked",
-    cancelled: "Stopped; it resumes if you request it again",
-    error: job.error ?? "Error",
+    queued: t("Queued"),
+    downloading: [`${formatBytes(job.done_bytes)} ${t("of")} ${formatBytes(job.total_bytes)}`, speed ? `· ${formatBytes(speed)}/s` : "", formatRemaining(job, speed) ? `· ${t(formatRemaining(job, speed))}` : ""].filter(Boolean).join(" "),
+    done: t("Finished and checked"),
+    cancelled: t("Stopped; it resumes if you request it again"),
+    error: job.error ? t(job.error) : "Error",
   }[job.state];
   const live = job.state === "queued" || job.state === "downloading";
   return (
     <div className="job">
       <div className="job-head">
         <strong title={job.id}>{job.id}</strong>
-        {live ? <button className="pill" onClick={() => void cancel(job.id)}>Stop</button> : job.state !== "done" && <button className="pill" onClick={() => void discard(job.id)}>Delete</button>}
+        {live ? <button className="pill" onClick={() => void cancel(job.id)}>{t("Stop")}</button> : job.state !== "done" && <button className="pill" onClick={() => void discard(job.id)}>{t("Delete")}</button>}
       </div>
-      {live && <progress max={100} value={share} aria-label={`Progress of ${job.id}`} />}
+      {live && <progress max={100} value={share} aria-label={t(`Progress of ${job.id}`)} />}
       <p className={job.state === "error" ? "model-reason" : "muted-text"}>{status}</p>
     </div>
   );
 }
 
 export function ModelsPanel() {
+  const t = useT();
   const { settings, tokenSource, jobs, settingsError, saveSettings, saveToken, forgetToken, image, cancelImage } = useModels();
   const connect = useSimulator((s) => s.connect);
   const [folder, setFolder] = useState("");
@@ -259,12 +275,19 @@ export function ModelsPanel() {
     await fetch("/api/models?refresh=1");
     await connect();
   };
+  const keptDownload = () => (settings?.download_is_default ? null : (settings?.download_dir ?? null));
   const replaceFolders = async (dirs: string[]) => {
-    if (await saveSettings(dirs, settings?.download_is_default ? null : (settings?.download_dir ?? null))) {
+    if (await saveSettings(dirs, keptDownload())) {
       setFolder("");
       await refresh();
     }
   };
+  const toggleDefault = async (dir: string, on: boolean) => {
+    if (!settings) return;
+    const disabled = on ? settings.disabled_defaults.filter((d) => d !== dir) : [...settings.disabled_defaults, dir];
+    if (await saveSettings(settings.model_dirs, keptDownload(), disabled)) await refresh();
+  };
+  const home = settings?.home;
   const addFolder = (e: FormEvent) => {
     e.preventDefault();
     if (settings && folder.trim()) void replaceFolders([...settings.model_dirs, folder]);
@@ -283,78 +306,86 @@ export function ModelsPanel() {
 
   return (
     <aside className="inspector">
-      <h2 className="detail-title">Models</h2>
-      <p className="detail-sub">Where they are searched for and where they are saved.</p>
+      <h2 className="detail-title">{t("Models")}</h2>
+      <p className="detail-sub">{t("Where they are searched for and where they are saved.")}</p>
 
       {settingsError && (
         <div className="issue error" role="alert">
           <span className="issue-icon" aria-hidden="true">!</span>
-          <div><p>{settingsError}</p></div>
+          <div><p>{t(settingsError)}</p></div>
         </div>
       )}
 
-      <h3>Folders</h3>
+      <h3>{t("Folders")}</h3>
       <div className="inset padded form">
+        <p className="muted-text">{t("Searched up to three levels inside each. The usual places can be turned off; the download folder is always searched.")}</p>
+        {settings?.default_dirs.map((dir) => {
+          const on = !settings.disabled_defaults.includes(dir);
+          const isDownload = dir === settings.download_dir;
+          return (
+            <label className="check toggle-folder" key={dir} title={shortPath(dir, home)}>
+              <input type="checkbox" checked={on || isDownload} disabled={isDownload} onChange={(e) => void toggleDefault(dir, e.target.checked)} />
+              <span>{shortPath(dir, home)}</span>
+            </label>
+          );
+        })}
         {settings?.model_dirs.map((dir) => (
           <div className="folder" key={dir}>
-            <span title={dir}>{dir}</span>
-            <button className="pill" aria-label={`Remove ${dir}`} onClick={() => void replaceFolders(settings.model_dirs.filter((d) => d !== dir))}>Remove</button>
+            <span title={shortPath(dir, home)}>{shortPath(dir, home)}</span>
+            <button className="pill" aria-label={t(`Remove ${shortPath(dir, home)}`)} onClick={() => void replaceFolders(settings.model_dirs.filter((d) => d !== dir))}>{t("Remove")}</button>
           </div>
         ))}
         <form className="inline-form" onSubmit={addFolder}>
-          <input type="text" aria-label="Model folder" placeholder="/path/to/my/models" value={folder} onChange={(e) => setFolder(e.target.value)} />
-          <button className="pill" disabled={!folder.trim()}>Add</button>
+          <input type="text" aria-label={t("Model folder")} placeholder={t("~/path/to/my/models")} value={folder} onChange={(e) => setFolder(e.target.value)} />
+          <button className="pill" disabled={!folder.trim()}>{t("Add")}</button>
         </form>
-        <p className="muted-text">Searched up to three levels inside each. Also always in:</p>
-        <ul className="plain-paths">
-          {settings?.default_dirs.map((dir) => <li key={dir} title={dir}>{dir}</li>)}
-        </ul>
-        <button className="pill" onClick={() => void refresh()}>Search again</button>
+        <p className="muted-text">{t("Folders can also be given before starting the engine, in LLM2CHIP_MODEL_DIRS, separated as in PATH.")}</p>
+        <button className="pill" onClick={() => void refresh()}>{t("Search again")}</button>
       </div>
 
-      <h3>Download to</h3>
+      <h3>{t("Download to")}</h3>
       <form className="inset padded form" onSubmit={saveDownload}>
-        <input type="text" aria-label="Download folder" value={download ?? settings?.download_dir ?? ""} onChange={(e) => setDownload(e.target.value)} />
-        {download !== null && <button className="pill">Save</button>}
+        <input type="text" aria-label={t("Download folder")} value={download ?? shortPath(settings?.download_dir ?? "", home)} onChange={(e) => setDownload(e.target.value)} />
+        {download !== null && <button className="pill">{t("Save")}</button>}
       </form>
 
-      <h3>Hugging Face account</h3>
+      <h3>{t("Hugging Face account")}</h3>
       <div className="inset padded form">
         <p className="muted-text">
-          {tokenSource === null && "No token. Enough for public models; gated ones need their license accepted and a read token."}
-          {tokenSource === "app" && "Using the token saved on this machine."}
-          {tokenSource === "environment" && "Using the token from the HF_TOKEN environment variable."}
-          {tokenSource === "huggingface-cli" && "Using the token you signed in to huggingface-cli with."}
+          {tokenSource === null && t("No token. Enough for public models; gated ones need their license accepted and a read token.")}
+          {tokenSource === "app" && t("Using the token saved on this machine.")}
+          {tokenSource === "environment" && t("Using the token from the HF_TOKEN environment variable.")}
+          {tokenSource === "huggingface-cli" && t("Using the token you signed in to huggingface-cli with.")}
         </p>
         <form className="inline-form" onSubmit={submitToken}>
-          <input type="password" autoComplete="off" aria-label="Hugging Face token" placeholder="Read token" value={token} onChange={(e) => setToken(e.target.value)} />
-          <button className="pill" disabled={!token.trim()}>Save</button>
+          <input type="password" autoComplete="off" aria-label={t("Hugging Face token")} placeholder={t("Read token")} value={token} onChange={(e) => setToken(e.target.value)} />
+          <button className="pill" disabled={!token.trim()}>{t("Save")}</button>
         </form>
-        {tokenSource === "app" && <button className="pill" onClick={() => void forgetToken()}>Delete token</button>}
-        {!local && <p className="model-reason">You are connected over the local network without encryption: type the token on the machine itself.</p>}
+        {tokenSource === "app" && <button className="pill" onClick={() => void forgetToken()}>{t("Delete token")}</button>}
+        {!local && <p className="model-reason">{t("You are connected over the local network without encryption: type the token on the machine itself.")}</p>}
       </div>
 
       <SpeedPanel />
 
       {image.state !== "idle" && (
         <>
-          <h3>Chip image</h3>
+          <h3>{t("Chip image")}</h3>
           <div className="inset padded form job">
             <div className="job-head">
               <strong title={image.name}>{image.name}</strong>
-              {image.state === "writing" && <button className="pill" onClick={() => void cancelImage()}>Stop</button>}
+              {image.state === "writing" && <button className="pill" onClick={() => void cancelImage()}>{t("Stop")}</button>}
             </div>
-            {image.state === "writing" && <progress max={image.total || 1} value={image.done ?? 0} aria-label="Image progress" />}
-            {image.state === "writing" && <p className="muted-text">{formatBytes(image.done ?? 0)} of {formatBytes(image.total ?? 0)}</p>}
-            {image.state === "done" && image.report && <p className="muted-text">{formatBytes(image.report.bytes)}, for {image.report.chips.join(", ")} chips. Saved in {image.report.path}</p>}
-            {image.state === "error" && <p className="model-reason">{image.error}</p>}
+            {image.state === "writing" && <progress max={image.total || 1} value={image.done ?? 0} aria-label={t("Image progress")} />}
+            {image.state === "writing" && <p className="muted-text">{`${formatBytes(image.done ?? 0)} ${t("of")} ${formatBytes(image.total ?? 0)}`}</p>}
+            {image.state === "done" && image.report && <p className="muted-text">{t(`${formatBytes(image.report.bytes)}, for ${image.report.chips.join(", ")} chips. Saved in ${shortPath(image.report.path, home)}`)}</p>}
+            {image.state === "error" && <p className="model-reason">{t(image.error ?? "")}</p>}
           </div>
         </>
       )}
 
       {jobs.length > 0 && (
         <>
-          <h3>Downloads</h3>
+          <h3>{t("Downloads")}</h3>
           <div className="inset padded form">
             {jobs.map((job) => <JobRow key={job.id} job={job} />)}
           </div>
@@ -381,10 +412,11 @@ const OPERATION_NAMES: Record<string, string> = {
 
 /** The tokens per second of the generated circuit, counted cycle by cycle, against the target. */
 function SpeedPanel() {
+  const t = useT();
   const speed = useModels((s) => s.speed);
   const measuring = useModels((s) => s.measuring);
   const params = useDesign((s) => s.params);
-  if (measuring) return <p className="muted-text">Counting the circuit's cycles…</p>;
+  if (measuring) return <p className="muted-text">{t("Counting the circuit's cycles…")}</p>;
   if (!speed) return null;
   const ghz = Number(params.freq_ghz);
   const measured = (ghz * 1e9) / speed.total;
@@ -392,19 +424,19 @@ function SpeedPanel() {
   const top = Math.max(...speed.ops.map((o) => o.cycles), 1);
   return (
     <>
-      <h3>Circuit speed</h3>
+      <h3>{t("Circuit speed")}</h3>
       <div className="inset padded form job">
         <div className="job-head">
           <strong title={speed.name}>{speed.name}</strong>
         </div>
         <p className="muted-text">
-          {formatNumber(measured)} tok/s at {formatNumber(ghz)} GHz with {speed.cells.toLocaleString(locale())} cells, {speed.units} units and {speed.lanes} lanes, at position {speed.position.toLocaleString(locale())}
-          {target > 0 ? `. Target: ${formatNumber(target)} tok/s (${formatNumber(target / measured)} times more).` : "."}
+          {t(`${formatNumber(measured)} tok/s at ${formatNumber(ghz)} GHz with ${speed.cells.toLocaleString(locale())} cells, ${speed.units} units and ${speed.lanes} lanes, at position ${speed.position.toLocaleString(locale())}`)}
+          {target > 0 ? `. ${t(`Target: ${formatNumber(target)} tok/s (${formatNumber(target / measured)} times more).`)}` : "."}
         </p>
-        <div className="lab-bars" role="table" aria-label="Cycles per operation">
+        <div className="lab-bars" role="table" aria-label={t("Cycles per operation")}>
           {speed.ops.slice(0, 8).map((o) => (
-            <div className="lab-row" role="row" key={o.name} title={`${o.name}: ${o.count} times`}>
-              <span role="cell" className="lab-label">{OPERATION_NAMES[o.name] ?? o.name}</span>
+            <div className="lab-row" role="row" key={o.name} title={t(`${o.name}: ${o.count} times`)}>
+              <span role="cell" className="lab-label">{t(OPERATION_NAMES[o.name] ?? o.name)}</span>
               <span role="cell" className="lab-track"><i style={{ width: `${(100 * o.cycles) / top}%` }} /></span>
               <span role="cell" className="lab-value">{(o.cycles / 1e6).toLocaleString(locale(), { maximumFractionDigits: 1 })} M</span>
             </div>

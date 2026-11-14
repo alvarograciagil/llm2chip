@@ -2403,15 +2403,12 @@ button.model-toggle {
   white-space: nowrap;
 }
 
-.plain-paths {
-  margin: 0;
-  padding: 0;
-  color: var(--label-3);
-  font-size: 11px;
-  list-style: none;
+.toggle-folder {
+  min-width: 0;
+  cursor: pointer;
 }
 
-.plain-paths li {
+.toggle-folder span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

@@ -1,4 +1,5 @@
 import { useEffect, useState, type PointerEvent } from "react";
+import { useT } from "../i18n";
 
 const LIMITS = { left: [220, 520], right: [240, 560] } as const;
 const DEFAULTS = { left: 292, right: 312 };
@@ -22,6 +23,7 @@ function apply(widths: Record<Side, number>) {
 /** The edges of the side columns, which can be dragged to make them wider or narrower.
  *  Each width is remembered in this browser; a double click restores it. */
 export function ColumnResizers() {
+  const t = useT();
   const [widths, setWidths] = useState(readWidths);
   useEffect(() => {
     apply(widths);
@@ -60,8 +62,8 @@ export function ColumnResizers() {
           className={`column-resizer ${side}`}
           role="separator"
           aria-orientation="vertical"
-          aria-label={side === "left" ? "Width of the parameter column" : "Width of the right column"}
-          title="Drag to change the width; double-click to reset it"
+          aria-label={side === "left" ? t("Width of the parameter column") : t("Width of the right column")}
+          title={t("Drag to change the width; double-click to reset it")}
           onPointerDown={drag(side)}
           onDoubleClick={() => setWidths((w) => ({ ...w, [side]: DEFAULTS[side] }))}
         />

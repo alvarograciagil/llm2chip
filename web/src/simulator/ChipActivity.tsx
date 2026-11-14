@@ -35,7 +35,7 @@ function StepRow({ step, open, onToggle, tokenizer }: { step: ChipStep; open: bo
     <li className={open ? "step open" : "step"}>
       <button className="step-head" onClick={onToggle} aria-expanded={open}>
         <span className="step-name">{step.kind === "prefill" ? `${t("Prompt")} ${step.index}` : `${t("Answer")} ${step.index}`}</span>
-        <span className="step-text">{step.kind === "token" ? (step.text.trim() ? `«${step.text}»` : t("(no text yet)")) : routines.map(([name]) => ROUTINE_LABEL[name] ?? name).join(" + ")}</span>
+        <span className="step-text">{step.kind === "token" ? (step.text.trim() ? `«${step.text}»` : t("(no text yet)")) : routines.map(([name]) => t(ROUTINE_LABEL[name] ?? name)).join(" + ")}</span>
         <TaskBar activity={step.activity} label={t("CPU cycles in this step")} />
         <span className="step-cycles">{formatNumber(total)}</span>
       </button>

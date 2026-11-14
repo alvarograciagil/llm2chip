@@ -15,6 +15,8 @@ export interface Settings {
   download_dir: string;
   download_is_default: boolean;
   default_dirs: string[];
+  disabled_defaults: string[];
+  home: string;
 }
 
 export interface SearchHit {
@@ -92,7 +94,7 @@ interface ModelsState {
 
   set: (patch: Partial<ModelsState>) => void;
   loadSettings: () => Promise<void>;
-  saveSettings: (dirs: string[], downloadDir: string | null) => Promise<boolean>;
+  saveSettings: (dirs: string[], downloadDir: string | null, disabledDefaults?: string[]) => Promise<boolean>;
   saveToken: (token: string) => Promise<boolean>;
   forgetToken: () => Promise<void>;
   search: () => Promise<void>;
@@ -178,9 +180,10 @@ export const useModels = create<ModelsState>((set, get) => ({
     }
   },
 
-  async saveSettings(dirs, downloadDir) {
+  async saveSettings(dirs, downloadDir, disabledDefaults) {
     try {
-      const settings = await call<Settings>("/api/settings", { method: "PUT", headers: json, body: JSON.stringify({ model_dirs: dirs, download_dir: downloadDir }) });
+      const disabled = disabledDefaults ?? get().settings?.disabled_defaults ?? [];
+      const settings = await call<Settings>("/api/settings", { method: "PUT", headers: json, body: JSON.stringify({ model_dirs: dirs, download_dir: downloadDir, disabled_defaults: disabled }) });
       set({ settings, settingsError: null });
       return true;
     } catch (e) {

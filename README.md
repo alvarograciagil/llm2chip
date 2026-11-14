@@ -71,7 +71,7 @@ A web interface backed by a local engine (or a desktop app):
 - **Models:** folders to search, search and download from Hugging Face, and building the chip's full image.
 - **New project assistant:** start from an FPGA board, a single chip, a base model or a fully custom design.
 
-The interface is in English, with a Spanish translation.
+The interface is in English, with a full Spanish translation; a test fails if a text on screen has no Spanish.
 
 | | |
 |---|---|
@@ -140,7 +140,11 @@ And all of them, including the whole chips in gates and the slow tests, before c
 scripts/check.sh --full
 ```
 
-Windows has the equivalent `.ps1` scripts. Weights are not included: the application looks in `~/.llm2chip/models`, `~/.mtplx/models`, the Hugging Face cache and any folders you add in the Models view.
+Windows has the equivalent `.ps1` scripts. Weights are not included. The application looks for models in `~/.llm2chip/models` (where downloads go), `~/.mtplx/models`, the Hugging Face cache and any folders you add in the Models view; each of the usual places can be turned off there. Folders can also be set before starting the engine, separated as in `PATH`:
+
+```bash
+LLM2CHIP_MODEL_DIRS=~/models:/data/llm scripts/dev.sh
+```
 
 ## What is verified
 

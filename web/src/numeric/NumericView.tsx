@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { create } from "zustand";
 import { Segmented } from "../components/controls";
 import { formatNumber, locale } from "../format";
+import { useT } from "../i18n";
 import { useSimulator } from "../simulator/simulatorStore";
 
 interface LabResult {
@@ -61,9 +62,10 @@ const percent = (value: number) => `${(value * 100).toLocaleString(locale(), { m
 
 /** One relative error per row, on a shared scale so that rows can be compared. */
 function ErrorBars({ rows }: { rows: { label: string; value: number }[] }) {
+  const t = useT();
   const largest = Math.max(...rows.map((r) => r.value), 1e-12);
   return (
-    <div className="lab-bars" role="table" aria-label="Error relativo">
+    <div className="lab-bars" role="table" aria-label={t("Relative error")}>
       {rows.map((row) => (
         <div className="lab-row" role="row" key={row.label} title={`${row.label}: ${percent(row.value)}`}>
           <span role="cell" className="lab-label">{row.label}</span>
@@ -76,16 +78,17 @@ function ErrorBars({ rows }: { rows: { label: string; value: number }[] }) {
 }
 
 export function NumericView() {
+  const t = useT();
   const { result, view, set, running, error } = useLab();
   const rows = !result
     ? []
     : view === "layers"
-      ? result.layers.map((l) => ({ label: `Layer ${l.layer}`, value: l.error }))
+      ? result.layers.map((l) => ({ label: t(`Layer ${l.layer}`), value: l.error }))
       : view === "tokens"
         ? result.logits_error.map((value, i) => ({ label: `Token ${i + 1}`, value }))
         : result.state_error.map((value, i) => ({ label: `Token ${i + 1}`, value }));
-  const options: [Source, string][] = [["layers", "Per layer"], ["tokens", "Logits per token"]];
-  if (result?.has_state) options.push(["state", "Recurrent state"]);
+  const options: [Source, string][] = [["layers", t("Per layer")], ["tokens", t("Logits per token")]];
+  if (result?.has_state) options.push(["state", t("Recurrent state")]);
 
   return (
     <section className="stage models-stage">
@@ -93,13 +96,13 @@ export function NumericView() {
         {error && (
           <div className="issue error" role="alert">
             <span className="issue-icon" aria-hidden="true">!</span>
-            <div><p>{error}</p></div>
+            <div><p>{t(error)}</p></div>
           </div>
         )}
-        {!result && !error && <p className="placeholder models-empty">{running ? "Running the model in floating point and in the chip's arithmetic…" : "Choose a model and an arithmetic to see how far the chip strays from the reference."}</p>}
+        {!result && !error && <p className="placeholder models-empty">{running ? t("Running the model in floating point and in the chip's arithmetic…") : t("Choose a model and an arithmetic to see how far the chip strays from the reference.")}</p>}
         {result && (
           <>
-            <Segmented label="View" value={view} options={options} onChange={(value) => set({ view: value })} />
+            <Segmented label={t("View")} value={view} options={options} onChange={(value) => set({ view: value })} />
             <ErrorBars rows={rows} />
           </>
         )}
@@ -109,6 +112,7 @@ export function NumericView() {
 }
 
 export function NumericPanel() {
+  const t = useT();
   const lab = useLab();
   const models = useSimulator((s) => s.models);
   const connect = useSimulator((s) => s.connect);
@@ -120,38 +124,38 @@ export function NumericPanel() {
   const { result } = lab;
   const number = (key: "newTokens" | "activationBits" | "stateBits" | "tableBits", label: string, min: number, max: number) => (
     <label>
-      {label}
+      {t(label)}
       <input type="number" min={min} max={max} value={lab[key]} onChange={(e) => lab.set({ [key]: Number(e.target.value) })} />
     </label>
   );
 
   return (
     <aside className="inspector essential">
-      <h2 className="detail-title">Numerics lab</h2>
-      <p className="detail-sub">Compares the chip's arithmetic with the floating-point reference.</p>
+      <h2 className="detail-title">{t("Numerics lab")}</h2>
+      <p className="detail-sub">{t("Compares the chip's arithmetic with the floating-point reference.")}</p>
       <div className="inset padded form">
         <label>
-          Model
+          {t("Model")}
           <select value={path} onChange={(e) => lab.set({ path: e.target.value })}>
             {runnable.map((m) => <option key={m.path} value={m.path}>{m.name}</option>)}
           </select>
         </label>
         <label>
-          Text
+          {t("Text")}
           <textarea rows={3} value={lab.prompt} onChange={(e) => lab.set({ prompt: e.target.value })} />
         </label>
         {number("newTokens", "Tokens generated", 1, 256)}
         {number("activationBits", "Activation bits", 4, 24)}
         {number("stateBits", "State bits", 4, 24)}
         {number("tableBits", "Table bits", 4, 16)}
-        <button className="pill primary-pill" disabled={!path || lab.running} onClick={() => { lab.set({ path }); void lab.run(); }}>{lab.running ? "Running…" : "Compare"}</button>
+        <button className="pill primary-pill" disabled={!path || lab.running} onClick={() => { lab.set({ path }); void lab.run(); }}>{lab.running ? t("Running…") : t("Compare")}</button>
       </div>
       {result && (
         <>
-          <h3>Result</h3>
+          <h3>{t("Result")}</h3>
           <dl className="inset padded lab-summary">
-            <div><dt>Same token chosen</dt><dd>{formatNumber(result.agreements)} of {formatNumber(result.compared)}</dd></div>
-            <div><dt>First difference</dt><dd>{result.first_divergence === null ? "None" : `Token ${result.first_divergence + 1}`}</dd></div>
+            <div><dt>{t("Same token chosen")}</dt><dd>{`${formatNumber(result.agreements)} ${t("of")} ${formatNumber(result.compared)}`}</dd></div>
+            <div><dt>{t("First difference")}</dt><dd>{result.first_divergence === null ? t("None") : `Token ${result.first_divergence + 1}`}</dd></div>
           </dl>
         </>
       )}

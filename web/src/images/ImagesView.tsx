@@ -6,6 +6,7 @@ import { readSquare, regionBetween, regionIsUsable, useImages, type Region } fro
 
 /** The picture with the region marked on it: drag across it to mark another. */
 function Marker({ preview, side, region, disabled, onRegion }: { preview: string; side: number; region: Region | null; disabled: boolean; onRegion: (r: Region | null) => void }) {
+  const t = useT();
   const box = useRef<HTMLDivElement>(null);
   const [from, setFrom] = useState<[number, number] | null>(null);
   const [draft, setDraft] = useState<Region | null>(null);
@@ -36,7 +37,7 @@ function Marker({ preview, side, region, disabled, onRegion }: { preview: string
         onRegion(regionIsUsable(r, side) ? r : null);
       }}
     >
-      <img src={preview} alt="Image being retouched" draggable={false} />
+      <img src={preview} alt={t("Image being retouched")} draggable={false} />
       {shown && (
         <div
           className="marker-region"

@@ -122,12 +122,12 @@ function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<An
   return (
     <div className="wizard-questions">
       {start !== "model" && (
-        <Question label="What are you after?" help="It decides which model I suggest among those that fit.">
-          <Segmented label="Goal" value={answers.goal} options={[["validate", t("Check that it works")], ["largest", t("The largest model")], ["fastest", t("The highest speed")]]} onChange={(goal) => set({ goal })} />
+        <Question label={t("What are you after?")} help={t("It decides which model I suggest among those that fit.")}>
+          <Segmented label={t("Goal")} value={answers.goal} options={[["validate", t("Check that it works")], ["largest", t("The largest model")], ["fastest", t("The highest speed")]]} onChange={(goal) => set({ goal })} />
         </Question>
       )}
-      <Question label="Weight bits" help="With 8 bits the model barely loses quality; with 4 it takes half and models twice as large fit; below 4 quality drops fast. With 16 they are kept as they come.">
-        <select aria-label="Weight bits" value={answers.weight_bits} onChange={(e) => set({ weight_bits: Number(e.target.value) })}>
+      <Question label={t("Weight bits")} help={t("With 8 bits the model barely loses quality; with 4 it takes half and models twice as large fit; below 4 quality drops fast. With 16 they are kept as they come.")}>
+        <select aria-label={t("Weight bits")} value={answers.weight_bits} onChange={(e) => set({ weight_bits: Number(e.target.value) })}>
           {WEIGHT_BITS.map(([bits, label]) => (
             <option key={bits} value={bits}>
               {label}
@@ -135,8 +135,8 @@ function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<An
           ))}
         </select>
       </Question>
-      <Question label="Context" help="The tokens the chip remembers. The cache grows with it, and it is what needs the most memory after the weights.">
-        <select aria-label="Context" value={answers.context_tokens} onChange={(e) => set({ context_tokens: Number(e.target.value) })}>
+      <Question label={t("Context")} help={t("The tokens the chip remembers. The cache grows with it, and it is what needs the most memory after the weights.")}>
+        <select aria-label={t("Context")} value={answers.context_tokens} onChange={(e) => set({ context_tokens: Number(e.target.value) })}>
           {CONTEXTS.map(([tokens, label]) => (
             <option key={tokens} value={tokens}>
               {label} tokens
@@ -146,11 +146,11 @@ function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<An
       </Question>
       {start !== "fpga" && (
         <>
-          <Question label="Target speed" help="Tokens per second for one user, guaranteed with the context full. The multipliers of each die come from here.">
-            <Segmented label="Speed" value={String(answers.target_tok_s)} options={SPEEDS} onChange={(v) => set({ target_tok_s: Number(v) })} />
+          <Question label={t("Target speed")} help={t("Tokens per second for one user, guaranteed with the context full. The multipliers of each die come from here.")}>
+            <Segmented label={t("Speed")} value={String(answers.target_tok_s)} options={SPEEDS} onChange={(v) => set({ target_tok_s: Number(v) })} />
           </Question>
-          <Question label="Process" help="The manufacturing node: it sets the area of each memory bit and each gate, and the clock.">
-            <select aria-label="Process" value={answers.node} onChange={(e) => set({ node: e.target.value })}>
+          <Question label={t("Process")} help={t("The manufacturing node: it sets the area of each memory bit and each gate, and the clock.")}>
+            <select aria-label={t("Process")} value={answers.node} onChange={(e) => set({ node: e.target.value })}>
               {nodes.map((n) => (
                 <option key={n.id} value={n.id}>
                   {t(n.label)}
@@ -158,16 +158,16 @@ function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<An
               ))}
             </select>
           </Question>
-          <Question label="Max die area" help="The physical limit is the reticle, about 858 mm². Small dies come out cheaper per wafer.">
-            <Segmented label="Area" value={String(answers.die_max_mm2)} options={[["100", "100 mm²"], ["300", "300 mm²"], ["600", "600 mm²"], ["858", t("Reticle")]]} onChange={(v) => set({ die_max_mm2: Number(v) })} />
+          <Question label={t("Max die area")} help={t("The physical limit is the reticle, about 858 mm². Small dies come out cheaper per wafer.")}>
+            <Segmented label={t("Area")} value={String(answers.die_max_mm2)} options={[["100", "100 mm²"], ["300", "300 mm²"], ["600", "600 mm²"], ["858", t("Reticle")]]} onChange={(v) => set({ die_max_mm2: Number(v) })} />
           </Question>
-          <Question label="Weights" help="In SRAM the chip takes other models; in ROM they are burnt in at manufacturing and take less.">
-            <Segmented label="Weights" value={answers.weight_backend} options={[["sram", t("SRAM, swappable")], ["rom", t("ROM, burnt in")]]} onChange={(weight_backend) => set({ weight_backend })} />
+          <Question label={t("Weights")} help={t("In SRAM the chip takes other models; in ROM they are burnt in at manufacturing and take less.")}>
+            <Segmented label={t("Weights")} value={answers.weight_backend} options={[["sram", t("SRAM, swappable")], ["rom", t("ROM, burnt in")]]} onChange={(weight_backend) => set({ weight_backend })} />
           </Question>
         </>
       )}
       {start === "model" && (
-        <Question label="Chip split" help="By layers: each chip does some layers and passes the vector to the next; little communication, but with one user one chip works at a time. By tensor: they all work on each layer at once; more speed for one user, with fast links. Mixed: tensor groups joined in a chain.">
+        <Question label={t("Chip split")} help={t("By layers: each chip does some layers and passes the vector to the next; little communication, but with one user one chip works at a time. By tensor: they all work on each layer at once; more speed for one user, with fast links. Mixed: tensor groups joined in a chain.")}>
           <Segmented label={t("Split")} value={answers.chip_split} options={[["layers", t("By layers")], ["tensor", t("By tensor")], ["mixed", t("Mixed")]]} onChange={(chip_split) => set({ chip_split })} />
         </Question>
       )}
@@ -176,19 +176,20 @@ function Questions({ answers, set }: { answers: Answers; set: (patch: Partial<An
 }
 
 function ModelList({ rows, answers, choose }: { rows: Row[]; answers: Answers; choose: (id: string) => void }) {
+  const t = useT();
   const judged = answers.start === "fpga" || answers.start === "chip";
   const best = judged ? suggested(rows, answers.goal) : null;
   return (
-    <ul className="wizard-models" role="listbox" aria-label="Models">
+    <ul className="wizard-models" role="listbox" aria-label={t("Models")}>
       {rows.map((r) => (
         <li key={r.id}>
           <button role="option" aria-selected={answers.model === r.id} className={answers.model === r.id ? "on" : ""} disabled={judged && !r.fits} onClick={() => choose(r.id)}>
             <span className="wizard-model-name">
-              {r.model.name}
-              {r.id === best && <em>Recommended</em>}
+              {t(r.model.name)}
+              {r.id === best && <em>{t("Recommended")}</em>}
             </span>
-            <span className="wizard-model-size">{Number.isFinite(r.params_g) ? `${formatParams(r.params_g)} parameters` : ""}</span>
-            {judged && <span className={r.fits ? "wizard-model-note" : "wizard-model-note bad"}>{r.note}</span>}
+            <span className="wizard-model-size">{Number.isFinite(r.params_g) ? t(`${formatParams(r.params_g)} parameters`) : ""}</span>
+            {judged && <span className={r.fits ? "wizard-model-note" : "wizard-model-note bad"}>{t(r.note)}</span>}
             {judged && r.fits && Number.isFinite(r.tok_s) && <span className="wizard-model-speed">{formatNumber(r.tok_s)} tok/s</span>}
           </button>
         </li>
@@ -199,8 +200,9 @@ function ModelList({ rows, answers, choose }: { rows: Row[]; answers: Answers; c
 
 /** A drawing of a board, for those whose maker's photo could not be checked. */
 function BoardDrawing({ board }: { board: FpgaBoard }) {
+  const t = useT();
   return (
-    <svg className="board-drawing" viewBox="0 0 320 200" role="img" aria-label={`Drawing of the ${board.name} board`}>
+    <svg className="board-drawing" viewBox="0 0 320 200" role="img" aria-label={t(`Drawing of the ${board.name} board`)}>
       <rect x="6" y="6" width="308" height="188" rx="10" className="pcb" />
       {[18, 302].flatMap((x) => [18, 182].map((y) => <circle key={`${x}-${y}`} cx={x} cy={y} r="5" className="hole" />))}
       <rect x="110" y="56" width="92" height="92" rx="4" className="fpga" />
@@ -222,7 +224,7 @@ function BoardDrawing({ board }: { board: FpgaBoard }) {
       <rect x="26" y="70" width="44" height="64" rx="3" className="chip" />
       <rect x="40" y="170" width="240" height="12" rx="2" className="header" />
       <text x="160" y="30" className="sub">
-        A drawing, not a photo
+        {t("A drawing, not a photo")}
       </text>
     </svg>
   );
@@ -240,7 +242,7 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
     <div className="board-picker">
       <div className="board-menus">
         <label>
-          Maker
+          {t("Maker")}
           <select value={current.maker} onChange={(e) => choose([...boards].filter((b) => b.maker === e.target.value).sort((a, b) => a.price_usd - b.price_usd)[0].id)}>
             {makers(boards).map((m) => (
               <option key={m}>{m}</option>
@@ -248,7 +250,7 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
           </select>
         </label>
         <label>
-          Model
+          {t("Model")}
           <select value={current.id} onChange={(e) => choose(e.target.value)}>
             {models.map((b) => (
               <option key={b.id} value={b.id}>
@@ -260,7 +262,7 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
       </div>
       <article className="board-card">
         <div className="board-photo">
-          {current.image && photoFailed !== current.id ? <img src={current.image} alt={`Photo of the ${current.name} board`} referrerPolicy="no-referrer" onError={() => setPhotoFailed(current.id)} /> : <BoardDrawing board={current} />}
+          {current.image && photoFailed !== current.id ? <img src={current.image} alt={t(`Photo of the ${current.name} board`)} referrerPolicy="no-referrer" onError={() => setPhotoFailed(current.id)} /> : <BoardDrawing board={current} />}
         </div>
         <div className="board-specs">
           <h3>{t(current.name)}</h3>
@@ -303,17 +305,17 @@ function Summary({ report, model, board }: { report: Report | null; model: Model
   return (
     <div className="wizard-summary">
       <dl>
-        <dt>Model</dt>
-        <dd>{model.name}</dd>
+        <dt>{t("Model")}</dt>
+        <dd>{t(model.name)}</dd>
         {board && (
           <>
-            <dt>Board</dt>
-            <dd>{board}</dd>
+            <dt>{t("Board")}</dt>
+            <dd>{t(board)}</dd>
           </>
         )}
-        <dt>Speed</dt>
+        <dt>{t("Speed")}</dt>
         <dd>{formatNumber(metric(report, "tok_s"))} tok/s</dd>
-        <dt>Chips</dt>
+        <dt>{t("Chips")}</dt>
         <dd>
           {report.dies} {report.dies === 1 ? "die" : "dies"} {t("of")} {formatNumber(report.die_area_mm2)} mm²
         </dd>
@@ -397,7 +399,7 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
   // Over the whole window: the toolbar's blur would otherwise hold it.
   return createPortal(
     <div className="wizard-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="wizard" role="dialog" aria-modal="true" aria-label="New project" tabIndex={-1} ref={dialog}>
+      <div className="wizard" role="dialog" aria-modal="true" aria-label={t("New project")} tabIndex={-1} ref={dialog}>
         <header>
           <span className="wizard-steps">
             {t("Step")} {step + 1} / {steps.length}
@@ -416,14 +418,14 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
           )}
           {current === "board" && <BoardPicker board={answers.board} choose={(board) => set({ board })} />}
           {current === "questions" && <Questions answers={answers} set={set} />}
-          {busy && <p className="wizard-empty">Estimating each design…</p>}
+          {busy && <p className="wizard-empty">{t("Estimating each design…")}</p>}
           {current === "model" && !busy && <ModelList rows={rows} answers={answers} choose={(id) => set({ model: id })} />}
           {current === "name" && (
             <>
               {!busy && <Summary report={report} model={model} board={board} />}
               <label className="wizard-name">
                 {t("Project name")}
-                <input type="text" value={name} placeholder={model ? `${model.name}${board ? ` on ${board}` : ""}` : ""} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && finish()} />
+                <input type="text" value={name} placeholder={model ? `${t(model.name)}${board ? ` ${t("on")} ${t(board)}` : ""}` : ""} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && finish()} />
               </label>
             </>
           )}

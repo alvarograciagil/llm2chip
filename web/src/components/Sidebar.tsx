@@ -32,7 +32,7 @@ function ValueInput({ field, value, onCommit }: { field: RangeField; value: numb
       <input
         type="text"
         inputMode="decimal"
-        aria-label={`Value of ${field.label}`}
+        aria-label={t(`Value of ${t(field.label)}`)}
         value={draft ?? formatNumber(value)}
         onFocus={(e) => {
           setDraft(locale() === "es-ES" ? String(value).replace(".", ",") : String(value));
@@ -58,6 +58,7 @@ function ValueInput({ field, value, onCommit }: { field: RangeField; value: numb
 /** A "?" that explains a parameter while the pointer is on it, above everything so no
  * scrolling panel cuts it, and opens its documentation when pressed. */
 function InfoTip({ id, label, text, onOpen }: { id: string; label: string; text: string; onOpen: () => void }) {
+  const t = useT();
   const [at, setAt] = useState<{ x: number; y: number; above: boolean } | null>(null);
   const show = (e: { currentTarget: HTMLElement }) => {
     const box = e.currentTarget.getBoundingClientRect();
@@ -66,14 +67,14 @@ function InfoTip({ id, label, text, onOpen }: { id: string; label: string; text:
   };
   return (
     <span className="info">
-      <button className="info-button" aria-label={`What ${label} is`} aria-describedby={id} onClick={onOpen} onMouseEnter={show} onMouseLeave={() => setAt(null)} onFocus={show} onBlur={() => setAt(null)}>
+      <button className="info-button" aria-label={t(`What ${label} is`)} aria-describedby={id} onClick={onOpen} onMouseEnter={show} onMouseLeave={() => setAt(null)} onFocus={show} onBlur={() => setAt(null)}>
         ?
       </button>
       {/* The sidebar's blur would make a fixed position its own: the tip lives in the page. */}
       {createPortal(
         <span className={at ? "tooltip shown" : "tooltip"} role="tooltip" id={id} style={at ? { left: at.x, top: at.y, transform: at.above ? "translateY(-100%)" : undefined } : undefined}>
           {text}
-          <em>Click to see the full documentation.</em>
+          <em>{t("Click to see the full documentation.")}</em>
         </span>,
         document.body,
       )}
@@ -111,7 +112,7 @@ function Row({ field, children, below }: { field: Field; children: React.ReactNo
           {t(field.label)}
           {help && <InfoTip id={`ayuda-${field.key}`} label={t(field.label)} text={help} onOpen={() => openDocs(field.key)} />}
           {changed && (
-            <button className="changed" aria-label={`${t("Reset")} ${t(field.label)}`} title="Reset" onClick={() => resetParam(field.key)} />
+            <button className="changed" aria-label={`${t("Reset")} ${t(field.label)}`} title={t("Reset")} onClick={() => resetParam(field.key)} />
           )}
         </span>
         {children}
@@ -122,6 +123,7 @@ function Row({ field, children, below }: { field: Field; children: React.ReactNo
 }
 
 function RangeRow({ field }: { field: RangeField }) {
+  const t = useT();
   const value = useDesign((s) => s.params[field.key]) as number;
   const setParam = useDesign((s) => s.setParam);
   const position = field.log ? toLog(Math.max(value, field.min), field.min, field.max) * LOG_STEPS : value;
@@ -137,7 +139,7 @@ function RangeRow({ field }: { field: RangeField }) {
       below={
         <input
           type="range"
-          aria-label={field.label}
+          aria-label={t(field.label)}
           style={{ ["--fill" as string]: `${Math.min(1, Math.max(0, fill)) * 100}%` }}
           min={field.log ? 0 : field.min}
           max={field.log ? LOG_STEPS : field.max}
@@ -152,15 +154,6 @@ function RangeRow({ field }: { field: RangeField }) {
   );
 }
 
-/** A weight format's name: its numbers stay, its words follow the language. */
-function englishLabel(label: string, t: (text: string) => string): string {
-  return label
-    .replace("Mix of 4 and 8 bits (real Qwen)", t("Mix of 4 and 8 bits (real Qwen)"))
-    .replace("fine scale", t("fine scale"))
-    .replace(/(\d+) de fracción/, (_, n: string) => `${n} ${t("fraction")}`)
-    .replace(/(\d+) valores/, (_, n: string) => `${n} ${t("values")}`);
-}
-
 function PresetRow({ field }: { field: Extract<Field, { kind: "preset" }> }) {
   const t = useT();
   const params = useDesign((s) => s.params);
@@ -172,13 +165,13 @@ function PresetRow({ field }: { field: Extract<Field, { kind: "preset" }> }) {
   };
   return (
     <Row field={field}>
-      <select aria-label={field.label} value={current} onChange={(e) => choose(e.target.value)}>
+      <select aria-label={t(field.label)} value={current} onChange={(e) => choose(e.target.value)}>
         {current === "" && <option value="">{t("Custom")}</option>}
         {field.sections.map((section) => (
           <optgroup key={section.title} label={t(section.title)}>
             {section.presets.map((preset) => (
               <option key={preset.label} value={preset.label}>
-                {englishLabel(preset.label, t)}
+                {t(preset.label)}
               </option>
             ))}
           </optgroup>
@@ -197,13 +190,13 @@ function FieldRow({ field }: { field: Field }) {
   if (field.kind === "toggle") {
     return (
       <Row field={field}>
-        <Switch checked={value as boolean} label={field.label} onChange={(v) => setParam(field.key, v)} />
+        <Switch checked={value as boolean} label={t(field.label)} onChange={(v) => setParam(field.key, v)} />
       </Row>
     );
   }
   return (
     <Row field={field}>
-      <select aria-label={field.label} value={value as string} onChange={(e) => setParam(field.key, e.target.value)}>
+      <select aria-label={t(field.label)} value={value as string} onChange={(e) => setParam(field.key, e.target.value)}>
         {field.options.map(([id, label]) => (
           <option key={id} value={id}>
             {t(label)}
@@ -340,10 +333,10 @@ function ModelSection() {
       <div className="row">
         <div className="row-head">
           <span className="row-label">{t("Model")}</span>
-          <select aria-label="Model" value={model?.id} onChange={(e) => selectModel(e.target.value)}>
+          <select aria-label={t("Model")} value={model?.id} onChange={(e) => selectModel(e.target.value)}>
             {models.map((m) => (
               <option key={m.id} value={m.id}>
-                {m.name}
+                {t(m.name)}
               </option>
             ))}
           </select>
@@ -457,7 +450,7 @@ export function Sidebar() {
     <aside className="sidebar">
       <div className="sidebar-tabs">
         <Segmented
-          label="Panel"
+          label={t("Panel")}
           value={tab}
           options={[
             ["parameters", t("Parameters")],

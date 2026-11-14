@@ -25,6 +25,7 @@ const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeL
 function SavePopover({ onClose }: { onClose: () => void }) {
   const designName = useDesign((s) => s.designName);
   const saveDesign = useDesign((s) => s.saveDesign);
+  const t = useT();
   const [name, setName] = useState(designName === "Untitled" ? "" : designName);
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => input.current?.select(), []);
@@ -34,9 +35,9 @@ function SavePopover({ onClose }: { onClose: () => void }) {
     onClose();
   };
   return (
-    <div className="popover" role="dialog" aria-label="Save design">
+    <div className="popover" role="dialog" aria-label={t("Save design")}>
       <label>
-        Design name
+        {t("Design name")}
         <input
           ref={input}
           type="text"
@@ -49,9 +50,9 @@ function SavePopover({ onClose }: { onClose: () => void }) {
         />
       </label>
       <div className="popover-actions">
-        <button onClick={onClose}>Cancel</button>
+        <button onClick={onClose}>{t("Cancel")}</button>
         <button className="primary" disabled={!name.trim()} onClick={submit}>
-          Save
+          {t("Save")}
         </button>
       </div>
     </div>
@@ -78,7 +79,7 @@ function DesignMenu() {
       <svg viewBox="0 0 10 14" aria-hidden="true">
         <path d="M2 5l3-3 3 3M2 9l3 3 3-3" {...stroke} strokeWidth={1.4} />
       </svg>
-      <select aria-label="Open design" value="" onChange={onChange}>
+      <select aria-label={t("Open design")} value="" onChange={onChange}>
         <option value="" disabled hidden />
         <optgroup label={t("Templates")}>
           {presets.map((p) => (
@@ -88,7 +89,7 @@ function DesignMenu() {
           ))}
         </optgroup>
         {saved.length > 0 && (
-          <optgroup label="My designs">
+          <optgroup label={t("My designs")}>
             {saved.map((d) => (
               <option key={d.name} value={`s:${d.name}`}>
                 {d.name}
@@ -102,10 +103,11 @@ function DesignMenu() {
 }
 
 function AppearanceMenu() {
+  const t = useT();
   const appearance = useDesign((s) => s.appearance);
   const setAppearance = useDesign((s) => s.setAppearance);
   return (
-    <label className="icon-select" title="Appearance">
+    <label className="icon-select" title={t("Appearance")}>
       <svg viewBox="0 0 20 20" aria-hidden="true">
         {appearance === "light" && (
           <path d="M10 6.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7ZM10 2.5v1.6M10 15.9v1.6M2.5 10h1.6M15.9 10h1.6M4.7 4.7l1.1 1.1M14.2 14.2l1.1 1.1M15.3 4.7l-1.1 1.1M5.8 14.2l-1.1 1.1" {...stroke} />
@@ -118,10 +120,10 @@ function AppearanceMenu() {
           </>
         )}
       </svg>
-      <select aria-label="Appearance" value={appearance} onChange={(e) => setAppearance(e.target.value as Appearance)}>
-        <option value="auto">Automatic</option>
-        <option value="light">Light</option>
-        <option value="dark">Dark</option>
+      <select aria-label={t("Appearance")} value={appearance} onChange={(e) => setAppearance(e.target.value as Appearance)}>
+        <option value="auto">{t("Automatic")}</option>
+        <option value="light">{t("Light")}</option>
+        <option value="dark">{t("Dark")}</option>
       </select>
     </label>
   );

@@ -153,7 +153,7 @@ scripts/dev.sh
 Open `http://localhost:5173`:
 
 1. **New project** (the + button): pick an FPGA board, a single chip, a base model or a custom design.
-2. **Models:** the checkpoints found on this machine, with what each can do. *Design chip* resizes the chip for one; *Simulate* runs it.
+2. **Models:** the checkpoints found on this machine, with what each can do. *Design chip* resizes the chip for one; *Simulate* runs it. The panel on the right sets where models are searched for: the usual places can be turned off and other folders added. (The path under each model is hidden in this screenshot.)
 
    ![Models view](screenshots/models.png)
 

@@ -99,7 +99,7 @@ function Summary({ report }: { report: Report }) {
           <dl className="inset metrics">
             <div><dt>{t("Multipliers per die")}</dt><dd>{formatNumber(report.macs_per_die)}</dd></div>
             {report.decisions.map((d) => (
-              <div key={d.weight_bits} title={`${formatNumber(d.area_um2)} µm² and ${formatNumber(d.energy_pj)} pJ per multiplication, up to ${formatNumber(d.fmax_ghz)} GHz.`}>
+              <div key={d.weight_bits} title={t(`${formatNumber(d.area_um2)} µm² and ${formatNumber(d.energy_pj)} pJ per multiplication, up to ${formatNumber(d.fmax_ghz)} GHz.`)}>
                 <dt>{t("{n}-bit weights").replace("{n}", String(d.weight_bits))} ({formatNumber(d.share * 100)} %)</dt>
                 <dd>{t(MULTIPLIER_NAME[d.multiplier])}, {d.mac_stages + d.adder_stages} {t("stages")}{d.skip_zeros ? `, ${t("skips zeros")}` : ""}</dd>
               </div>
@@ -184,11 +184,12 @@ function Summary({ report }: { report: Report }) {
 }
 
 function Detail({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
+  const t = useT();
   const setSelection = useDesign((s) => s.setSelection);
   return (
     <>
       <button className="back" onClick={() => setSelection(null)}>
-        ‹ Resumen
+        ‹ {t("Summary")}
       </button>
       <h2 className="detail-title">{title}</h2>
       {subtitle && <p className="detail-sub">{subtitle}</p>}

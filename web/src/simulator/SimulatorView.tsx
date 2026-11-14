@@ -68,7 +68,7 @@ function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
                     className={s === pinned ? `${KIND_CLASS[s.kind]} pinned` : KIND_CLASS[s.kind]}
                     style={{ left: `${(s.start / schedule.total_cycles) * 100}%`, width: `${Math.max(0.04, (s.cycles / schedule.total_cycles) * 100)}%` }}
                     tabIndex={0}
-                    aria-label={`${s.name}${s.layer !== null ? `, ${t("layer")} ${s.layer}` : ""}, ${formatNumber(Math.round(s.cycles))} ${t("cycles")}`}
+                    aria-label={`${t(s.name)}${s.layer !== null ? `, ${t("layer")} ${s.layer}` : ""}, ${formatNumber(Math.round(s.cycles))} ${t("cycles")}`}
                     onMouseEnter={() => setHover(s)}
                     onFocus={() => setHover(s)}
                     onBlur={() => setHover(null)}
@@ -94,7 +94,7 @@ function Timeline({ schedule, pulse }: { schedule: Schedule; pulse: number }) {
         {shown ? (
           <>
             <p>
-              <strong>{shown.name}</strong>
+              <strong>{t(shown.name)}</strong>
               {shown.layer !== null ? ` · ${t("layer")} ${shown.layer}` : ""} · die {shown.die} · {formatNumber(Math.round(shown.cycles))} {t("cycles")} ({percent(shown.cycles / schedule.total_cycles)} % {t("of the token")}, {formatNumber(ns(shown.cycles))} ns) · {t("starts at cycle")} {formatNumber(Math.round(shown.start))}
             </p>
             <p className="muted-text">{t(KIND_HELP[shown.kind])}</p>
@@ -161,7 +161,7 @@ export function SimulatorView() {
         <div className="transcript" aria-live="polite">
           {picture && draw ? (
             <figure className="picture">
-              <img src={picture.data} width={picture.side} height={picture.side} alt={`Generated image: ${prompt}`} />
+              <img src={picture.data} width={picture.side} height={picture.side} alt={`${t("Generated image")}: ${prompt}`} />
               <figcaption>{picture.side} × {picture.side} px, in {formatNumber(picture.seconds)} s</figcaption>
             </figure>
           ) : output ? <p>{output}</p> : <p className="placeholder">{loaded ? (draw ? t("The image will appear here.") : t("The model's answer will appear here.")) : t("Load the chip in the right panel to simulate it: with the design's model and arithmetic.")}</p>}
@@ -185,10 +185,10 @@ export function SimulatorView() {
         )}
         {image && (
           <figure className="attached">
-            <img src={image.preview} alt="Attached image" />
+            <img src={image.preview} alt={t("Attached image")} />
             <figcaption>
               {image.width} × {image.height} px{imageReport ? ` · ${formatNumber(imageReport.patches)} ${t("patches")} → ${formatNumber(imageReport.tokens)} tokens, ${formatNumber(imageReport.seconds)} s${imageReport.onChip ? `, ${t("encoded by the chip with its arithmetic")}` : `, ${t("encoded by the host in floating point")}`}` : ""}
-              <button className="link inline" onClick={() => set({ image: null, imageReport: null })}>Remove</button>
+              <button className="link inline" onClick={() => set({ image: null, imageReport: null })}>{t("Remove")}</button>
             </figcaption>
           </figure>
         )}
@@ -200,7 +200,7 @@ export function SimulatorView() {
         )}
         <div className="composer">
           <label className={readsImages ? "pill attach" : "pill attach disabled"} title={readsImages ? t("Attach an image: the model's encoder turns it into tokens read before the question") : current?.images?.note ?? t("This model does not read images")}>
-            Image
+            {t("Image")}
             <input type="file" accept="image/*" disabled={!readsImages} onChange={(e) => {
               const file = e.target.files?.[0];
               if (file) void readImage(file).then((picture) => set({ image: picture, imageReport: null }));
@@ -208,7 +208,7 @@ export function SimulatorView() {
             }} />
           </label>
           <textarea
-            aria-label="Input text"
+            aria-label={t("Input text")}
             rows={3}
             value={prompt}
             placeholder={t("Type a text")}
@@ -218,9 +218,9 @@ export function SimulatorView() {
             }}
           />
           {running ? (
-            <button className="pill" onClick={stop}>Stop</button>
+            <button className="pill" onClick={stop}>{t("Stop")}</button>
           ) : (
-            <button className="pill primary-pill" disabled={!loaded || !prompt.trim()} onClick={generate}>Send</button>
+            <button className="pill primary-pill" disabled={!loaded || !prompt.trim()} onClick={generate}>{t("Send")}</button>
           )}
         </div>
         {loaded && <ChipActivity />}
@@ -298,14 +298,14 @@ export function SimulatorPanel() {
 
   return (
     <aside className="inspector">
-      <h2 className="detail-title">Simulator</h2>
+      <h2 className="detail-title">{t("Simulator")}</h2>
       <p className="detail-sub">{t("Runs the microprogram with real weights.")}</p>
 
       <h3>{t("The chip being simulated")}</h3>
       <div className="inset padded form">
         <p className="sim-model">
           <strong>{design?.name ?? t("No model")}</strong>
-          <span className="muted-text">{t("The design's model, with its arithmetic")}: {String(params.activation_bits)}-bit {t("integers and weights")} {formatLabel}.</span>
+          <span className="muted-text">{t(`The design's model, with its arithmetic: ${String(params.activation_bits)}-bit integers and weights ${t(formatLabel)}.`)}</span>
         </p>
         {candidates.length === 0 ? (
           <>

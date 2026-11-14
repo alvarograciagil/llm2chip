@@ -60,7 +60,7 @@ function Legend({ report, overlay }: { report: Report; overlay: Overlay }) {
       <span>0</span>
       <i className="ramp" aria-hidden="true" />
       <span>
-        {show(overlayRange(report, overlay))} {unit}
+        {show(overlayRange(report, overlay))} {t(unit)}
       </span>
     </div>
   );
@@ -74,20 +74,20 @@ function Breadcrumb({ selection, onSystem, onDie }: { selection: Selection; onSy
       {selection && (
         <>
           <span aria-hidden="true">›</span>
-          <button onClick={() => onDie(selection.die)}>Die {selection.die}</button>
+          <button onClick={() => onDie(selection.die)}>{t(`Die ${selection.die}`)}</button>
         </>
       )}
       {selection && (selection.kind === "array" || selection.kind === "cell") && (
         <>
           <span aria-hidden="true">›</span>
-          <span>Cell array</span>
+          <span>{t("Cell array")}</span>
         </>
       )}
       {selection?.kind === "cell" && (
         <>
           <span aria-hidden="true">›</span>
           <span>
-            Celda {selection.col}, {selection.row}
+            {t(`Cell ${selection.col}, ${selection.row}`)}
           </span>
         </>
       )}
@@ -117,6 +117,8 @@ export function FloorplanView() {
   const hover = useRef<Hit | null>(null);
   const theme = useRef<Theme | null>(null);
   const latest = useRef({ report, overlay, selection });
+  const translator = useRef(t);
+  translator.current = t;
   latest.current = { report, overlay, selection };
   const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(null);
 
@@ -127,7 +129,7 @@ export function FloorplanView() {
     const ctx = el.getContext("2d")!;
     const dpr = window.devicePixelRatio || 1;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    draw(ctx, { report: r, overlay: o, selection: s, hover: hover.current, theme: theme.current, ...size.current, camera: camera.current });
+    draw(ctx, { report: r, overlay: o, selection: s, hover: hover.current, theme: theme.current, ...size.current, camera: camera.current, t: translator.current });
   }, []);
 
   const schedule = useCallback(() => {
@@ -317,7 +319,7 @@ export function FloorplanView() {
       hover.current = hit;
       schedule();
     }
-    setTip(hit ? { x: px, y: py, text: hit.label } : null);
+    setTip(hit ? { x: px, y: py, text: t(hit.label) } : null);
   };
 
   const onPointerUp = (e: ReactPointerEvent<HTMLCanvasElement>) => {
