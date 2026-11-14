@@ -189,7 +189,7 @@ impl Hub {
     }
 
     fn with_endpoint(home: PathBuf, endpoint: String) -> Arc<Self> {
-        let client = reqwest::Client::builder().user_agent(concat!("llm2chip/", env!("CARGO_PKG_VERSION"))).connect_timeout(Duration::from_secs(30)).read_timeout(Duration::from_secs(60)).build().expect("cliente HTTP");
+        let client = reqwest::Client::builder().user_agent(concat!("llm2chip/", env!("CARGO_PKG_VERSION"))).connect_timeout(Duration::from_secs(30)).read_timeout(Duration::from_secs(60)).build().expect("the HTTP client");
         Arc::new(Self { endpoint: endpoint.trim_end_matches('/').to_string(), home, client, jobs: Mutex::new(HashMap::new()), slots: Semaphore::new(1) })
     }
 

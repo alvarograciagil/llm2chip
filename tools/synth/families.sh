@@ -5,7 +5,7 @@
 #   cargo run --release -p sim --example fpga -- chip.v --dsp --factor-steps 2
 #   tools/synth/families.sh chip.v [OUT_DIR] [ecp5 xilinx gowin cyclone4 ...]
 #
-# Needs OSS CAD Suite (the server installs it in ~/.llm2chip/tools/oss-cad-suite).
+# Needs OSS CAD Suite, unpacked in ~/.llm2chip/tools/oss-cad-suite or where OSS_CAD_SUITE points.
 # `ecp5-pnr` also places and routes on an ECP5-85F and reports the clock it reaches.
 set -u
 chip=${1:?"the chip's Verilog"}

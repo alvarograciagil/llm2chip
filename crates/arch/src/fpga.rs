@@ -236,7 +236,7 @@ mod corrections {
                 let fixed = crate::estimate(model, &with(&p, field, value)).unwrap();
                 let kind = |m: &str| m.chars().take(24).collect::<String>();
                 let still = fixed.violations.iter().find(|w| w.field == v.field && w.severity == v.severity && kind(&w.message) == kind(&v.message));
-                assert!(still.is_none() || v.severity == Severity::Warning && field == "target_tok_s", "«{}» sigue tras poner {field} = {value}: {:?}", v.message, still.map(|w| &w.message));
+                assert!(still.is_none() || v.severity == Severity::Warning && field == "target_tok_s", "“{}” remains after setting {field} = {value}: {:?}", v.message, still.map(|w| &w.message));
                 checked += 1;
             }
         }

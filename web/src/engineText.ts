@@ -964,6 +964,8 @@ export const ENGINE_TEXT: [string, string][] = [
   ["{s} µm² and {s} pJ per multiplication, up to {s} GHz.", "{0} µm² y {1} pJ por multiplicación, hasta {2} GHz."],
   ["The cells start a new sum; adds {s}.", "Las celdas empiezan una suma nueva; suma {0}."],
   ["The design's model, with its arithmetic: {n}-bit integers and weights {s}.", "El modelo del diseño, con su aritmética: enteros de {0} bits y pesos {1}."],
+  ["{s}: type {s} is not supported", "{0}: tipo {1} no soportado"],
+  ["invalid request", "petición inválida"],
 ];
 
 const NUMBER = "(-?[\\d.,]+)";

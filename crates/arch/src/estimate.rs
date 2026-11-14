@@ -1625,7 +1625,7 @@ mod tests {
             let blocks = report.blocks.iter().map(|b| b.per_die_mm2).sum::<f64>();
             let default_blocks = base_report.die_area_mm2;
             let metrics = serde_json::to_string(&report.metrics).unwrap();
-            assert!(metrics != base || (blocks - default_blocks).abs() > 1e-9, "{} no cambia nada", option.id);
+            assert!(metrics != base || (blocks - default_blocks).abs() > 1e-9, "{} changes nothing", option.id);
         }
     }
 

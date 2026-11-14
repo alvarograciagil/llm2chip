@@ -17,7 +17,7 @@ fn build_firmware() -> Option<FirmwareImage> {
             let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../firmware");
             let built = Command::new("cargo").current_dir(&dir).env_remove("RUSTFLAGS").env_remove("CARGO_ENCODED_RUSTFLAGS").args(["build", "--release"]).output().ok()?;
             if !built.status.success() {
-                eprintln!("firmware omitido: {}", String::from_utf8_lossy(&built.stderr));
+                eprintln!("firmware skipped: {}", String::from_utf8_lossy(&built.stderr));
                 return None;
             }
             let elf = std::fs::read(dir.join("target/riscv32im-unknown-none-elf/release/firmware")).ok()?;

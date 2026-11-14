@@ -9,6 +9,7 @@ import react from "@vitejs/plugin-react";
 const STATE = join(homedir(), ".llm2chip");
 const LAN = process.env.LLM2CHIP_LAN === "1";
 const PORT = Number(process.env.LLM2CHIP_WEB_PORT) || 5173;
+const ENGINE_PORT = Number(process.env.LLM2CHIP_ENGINE_PORT) || 7878;
 const COOKIE = "llm2chip_lan";
 
 /** The engine writes a new token on every start, so it is read per request. */
@@ -73,7 +74,7 @@ function lanAccess(): Plugin {
         const address = Object.values(networkInterfaces()).flat().find((a) => a?.family === "IPv4" && !a.internal)?.address ?? "localhost";
         const link = `http://${address}:${PORT}/?key=${key}`;
         writeFileSync(join(STATE, "lan-url"), `${link}\n`, { mode: 0o600 });
-        console.log(`\n  Red local: ${link}\n`);
+        console.log(`\n  Local network: ${link}\n`);
       });
     },
   };
@@ -96,7 +97,7 @@ export default defineConfig({
     allowedHosts: LAN ? [".local"] : undefined,
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:7878",
+        target: `http://127.0.0.1:${ENGINE_PORT}`,
         ws: true,
         configure(proxy) {
           proxy.on("proxyReq", (outgoing, incoming) => vouch(outgoing, incoming));

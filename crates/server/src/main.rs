@@ -41,7 +41,12 @@ use std::sync::{Arc, Mutex};
 use tokenizers::Tokenizer;
 use tokio::sync::mpsc;
 
-const PORT: u16 = 7878;
+/// The engine's port unless `LLM2CHIP_ENGINE_PORT` gives another.
+const DEFAULT_PORT: u16 = 7878;
+
+fn engine_port() -> u16 {
+    std::env::var("LLM2CHIP_ENGINE_PORT").ok().and_then(|p| p.trim().parse().ok()).unwrap_or(DEFAULT_PORT)
+}
 const FIRMWARE: &[u8] = include_bytes!("../../../firmware/prebuilt/firmware.elf");
 const FLOW_LOGITS_REGISTER: u32 = 1;
 const DEFAULT_CONTEXT: u64 = 8192;
@@ -616,7 +621,7 @@ async fn generate_socket(ws: WebSocketUpgrade, State(app): State<App>) -> Respon
 async fn handle_socket(mut socket: WebSocket, app: App) {
     let Some(Ok(Message::Text(text))) = socket.recv().await else { return };
     let Ok(request) = serde_json::from_str::<GenerateRequest>(&text) else {
-        let _ = socket.send(Message::Text(r#"{"type":"error","message":"petición inválida"}"#.into())).await;
+        let _ = socket.send(Message::Text(r#"{"type":"error","message":"invalid request"}"#.into())).await;
         return;
     };
 
@@ -1147,7 +1152,7 @@ async fn guard(State(app): State<App>, request: Request, next: Next) -> Response
 /// Serves the built interface and hands the browser its session cookie.
 async fn static_file(State(app): State<App>, uri: axum::http::Uri) -> Response {
     let Some(root) = app.dist.as_ref() else {
-        return (StatusCode::NOT_FOUND, "interfaz no compilada").into_response();
+        return (StatusCode::NOT_FOUND, "the interface is not built: run npm --prefix web run build").into_response();
     };
     let wanted = uri.path().trim_start_matches('/');
     let wanted = if wanted.is_empty() { "index.html" } else { wanted };
@@ -1220,8 +1225,15 @@ async fn main() {
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .fallback(static_file)
         .with_state(app);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", PORT)).await.expect("port 7878 is in use");
-    println!("llm2chip at http://127.0.0.1:{PORT}");
+    let port = engine_port();
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("cannot listen on 127.0.0.1:{port} ({e}): another llm2chip may be running, or set LLM2CHIP_ENGINE_PORT");
+            std::process::exit(1);
+        }
+    };
+    println!("llm2chip at http://127.0.0.1:{port}");
     axum::serve(listener, routes).await.expect("the server failed");
 }
 

@@ -106,45 +106,27 @@ Acceleration uses Metal on macOS and Vulkan on Windows and Linux. Full gate-by-g
 
 ## Getting started
 
-You need Rust with the `wasm32-unknown-unknown` and `riscv32im-unknown-none-elf` targets, `wasm-pack` and Node. Icarus Verilog, Yosys and OpenROAD are optional.
+You need Rust with the `wasm32-unknown-unknown` target, `wasm-pack` and Node 22.12 or newer. A Metal or Vulkan GPU speeds up the simulation; Docker, Icarus Verilog and OSS CAD Suite are optional. The [installation guide](docs/install.md) has the steps for macOS, Linux and Windows, every start-up option and the troubleshooting.
 
 ```bash
+git clone https://github.com/Xenogears/llm2chip.git
+cd llm2chip
+npm --prefix web ci
 scripts/dev.sh
 ```
 
-Then open `http://localhost:5173`. The local engine only listens on `127.0.0.1`.
+Then open `http://localhost:5173`. On Windows, `scripts\dev.ps1`. Weights are not included: download a model from the Models view (for example `Qwen/Qwen3-0.6B`), or point it at the folders where you keep yours.
 
-To use the interface from other machines on your network:
+The most used options:
 
-```bash
-scripts/dev.sh --lan
-```
-
-It prints an address with an access key, also saved in `~/.llm2chip/lan-url`. Anyone with that address can load and run models on your machine, so do not share it outside your network. The engine itself still listens only locally; `LLM2CHIP_LAN_KEY` sets your own key and `LLM2CHIP_WEB_PORT` changes the port.
-
-To package the desktop application:
-
-```bash
-scripts/build-app.sh
-```
-
-To run the quick checks, a few minutes:
-
-```bash
-scripts/check.sh
-```
-
-And all of them, including the whole chips in gates and the slow tests, before changing the hardware:
-
-```bash
-scripts/check.sh --full
-```
-
-Windows has the equivalent `.ps1` scripts. Weights are not included. The application looks for models in `~/.llm2chip/models` (where downloads go), `~/.mtplx/models`, the Hugging Face cache and any folders you add in the Models view; each of the usual places can be turned off there. Folders can also be set before starting the engine, separated as in `PATH`:
-
-```bash
-LLM2CHIP_MODEL_DIRS=~/models:/data/llm scripts/dev.sh
-```
+| Option | What it does |
+|---|---|
+| `scripts/dev.sh --lan` | Opens the interface to your local network, behind an access key. |
+| `LLM2CHIP_MODEL_DIRS=~/models:/data/llm` | Extra folders to search for models. |
+| `LLM2CHIP_ENGINE_PORT`, `LLM2CHIP_WEB_PORT` | The engine's port (7878) and the interface's (5173). |
+| `HF_TOKEN` | Hugging Face token, for gated models. |
+| `scripts/build-app.sh` | Builds the desktop application. |
+| `scripts/check.sh` | The quick tests; `--full` adds the whole chips in gates and the slow tests. |
 
 ## What is verified
 
@@ -184,6 +166,7 @@ This is an architecture and logic design, not a manufacturable layout: there is 
 
 | Document | Contents |
 |---|---|
+| [`docs/install.md`](docs/install.md) | Installation on macOS, Linux and Windows, starting, start-up options and troubleshooting |
 | [`docs/benchmarks.md`](docs/benchmarks.md) | Results: Qwen3.8-27B on a chip, quality of the chip's arithmetic, images, FPGA and layouts |
 | [`docs/examples.md`](docs/examples.md) | Every example and how to run it, and a walk through the application |
 | [`docs/simulation.md`](docs/simulation.md) | How the simulation works: floating point, the exact machine, instruction level and gates, and how each checks the next |

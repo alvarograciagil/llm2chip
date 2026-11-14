@@ -192,7 +192,7 @@ impl Weights {
             "BF16" => Ok(bytes.as_chunks::<2>().0.iter().map(|c| half::bf16::from_le_bytes(*c).to_f32()).collect()),
             "F32" => Ok(bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()),
             "F64" => Ok(bytes.as_chunks::<8>().0.iter().map(|c| f64::from_le_bytes(*c) as f32).collect()),
-            other => Err(format!("{name}: tipo {other} no soportado")),
+            other => Err(format!("{name}: type {other} is not supported")),
         }
     }
 
@@ -206,7 +206,7 @@ impl Weights {
             let (biases, _) = self.bytes(&format!("{name}.biases"))?;
             return Ok(Matrix { rows, owner: self, name: name.to_string(), source: Source::Packed { words_per_row: last[0], groups: *ts.shape.last().unwrap_or(&1), words: bytes, scales, biases } });
         }
-        let format = Plain::parse(&t.dtype).ok_or_else(|| format!("{name}: tipo {} no soportado", t.dtype))?;
+        let format = Plain::parse(&t.dtype).ok_or_else(|| format!("{name}: type {} is not supported", t.dtype))?;
         // Integer checkpoints may carry the factor that turns codes into real values.
         let factor = match self.floats(&format!("{name}.scale")) {
             Ok(values) if !values.is_empty() => values[0],
