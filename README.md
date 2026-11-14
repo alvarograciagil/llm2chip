@@ -196,6 +196,10 @@ This is an architecture and logic design, not a manufacturable layout: there is 
 | `tech`, `models`, `presets` | Technology nodes, model descriptions and starting designs |
 | `tools` | Python reference, model conversion, synthesis and OpenROAD scripts |
 
+## Contributing
+
+Issues and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to check a change and the license under which contributions are accepted.
+
 ## License
 
 llm2chip is released under the [PolyForm Noncommercial License 1.0.0](LICENSE.md): you may use, modify and share it for any noncommercial purpose, including personal projects, research and education. Commercial use is not permitted under this license; for commercial licensing, open an issue to get in touch.
