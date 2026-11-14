@@ -20,7 +20,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = Path::new(args.get(1).expect("model folder"));
     let prompt: u32 = args.get(2).map_or(1024, |a| a.parse().expect("prompt"));
-    let context: u32 = args.get(3).map_or(8192, |a| a.parse().expect("contexto"));
+    let context: u32 = args.get(3).map_or(8192, |a| a.parse().expect("context"));
     let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
     let program = compiler::compile_model(&config).unwrap();
     let weights = Weights::open(dir).unwrap();

@@ -374,7 +374,7 @@ mod tests {
         let weights: Vec<_> = report.floorplan.dies.iter().map(|d| d.weights as f64).collect();
         let mean = weights.iter().sum::<f64>() / weights.len() as f64;
         for w in weights {
-            assert!((w / mean - 1.0).abs() < 0.35, "{w} frente a {mean}");
+            assert!((w / mean - 1.0).abs() < 0.35, "{w} against {mean}");
         }
     }
 

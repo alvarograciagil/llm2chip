@@ -866,7 +866,7 @@ fn an_image_rotates_by_three_positions_on_the_chip_as_in_float() {
     flat.continue_text_at(5);
     let other = flat.step(5, true).unwrap().unwrap();
     let moved = other.iter().zip(&got).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-    assert!(moved > 4.0 * error, "{moved} frente a {error}");
+    assert!(moved > 4.0 * error, "{moved} against {error}");
     std::fs::remove_dir_all(dir).ok();
 }
 

@@ -144,6 +144,15 @@ Windows has the equivalent `.ps1` scripts. Weights are not included: the applica
 
 Details and measurements are in [`docs/`](docs) and [`tests/golden/`](tests/golden).
 
+## Results at a glance
+
+From [`docs/benchmarks.md`](docs/benchmarks.md), where each figure says whether it was measured or estimated:
+
+- **Qwen3.8-27B, default design (estimated):** 13 dies of 806 mm² in TSMC N6, 1.77 million weight multipliers, about 3,750 tok/s for one user at 240 W. Weight memory is 89 % of the silicon.
+- **Quality on the real weights (measured):** the chip's 16-bit block floating point picks the same token as floating point in 29 of 30 steps on Qwen3.8-27B and 11 of 12 on Qwen3.6-35B-A3B. DeltaNet's state holds at 16 and even 12 bits; plain fixed point does not.
+- **Images (measured):** Qwen3.8-27B's vision encoder runs in the die's arithmetic within 1.5 % of floating point; Show-o on 8-bit cells picks the same code as floating point in 61 of 64 places; MAGVIT-v2 decodes at 49.6 dB PSNR from floating point.
+- **FPGA (measured in synthesis):** the smallest complete chip takes 11,166 LUT6 on Xilinx 7 series or 17,872 LUT4 on ECP5, and routes at 35.4 MHz on an ECP5-85F.
+
 ## Limits
 
 This is an architecture and logic design, not a manufacturable layout: there is no full-chip place and route, timing sign-off or commercial PDK. In particular:
@@ -159,6 +168,9 @@ This is an architecture and logic design, not a manufacturable layout: there is 
 
 | Document | Contents |
 |---|---|
+| [`docs/benchmarks.md`](docs/benchmarks.md) | Results: Qwen3.8-27B on a chip, quality of the chip's arithmetic, images, FPGA and layouts |
+| [`docs/examples.md`](docs/examples.md) | Every example and how to run it, and a walk through the application |
+| [`docs/simulation.md`](docs/simulation.md) | How the simulation works: floating point, the exact machine, instruction level and gates, and how each checks the next |
 | [`docs/full-chip.md`](docs/full-chip.md) | The whole chip: blocks, simulation levels, several chips, the fixed microprogram |
 | [`docs/parameters.md`](docs/parameters.md) | Every parameter of the design, as the application explains it |
 | [`docs/vision.md`](docs/vision.md) | Images on the chip: the vision encoder, Janus-Pro and Show-o |

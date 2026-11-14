@@ -1,7 +1,7 @@
 //! Where the chip's retouch loses colour: the same retouch with several seeds, three ways.
 //!
-//! - `flotante`: Show-o and MaskGIT in floating point, as the app runs them off the chip.
-//! - `maskgit-entero`: Show-o in floating point, MaskGIT as the firmware runs it, in integers
+//! - `float`: Show-o and MaskGIT in floating point, as the app runs them off the chip.
+//! - `integer-maskgit`: Show-o in floating point, MaskGIT as the firmware runs it, in integers
 //!   (`maskgit-rt`), the scores rounded to the die's 16-bit mantissas.
 //! - `chip`: MaskGIT in integers and Show-o on the die as the chip addresses it, its cells
 //!   keeping the weights affine of 8 bits.

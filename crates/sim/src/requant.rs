@@ -480,7 +480,7 @@ mod tests {
                 quantize(&format, &reference, &mut expected);
                 recoded.decode_into(index, &mut decoded);
                 for (a, b) in expected.iter().zip(&decoded) {
-                    assert!((a - b).abs() <= 1e-5 * a.abs().max(1e-3), "{format:?}: {a} frente a {b}");
+                    assert!((a - b).abs() <= 1e-5 * a.abs().max(1e-3), "{format:?}: {a} against {b}");
                 }
             }
         }

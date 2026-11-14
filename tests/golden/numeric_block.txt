@@ -1,11 +1,11 @@
-activacion estado | acuerdo_top1 KL_medio KL_max saturaciones
-bloque 20 bits, estado 32 bits | 100.0% 0.0000 0.000 0
-bloque 16 bits, estado 32 bits | 100.0% 0.0009 0.005 0
-bloque 16 bits, estado 20 bits | 100.0% 0.0008 0.005 0
-bloque 16 bits, estado 16 bits | 100.0% 0.0008 0.004 0
-bloque 16 bits, estado 12 bits | 100.0% 0.0017 0.008 0
-bloque 14 bits, estado 32 bits | 100.0% 0.0034 0.030 0
-bloque 12 bits, estado 32 bits | 97.5% 0.0146 0.131 0
-bloque 12 bits, estado 16 bits | 97.5% 0.0256 0.374 0
-bloque 10 bits, estado 32 bits | 87.5% 0.1880 2.635 0
-bloque 8 bits, estado 32 bits | 0.0% 12.4731 19.631 0
+activation state | top1_agreement mean_KL max_KL saturations
+block 20 bits, state 32 bits | 100.0% 0.0000 0.000 0
+block 16 bits, state 32 bits | 100.0% 0.0009 0.005 0
+block 16 bits, state 20 bits | 100.0% 0.0008 0.005 0
+block 16 bits, state 16 bits | 100.0% 0.0008 0.004 0
+block 16 bits, state 12 bits | 100.0% 0.0017 0.008 0
+block 14 bits, state 32 bits | 100.0% 0.0034 0.030 0
+block 12 bits, state 32 bits | 97.5% 0.0146 0.131 0
+block 12 bits, state 16 bits | 97.5% 0.0256 0.374 0
+block 10 bits, state 32 bits | 87.5% 0.1880 2.635 0
+block 8 bits, state 32 bits | 0.0% 12.4731 19.631 0

@@ -1486,7 +1486,7 @@ mod tests {
         for multiplier_kind in [MultiplierKind::Array, MultiplierKind::Wallace, MultiplierKind::Booth] {
             for mac_stages in 1..=3 {
                 let (area, reached) = cost(&ChipParams { auto_circuit: false, multiplier_kind, mac_stages, adder_stages: 1, ..automatic.clone() });
-                assert!(best <= area * 1.0001 || reached < frequency, "{multiplier_kind:?} × {mac_stages}: {area} frente a {best}");
+                assert!(best <= area * 1.0001 || reached < frequency, "{multiplier_kind:?} × {mac_stages}: {area} against {best}");
             }
         }
     }

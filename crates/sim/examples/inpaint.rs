@@ -5,7 +5,7 @@
 //! `cargo run --release -p sim --example inpaint -- <folder> draw "<text>" output.bmp [steps] [guidance] [seed]`
 //! `cargo run --release -p sim --example inpaint -- <folder> reconstruct <image> output.bmp`
 //!
-//! The picture is a 24-bit BMP, a binary PPM (P6), or `figura` for a red disc on white drawn here. The
+//! The picture is a 24-bit BMP, a binary PPM (P6), or `disc` for a red disc on white drawn here. The
 //! folder holds Show-o, MAGVIT-v2 in `magvitv2` and Phi-1.5's tokenizer in `phi`.
 
 use sim::showo::ShowO;
@@ -40,7 +40,7 @@ fn bmp(rgb: &[u8], side: usize) -> Vec<u8> {
 
 /// A binary PPM's pixels, or a red disc on white.
 fn picture(source: &str) -> Result<(Vec<u8>, usize, usize), String> {
-    if source == "figura" {
+    if source == "disc" {
         let side = 256;
         let rgb = (0..side * side)
             .flat_map(|i| {

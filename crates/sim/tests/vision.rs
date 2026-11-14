@@ -85,7 +85,7 @@ fn the_language_model_reads_the_chip_encoder_s_tokens_as_the_reference_ones() {
     };
     let (from_chip, from_reference) = (last(&chip), last(&reference));
     let best = |v: &[f32]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
-    assert_eq!(best(&from_chip), best(&from_reference), "{from_chip:?} frente a {from_reference:?}");
+    assert_eq!(best(&from_chip), best(&from_reference), "{from_chip:?} against {from_reference:?}");
     std::fs::remove_dir_all(&dir).ok();
 }
 

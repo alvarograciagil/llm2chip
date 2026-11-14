@@ -63,7 +63,7 @@ function lanAccess(): Plugin {
         }
         response.statusCode = 401;
         response.setHeader("content-type", "text/plain; charset=utf-8");
-        response.end("Hace falta la clave de acceso: abre la dirección completa que muestra el equipo donde corre llm2chip.\n");
+        response.end("An access key is needed: open the full address shown by the machine running llm2chip.\n");
       });
       // WebSockets do not pass through the middlewares above.
       server.httpServer?.prependListener("upgrade", (request: IncomingMessage, socket) => {

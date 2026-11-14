@@ -302,8 +302,8 @@ fn trees_are_faster_than_the_ripple_array() {
         Simulator::new(&cell_design(c)).unwrap().critical_path([0.25, 0.25, 0.5, 0.12, 0.4])
     };
     let (array, wallace, booth) = (delay(MultiplierKind::Array), delay(MultiplierKind::Wallace), delay(MultiplierKind::Booth));
-    assert!(wallace < array * 0.75, "{wallace} frente a {array}");
-    assert!(booth < array * 0.75, "{booth} frente a {array}");
+    assert!(wallace < array * 0.75, "{wallace} against {array}");
+    assert!(booth < array * 0.75, "{booth} against {array}");
 }
 
 #[test]

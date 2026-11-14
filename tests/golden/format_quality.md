@@ -1,14 +1,14 @@
-# Calidad de cada formato de pesos
+# Quality of each weight format
 
-Coincidencia con la coma flotante en 16 tokens generados con Qwen3.8-27B (carpeta Optimized-Speed-FP16), recuantizando cada tensor al formato indicado y ejecutando el resto en coma flotante.
+Agreement with floating point over 16 generated tokens with Qwen3.8-27B (the Optimized-Speed-FP16 folder), requantizing each tensor to the given format and running the rest in floating point.
 
-Límites de esta medida:
+Limits of this measurement:
 
-- El punto de partida ya está cuantizado a 4 bits (8 en algunos tensores). Los formatos estrechos parten de un error ya presente, y MXFP4 o NVFP4 no se pueden juzgar del todo sin pesos originales.
-- Con 16 tokens, cada coincidencia vale 6,25 puntos. La KL media distingue mejor entre formatos parecidos: por eso `mlx4` (100 %) no es mejor que `mlx6` (93,8 %).
-- `mlx6` y `mlx8` se midieron con grupos de 32, y las presets de la app usan 64. `gguf3` también usa 32 frente a los 16 de Q3_K. Por eso esas tres filas no aparecen en la tabla de la app.
+- The starting point is already quantized to 4 bits (8 in some tensors). Narrow formats start from an error that is already there, and MXFP4 or NVFP4 cannot be fully judged without the original weights.
+- With 16 tokens, each match is worth 6.25 points. The mean KL separates similar formats better: that is why `mlx4` (100 %) is not better than `mlx6` (93.8 %).
+- `mlx6` and `mlx8` were measured with groups of 32, and the app's presets use 64. `gguf3` also uses 32 against Q3_K's 16. That is why those three rows do not appear in the app's table.
 
-| formato | top-1 | KL media | s/token |
+| format | top-1 | mean KL | s/token |
 |---|---|---|---|
 | q2 | 0.0 % | 11.9131 | 5.4 |
 | q3 | 0.0 % | 13.0815 | 5.3 |
@@ -46,13 +46,13 @@ Límites de esta medida:
 | book4 | 43.8 % | 2.1889 | 50.9 |
 | book8 | 56.2 % | 1.2565 | 68.7 |
 
-Comando: `cargo run --release -p sim --example formats -- <carpeta> 16 <formatos...>`
+Command: `cargo run --release -p sim --example formats -- <folder> 16 <formats...>`
 
-## Medición con 64 tokens
+## Measured with 64 tokens
 
-Con más tokens, cada coincidencia vale 1,6 puntos. Los libros de códigos se midieron tras cambiar su inicialización a valores repartidos por todo el rango.
+With more tokens, each match is worth 1.6 points. The codebooks were measured after changing their initialization to values spread over the whole range.
 
-| formato | top-1 | KL media | s/token |
+| format | top-1 | mean KL | s/token |
 |---|---|---|---|
 | nvfp4 | 90.6 % | 0.0510 | 4.2 |
 | mxfp4 | 93.8 % | 0.1073 | 2.7 |

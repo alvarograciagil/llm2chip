@@ -1,0 +1,213 @@
+# Benchmarks and results
+
+What llm2chip measures, and what it gives today. Every figure says where it comes from:
+
+- **Measured:** from a run of the circuit, the exact machine or the gates, with the command to repeat it ([examples.md](examples.md)).
+- **Estimated:** from the analytic estimator, which is calibrated against OpenROAD layouts and published chips but is not a sign-off.
+
+Nothing here has run on silicon or on an FPGA board. Simulation times are from an Apple M2 Max with 64 GB of memory.
+
+## Qwen3.8-27B on a chip
+
+The main target: Qwen3.8-27B (27 billion parameters, 64 layers mixing Gated DeltaNet and full attention, with an MTP head and a vision encoder), from the MLX checkpoint `Qwen3.8-27B-MTPLX-Optimized-Speed-FP16`. Its weights are mixed: 4-bit affine codes in groups of 32, and 8-bit in groups of 64 for the embedding, the output head, DeltaNet's output projection and the last eight MLPs. The chip keeps them as they are.
+
+### The default design, estimated
+
+`cargo run --release -p arch --example report` with the application's default parameters: weights in SRAM next to their multipliers, TSMC N6, 1 GHz, 16-bit activations, one user.
+
+| | |
+|---|---|
+| Parameters | 26.9 G |
+| Weights in memory | 19.5 GB (chip capacity 25.4 GB) |
+| Dies | 13 of 806.5 mm² (reticle limit 815 mm²), in 3 packages |
+| Total silicon | 10,485 mm² |
+| Weight multipliers | 1,768,000 (136,000 per die), 14.4 KB of weights each |
+| Generation, one user | **3,755 tok/s** (265,500 cycles per token) |
+| Prompt reading | 48,960 tok/s |
+| Energy | 56 mJ per token, **240 W** while generating |
+| Weights read per token | 18.2 GB, 68 TB/s from the cells' own memories |
+| KV cache | 0.54 GB, 64 KiB per context token |
+| DeltaNet and convolution state | 154 MB |
+| Die-to-die traffic | 38 MB/s |
+| Time to load the image | 1.4 s |
+
+Where each die's area goes:
+
+| Block | mm² per die |
+|---|---|
+| Cells: weight memory | 717.2 |
+| Cells: multipliers | 24.3 |
+| Scale and bias per group | 17.1 |
+| Attention KV cache | 12.0 |
+| Cells: ECC correction | 7.2 |
+| Control and load CPU | 6.0 |
+| Clock, power and test | 6.0 |
+| Tokenizer tables | 3.9 |
+| DeltaNet state | 3.4 |
+| Die-to-die links | 2.9 |
+| Vector units | 2.7 |
+| Activation network | 2.5 |
+| Sequencer, CPU memory, function units, buffers | 1.4 |
+
+Weight memory takes 89 % of the silicon: this kind of chip is a memory with multipliers inside, and SRAM density, which has barely improved since N5, sets its size and cost. That is why weight format matters more than anything else (see below), and why the estimator offers ROM (weights fixed at manufacture) and stacked DRAM as alternatives.
+
+For reference, the same estimator gives 787 mm² and 15,234 tok/s for the Taalas HC1 preset (Llama 3.1 8B in mask ROM, N6), against the 815 mm² and more than 15,000 tok/s published for that chip ([research.md](research.md)).
+
+### Speed from the circuit
+
+The estimator assumes the cells stream weights at full rate. `sim::sizing` checks that against the real circuit: for each die shape it generates the model's microprogram, follows its loops and jumps to the last position of the context, and takes the clock from the generated circuit's critical path. That figure is guaranteed with the context full.
+
+FRONTIER_PLACEHOLDER
+
+## Quality of the chip's arithmetic
+
+All measured on the real weights, against floating point.
+
+### The exact integer machine
+
+The most likely token, chip arithmetic against floating point, over a generated text (`exact` example; `tests/golden/exact.md`):
+
+| Model | Vector bits | Same top-1 token |
+|---|---|---|
+| Qwen3.8-27B | 16 | 29 of 30 |
+| Qwen3.8-27B | 14 | 11 of 12 |
+| Qwen3.6-35B-A3B (MoE) | 16 | 11 of 12 |
+| Qwen3.6-35B-A3B (MoE) | 18 | 11 of 12 |
+
+The gates match the exact machine bit for bit on tiny models at 12, 16, 18 and 20 bits, so these are the chip's own outputs.
+
+### How many bits the activations, the state and the tables need
+
+Qwen3.8-27B with teacher forcing (`numeric` example; `tests/golden/numeric_*.txt`). Block floating point, with one exponent per block of lanes:
+
+| Activations | DeltaNet state | Function tables | Top-1 agreement | Mean KL |
+|---|---|---|---|---|
+| 20 bits | 32 bits | — | 100 % | 0.0000 |
+| 16 bits | 16 bits | — | 100 % | 0.0008 |
+| 16 bits | 12 bits | — | 100 % | 0.0017 |
+| 14 bits | 32 bits | — | 100 % | 0.0034 |
+| 14 bits | 14 bits | 10 bits | 100 % | 0.0060 |
+| 12 bits | 32 bits | — | 97.5 % | 0.0146 |
+| 16 bits | 16 bits | 8 bits | 90.0 % | 0.0411 |
+| 10 bits | 32 bits | — | 87.5 % | 0.1880 |
+| 8 bits | 32 bits | — | 0 % | 12.47 |
+
+Plain fixed point fails: with Q24.12 activations and a Q32.20 state, top-1 agreement is 90 %, and with 16-bit fixed point it falls to 20 % with hundreds of saturations. That result is why the die uses block floating point. DeltaNet's recurrent state, the main numeric risk in the original plan, holds at 16 and even 12 bits.
+
+### Weight formats
+
+Each tensor requantized to the format and the rest run in floating point, 64 generated tokens (`formats` example; `tests/golden/format_quality.md`):
+
+| Format | Top-1 | Mean KL |
+|---|---|---|
+| fp8 | 95.3 % | 0.0052 |
+| mlx4 (4-bit affine, the checkpoint's own) | 93.8 % | 0.0053 |
+| posit8 | 93.8 % | 0.0099 |
+| q8 | 93.8 % | 0.0265 |
+| nvfp4 | 90.6 % | 0.0510 |
+| mxfp4 | 93.8 % | 0.1073 |
+| q6 | 65.6 % | 0.6837 |
+| book8 (codebook) | 73.4 % | 0.8838 |
+| book4 (codebook) | 57.8 % | 1.3339 |
+
+The checkpoint is already quantized to 4 bits, so narrower formats start from an existing error and the 4-bit floating-point formats cannot be fully judged. Formats with a scale per group (mlx4, nvfp4, mxfp4) keep 4-bit quality at a quarter of the memory of 16 bits; plain integers without groups need 7 or 8 bits.
+
+### Speculative decoding with the MTP head
+
+How often Qwen3.8-27B's own MTP head guesses the following tokens, in floating point (`mtp` example; `tests/golden/mtp_acceptance.txt`):
+
+| Depth | Accepted |
+|---|---|
+| 1 | 90.0 % (54 of 60) |
+| 2 | 74.6 % (44 of 59) |
+| 3 | 67.2 % (39 of 58) |
+
+MTPLX reports 93.8, 85.5 and 74.3 % for the same checkpoint; the estimator uses those rates for the speed with speculation.
+
+## Images
+
+| What | Result | Command |
+|---|---|---|
+| Qwen3.8-27B vision encoder (460 M parameters, 27 blocks) in the die's arithmetic | 1.5 % from floating point at 16 bits; the whole model in chip arithmetic recognises a red disc and a square | `see_exact`, `see ... chip` |
+| Qwen3.8-27B with images, floating point | Names the colour of drawn shapes: "Red", "Blue", "Green" | `see` |
+| Janus-Pro-1B drawing "a red apple on a wooden table" | Floating point 387 s, chip arithmetic 543 s; both draw a red apple on wood | `draw`, `EXACT=16` |
+| Show-o transformer, one pass, 8-bit affine cells on the addressed die | 61 of 64 masked places pick the same best code as floating point, about 46 s per pass (210 s with 16-bit mantissas) | `showo_addressed ... 4096 pass` |
+| Show-o by weight format | Mean KL 0.001 nats with 8-bit affine weights, 0.066 with 4 bits | `showo_formats` |
+| Show-o retouch as on the chip (integer MaskGIT, guidance on the die, 8-bit cells) | 4 guided steps in 360 s and 4.3 GB | `showo_fill_chip` |
+| MAGVIT-v2 decoder in chip arithmetic | 49.6 dB PSNR from floating point (195 s) | |
+| MAGVIT-v2 encoder in chip arithmetic | 99.3 % of the bits equal (254 s) | |
+| MAGVIT-v2 round trip in floating point | About 30 dB PSNR | `inpaint ... reconstruct` |
+
+Times are simulation times on the Mac, not chip times.
+
+**Integer sampling against floating point.** Retouching a red disc into "a yellow lemon" (guidance 1.75, 4 steps), measuring how yellow the square comes out (`min(R, G) − B`):
+
+| Way | Seeds | Yellow (mean ± error) |
+|---|---|---|
+| Floating point | 24 | 95.1 ± 4.1 |
+| Firmware's integer MaskGIT, model in floating point | 24 | 86.9 ± 2.3 |
+| The chip: integer MaskGIT, transformer on the die, 8-bit cells | 4 | 84.5 ± 5.6 |
+
+The chip follows the integer sampler seed by seed. The gap to floating point is within the spread between seeds, and three other texts ("a green apple", "an orange", "a blue ball") show no systematic difference ([vision.md](vision.md#quality-of-the-integer-fill)).
+
+## Gate-level runs
+
+Bit and cycle exact against the instruction level and the exact machine ([simulation.md](simulation.md)):
+
+| Run | Cycles |
+|---|---|
+| Toy Show-o filling an image through the whole chip (CPU, firmware, die) | 12.45 M |
+| Toy Show-o transformer on the die | 3.1 M |
+| Toy MAGVIT-v2 decoder, 664 routines | 2.65 M |
+| Toy Show-o fill through the firmware at instruction level | 23.8 M |
+| Whole chip in Icarus Verilog with its image | 1,296,777 |
+| stories260K through the whole chip | Same text (", there was") and cycles as the instruction level |
+
+The event-driven gate simulator runs the full suite of whole chips in gates in about 5 minutes (it was 30 with a plain cycle simulator).
+
+## FPGA
+
+The smallest complete chip (CPU, die, sampling unit), synthesized with Yosys (`fpga` example, `tools/synth/families.sh`; [fpga.md](fpga.md)):
+
+| Family | Logic | Flip-flops | Block memory | Multipliers |
+|---|---|---|---|---|
+| Xilinx 7 series | 11,166 LUT6 | 5,443 | 42 BRAM36 + 14 BRAM18 | 42 DSP48 |
+| Gowin | 17,961 LUT + 2,214 ALU | 5,519 | 125 BSRAM | 60 |
+| Lattice ECP5 | 17,872 LUT4 | 5,527 | 125 DP16KD | 59 |
+| Cyclone IV E | 53,603 LE | 9,017 | — | — |
+
+Placed and routed with nextpnr on an ECP5-85F: **35.4 MHz**, up from 15.4 MHz through the changes listed in fpga.md.
+
+stories260K (a 260,000-parameter Llama that writes short stories), cycles measured on its microprogram at the end of a 64-token context:
+
+| Cells × lanes | Cycles per token | tok/s at 25-50 MHz | Memory |
+|---|---|---|---|
+| 8 × 1 | 211,500 | 120-240 | 4.63 Mbit |
+| 8 × 4 | 104,800 | 240-480 | 5.62 Mbit |
+| 16 × 4 | 87,500 | 290-570 | 5.62 Mbit |
+| 32 × 8 | 52,700 | 470-950 | 6.47 Mbit |
+
+## Physical design
+
+The compute cell through OpenROAD on open PDKs ([asic.md](asic.md)):
+
+| PDK | Area | Clock | Power | Violations |
+|---|---|---|---|---|
+| SkyWater 130 | 8,911 µm² | 119 MHz | 1.19 mW at 100 MHz | 0 |
+| GF180 | 41,614 µm² | 125 MHz | 26.6 mW at 67 MHz | 0 |
+
+A tile with 4,096 weights in a real 32 Kbit OpenRAM macro on SkyWater 130: 0.722 mm² of macro, as estimated, at 211 MHz. Fifteen layouts (five cells on three processes) calibrate the estimator to within 12 % on clock and 62-112 % on area (`tests/golden/asic.json`).
+
+Factory test coverage with the generated scan chains and ATPG patterns: cell 100 %, CPU 99.4 %, sampling unit 97.7 %.
+
+## Multipliers
+
+Each multiplier and format is generated, checked against exact products and synthesized with Yosys and ABC (`tests/golden/synthesis.md`). For 8-bit fixed point:
+
+| Multiplier | Area after ABC | Path in full adders |
+|---|---|---|
+| Array | 117.8 µm² | 25.9 |
+| Wallace | 131.4 µm² | 16.0 |
+| Booth | 124.8 µm² | 21.0 |
+
+The generator builds every option for each design and keeps the smallest that meets the clock.

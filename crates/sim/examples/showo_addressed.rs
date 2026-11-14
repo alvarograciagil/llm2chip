@@ -1,6 +1,6 @@
 //! The real Show-o on a die addressed as the firmware addresses it: the embedding table in
 //! the image, a row at a time, and the die's memories sized so that register and element
-//! fit in 32 bits. Prints the die's sizes and, with `pasada`, runs one pass with the text
+//! fit in 32 bits. Prints the die's sizes and, with `pass`, runs one pass with the text
 //! and compares each masked place's best code with floating point's.
 //!
 //! `cargo run --release -p sim --example showo_addressed -- <Show-o folder> [cells] [pass]`

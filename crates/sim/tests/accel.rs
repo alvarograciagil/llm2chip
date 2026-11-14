@@ -89,7 +89,7 @@ fn compare(gap: usize) {
             a.apply_rows(first, &x, &mut slow);
             b.apply_rows(first, &x, &mut fast);
             for (s, f) in slow.iter().zip(&fast) {
-                assert!((s - f).abs() <= 1e-3 * s.abs().max(1.0), "{matrix}: {s} frente a {f}");
+                assert!((s - f).abs() <= 1e-3 * s.abs().max(1.0), "{matrix}: {s} against {f}");
             }
         }
 

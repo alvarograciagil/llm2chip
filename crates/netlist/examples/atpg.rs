@@ -1,7 +1,7 @@
 //! Scan chain and test patterns for the blocks of the chip, with their fault coverage.
 //!
-//! `cargo run --release -p netlist --example atpg [bloque…]`, the blocks among `celda`, `cpu`,
-//! `muestreo` and `die`; without any, all but the die, which takes much longer.
+//! `cargo run --release -p netlist --example atpg [block…]`, the blocks among `cell`, `cpu`,
+//! `sampler` and `die`; without any, all but the die, which takes much longer.
 
 use netlist::atpg;
 use netlist::format::WeightCoding;

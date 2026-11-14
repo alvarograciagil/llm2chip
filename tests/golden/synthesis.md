@@ -1,4 +1,4 @@
-| Multiplicador | Formato | Bits | Exp | Generador µm² | Tras ABC µm² | Relación | Camino (FA) |
+| Multiplier | Format | Bits | Exp | Generator µm² | After ABC µm² | Ratio | Path (FA) |
 |---|---|---|---|---|---|---|---|
 | array | fixed | 4 | 0 | 92.8 | 77.0 | 0.83 | 21.9 |
 | array | fixed | 8 | 0 | 162.1 | 117.8 | 0.73 | 25.9 |
@@ -28,8 +28,8 @@
 | booth | posit | 16 | 1 | 399.0 | 322.0 | 0.81 | 44.4 |
 | booth | log | 8 | 4 | 277.9 | 185.0 | 0.67 | 23.7 |
 
-Media array: 0.650
+Mean array: 0.650
 
-Media wallace: 0.783
+Mean wallace: 0.783
 
-Media booth: 0.752
+Mean booth: 0.752

@@ -82,7 +82,7 @@ fn assert_same(sim: &mut Simulator, model: &Behavior, c: DieConfig, reg: u32, le
 }
 
 fn close(a: f64, b: f64, tolerance: f64, what: &str) {
-    assert!((a - b).abs() <= tolerance * b.abs().max(0.05), "{what}: {a} frente a {b}");
+    assert!((a - b).abs() <= tolerance * b.abs().max(0.05), "{what}: {a} against {b}");
 }
 
 #[test]

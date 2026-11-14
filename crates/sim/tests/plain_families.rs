@@ -28,7 +28,7 @@ fn every_family_matches_the_reference_token_by_token() {
         for (position, (token, reference)) in tokens.iter().zip(&expected).enumerate() {
             let (logits, _) = Runner::step(&mut engine, *token, true).unwrap();
             for (index, (got, want)) in logits.unwrap().iter().zip(reference).enumerate() {
-                assert!((got - want).abs() < 2e-3, "{family}, token {position}, logit {index}: {got} frente a {want}");
+                assert!((got - want).abs() < 2e-3, "{family}, token {position}, logit {index}: {got} against {want}");
             }
         }
     }

@@ -1,4 +1,4 @@
-activacion estado | acuerdo_top1 KL_medio KL_max saturaciones
+activation state | top1_agreement mean_KL max_KL saturations
 Q24.12 Q32.20 | 90.0% 0.0510 0.357 0
 Q16.8 Q32.20 | 20.0% 4.6373 11.417 580
 Q16.8 Q16.10 | 17.5% 4.6484 13.625 627

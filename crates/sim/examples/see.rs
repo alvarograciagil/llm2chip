@@ -4,8 +4,8 @@
 //!
 //! `cargo run --release -p sim --example see -- <folder> [shape] "<question>" [tokens] [chip]`
 //!
-//! The figure is drawn here, 256×256 pixels on white: `rojo` (a red disc), `azul` (a blue
-//! square) or `verde` (a green triangle).
+//! The figure is drawn here, 256×256 pixels on white: `red` (a red disc), `blue` (a blue
+//! square) or `green` (a green triangle).
 
 use compiler::compile_qwen3_5;
 use sim::vision::{image_positions, patches, VisionTower};
