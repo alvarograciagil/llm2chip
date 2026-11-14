@@ -405,6 +405,13 @@ pub trait BlockOps: Sized {
         self.each(outer.into(), |s, o| s.each(inner.into(), |s, i| body(s, o, i)));
     }
 
+    /// Inside `each_head` or `each_head_split`: whether every head has a unit of its own in
+    /// a single round, so a state kept from one token to the next can sit in the same
+    /// register on each unit rather than one register per head.
+    fn one_head_per_unit(&self) -> bool {
+        false
+    }
+
     /// Like `each_head`, for a body that can share each head's work among several units.
     fn each_head_split(&mut self, outer: u32, inner: u32, body: impl FnMut(&mut Self, Self::N, Self::N)) {
         self.each_head(outer, inner, body);
@@ -864,6 +871,9 @@ pub struct KeyStore<N> {
     pub values: u32,
     pub stride: u32,
     pub offset: N,
+    /// The keys were written by `store_key_part` inside the same loop over heads: a die that
+    /// gives each unit its own heads keeps there only those heads' columns.
+    pub local: bool,
 }
 
 /// Below this a loop is not worth the words it takes to set up a stream.
@@ -937,6 +947,9 @@ pub struct Assembly {
     key_shift: u32,
     /// Inside a loop over heads split among units: this unit's part and how many there are.
     split: Option<(Expr, u32)>,
+    /// Inside a loop over heads run by several units: which round of heads this is. Each
+    /// unit keeps the key columns of its own heads only, one round after another.
+    head_round: Option<Expr>,
     /// Inside slices of one vector: the units counted together when normalising.
     slab_group: u32,
     /// True inside a body that every unit runs with its own indices.
@@ -993,6 +1006,13 @@ impl Assembly {
         } else {
             (inner, None)
         }
+    }
+
+    /// The round of heads whose columns `store` keeps from the first word of each unit, when
+    /// `store_key_part` wrote them that way: keys in columns, written whole columns at a time,
+    /// inside a loop over heads that the units share.
+    fn local_columns(&self, store: &KeyStore<Expr>) -> Option<Expr> {
+        self.head_round.filter(|_| store.local && self.key_shift > 0 && self.key_capacity.is_some())
     }
 
     fn group_bits(&self) -> u32 {
@@ -1110,7 +1130,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false }
+        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1888,7 +1908,8 @@ impl BlockOps for Assembly {
             return self.row_combination(probabilities, values, dst, (width, stride, offset), tokens);
         };
         let Some((part, parts)) = self.split.filter(|(_, parts)| width.is_multiple_of(*parts)) else {
-            return self.dots(probabilities, values, dst, width.into(), tokens, |j, t| ((probabilities, t), (values, (offset + j) * capacity + t)));
+            let column = self.local_columns(&store).map_or(offset, |round| round * width);
+            return self.dots(probabilities, values, dst, width.into(), tokens, |j, t| ((probabilities, t), (values, (column + j) * capacity + t)));
         };
         // Each unit sums its share of the columns over every token; the rest of its sums
         // stay zero, so adding the units' wide memories puts every column in all of them.
@@ -1897,12 +1918,14 @@ impl BlockOps for Assembly {
         self.immediate(0, zero);
         self.steps.push(Step::Combine { weights: zero, matrix: values, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
         let first = part * share;
+        let column = self.local_columns(&store).map_or(offset + first, |round| round * share);
         self.each(share.into(), |s, k| {
             let j = first + k;
+            let at = (column + k) * capacity;
             s.clear_accumulator();
-            s.elements(tokens, &[0.into(), (offset + j) * capacity], true, |s, t, vector| {
+            s.elements(tokens, &[0.into(), at], true, |s, t, vector| {
                 let mut step = alu(OP_MOV);
-                (step.a, step.b, step.write, step.accumulate, step.vector) = ((probabilities, t), (values, (offset + j) * capacity + t), false, true, vector);
+                (step.a, step.b, step.write, step.accumulate, step.vector) = ((probabilities, t), (values, at + t), false, true, vector);
                 s.push(step);
             });
             s.store_accumulator(j);
@@ -1999,6 +2022,10 @@ impl BlockOps for Assembly {
         }
     }
 
+    fn one_head_per_unit(&self) -> bool {
+        self.head_round.is_some_and(|round| round == Expr::from(0))
+    }
+
     fn each_head_split(&mut self, outer: u32, inner: u32, mut body: impl FnMut(&mut Self, Expr, Expr)) {
         let heads = outer * inner;
         let mut parts = 1;
@@ -2017,7 +2044,10 @@ impl BlockOps for Assembly {
         self.split = Some((Expr::var(part), parts));
         self.in_units = true;
         self.heads_at_once = outer * width * parts <= self.clusters;
+        // Heads split into parts always fit the units in one round.
+        self.head_round = Some(0.into());
         body(self, Expr::var(first), Expr::var(second));
+        self.head_round = None;
         self.heads_at_once = false;
         self.in_units = false;
         self.split = None;
@@ -2046,20 +2076,33 @@ impl BlockOps for Assembly {
         self.forget_shifts();
         let before = std::mem::take(&mut self.steps);
         let (width, slots) = self.head_slots(outer, inner, 1);
+        let total = outer * width;
+        let rounds = total.div_ceil(self.clusters);
+        // More heads than units: the round is a number of its own, the same in every unit.
+        let round = (rounds > 1).then(|| {
+            self.loops += 1;
+            Var::Loop(self.loops - 1)
+        });
         self.in_units = true;
         self.heads_at_once = outer * width <= self.clusters;
+        self.head_round = Some(round.map_or(0.into(), Expr::var));
         body(self, Expr::var(first), Expr::var(second));
+        self.head_round = None;
         self.heads_at_once = false;
         self.in_units = false;
         let inside = std::mem::replace(&mut self.steps, before);
         self.forget_shifts();
-        let total = outer * width;
-        for block in 0..total.div_ceil(self.clusters) {
+        let vars: Vec<Var> = [first, second].into_iter().chain(round).collect();
+        for block in 0..rounds {
             let assignments = (0..self.clusters.min(total - block * self.clusters)).map(|unit| {
                 let head = block * self.clusters + unit;
-                vec![head / width, head % width]
+                let mut values = vec![head / width, head % width];
+                if round.is_some() {
+                    values.push(block);
+                }
+                values
             });
-            self.steps.push(Step::Clustered { vars: vec![first, second], assignments: assignments.collect(), slots, body: inside.clone() });
+            self.steps.push(Step::Clustered { vars: vars.clone(), assignments: assignments.collect(), slots, body: inside.clone() });
         }
         self.head_units = (0..outer * inner).map(|h| (h / inner) * width + h % inner).collect();
     }
@@ -2205,8 +2248,11 @@ impl BlockOps for Assembly {
         self.align_to(src, from, exponent, scratch, start, len.into());
         let variable = Var::Loop(self.loops);
         self.loops += 1;
+        // A unit with heads of its own keeps their columns from its first word, a round of
+        // heads after another, not at their places in the whole key.
+        let column = self.head_round.map_or(from, |round| round * len);
         let mut step = alu(OP_MOV);
-        (step.a, step.dst, step.write_spread) = ((scratch, start + Expr::var(variable)), (keys, slot + from * capacity), true);
+        (step.a, step.dst, step.write_spread) = ((scratch, start + Expr::var(variable)), (keys, slot + column * capacity), true);
         self.steps.push(Step::Stream { variable, count: len.into(), in_elements: false, body: step });
     }
 
@@ -2254,7 +2300,8 @@ impl BlockOps for Assembly {
             Some((part, parts)) => (part * (width / parts), width / parts, parts),
             None => (0.into(), width, 1),
         };
-        self.each(share.into(), |s, j| s.steps.push(Step::Combine { weights: (query, first + j), matrix: keys, start: (offset + first + j) * capacity, width: tokens, fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false }));
+        let column = self.local_columns(&store).map_or(offset + first, |round| round * share);
+        self.each(share.into(), |s, j| s.steps.push(Step::Combine { weights: (query, first + j), matrix: keys, start: (column + j) * capacity, width: tokens, fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false }));
         if parts > 1 {
             self.steps.push(Step::WideReduce { rows: tokens, group: parts.trailing_zeros() });
         }

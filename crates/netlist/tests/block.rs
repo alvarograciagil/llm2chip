@@ -150,7 +150,7 @@ fn softmax_attention_matches_floating_point() {
     asm.load_vector(2, &v);
     asm.load_vector(3, &ones);
     let regs = AttentionRegs { scores: 5, top: 6, shifted: 7, weights: 8, total: 9, inverse: 10, probabilities: 11 , softcap: None};
-    asm.attention(0, KeyStore { keys: 1, values: 2, stride: width as u32, offset: 0.into() }, 3, 4, width as u32, (tokens as u32).into(), None, regs);
+    asm.attention(0, KeyStore { keys: 1, values: 2, stride: width as u32, offset: 0.into(), local: false }, 3, 4, width as u32, (tokens as u32).into(), None, regs);
 
     let mut sim = run_gates(c, &asm);
     let mut model = Behavior::new(&c, &asm.initial);

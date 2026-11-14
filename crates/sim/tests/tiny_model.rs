@@ -811,8 +811,9 @@ fn heads_in_groups_of_three_run_on_units_a_power_of_two_apart() {
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }
-    // Eight units take one part of each head; sixteen take two.
-    for cluster_bits in [3, 4] {
+    // Two and four units take their heads in rounds, each keeping only its heads' keys;
+    // eight units take one part of each head; sixteen take two.
+    for cluster_bits in [1, 2, 3, 4] {
         let c = DieConfig { cells: 4 << cluster_bits, features: cell_die_config().features.with_lane_bits(2).with_cluster_bits(cluster_bits), ..cell_die_config() };
         let mut run = gates_in_cells(&program, &dir, c, &tokens);
         // Some buffers stay a slice per unit: what reads them takes the same slices.

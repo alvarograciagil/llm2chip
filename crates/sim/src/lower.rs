@@ -51,6 +51,18 @@ pub fn chip_plan(program: &Program, weights: &Weights, chips: usize, context: us
     program.split_by(chips, bits)
 }
 
+/// The per-layer values an operation keeps among the small constants: the ones shared by
+/// every layer, such as scales, are not counted.
+fn small_of(op: &Op) -> Vec<String> {
+    match op {
+        Op::RmsNorm { weight, .. } | Op::RmsGated { weight, .. } | Op::Dconv { weight, .. } => vec![format!("{weight}.weight")],
+        Op::AddWeight { weight, .. } => vec![weight.clone()],
+        Op::LayerNorm { weight, .. } | Op::GroupNorm { weight, .. } => vec![format!("{weight}.weight"), format!("{weight}.bias")],
+        Op::DeltaStep { a_log, dt_bias, .. } => vec![a_log.clone(), dt_bias.clone()],
+        _ => Vec::new(),
+    }
+}
+
 fn all_ops(program: &Program) -> impl Iterator<Item = &Inst> {
     program.ops.iter().chain(program.draft.iter().flat_map(|d| d.ops.iter())).chain(program.image.iter().flat_map(|i| i.logits_ops.iter().chain(&i.input_ops))).chain(program.vision.iter().flat_map(|v| v.ops.iter()))
 }
@@ -1321,7 +1333,10 @@ impl Layout {
     pub fn keep_weights_of_part(&mut self, program: &Program, plan: &[Range<usize>], die: usize, logits: bool) {
         let tail = program.logits_from..program.ops.len();
         let used: HashSet<String> = plan[die].clone().chain(if logits { tail } else { 0..0 }).flat_map(|i| matrices_of(program, &program.ops[i].op)).map(|(name, ..)| name).collect();
-        let dropped: HashSet<u32> = self.weights.iter().filter(|(name, _)| !used.contains(*name)).map(|(_, reg)| *reg).collect();
+        let mut dropped: HashSet<u32> = self.weights.iter().filter(|(name, _)| !used.contains(*name)).map(|(_, reg)| *reg).collect();
+        // So do the norms, convolution taps and decay rates of the layers other chips run.
+        let kept: HashSet<String> = plan[die].clone().chain(if logits { program.logits_from..program.ops.len() } else { 0..0 }).map(|i| &program.ops[i].op).chain(all_ops(program).skip(program.ops.len()).map(|i| &i.op)).flat_map(small_of).collect();
+        dropped.extend(program.ops.iter().flat_map(|i| small_of(&i.op)).filter(|name| !kept.contains(name)).filter_map(|name| self.small.get(&name).copied()));
         self.setup.initial.retain(|(register, _), _| !dropped.contains(register));
         self.cell_plan.retain(|e| used.contains(&e.name));
         self.in_cells = place_in_cells(&self.cell_plan, self.config.cells as usize, 1 << self.config.features.cluster_bits, 1 << self.config.features.lane_bits).0;
@@ -1787,7 +1802,7 @@ impl Layout {
                         ops.normalize(t[5], rope.into());
                         self.rotate_pairs(ops, t[5], rope, t[6]);
                         ops.gather(&[(t[4], lora), (t[6], rope)], t[7]);
-                        ops.attention(t[7], KeyStore { keys: t[2], values: t[2], stride: width, offset: zero }, self.ones, t[8], width, tokens, Some(scale), regs);
+                        ops.attention(t[7], KeyStore { keys: t[2], values: t[2], stride: width, offset: zero, local: false }, self.ones, t[8], width, tokens, Some(scale), regs);
                         ops.matvec(unembed, self.weights[unembed], h * value_dim, t[8], first + offset, value_dim, lora);
                     });
                 });
@@ -2007,6 +2022,9 @@ impl Layout {
                 let width = (program.kv_slots[*slot].heads * head_dim) as u32;
                 let d = *head_dim as u32;
                 let (keys, values) = (self.keys[*slot], self.values[*slot]);
+                // `KvAppend` gave each unit just its heads' columns when its key is exactly
+                // the heads this reads.
+                let local = all_ops(program).any(|inst| matches!(inst.op, Op::KvAppend { slot: s, key, .. } if s == *slot && program.buffers[key] == kv_heads * head_dim));
                 let capped = softcap.map(|cap| (self.small[&format!("escala:{}", 1.0 / cap)], self.small[&format!("escala:{cap}")]));
                 let regs = AttentionRegs { scores: t[10], top: t[11], shifted: t[12], weights: t[13], total: t[14], inverse: t[15], probabilities: t[16], softcap: capped };
                 let first = self.parts[0];
@@ -2026,7 +2044,7 @@ impl Layout {
                             } else {
                                 Some(self.inverse_root[scale_dim])
                             };
-                            let store = KeyStore { keys, values, stride: width, offset: kv_head * d };
+                            let store = KeyStore { keys, values, stride: width, offset: kv_head * d, local };
                             ops.attention(qh, store, self.ones, first + offset, d, tokens, scale, regs);
                             ops.align_heads(first + offset, d);
                         });
@@ -2061,7 +2079,11 @@ impl Layout {
                 ops.each_head_split(*key_heads as u32, ratio as u32, |ops, key_head, shared| {
                     {
                         let h = key_head * ratio as u32 + shared;
-                        ops.with_window(h, &[first_state, first_out, first_part], |ops, offset| {
+                        // A unit with a head of its own keeps its state in one register: the
+                        // others, one per head, would only take room in every unit.
+                        let own = ops.one_head_per_unit();
+                        let windowed: &[u32] = if own { &[first_out, first_part] } else { &[first_state, first_out, first_part] };
+                        ops.with_window(h, windowed, |ops, offset| {
                             let (qh, kh, vh, beta, decay) = (t[20], t[21], t[22], t[23], t[24]);
                             let (work, inv) = (t[25], t[26]);
 
@@ -2091,7 +2113,7 @@ impl Layout {
                             ops.multiply(t[33], self.minus_one, work, 1.into());
                             ops.function(FN_EXP, work, decay, 1.into());
 
-                            let regs = DeltaRegs { state: first_state + offset, key: kh, query: qh, value: vh, beta, decay, memory: t[10], error: t[11], delta: t[12], update: t[13], next: t[14], out: first_out + offset, key_rows: t[56], query_rows: t[57] };
+                            let regs = DeltaRegs { state: if own { first_state } else { first_state + offset }, key: kh, query: qh, value: vh, beta, decay, memory: t[10], error: t[11], delta: t[12], update: t[13], next: t[14], out: first_out + offset, key_rows: t[56], query_rows: t[57] };
                             ops.delta_step(regs, kd, vd);
                             // The gated norm reads each head's output where it was made, so a
                             // copy of it is the one brought to the shared exponent.

@@ -61,17 +61,32 @@ One token at the last position of an 8,192-token context, on a die with 128 vect
 
 | Operation | Cycles | Share |
 |---|---|---|
-| Attention sum (scores × values) | 181,440 | 34 % |
+| Attention sum (scores × values) | 181,376 | 34 % |
 | Matrix products in the cells | 157,708 | 30 % |
-| DeltaNet delta rule | 73,104 | 14 % |
+| DeltaNet delta rule | 73,056 | 14 % |
 | RMSNorm | 35,238 | 7 % |
-| SiLU, element-wise products, RoPE, gated norms, the rest | 86,518 | 16 % |
-| **Total** | **534,008** | |
+| SiLU, element-wise products, RoPE, gated norms, the rest | 86,454 | 16 % |
+| **Total** | **533,832** | |
 
 The generated die's critical path is about 25 full-adder delays (measured on small dies and extrapolated by the sizing search), which in N6 (0.04 ns per full adder, estimated) allows about 1 GHz: **about 1,870 tok/s** for one user with the context full, half of what the estimator gives. Matrix products take only 30 % of the circuit's cycles; attention at full context and the element-wise work in the vector lanes take the rest, which is where the estimator is optimistic. Attention grows with the context, so these figures are the slowest case.
 
-**Known limit of the sizing search.** `size` and `frontier` should find the smallest set of dies that reaches a target speed within the reticle. For Qwen3.8-27B at 8,192 tokens they currently find none: in the compact vector memory, each vector unit reserves address space for the whole KV cache of its chip's attention layers, not only for the heads it serves, so the vector memory grows with the number of units and no die fits. The tiny models and the FPGA chip are not affected. Giving each unit only its own heads' part of the KV cache is the next hardware change; until then the cycle counts above are valid, but the area of a die sized from the circuit is not.
+That die is a speed reference, not one that fits: with 262,144 cells it is far larger than the reticle.
 
+### Dies sized from the circuit
+
+`frontier` builds the real microprogram of every chip for each die shape, counts the words each vector unit's memory needs, adds the cells' memory and the logic, and keeps the shapes whose dies fit the reticle (858 mm²). For Qwen3.8-27B with an 8,192-token context and a 1,024-token prompt (N6, estimated areas; 8, 12 or 16 chips, the default of `CHIPS`; 42 minutes on the M2 Max). Each row is a point of the speed-for-area frontier:
+
+| Chips | Units × lanes | Cells per die | tok/s | Clock | First token | Total area | Per chip |
+|---|---|---|---|---|---|---|---|
+| 12 | 64 × 64 | 8,192 | 203 | 994 MHz | 474 ms | 10,029 mm² | 836 mm² |
+| 16 | 64 × 128 | 8,192 | 235 | 1,010 MHz | 309 ms | 12,839 mm² | 802 mm² |
+| 16 | 64 × 64 | 16,384 | 320 | 994 MHz | 202 ms | 12,942 mm² | 809 mm² |
+| 16 | 64 × 128 | 16,384 | 406 | 1,010 MHz | 172 ms | 13,295 mm² | 831 mm² |
+| 16 | 64 × 64 | 32,768 | **451** | 994 MHz | 132 ms | 13,683 mm² | 855 mm² |
+
+So the circuit as generated today reaches **about 450 tok/s within the reticle**, an eighth of the estimator's 3,750 tok/s on a similar area. The gap is the vector memory: every die is close to the reticle with few cells, because each vector unit keeps about 3.5 M words (7 MB at 16 bits) on the busiest chip. Of those, 59 % is KV cache: each unit keeps the columns of the key head its query head reads, so the six query heads of a group hold six copies; 22 % is the RoPE table for every position, which every unit keeps whole. Sharing the keys of a group among its units and writing one RoPE row per token from the host are the next hardware changes; the estimator's figure assumes both.
+
+Getting here took three fixes to the compact vector memory (November 2026): each unit keeps only its own heads' columns of the KV cache, a unit with one DeltaNet head keeps its state in one register rather than one per head, and each chip loads only its own layers' norms, convolution taps and decay rates. Before them, the busiest chip needed about 33 M words per unit and no die fitted.
 
 ## Quality of the chip's arithmetic
 
