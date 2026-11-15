@@ -137,7 +137,7 @@ fn says_the_same_in_gates(config: ChipConfig, design: &netlist::Design, layout: 
 
     let input = b"hoy\0";
     let mut engine = VmEngine::new(compile_qwen3_5(model).unwrap(), Weights::open(dir).unwrap(), die, CHIP_TOKENS).unwrap();
-    if layout.outside_table().is_some() {
+    if layout.outside_table().is_some() || layout.rotation_table_outside().is_some() {
         engine = engine.with_table_outside().unwrap();
     }
     let model = ChipModel::new(engine, code.clone(), SamplerModel { config: config.sampler, rng: 0, table: exponential_table() });
@@ -150,7 +150,7 @@ fn says_the_same_in_gates(config: ChipConfig, design: &netlist::Design, layout: 
     let expected = bus.tx.clone();
     eprintln!("instruction-level simulator: {} cycles, output {:?}", cpu.cycle, String::from_utf8_lossy(&expected));
     // A table that stays in the image is not loaded at boot.
-    let at_boot = segments.iter().filter(|s| s.target != netlist::image::Target::RuntimeTable).count();
+    let at_boot = segments.iter().filter(|s| !matches!(s.target, netlist::image::Target::RuntimeTable | netlist::image::Target::RotationTable)).count();
     assert_eq!(expected.iter().filter(|b| **b == b'.').count(), at_boot, "every segment must load correctly");
 
     let start = std::time::Instant::now();
@@ -181,6 +181,10 @@ fn the_embedding_can_stay_in_the_image_and_come_a_row_at_a_time() {
     // The register keeps one row: the vector memory no longer holds the whole table.
     let table = layout.outside_table().expect("table outside");
     assert_eq!(table.mantissas.len(), 8 * table.cols as usize);
+    // So does the rotation table: the firmware brings each position's row.
+    let rotation = layout.rotation_table_outside().expect("rotation table outside");
+    assert_eq!(rotation.mantissas.len(), CHIP_TOKENS * rotation.cols as usize);
+    assert!(layout.longest_registers(64).iter().all(|(register, reach)| *register != rotation.register || *reach <= rotation.cols), "the rotation table's register holds one row");
     std::fs::remove_dir_all(&dir).ok();
 }
 

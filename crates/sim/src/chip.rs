@@ -562,6 +562,9 @@ pub fn image_segments(config: &DieConfig, code: &Microprogram, layout: &Layout) 
     if let Some(table) = layout.outside_table() {
         segments.push(Segment { target: Target::RuntimeTable, unit: table.cols, address: table.register << config.index_bits, beats: 1, words: table.mantissas.iter().map(|v| mask(*v)).collect() });
     }
+    if let Some(table) = layout.rotation_table_outside() {
+        segments.push(Segment { target: Target::RotationTable, unit: table.cols, address: table.register << config.index_bits, beats: 1, words: table.mantissas.iter().map(|v| mask(*v)).collect() });
+    }
     segments.push(Segment { target: Target::SamplerTable, unit: 0, address: 0, beats: 1, words: exponential_table() });
     segments
 }

@@ -65,7 +65,10 @@ const INFO_TABLE_ADDRESS: usize = 22;
 const INFO_TABLE_COLS: usize = 23;
 const INFO_VISION: usize = 24;
 const INFO_SHOWO: usize = 25;
-const INFO_PARAMETERS: usize = 26;
+const INFO_ROTATION_SOURCE: usize = 26;
+const INFO_ROTATION_ADDRESS: usize = 27;
+const INFO_ROTATION_COLS: usize = 28;
+const INFO_PARAMETERS: usize = 29;
 const TARGET_VECTOR: u32 = 3;
 
 /// The tokenizer's tables, which the image builder leaves after the segment table.
@@ -231,14 +234,15 @@ fn chain_receive() -> u32 {
     peripheral_read(REG_CHAIN_DATA)
 }
 
-/// Brings the token's row of the lookup table that stays in the image, if there is one,
-/// into the register the die reads it from.
-fn load_row(token: u32) {
-    let cols = info(INFO_TABLE_COLS);
+/// Brings row `row` of a table that stays in the image, if there is one, into the register
+/// the die reads it from: the table whose place, register and row length are in the
+/// description fields `source`, `address` and `count`.
+fn load_row(row: u32, [source, address, count]: [usize; 3]) {
+    let cols = info(count);
     if cols == 0 {
         return;
     }
-    let fields = [info(INFO_TABLE_SOURCE).wrapping_add(token.wrapping_mul(cols)), TARGET_VECTOR, 0, info(INFO_TABLE_ADDRESS), cols, 1];
+    let fields = [info(source).wrapping_add(row.wrapping_mul(cols)), TARGET_VECTOR, 0, info(address), cols, 1];
     unsafe {
         for (register, value) in fields.iter().enumerate() {
             write_volatile(LOADER.add(register), *value);
@@ -253,7 +257,12 @@ fn start_die(routine: u32, token: u32, position: u32) {
     // Only these routines read a token's row of the table: with Show-o, the image's
     // embedding too, which reads the same table.
     if routine == ROUTINE_TOKEN || routine == ROUTINE_DRAFT || (routine == ROUTINE_VISION && info(INFO_SHOWO) != 0) {
-        load_row(token);
+        load_row(token, [INFO_TABLE_SOURCE, INFO_TABLE_ADDRESS, INFO_TABLE_COLS]);
+    }
+    // The routines that rotate by the token's position: a die that leaves its rotation
+    // table in the image holds only that position's row.
+    if routine == ROUTINE_TOKEN || routine == ROUTINE_DRAFT || routine == ROUTINE_TOKEN_FROM_IMAGE {
+        load_row(position, [INFO_ROTATION_SOURCE, INFO_ROTATION_ADDRESS, INFO_ROTATION_COLS]);
     }
     for p in 0..info(INFO_PARAMETER_COUNT) as usize {
         let at = INFO_PARAMETERS + 7 * p;

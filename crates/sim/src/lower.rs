@@ -524,6 +524,18 @@ pub struct Layout {
     /// The lookup table that stays in the image, its register and its row length: the
     /// register holds only the row the firmware brought in for this token.
     outside: Option<OutsideTable>,
+    /// The rotation table when it stays in the image: its register holds only the row of the
+    /// token's position, which the firmware brings before each routine that rotates.
+    rotation_outside: Option<OutsideTable>,
+}
+
+/// Where each register of a compact vector memory starts and its loop step, the words of
+/// the whole memory, their log2, and the words each register takes.
+struct RegisterPlan {
+    bases: Vec<(u32, u32)>,
+    words: u64,
+    bits: u32,
+    sizes: Vec<(u32, u64)>,
 }
 
 /// A lookup table the firmware reads from the image a row at a time.
@@ -927,7 +939,11 @@ impl Layout {
             _ => None,
         });
         let token_range = table_rows.chain([program.vocab, program.vision.as_ref().map_or(0, |v| v.patches)]).max().unwrap_or(0) as u32;
-        Ok(Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: if outside.is_some() { program.vision.as_ref().map_or(program.vocab, |v| v.patches) as u32 } else { token_range }, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside })
+        let mut layout = Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: if outside.is_some() { program.vision.as_ref().map_or(program.vocab, |v| v.patches) as u32 } else { token_range }, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside, rotation_outside: None };
+        if table_out {
+            layout.rotation_out(program, matrices_in_registers);
+        }
+        Ok(layout)
     }
 
     pub fn setup(&self) -> &Assembly {
@@ -1165,7 +1181,44 @@ impl Layout {
         self.register_layout().1
     }
 
+    /// Words of each unit's vector memory by what they hold, for the routines assembled so
+    /// far: the cache's keys and values, the rotation table, the recurrent and convolution
+    /// state, the constants and the rest.
+    pub fn vector_words_by_kind(&self) -> Vec<(&'static str, u64)> {
+        let sizes = self.register_layout_sizes().sizes;
+        let kind = |r: u32| -> &'static str {
+            if self.keys.contains(&r) {
+                "keys"
+            } else if self.values.contains(&r) {
+                "values"
+            } else if self.rope_table.contains(&r) || self.vision_rope.is_some_and(|(_, table, _)| table == r) {
+                "rotation table"
+            } else if self.delta.iter().flatten().any(|d| *d == r) || self.conv.contains(&r) {
+                "recurrent state"
+            } else if self.small.values().any(|s| *s == r) || self.weights.values().any(|w| *w == r) {
+                "constants and tables"
+            } else {
+                "working registers"
+            }
+        };
+        let mut totals: Vec<(&'static str, u64)> = Vec::new();
+        for (register, words) in sizes {
+            let name = kind(register);
+            match totals.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, total)) => *total += words,
+                None => totals.push((name, words)),
+            }
+        }
+        totals.sort_by_key(|(_, words)| std::cmp::Reverse(*words));
+        totals
+    }
+
     fn register_layout(&self) -> (Vec<(u32, u32)>, u64, u32) {
+        let plan = self.register_layout_sizes();
+        (plan.bases, plan.words, plan.bits)
+    }
+
+    fn register_layout_sizes(&self) -> RegisterPlan {
         let lanes = 1u64 << self.config.features.lane_bits;
         let mut extents = self.extents.borrow().clone();
         // What is loaded before the first routine, and the exponent of every register.
@@ -1188,12 +1241,14 @@ impl Layout {
         }
         let mut bases = vec![(0u32, 0u32); 1 << self.config.reg_bits];
         let mut placed = vec![false; bases.len()];
+        let mut sizes = Vec::new();
         let mut next = 0u64;
         for (first, last) in merged {
             let stride = (first..=last).map(words).max().unwrap_or(lanes).next_power_of_two();
             for r in first..=last {
                 bases[r as usize] = ((next + (r - first) as u64 * stride) as u32, stride.trailing_zeros());
                 placed[r as usize] = true;
+                sizes.push((r, stride));
             }
             next += (last - first + 1) as u64 * stride;
         }
@@ -1201,10 +1256,11 @@ impl Layout {
         alone.sort_unstable();
         for r in alone {
             bases[r as usize] = (next as u32, 0);
+            sizes.push((r, words(r)));
             next += words(r);
         }
         let bits = (u64::BITS - next.max(lanes * 2).saturating_sub(1).leading_zeros()).max(self.config.features.lane_bits + 1);
-        (bases, next, bits)
+        RegisterPlan { bases, words: next, bits, sizes }
     }
 
     /// Forgets the weights of every matrix that the given operations do not use.
@@ -1381,7 +1437,45 @@ impl Layout {
     /// token the firmware loads that token's row into the table's register, which then
     /// holds one row. Only one table can stay outside; with none, or with more than one,
     /// nothing changes. Returns whether the table went out.
+    /// The rotation table goes too, when the model rotates by position alone.
     pub fn table_outside(&mut self, program: &Program) -> bool {
+        let rotation = self.rotation_out(program, true);
+        self.embedding_out(program) || rotation
+    }
+
+    /// Leaves the rotation table in the image: before each routine that rotates, the
+    /// firmware brings the row of the token's position into the table's register, which
+    /// then holds one row instead of one for every position of the context. Only a model
+    /// that rotates by position alone, with one table, can: an image's tokens take rotations
+    /// the host writes into the table. With `keep`, the table's rows stay with the layout
+    /// for the image. Returns whether the table went out.
+    fn rotation_out(&mut self, program: &Program, keep: bool) -> bool {
+        let width = 3 * self.rope_half as u32 + 1;
+        let register = self.rope_table[0];
+        if self.rotation_outside.is_some() || self.rope_half == 0 || program.vision.is_some() || program.image.is_some() || program.local_rope_theta.is_some() || !self.setup.initial.contains_key(&(register, 0)) {
+            return false;
+        }
+        let rows = self.positions;
+        let mut mantissas = Vec::with_capacity(if keep { (rows * width) as usize } else { 0 });
+        for i in 0..rows * width {
+            let value = self.setup.initial.get(&(register, i)).copied().unwrap_or(0);
+            if keep {
+                mantissas.push(value);
+            }
+            if i >= width {
+                self.setup.initial.remove(&(register, i));
+            }
+        }
+        self.rotation_outside = Some(OutsideTable { name: "rotation".into(), register, cols: width, mantissas });
+        true
+    }
+
+    /// The rotation table that stays in the image, if it does.
+    pub fn rotation_table_outside(&self) -> Option<&OutsideTable> {
+        self.rotation_outside.as_ref()
+    }
+
+    fn embedding_out(&mut self, program: &Program) -> bool {
         if self.lookup_tables.len() != 1 {
             return false;
         }
@@ -1516,7 +1610,7 @@ impl Layout {
     /// The text's rotation table, its row 0's address, and half the rotated elements of a
     /// row: only a table in registers, which the firmware can rewrite.
     pub fn rope_table(&self) -> Option<(u32, u32)> {
-        self.setup.initial.contains_key(&(self.rope_table[0], 0)).then(|| (self.rope_table[0] << self.config.index_bits, self.rope_half as u32))
+        (self.rotation_outside.is_none() && self.setup.initial.contains_key(&(self.rope_table[0], 0))).then(|| (self.rope_table[0] << self.config.index_bits, self.rope_half as u32))
     }
 
     pub fn vision_info(&self, program: &Program, config: &crate::vision::VisionConfig) -> Option<netlist::chip::VisionInfo> {
@@ -1624,7 +1718,9 @@ impl Layout {
         }
         let (theta, scaling, half) = (program.rope_theta, program.rope_scaling, self.rope_half);
         let rotations = self.rotations.borrow();
-        ops.load_row(self.rope_table[0], position, 3 * half as u32 + 1, self.rope[0], |row| rotations.get(&(0, row)).cloned().unwrap_or_else(|| rope_row(theta, scaling, half, row)));
+        // A table left in the image holds just this position's row, put there by the firmware.
+        let row = if self.rotation_outside.is_some() { 0.into() } else { position };
+        ops.load_row(self.rope_table[0], row, 3 * half as u32 + 1, self.rope[0], |row| rotations.get(&(0, row)).cloned().unwrap_or_else(|| rope_row(theta, scaling, half, row)));
         if let Some(local) = program.local_rope_theta {
             ops.load_row(self.rope_table[1], position, 3 * half as u32 + 1, self.rope[1], |row| rope_row(local, None, half, row));
         }

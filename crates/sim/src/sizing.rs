@@ -142,6 +142,8 @@ pub struct Built {
     pub cell_bits: u64,
     /// Words of vector memory of each unit on the chip that needs most.
     pub vector_words: u64,
+    /// What those words hold, on that chip.
+    pub vector_kinds: Vec<(&'static str, u64)>,
 }
 
 /// Each chip's microprogram and the memory it needs. By layers, they are cut among the
@@ -149,7 +151,7 @@ pub struct Built {
 /// an equal slice of each matrix.
 pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32, chips: u32, sharing: Sharing) -> Result<Built, String> {
     let plan = chip_plan(program, weights, chips as usize, context as usize, die.cell.activation_bits)?;
-    let (mut cell_bits, mut vector) = (0, 0);
+    let (mut cell_bits, mut vector, mut kinds) = (0, 0, Vec::new());
     let codes = (0..plan.len())
         .map(|chip| {
             // The embedding table stays in the image, as on a large model's chip: the
@@ -170,11 +172,14 @@ pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32,
             cell_bits = cell_bits.max(depth * die.cell.weight_bits as u64 + groups * 2 * die.scale_bits as u64);
             let code = if by_rows { layout.microprogram(program)? } else { layout.die_microprogram(program, &plan, chip)? };
             // The words its own routines reach, as the compact vector memory holds them.
-            vector = vector.max(layout.vector_words_used());
+            let words = layout.vector_words_used();
+            if words > vector {
+                (vector, kinds) = (words, layout.vector_words_by_kind());
+            }
             Ok(code)
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok(Built { programs: codes, cell_bits, vector_words: vector })
+    Ok(Built { programs: codes, cell_bits, vector_words: vector, vector_kinds: kinds })
 }
 
 /// Silicon of a process, for the area of what is generated.
@@ -249,7 +254,7 @@ pub fn die_of(base: DieConfig, context: u32, (cluster_bits, lane_bits, cell_bits
 /// One set of chips, measured: its own microprograms, its clock and its silicon.
 fn evaluate(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs, target: &Target, (chips, cluster_bits, lane_bits, cell_bits): (u32, u32, u32, u32)) -> Option<Candidate> {
     let die = die_of(base, target.context, (cluster_bits, lane_bits, cell_bits));
-    let Built { programs: codes, cell_bits: bits, vector_words } = built(program, weights, die, target.context, chips, target.sharing).ok()?;
+    let Built { programs: codes, cell_bits: bits, vector_words, .. } = built(program, weights, die, target.context, chips, target.sharing).ok()?;
     let timing = timing(&codes, die, target.context, target.prompt, 256, target.sharing);
     let clock = target.clock_hz.min(costs.clock_hz(cluster_bits, lane_bits, target.process.full_adder_ns));
     let cycles = timing.token_cycles;

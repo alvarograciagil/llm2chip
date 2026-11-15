@@ -131,6 +131,9 @@ fn main() {
         if layout.outside_table().is_some() {
             eprintln!("the embedding table stays in the image");
         }
+        if layout.rotation_table_outside().is_some() {
+            eprintln!("the rotation table stays in the image");
+        }
         eprintln!("longest registers: {:?}", layout.longest_registers(6));
         let (depth, groups) = layout.cell_depths();
         eprintln!("{} registers used (2^{} in the table), {} weight words and {} factor groups per cell", layout.registers_needed(), die.reg_bits, depth, groups);

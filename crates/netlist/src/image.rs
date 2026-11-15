@@ -27,6 +27,16 @@ pub enum Target {
     /// For each PC of a microcode kept as a dictionary, where its following word and its
     /// branch target are in the dictionary.
     MicrocodeIndex = 10,
+    /// The rotation table, when it stays in the image: the firmware loads the row of each
+    /// token's position into the register at `address`, `unit` elements. Not loaded at boot.
+    RotationTable = 11,
+}
+
+impl Target {
+    /// Tables the firmware reads a row of while running, instead of loading them at boot.
+    fn at_runtime(self) -> bool {
+        matches!(self, Target::RuntimeTable | Target::RotationTable)
+    }
 }
 
 /// A block of the image and where it goes on the chip.
@@ -85,7 +95,9 @@ pub fn build_image(program: &[u32], data: &[u32], config: &[u32], tokenizer: &[u
     }
 
     let mut tables_at = source;
-    point_at_table(&mut config, tables.first(), &mut tables_at);
+    for table in &tables {
+        point_at_table(&mut config, table, &mut tables_at);
+    }
     let mut image = vec![MAGIC, program.len() as u32, data_words as u32];
     image.extend_from_slice(program);
     image.extend_from_slice(data);
@@ -100,26 +112,31 @@ pub fn build_image(program: &[u32], data: &[u32], config: &[u32], tokenizer: &[u
     for segment in segments {
         image.extend_from_slice(&segment.words);
     }
-    for table in tables.iter().take(1) {
+    for table in &tables {
         image.extend_from_slice(&table.words);
     }
     Ok(image)
 }
 
-/// Splits off the tables that stay in the image from the segments loaded at boot.
+/// Splits off the tables that stay in the image from the segments loaded at boot: at most
+/// a lookup table read by token and a rotation table read by position.
 fn runtime_tables(segments: &[Segment]) -> (Vec<Segment>, Vec<Segment>) {
-    let (tables, boot): (Vec<Segment>, Vec<Segment>) = segments.iter().cloned().partition(|s| s.target == Target::RuntimeTable);
-    assert!(tables.len() <= 1, "the image takes only one table read while running");
+    let (tables, boot): (Vec<Segment>, Vec<Segment>) = segments.iter().cloned().partition(|s| s.target.at_runtime());
+    for kind in [Target::RuntimeTable, Target::RotationTable] {
+        assert!(tables.iter().filter(|t| t.target == kind).count() <= 1, "the image takes only one table of each kind read while running");
+    }
     (boot, tables)
 }
 
 /// Tells the firmware where `table` will be in the image, which is `at` onwards, and moves
 /// `at` past it.
-fn point_at_table(info: &mut [u32], table: Option<&Segment>, at: &mut usize) {
-    let Some(table) = table else { return };
-    info[crate::chip::INFO_TABLE_SOURCE] = *at as u32;
-    info[crate::chip::INFO_TABLE_ADDRESS] = table.address;
-    info[crate::chip::INFO_TABLE_COLS] = table.unit;
+fn point_at_table(info: &mut [u32], table: &Segment, at: &mut usize) {
+    use crate::chip::{INFO_ROTATION_ADDRESS, INFO_ROTATION_COLS, INFO_ROTATION_SOURCE, INFO_TABLE_ADDRESS, INFO_TABLE_COLS, INFO_TABLE_SOURCE};
+    let (source, address, cols) = match table.target {
+        Target::RotationTable => (INFO_ROTATION_SOURCE, INFO_ROTATION_ADDRESS, INFO_ROTATION_COLS),
+        _ => (INFO_TABLE_SOURCE, INFO_TABLE_ADDRESS, INFO_TABLE_COLS),
+    };
+    (info[source], info[address], info[cols]) = (*at as u32, table.address, table.unit);
     *at += table.words.len();
 }
 
@@ -173,16 +190,16 @@ pub fn build_plan_image(program: &[u32], data: &[u32], tokenizer: &[u32], plans:
     let mut blocks = Vec::new();
     for (part, (boot, tables)) in plans.iter().flatten().zip(&split) {
         let mut info = part.info.clone();
-        if let Some(table) = tables.first() {
+        for table in tables {
             match placed.iter().find(|(words, _)| *words == table.words.as_slice()) {
                 Some((_, at)) => {
                     let mut at = *at;
-                    point_at_table(&mut info, Some(table), &mut at);
+                    point_at_table(&mut info, table, &mut at);
                 }
                 None => {
                     placed.push((&table.words, tables_at));
                     runtime_words.extend_from_slice(&table.words);
-                    point_at_table(&mut info, Some(table), &mut tables_at);
+                    point_at_table(&mut info, table, &mut tables_at);
                 }
             }
         }

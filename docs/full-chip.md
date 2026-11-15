@@ -141,7 +141,7 @@ Today the weights are written straight into the simulated memory. The central ch
 
 The microprogram is loaded once from the image and does not depend on the token or the position. The sequencer has index registers that add an offset to each operand, and a conditional jump for loops. The CPU writes the parameters (embedding row, cache position, context tokens) and starts one of the routines: token, logits, and those of the MTP head.
 
-RoPE's sines and cosines go into a table in memory with one row per position. It is the part that grows most with the context (each position takes 3·h+1 values), so for long contexts it will pay to replace it with two tables and angle addition.
+RoPE's sines and cosines form a table with one row per position, 3·h+1 values each, the part of the chip's data that grows most with the context. On a chip whose embedding table stays in the image, the rotation table stays there too: before each routine that rotates, the firmware has the load controller bring the row of the token's position into the table's register, which holds that one row. Models whose image tokens take rotations written by the host (M-RoPE, Show-o) or that have two rotation tables keep the whole table in the die.
 
 The logic per head and per layer is still unrolled: the program grows with the number of heads, though no longer with the number of elements. Folding the heads into loops is the pending improvement for all of Qwen3.8 to fit.
 

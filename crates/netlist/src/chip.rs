@@ -682,7 +682,12 @@ pub const INFO_TABLE_COLS: usize = 23;
 /// Where the description of the chip's image encoder starts, if it carries one; zero if not.
 pub const INFO_VISION: usize = 24;
 pub const INFO_SHOWO: usize = 25;
-pub const INFO_PARAMETERS: usize = 26;
+/// The rotation table, when it stays in the image: the firmware brings the row of each
+/// token's position before each routine that rotates, the same way as the lookup table's.
+pub const INFO_ROTATION_SOURCE: usize = 26;
+pub const INFO_ROTATION_ADDRESS: usize = 27;
+pub const INFO_ROTATION_COLS: usize = 28;
+pub const INFO_PARAMETERS: usize = 29;
 
 /// What the firmware needs to run the image encoder a chip carries, in the order of its
 /// words: see `VisionInfo`.
