@@ -1666,8 +1666,8 @@ fn whole_delta_step<O: BlockOps>(ops: &mut O, r: DeltaRegs, key: u32, value: u32
     ops.scale(r.memory, r.delta, r.update, value.into());
     ops.add(r.next, r.update, r.out, value.into());
     ops.outer_product(r.key, r.delta, r.update, key, value);
-    ops.add(r.state, r.update, r.next, cells.into());
-    ops.copy_part(r.next, 0.into(), r.state, 0.into(), cells.into());
+    // In place: each element is read before it is written.
+    ops.add(r.state, r.update, r.state, cells.into());
 }
 
 /// Whether one loop can issue an element per cycle: results land two or three cycles
@@ -1864,6 +1864,13 @@ impl BlockOps for Assembly {
     fn row_combination(&mut self, weights: u32, matrix: u32, dst: u32, (width, stride, offset): (u32, u32, Expr), count: Expr) {
         if !self.combines || width < MIN_STREAM {
             return self.dots(weights, matrix, dst, width.into(), count, |j, t| ((weights, t), (matrix, t * stride + offset + j)));
+        }
+        // Rows of one block one after another go through one a cycle, as a delta rule's
+        // state does, instead of a few cycles each.
+        let lanes = 1u32 << self.lane_bits;
+        if self.rows_stream && width == lanes && stride == width && offset.is_multiple_of(lanes) && count.is_constant() && count.constant() > 1 {
+            self.steps.push(Step::CombineRows { weights: (weights, 0.into()), matrix, start: offset, rows: count.constant(), window: 0.into(), window_a: false, window_b: false });
+            return self.narrow_sums(weights, matrix, dst, width.into());
         }
         // A zero weight clears every sum, whatever the matrix holds.
         let zero = self.sc(10);
