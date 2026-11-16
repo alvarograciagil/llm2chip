@@ -222,6 +222,21 @@ pub struct CellTensor {
     bits: u32,
     /// The first row of the whole matrix that this chip holds, when chips share it by rows.
     first_row: usize,
+    /// Runs of rows of the whole matrix, `(first, count)`, when this chip's are not one.
+    pieces: Vec<(usize, usize)>,
+}
+
+/// Row `row` of a chip's share of a matrix, in the whole matrix: from `first_row` on, or
+/// through the runs `pieces` when it holds several.
+fn whole_row(first_row: usize, pieces: &[(usize, usize)], row: usize) -> usize {
+    let mut rest = row;
+    for (first, count) in pieces {
+        if rest < *count {
+            return first + rest;
+        }
+        rest -= count;
+    }
+    first_row + row
 }
 
 impl CellTensor {
@@ -239,7 +254,7 @@ impl CellTensor {
     /// One row in the bytes of the image: its codes, then each group's scale and bias.
     pub fn encoded_row(&self, weights: &Weights, row: usize) -> Result<Vec<u8>, String> {
         let matrix = weights.matrix(&self.name)?;
-        let (codes, factors) = matrix.cell_row(self.first_row + row, self.cols, self.exponent, self.bits)?;
+        let (codes, factors) = matrix.cell_row(whole_row(self.first_row, &self.pieces, row), self.cols, self.exponent, self.bits)?;
         let code_bits = matrix.cell_code_bits(self.cols, self.bits);
         let mut bytes = Vec::with_capacity(self.row_bytes(weights)?);
         match code_bits {
@@ -286,6 +301,9 @@ struct CellEntry {
     chained: bool,
     /// The first row of the whole matrix that this chip holds, when chips share it by rows.
     first_row: usize,
+    /// Runs of rows of the whole matrix, `(first, count)`, when this chip's are not one:
+    /// those of its heads in each part of a projection that makes several.
+    pieces: Vec<(usize, usize)>,
 }
 
 /// Entries that share passes of the cells, with where each one's rows start and how many
@@ -753,7 +771,7 @@ impl Layout {
                         chains.insert(name.clone(), vec![(name.clone(), *dst)]);
                         leader_of.insert(name.clone(), name.clone());
                     }
-                    cell_plan.push(CellEntry { block, name, rows, cols, group, groups, quant, packing, exponent, chained, first_row: 0 });
+                    cell_plan.push(CellEntry { block, name, rows, cols, group, groups, quant, packing, exponent, chained, first_row: 0, pieces: Vec::new() });
                 }
             }
             previous = Some(&inst.op);
@@ -1368,7 +1386,7 @@ impl Layout {
 
     /// Every matrix in the cells, in the order they hold them.
     pub fn cell_tensors(&self) -> Vec<CellTensor> {
-        self.cell_plan.iter().map(|e| CellTensor { name: e.name.clone(), rows: e.rows, cols: e.cols, block: e.block, exponent: e.exponent, cells: self.config.cells as usize, bits: self.config.cell.activation_bits, first_row: e.first_row }).collect()
+        self.cell_plan.iter().map(|e| CellTensor { name: e.name.clone(), rows: e.rows, cols: e.cols, block: e.block, exponent: e.exponent, cells: self.config.cells as usize, bits: self.config.cell.activation_bits, first_row: e.first_row, pieces: e.pieces.clone() }).collect()
     }
 
     pub fn cell_depths(&self) -> (u64, u64) {
@@ -1400,7 +1418,7 @@ impl Layout {
                     match owner {
                         Some((p, start)) => {
                             let matrix = weights.matrix(&p.name)?;
-                            let (w, f) = matrix.cell_row(p.first_row + b * p.block + row - start, p.cols, p.exponent, self.config.cell.activation_bits)?;
+                            let (w, f) = matrix.cell_row(whole_row(p.first_row, &p.pieces, b * p.block + row - start), p.cols, p.exponent, self.config.cell.activation_bits)?;
                             let count = p.cols.div_ceil(p.quant);
                             let shared = |q: usize| if f.len() == count { f.get(q).copied() } else { (q < count).then(|| f[0]) };
                             factors.extend(quant_groups.clone().map(|q| shared(q).unwrap_or((0, 0))));
@@ -1534,6 +1552,35 @@ impl Layout {
         // Each chip's slice must be whole blocks of the link.
         let block = if self.config.features.wide_link { 1usize << self.config.features.lane_bits } else { 1 };
         let fits = |buffer: usize| buffers[buffer].is_multiple_of(n) && (buffers[buffer] / n).is_multiple_of(block);
+        let readers = |buffer: usize| ops.iter().filter(move |op| buffers_read(op).contains(&buffer));
+        // The delta rule's projection makes queries, keys and values in one vector, which the
+        // convolution and SiLU take channel by channel: a chip that runs some of the heads
+        // makes only their channels, the queries', keys' and values' one after the other,
+        // when nothing else reads them. The projection's rows that make them are its own.
+        let mut sections: HashMap<usize, (String, usize, Vec<usize>)> = HashMap::new();
+        let mut packed: HashSet<usize> = HashSet::new();
+        for op in ops.iter().filter(|_| delta_split) {
+            let Op::DeltaStep { mixed, key_dim, key_heads, value_dim, value_heads, .. } = op else { continue };
+            let silu = ops.iter().find_map(|o| match o {
+                Op::Silu { src, dst } if dst == mixed => Some(*src),
+                _ => None,
+            });
+            let conv = silu.and_then(|c| ops.iter().find_map(|o| match o {
+                Op::Dconv { src, dst, slot, .. } if *dst == c => Some((*src, *slot)),
+                _ => None,
+            }));
+            let matrix = conv.and_then(|(q, _)| ops.iter().find_map(|o| match o {
+                Op::Matvec { matrix, dst, .. } if *dst == q && self.by_rows.contains(matrix) => Some(matrix.clone()),
+                _ => None,
+            }));
+            let (Some(c), Some((q, slot)), Some(matrix)) = (silu, conv, matrix) else { continue };
+            let parts = vec![key_dim * key_heads, key_dim * key_heads, value_dim * value_heads];
+            let divide = parts.iter().all(|part| part.is_multiple_of(n) && (part / n).is_multiple_of(block));
+            if divide && buffers[q] == parts.iter().sum::<usize>() && readers(q).count() == 1 && readers(c).count() == 1 && readers(*mixed).all(|r| matches!(r, Op::DeltaStep { .. })) {
+                packed.extend([q, c, *mixed]);
+                sections.insert(q, (matrix, slot, parts));
+            }
+        }
         // What runs head by head: whether `op` reads `buffer` as heads.
         let by_heads = |op: &Op, buffer: usize| match op {
             Op::RmsGated { src, z, .. } => delta_split && delta_out.contains(src) && (*z == buffer || *src == buffer),
@@ -1546,9 +1593,10 @@ impl Layout {
             // blocks of the link.
             Op::Silu { src, dst } | Op::Sigmoid { src, dst } => *src == buffer && fits(*dst),
             Op::MulElem { a, b, dst } => (*a == buffer || *b == buffer) && fits(*dst),
+            Op::Dconv { src, .. } => *src == buffer && packed.contains(src),
+            Op::DeltaStep { mixed, .. } => *mixed == buffer && packed.contains(mixed),
             _ => false,
         };
-        let readers = |buffer: usize| ops.iter().filter(move |op| buffers_read(op).contains(&buffer));
         let mut local: HashSet<usize> = HashSet::new();
         for op in &ops {
             match op {
@@ -1576,6 +1624,9 @@ impl Layout {
                 Op::MulElem { a, b, dst } if local.contains(a) || local.contains(b) => {
                     local.insert(*dst);
                 }
+                Op::Dconv { src, dst, .. } if local.contains(src) => {
+                    local.insert(*dst);
+                }
                 _ => {}
             }
         }
@@ -1596,6 +1647,36 @@ impl Layout {
             return;
         }
         let gather: HashSet<usize> = local.iter().copied().filter(|b| readers(*b).any(|r| !by_heads(r, *b))).collect();
+        // A packed projection takes its rows from each part, and the convolution's taps
+        // follow its channels: this chip's, from the place its slice starts.
+        for (q, (matrix, slot, parts)) in sections.into_iter().filter(|(q, _)| local.contains(q)) {
+            let Some(entry) = self.cell_plan.iter_mut().find(|e| e.name == matrix) else { continue };
+            let mut first = 0;
+            entry.pieces = parts.iter().map(|part| {
+                let piece = (first + index as usize * part / n, part / n);
+                first += part;
+                piece
+            }).collect();
+            let channels: Vec<usize> = entry.pieces.iter().flat_map(|(first, count)| *first..first + count).collect();
+            let weight = ops.iter().find_map(|o| match o {
+                Op::Dconv { src, weight, .. } if *src == q => Some(weight.clone()),
+                _ => None,
+            });
+            let (Some(weight), (dim, kernel)) = (weight, program.conv_slots[slot]) else { continue };
+            let taps = self.small[&format!("{weight}.weight")];
+            let base = index as usize * dim / n;
+            let moved: Vec<((u32, u32), i64)> = (0..kernel)
+                .flat_map(|k| channels.iter().enumerate().map(move |(j, c)| (k, j, *c)))
+                .map(|(k, j, c)| ((taps, (k * dim + base + j) as u32), self.setup.initial.get(&(taps, (k * dim + c) as u32)).copied().unwrap_or(0)))
+                .collect();
+            for (place, value) in moved {
+                if value == 0 {
+                    self.setup.initial.remove(&place);
+                } else {
+                    self.setup.initial.insert(place, value);
+                }
+            }
+        }
         (self.heads_shard, self.local, self.gather_local) = (Some((index, chips)), local, gather);
     }
 
@@ -2414,19 +2495,28 @@ impl Layout {
                 let taps = self.small[&format!("{weight}.weight")];
                 let reg = self.conv[*slot];
                 let (dim32, kernel32) = (dim as u32, kernel as u32);
+                // A chip that runs some of the delta rule's heads convolves their channels.
+                let (base, len) = self.slice_of(program, *dst);
+                ops.slices_across_chips(self.local.contains(dst));
                 let (src, dst) = (self.reg(*src), self.reg(*dst));
                 // Each unit keeps the history of its own channels and convolves them.
-                ops.in_slabs(dim32, &[dst], |ops, start, n| {
+                ops.in_slabs_at(base, len, &[dst], |ops, start, n| {
                     ops.align_to(src, start, STATE_EXPONENT, reg, start + (history * dim32).into(), n.into());
                     ops.depthwise_part(taps, reg, dst, dim32, kernel32, start, n);
                     ops.each(history.into(), |ops, k| ops.copy_elements(reg, (k + 1.into()) * dim32 + start, k * dim32 + start, n));
                 });
+                ops.slices_across_chips(false);
             }
             Op::DeltaStep { slot, mixed, a, b, a_log, dt_bias, key_dim, key_heads, value_dim, value_heads, dst } => {
                 let ratio = value_heads / key_heads;
                 let (kd, vd) = (*key_dim as u32, *value_dim as u32);
                 let key_len = kd * *key_heads as u32;
                 let root = self.inverse_root[key_dim];
+                // A chip that makes only its heads' channels has their queries, keys and
+                // values one after the other from where its slice starts.
+                let packed = self.local.contains(mixed);
+                let (base, share) = self.slice_of(program, *mixed);
+                let chips = if packed { (program.buffers[*mixed] as u32) / share } else { 1 };
                 let mixed = self.reg(*mixed);
                 let (a_reg, b_reg) = (self.reg(*a), self.reg(*b));
                 let (scale_a, bias) = (self.small[a_log], self.small[dt_bias]);
@@ -2446,14 +2536,20 @@ impl Layout {
                             let (qh, kh, vh, beta, decay) = (t[20], t[21], t[22], t[23], t[24]);
                             let (work, inv) = (t[25], t[26]);
 
-                            ops.copy_part(mixed, key_head * kd, work, 0.into(), kd.into());
+                            let (query_at, key_at, value_at) = if packed {
+                                let (keys, local) = (key_len / chips, mine * ratio as u32 + shared);
+                                (mine * kd + base.into(), mine * kd + (base + keys).into(), local * vd + (base + 2 * keys).into())
+                            } else {
+                                (key_head * kd, key_head * kd + key_len.into(), h * vd + (2 * key_len).into())
+                            };
+                            ops.copy_part(mixed, query_at, work, 0.into(), kd.into());
                             ops.normalize(work, kd.into());
                             ops.l2_normalize(work, t[27], kd, (inv, t[28]), Some(self.epsilon));
                             ops.scale(root, t[27], qh, kd.into());
-                            ops.copy_part(mixed, key_head * kd + key_len.into(), work, 0.into(), kd.into());
+                            ops.copy_part(mixed, key_at, work, 0.into(), kd.into());
                             ops.normalize(work, kd.into());
                             ops.l2_normalize(work, kh, kd, (inv, t[28]), Some(self.epsilon));
-                            ops.copy_part(mixed, h * vd + (2 * key_len).into(), vh, 0.into(), vd.into());
+                            ops.copy_part(mixed, value_at, vh, 0.into(), vd.into());
                             ops.normalize(vh, vd.into());
 
                             ops.copy_part(b_reg, h, work, 0.into(), 1.into());
