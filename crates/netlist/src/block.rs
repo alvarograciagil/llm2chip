@@ -1545,8 +1545,9 @@ impl Assembly {
     fn ring_matvec_rows(&mut self, name: &str, matrix: u32, src: u32, dst: u32, rows: u32, offset: u32) {
         let place = *self.in_cells.get(name).unwrap_or_else(|| panic!("{name} is split by rows and must be in the cells"));
         self.cell_matvec(place, 0.into(), src, rows);
+        // Every unit holds every total; each narrows a slice and one stream collects them.
         self.across_chips = true;
-        self.narrow_part_at(matrix, src, dst, 0.into(), offset.into(), rows.into());
+        self.in_slabs_at(offset, rows, &[dst], |s, from, count| s.narrow_part_at(matrix, src, dst, from + offset.wrapping_neg().into(), from, count.into()));
         self.across_chips = false;
     }
 
@@ -1559,7 +1560,7 @@ impl Assembly {
         self.cell_matvec(place, 0.into(), src, total);
         self.across_chips = true;
         for (&(matrix, dst, rows, offset), start) in parts.iter().zip(starts) {
-            self.narrow_part_at(matrix, src, dst, start.into(), offset.into(), rows.into());
+            self.in_slabs_at(offset, rows, &[dst], |s, from, count| s.narrow_part_at(matrix, src, dst, from + start.wrapping_sub(offset).into(), from, count.into()));
         }
         self.across_chips = false;
     }

@@ -48,6 +48,14 @@ fn main() {
         let share = sim::chip::ShareOut::new(&program, &weights, chips as usize, context as usize, die.cell.activation_bits, sharing).unwrap();
         let mut layout = sim::lower::Layout::for_image_table_outside(&program, &weights, die, context as usize).unwrap();
         share.microprogram(&mut layout, &program, chip).unwrap();
+        if std::env::var("CONSTANTS").is_ok() {
+            let named = layout.largest_constants(12);
+            let total: u64 = named.iter().map(|(_, w)| w).sum();
+            println!("largest constants of chip {chip} ({total} words among them):");
+            for (name, words) in named {
+                println!("  {words:>8} {name}");
+            }
+        }
         if let Ok(op) = std::env::var("WORDS") {
             let inst = &program.ops[op.parse::<usize>().expect("an operation's number")];
             let code = layout.op_microprogram(&program, inst, false).unwrap();

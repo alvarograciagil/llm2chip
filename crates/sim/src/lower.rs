@@ -1276,6 +1276,16 @@ impl Layout {
         totals
     }
 
+    /// The constants and tables that take most of a vector unit's memory, by name, with
+    /// the words of each.
+    pub fn largest_constants(&self, count: usize) -> Vec<(String, u64)> {
+        let sizes: HashMap<u32, u64> = self.register_layout_sizes().sizes.into_iter().collect();
+        let mut named: Vec<(String, u64)> = self.small.iter().chain(self.weights.iter()).filter_map(|(name, r)| sizes.get(r).map(|words| (name.clone(), *words))).collect();
+        named.sort_by_key(|(_, words)| std::cmp::Reverse(*words));
+        named.truncate(count);
+        named
+    }
+
     fn register_layout(&self) -> (Vec<(u32, u32)>, u64, u32) {
         let plan = self.register_layout_sizes();
         (plan.bases, plan.words, plan.bits)
