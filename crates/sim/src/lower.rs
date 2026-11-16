@@ -1664,18 +1664,13 @@ impl Layout {
             });
             let (Some(weight), (dim, kernel)) = (weight, program.conv_slots[slot]) else { continue };
             let taps = self.small[&format!("{weight}.weight")];
-            let base = index as usize * dim / n;
+            let width = dim / n;
             let moved: Vec<((u32, u32), i64)> = (0..kernel)
                 .flat_map(|k| channels.iter().enumerate().map(move |(j, c)| (k, j, *c)))
-                .map(|(k, j, c)| ((taps, (k * dim + base + j) as u32), self.setup.initial.get(&(taps, (k * dim + c) as u32)).copied().unwrap_or(0)))
+                .map(|(k, j, c)| ((taps, (k * width + j) as u32), self.setup.initial.get(&(taps, (k * dim + c) as u32)).copied().unwrap_or(0)))
                 .collect();
-            for (place, value) in moved {
-                if value == 0 {
-                    self.setup.initial.remove(&place);
-                } else {
-                    self.setup.initial.insert(place, value);
-                }
-            }
+            self.setup.initial.retain(|(register, _), _| *register != taps);
+            self.setup.initial.extend(moved.into_iter().filter(|(_, value)| *value != 0));
         }
         (self.heads_shard, self.local, self.gather_local) = (Some((index, chips)), local, gather);
     }
@@ -2495,15 +2490,19 @@ impl Layout {
                 let taps = self.small[&format!("{weight}.weight")];
                 let reg = self.conv[*slot];
                 let (dim32, kernel32) = (dim as u32, kernel as u32);
-                // A chip that runs some of the delta rule's heads convolves their channels.
+                // A chip that runs some of the delta rule's heads convolves their channels,
+                // and keeps their taps and history together, as rows of its own channels.
                 let (base, len) = self.slice_of(program, *dst);
-                ops.slices_across_chips(self.local.contains(dst));
+                let packed = self.local.contains(dst);
+                let width = if packed { len } else { dim32 };
+                ops.slices_across_chips(packed);
                 let (src, dst) = (self.reg(*src), self.reg(*dst));
                 // Each unit keeps the history of its own channels and convolves them.
                 ops.in_slabs_at(base, len, &[dst], |ops, start, n| {
-                    ops.align_to(src, start, STATE_EXPONENT, reg, start + (history * dim32).into(), n.into());
-                    ops.depthwise_part(taps, reg, dst, dim32, kernel32, start, n);
-                    ops.each(history.into(), |ops, k| ops.copy_elements(reg, (k + 1.into()) * dim32 + start, k * dim32 + start, n));
+                    let channel = if packed { start + base.wrapping_neg().into() } else { start };
+                    ops.align_to(src, start, STATE_EXPONENT, reg, channel + (history * width).into(), n.into());
+                    ops.depthwise_part_at(taps, reg, dst, width, kernel32, channel, n, start);
+                    ops.each(history.into(), |ops, k| ops.copy_elements(reg, (k + 1.into()) * width + channel, k * width + channel, n));
                 });
                 ops.slices_across_chips(false);
             }

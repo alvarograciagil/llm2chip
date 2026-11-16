@@ -488,6 +488,14 @@ pub trait BlockOps: Sized {
         self.depthwise(taps, history, dst, width, kernel);
     }
 
+    /// `depthwise_part` writing its `len` results from `to` in `dst` rather than from `start`:
+    /// a chip that convolves only some channels keeps their taps and history together.
+    #[allow(clippy::too_many_arguments)]
+    fn depthwise_part_at(&mut self, taps: u32, history: u32, dst: u32, width: u32, kernel: u32, start: Self::N, len: u32, to: Self::N) {
+        let _ = to;
+        self.depthwise_part(taps, history, dst, width, kernel, start, len);
+    }
+
     /// Moves `width` elements of `reg` to an earlier place in the same register.
     fn copy_elements(&mut self, reg: u32, from: Self::N, to: Self::N, width: u32) {
         self.each(width.into(), |s, c| s.move_element((reg, from + c), (reg, to + c)));
@@ -2404,7 +2412,11 @@ impl BlockOps for Assembly {
     }
 
     fn depthwise_part(&mut self, taps: u32, history: u32, dst: u32, width: u32, kernel: u32, start: Expr, len: u32) {
-        if start == Expr::from(0) && len == width {
+        self.depthwise_part_at(taps, history, dst, width, kernel, start, len, start);
+    }
+
+    fn depthwise_part_at(&mut self, taps: u32, history: u32, dst: u32, width: u32, kernel: u32, start: Expr, len: u32, to: Expr) {
+        if start == Expr::from(0) && to == start && len == width {
             return self.depthwise(taps, history, dst, width, kernel);
         }
         assert!(self.combines, "only a die that sums rows splits the convolution");
@@ -2412,7 +2424,7 @@ impl BlockOps for Assembly {
         self.immediate(0, zero);
         self.steps.push(Step::Combine { weights: zero, matrix: history, start, width: len.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 });
         self.each(kernel.into(), |s, k| s.steps.push(Step::Combine { weights: (taps, k * width + start), matrix: history, start: k * width + start, width: len.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: true, from_group: 0 }));
-        self.narrow_part_at(taps, history, dst, 0.into(), start, len.into());
+        self.narrow_part_at(taps, history, dst, 0.into(), to, len.into());
     }
 
     fn copy_elements(&mut self, reg: u32, from: Expr, to: Expr, width: u32) {
