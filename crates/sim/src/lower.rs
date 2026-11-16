@@ -1468,7 +1468,32 @@ impl Layout {
         }
         // In groups, the first group makes the logits, sharing their products as the layers'.
         let fits = |e: &CellEntry| plain.contains(&e.name) && !other.contains(&e.name) && e.block == e.rows && e.rows.is_multiple_of(chips * lanes);
-        // Products that run in one pass of the cells are shared alike, or not at all.
+        // Products that run in one pass of the cells are shared alike, or not at all: a pass
+        // with some that cannot be shared, such as a few rows next to many, becomes two, the
+        // shared ones and the rest, each in program order.
+        let plan = std::mem::take(&mut self.cell_plan);
+        let mut start = 0;
+        while start < plan.len() {
+            let end = (start + 1..plan.len()).find(|i| !plan[*i].chained).unwrap_or(plan.len());
+            let (shared, whole): (Vec<CellEntry>, Vec<CellEntry>) = plan[start..end].iter().cloned().partition(|e| fits(e));
+            if shared.is_empty() || whole.is_empty() {
+                self.cell_plan.extend(plan[start..end].iter().cloned());
+            } else {
+                let parts = self.chains.remove(&plan[start].name).expect("a pass of several products is a chain");
+                for mut run in [shared, whole] {
+                    for (i, e) in run.iter_mut().enumerate() {
+                        e.chained = i > 0;
+                    }
+                    if run.len() > 1 {
+                        let chain: Vec<(String, usize)> = run.iter().map(|e| parts.iter().find(|(name, _)| *name == e.name).cloned().expect("in the chain")).collect();
+                        self.chains.insert(run[0].name.clone(), chain);
+                    }
+                    self.cell_plan.extend(run);
+                }
+            }
+            start = end;
+        }
+        self.followers = self.chains.values().flat_map(|parts| parts[1..].iter().map(|(name, _)| name.clone())).collect();
         let mut start = 0;
         while start < self.cell_plan.len() {
             let end = (start + 1..self.cell_plan.len()).find(|i| !self.cell_plan[*i].chained).unwrap_or(self.cell_plan.len());
