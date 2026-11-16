@@ -10,7 +10,7 @@ pub use crate::chip::Sharing;
 use crate::lower::{chip_plan, Layout, Shard, ENTRY_LOGITS, ENTRY_TOKEN};
 use crate::Weights;
 use compiler::Program;
-use netlist::{die_design, DieConfig, Microprogram};
+use netlist::{die_design, word_bits, DieConfig, DieFeatures, Microprogram};
 use rayon::prelude::*;
 use serde::Serialize;
 
@@ -144,6 +144,33 @@ pub struct Built {
     pub vector_words: u64,
     /// What those words hold, on that chip.
     pub vector_kinds: Vec<(&'static str, u64)>,
+    /// Bits of microcode memory on the chip that needs most.
+    pub microcode_bits: u64,
+}
+
+/// Bits of microcode memory a set of chips needs: on each, the fewer of its words one
+/// after another and a dictionary of its distinct words with an index into it. Every chip
+/// is the same silicon, so the set needs the most any of them does.
+pub fn microcode_memory(die: DieConfig, codes: &[Microprogram]) -> u64 {
+    let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
+    let features = codes.iter().map(DieFeatures::of).reduce(DieFeatures::union).unwrap_or_default();
+    let features = features.with_lane_bits(die.features.lane_bits).with_cluster_bits(die.features.cluster_bits).with_key_shift(die.features.key_shift).with_factor_steps(die.features.factor_steps).with_wide_link(die.features.wide_link);
+    let longest = codes.iter().map(|code| code.words.len() as u64).max().unwrap_or(1);
+    let config = DieConfig { features, microcode_bits: bits_for(longest), ..die };
+    let width = word_bits(&config) as u64;
+    codes
+        .iter()
+        .map(|code| {
+            let words = code.words.len() as u64;
+            let plain = words * width;
+            if config.microcode_bits > netlist::die::ENTRY_INDEX_SHIFT {
+                return plain;
+            }
+            let distinct = netlist::die::code_dictionary(code, &config).0.len() as u64;
+            plain.min(distinct * width + words * 2 * bits_for(distinct) as u64)
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// Each chip's microprogram and the memory it needs. By layers, they are cut among the
@@ -179,7 +206,8 @@ pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32,
             Ok(code)
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok(Built { programs: codes, cell_bits, vector_words: vector, vector_kinds: kinds })
+    let microcode_bits = microcode_memory(die, &codes);
+    Ok(Built { programs: codes, cell_bits, vector_words: vector, vector_kinds: kinds, microcode_bits })
 }
 
 /// Silicon of a process, for the area of what is generated.
@@ -254,7 +282,7 @@ pub fn die_of(base: DieConfig, context: u32, (cluster_bits, lane_bits, cell_bits
 /// One set of chips, measured: its own microprograms, its clock and its silicon.
 fn evaluate(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs, target: &Target, (chips, cluster_bits, lane_bits, cell_bits): (u32, u32, u32, u32)) -> Option<Candidate> {
     let die = die_of(base, target.context, (cluster_bits, lane_bits, cell_bits));
-    let Built { programs: codes, cell_bits: bits, vector_words, .. } = built(program, weights, die, target.context, chips, target.sharing).ok()?;
+    let Built { programs: codes, cell_bits: bits, vector_words, microcode_bits, .. } = built(program, weights, die, target.context, chips, target.sharing).ok()?;
     let timing = timing(&codes, die, target.context, target.prompt, 256, target.sharing);
     let clock = target.clock_hz.min(costs.clock_hz(cluster_bits, lane_bits, target.process.full_adder_ns));
     let cycles = timing.token_cycles;
@@ -263,7 +291,8 @@ fn evaluate(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs
     // each read port.
     let banks = 1u64 << (cluster_bits + lane_bits);
     let vectors = 2.0 * target.process.memory_mm2(banks, (vector_words * die.cell.activation_bits as u64) >> lane_bits);
-    let die_mm2 = gates * target.process.gate_um2 / 1e6 + target.process.memory_mm2(1 << cell_bits, bits) + vectors;
+    // The sequencer keeps the microprogram in a memory of its own.
+    let die_mm2 = gates * target.process.gate_um2 / 1e6 + target.process.memory_mm2(1 << cell_bits, bits) + vectors + target.process.memory_mm2(1, microcode_bits);
     Some(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, clock_hz: clock, tokens_per_second: clock / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / clock, gates: chips as f64 * gates, area_mm2: chips as f64 * die_mm2, die_mm2 })
 }
 

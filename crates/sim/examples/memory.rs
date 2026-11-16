@@ -34,5 +34,6 @@ fn main() {
     for (kind, count) in &set.vector_kinds {
         println!("  {kind}: {count} ({:.0} %)", 100.0 * *count as f64 / set.vector_words as f64);
     }
+    println!("microcode memory: {:.2} Mbit", set.microcode_bits as f64 / 1e6);
     println!("cell memory: {} bits", set.cell_bits);
 }

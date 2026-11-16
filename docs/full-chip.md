@@ -143,7 +143,15 @@ The microprogram is loaded once from the image and does not depend on the token 
 
 RoPE's sines and cosines form a table with one row per position, 3·h+1 values each, the part of the chip's data that grows most with the context. On a chip whose embedding table stays in the image, the rotation table stays there too: before each routine that rotates, the firmware has the load controller bring the row of the token's position into the table's register, which holds that one row. Models whose image tokens take rotations written by the host (M-RoPE, Show-o) or that have two rotation tables keep the whole table in the die.
 
-The logic per head and per layer is still unrolled: the program grows with the number of heads, though no longer with the number of elements. Folding the heads into loops is the pending improvement for all of Qwen3.8 to fit.
+The program grows with the layers each chip holds and, on a die with fewer vector units than heads, with the rounds of heads: each round repeats a loop's body for its own heads. It no longer grows with the number of elements, and a die with a unit for every head runs each loop over heads once. For Qwen3.8-27B (`memory` example):
+
+| Chips | Units | Words per chip | Microcode memory |
+|---|---|---|---|
+| 16 | 64 | 3,849 to 17,566 | 1.2 Mbit |
+| 16 | 4 | 17,396 to 75,359 | 18 Mbit |
+| 1 | 64 | 222,802 | 55 Mbit |
+
+The memory is the fewer bits of the words one after another and of a dictionary of distinct words with an index, which only works up to 2^16 words. Even all of Qwen3.8 on one chip takes a millimetre or two in N6, far below what its vector memory takes, and the sizing now counts it. Folding the layers into one loop would make the program as small as one layer, which matters on an FPGA, whose block RAM is small; it needs every layer's registers and weights laid out the same way, and is still to be done.
 
 ## Phases
 
