@@ -1758,6 +1758,21 @@ impl Gen {
                     (addr_b, waddr, raddr_a)
                 }
             };
+            // While the link holds the sequencer back, the banks read again where they read
+            // the cycle before: when it lets go, the data that was in flight is there again,
+            // so a stream that waits on the link loses nothing.
+            let (addr_b, raddr_a) = if !(c.features.uses(OP_LINK) || c.features.widths[LINK_SEND_FIELD] > 0) {
+                (addr_b, raddr_a)
+            } else {
+                let mut l = Logic { b: &mut b, next: 72_000 };
+                let mut hold = |address: Vec<Bit>| -> Vec<Bit> {
+                    let before = l.fresh_bus(address.len());
+                    let presented = l.mux_bus(link_stall, &address, &before);
+                    l.connect_flops(&presented, &before);
+                    presented
+                };
+                (hold(addr_b), hold(raddr_a))
+            };
 
             let write_data = b.wire("write_data", a);
             let wdata = b.wire("wdata", a);
@@ -3288,6 +3303,8 @@ impl DieProgram {
             }
             if (written..n + written).contains(&k) {
                 (w.reg_dst, w.offset_dst, w.window_dst, w.write_en, w.write_spread) = (step.dst.0, offset_dst, step.window_dst, step.write, step.write_spread);
+                // What would be written goes out on the link instead.
+                (w.link_send, w.link_loop) = (step.link_send, step.link_loop && step.link_send);
             }
             w
         };

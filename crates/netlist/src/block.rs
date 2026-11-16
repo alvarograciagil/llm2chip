@@ -1052,9 +1052,10 @@ struct HeadGroup {
     place: Expr,
 }
 
-/// Words a chip sends before it takes as many: each link holds twice as many in its queue,
-/// so chips that all send at once never wait on one another.
-const EXCHANGE_CHUNK: u32 = 4;
+/// Blocks a chip sends before it takes as many, each way as a stream: a link's queue holds
+/// four times as many and warns at half, so chips that all send at once, one of them a
+/// chunk ahead, never wait on one another.
+const EXCHANGE_CHUNK: u32 = 1 << (crate::link::QUEUE_BITS - 2);
 
 impl Assembly {
     /// The units whose values count together inside the current loop.
@@ -1576,6 +1577,22 @@ impl Assembly {
         let words = len / unit;
         let chunk = EXCHANGE_CHUNK.min(words);
         let pass = |s: &mut Self, first: Expr, count: u32| {
+            // A pass of a whole chunk goes out, and comes in, as a stream of blocks.
+            if s.streams && count > 0 {
+                let variable = Var::Loop(s.loops);
+                s.loops += 1;
+                let mut word = alu(OP_MOV);
+                (word.a, word.write, word.link_send, word.vector) = ((reg, first + Expr::from(sent) + Expr::var(variable) * unit), false, true, unit > 1);
+                word.link_loop = s.ring_last;
+                s.steps.push(Step::Stream { variable, count: count.into(), in_elements: false, body: word });
+                let variable = Var::Loop(s.loops);
+                s.loops += 1;
+                let mut word = alu(OP_LINK);
+                (word.dst, word.vector) = ((reg, first + Expr::from(received) + Expr::var(variable) * unit), unit > 1);
+                word.link_loop = s.ring_first;
+                s.steps.push(Step::Stream { variable, count: count.into(), in_elements: false, body: word });
+                return;
+            }
             for k in 0..count {
                 let at = first + Expr::from(k * unit);
                 let mut word = alu(OP_MOV);
@@ -1728,8 +1745,10 @@ fn can_stream(variable: Var, step: &Alu<Expr>, unit: u32, per_block: bool) -> bo
     let a_per_block = per_block && unit > 1 && step.vector && step.broadcast_a && stride(step.a.1) == 1;
     // Moving elements to earlier places is safe: the reads stay ahead of the writes.
     let safe = |operand: At<Expr>| operand.0 != step.dst.0 || (stride(operand.1) == unit && (operand.1 == step.dst.1 || operand.1.is_after(step.dst.1)));
-    let plain = !(step.load_shift_a || step.load_shift_b || step.load_shift_left || step.load_wide_shift || step.link_send || step.magnitude_clear || step.max_clear || step.max_out || step.accumulator_clear || step.wide_clear || step.wide_write) && step.literal.is_none();
-    let streamable = matches!(step.op, OP_ADD | OP_SUB | OP_MUL | OP_MOV | OP_FUNCTION | OP_SHIFT_LEFT | OP_WIDE_OUT);
+    // A word that waits on the link holds the stream where it is, reads included.
+    let sends = step.link_send && step.op == OP_MOV && !step.write;
+    let plain = !(step.load_shift_a || step.load_shift_b || step.load_shift_left || step.load_wide_shift || (step.link_send && !sends) || step.magnitude_clear || step.max_clear || step.max_out || step.accumulator_clear || step.wide_clear || step.wide_write) && step.literal.is_none();
+    let streamable = matches!(step.op, OP_ADD | OP_SUB | OP_MUL | OP_MOV | OP_FUNCTION | OP_SHIFT_LEFT | OP_WIDE_OUT | OP_LINK);
     let scans = !step.write;
     plain && streamable && (scans || stride(step.dst.1) == unit) && (moves_with(step.a.1) || a_per_block) && moves_with(step.b.1) && (scans || (safe(step.a) && safe(step.b)))
 }

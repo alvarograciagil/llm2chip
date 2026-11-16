@@ -7,7 +7,8 @@ use crate::rv32::Logic;
 use crate::{Bit, Builder, Design};
 use std::collections::BTreeMap;
 
-const QUEUE_BITS: usize = 4;
+/// log2 of the words the receiver's queue holds: it asks the sender to wait at half.
+pub const QUEUE_BITS: usize = 5;
 const SEQUENCE_BITS: usize = 4;
 /// Cycles to wait, as a power of two, before asking again for a repeat that never came.
 const RETRY_BITS: usize = 7;

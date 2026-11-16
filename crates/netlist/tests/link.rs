@@ -1,6 +1,6 @@
 //! The chip-to-chip link: order, flow control and damaged words.
 
-use netlist::link::{link_endpoint_design, wire_bits};
+use netlist::link::{link_endpoint_design, wire_bits, QUEUE_BITS};
 use netlist::reliability::encode;
 use netlist::Simulator;
 
@@ -63,7 +63,7 @@ fn the_receiver_asks_the_sender_to_wait_before_it_overflows() {
         receive(&mut link, numbered(accepted, accepted % 16));
         accepted += 1;
         link.settle();
-        assert!(accepted < 16, "the queue must warn before it fills up");
+        assert!(accepted < 1 << QUEUE_BITS, "the queue must warn before it fills up");
     }
     settle_queue(&mut link);
     for value in 0..accepted {
