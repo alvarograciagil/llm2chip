@@ -74,19 +74,37 @@ That die is a speed reference, not one that fits: with 262,144 cells it is far l
 
 ### Dies sized from the circuit
 
-`frontier` builds the real microprogram of every chip for each die shape, counts the words each vector unit's memory needs, adds the cells' memory and the logic, and keeps the shapes whose dies fit the reticle (858 mm²). For Qwen3.8-27B with an 8,192-token context and a 1,024-token prompt (N6, estimated areas; 8, 12 or 16 chips, the default of `CHIPS`; 42 minutes on the M2 Max). Each row is a point of the speed-for-area frontier:
+`frontier` builds the real microprogram of every chip for each die shape, counts the words each vector unit's memory needs, adds the cells' memory, the microcode memory and the logic, and keeps the shapes whose dies fit the reticle (858 mm²). For Qwen3.8-27B with an 8,192-token context and a 1,024-token prompt (N6, estimated areas; 8, 12 or 16 chips, the default of `CHIPS`). Each row is a point of the speed-for-area frontier:
 
 | Chips | Units × lanes | Cells per die | tok/s | Clock | First token | Total area | Per chip |
 |---|---|---|---|---|---|---|---|
-| 12 | 64 × 64 | 8,192 | 203 | 994 MHz | 474 ms | 10,029 mm² | 836 mm² |
-| 16 | 64 × 128 | 8,192 | 235 | 1,010 MHz | 309 ms | 12,839 mm² | 802 mm² |
-| 16 | 64 × 64 | 16,384 | 320 | 994 MHz | 202 ms | 12,942 mm² | 809 mm² |
-| 16 | 64 × 128 | 16,384 | 406 | 1,010 MHz | 172 ms | 13,295 mm² | 831 mm² |
-| 16 | 64 × 64 | 32,768 | **451** | 994 MHz | 132 ms | 13,683 mm² | 855 mm² |
+| 8 | 64 × 64 | 8,192 | 203 | 994 MHz | 677 ms | 6,443 mm² | 805 mm² |
+| 8 | 64 × 128 | 8,192 | 236 | 1,010 MHz | 611 ms | 6,574 mm² | 822 mm² |
+| 8 | 64 × 64 | 16,384 | 322 | 994 MHz | 399 ms | 6,718 mm² | 840 mm² |
+| 8 | 64 × 128 | 16,384 | 408 | 1,010 MHz | 338 ms | 6,842 mm² | 855 mm² |
+| 12 | 64 × 64 | 32,768 | 453 | 994 MHz | 181 ms | 7,896 mm² | 658 mm² |
+| 12 | 64 × 128 | 32,768 | 641 | 1,010 MHz | 141 ms | 8,063 mm² | 672 mm² |
+| 12 | 64 × 128 | 65,536 | 898 | 1,010 MHz | 94 ms | 9,036 mm² | 753 mm² |
+| 16 | 128 × 128 | 65,536 | 1,055 | 989 MHz | 65 ms | 12,687 mm² | 793 mm² |
+| 16 | 64 × 128 | 131,072 | **1,102** | 1,010 MHz | 53 ms | 13,252 mm² | 828 mm² |
 
-So the circuit as generated today reaches **about 450 tok/s within the reticle**, an eighth of the estimator's 3,750 tok/s on a similar area. The gap is the vector memory: every die is close to the reticle with few cells, because each vector unit keeps about 3.5 M words (7 MB at 16 bits) on the busiest chip. Of those, 59 % is KV cache: each unit keeps the columns of the key head its query head reads, so the six query heads of a group hold six copies; 22 % is the RoPE table for every position, which every unit keeps whole. Sharing the keys of a group among its units and writing one RoPE row per token from the host are the next hardware changes; the estimator's figure assumes both.
+So the circuit as generated today reaches **about 1,100 tok/s within the reticle**, and 898 tok/s on 12 dies is the point with the least area for each token per second. That is under a third of the estimator's 3,750 tok/s; the rest of the gap is the cells: the estimator puts far more of them in a die than the generated one has room for once its vector memory is counted.
 
-Getting here took three fixes to the compact vector memory (November 2026): each unit keeps only its own heads' columns of the KV cache, a unit with one DeltaNet head keeps its state in one register rather than one per head, and each chip loads only its own layers' norms, convolution taps and decay rates. Before them, the busiest chip needed about 33 M words per unit and no die fitted.
+What each unit's vector memory holds on the busiest chip of 16 with 64 × 64 units and 32,768 cells (`memory` example):
+
+| | Before | Now |
+|---|---|---|
+| Keys | 2,097,152 words | 360,448 |
+| Values | 2,097,152 | 360,448 |
+| Rotation table | 794,624 | 128 |
+| Working registers, constants and recurrent state | 582,080 | 582,144 |
+| **Total** | **5,571,008** | **1,303,168** |
+
+Two hardware changes made the difference (November 2026):
+- **The query heads of a key head keep its cache once between them.** The units that run them form a group: each keeps a share of the key head's columns, and all read each share from its unit in turn, through a selector on the vector unit's second operand. Before, each of the six query heads of a group kept a whole copy.
+- **The rotation table stays in the image.** Before each routine that rotates, the firmware brings the row of the token's position, so each unit holds one row instead of one per position of the context.
+
+Before those, three fixes to the compact vector memory had already brought the busiest chip from about 33 M words per unit, when no die fitted, to 5.6 M: each unit keeps only its own heads' columns of the KV cache, a unit with one DeltaNet head keeps its state in one register rather than one per head, and each chip loads only its own layers' norms, convolution taps and decay rates. On dies with fewer units than heads each unit still keeps a copy of its heads' cache for every round of heads, which is why the frontier's dies have a unit for every head.
 
 ## Quality of the chip's arithmetic
 
