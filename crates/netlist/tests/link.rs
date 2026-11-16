@@ -1,12 +1,12 @@
 //! The chip-to-chip link: order, flow control and damaged words.
 
-use netlist::link::{link_endpoint_design, wire_bits, QUEUE_BITS};
+use netlist::link::{link_endpoint_design, wire_bits, QUEUE_BITS, SEQUENCE_BITS};
 use netlist::reliability::encode;
 use netlist::Simulator;
 
 const WIDTH: u32 = 16;
 
-const SEQUENCE: u32 = 4;
+const SEQUENCE: u32 = SEQUENCE_BITS as u32;
 
 /// A word as it travels: its data, its number and their check bits.
 fn numbered(value: u64, sequence: u64) -> u64 {
@@ -60,7 +60,7 @@ fn the_receiver_asks_the_sender_to_wait_before_it_overflows() {
     let mut accepted = 0;
     link.settle();
     while link.get("pin_rx_ready") == Some(1) {
-        receive(&mut link, numbered(accepted, accepted % 16));
+        receive(&mut link, numbered(accepted, accepted % (1 << SEQUENCE)));
         accepted += 1;
         link.settle();
         assert!(accepted < 1 << QUEUE_BITS, "the queue must warn before it fills up");

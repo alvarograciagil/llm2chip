@@ -8,8 +8,10 @@ use crate::{Bit, Builder, Design};
 use std::collections::BTreeMap;
 
 /// log2 of the words the receiver's queue holds: it asks the sender to wait at half.
-pub const QUEUE_BITS: usize = 5;
-const SEQUENCE_BITS: usize = 4;
+pub const QUEUE_BITS: usize = 6;
+/// log2 of the words a sender keeps for repeats: it sends up to half as many before it
+/// hears that they arrived, at least a chunk of an exchange between chips.
+pub const SEQUENCE_BITS: usize = 5;
 /// Cycles to wait, as a power of two, before asking again for a repeat that never came.
 const RETRY_BITS: usize = 7;
 /// The next word the receiver expects, and whether it is asking for a repeat.

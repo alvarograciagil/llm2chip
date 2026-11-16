@@ -1064,6 +1064,7 @@ struct HeadGroup {
 /// four times as many and warns at half, so chips that all send at once, one of them a
 /// chunk ahead, never wait on one another.
 const EXCHANGE_CHUNK: u32 = 1 << (crate::link::QUEUE_BITS - 2);
+const _: () = assert!(EXCHANGE_CHUNK as usize <= 1 << (crate::link::SEQUENCE_BITS - 1), "a sender keeps a whole chunk for repeats");
 
 impl Assembly {
     /// The units whose values count together inside the current loop.
