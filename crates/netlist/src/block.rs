@@ -274,7 +274,13 @@ pub trait BlockOps: Sized {
     /// and an implementation that runs directly may use `values` instead.
     fn load_row(&mut self, table: u32, row: Self::N, width: u32, dst: u32, values: impl Fn(u32) -> Vec<f64>);
     fn normalize(&mut self, reg: u32, len: Self::N);
-    fn add_sub(&mut self, subtract: bool, a: At<Self::N>, b: At<Self::N>, b_stride: u32, dst: u32, len: Self::N);
+    fn add_sub(&mut self, subtract: bool, a: At<Self::N>, b: At<Self::N>, b_stride: u32, dst: u32, len: Self::N) {
+        self.add_sub_unnormalized(subtract, a, b, b_stride, dst, len);
+        self.normalize(dst, len);
+    }
+    /// `add_sub` leaving the result at the exponent the sum takes: for a step that aligns
+    /// it to a fixed exponent next, which a normalisation before would not change.
+    fn add_sub_unnormalized(&mut self, subtract: bool, a: At<Self::N>, b: At<Self::N>, b_stride: u32, dst: u32, len: Self::N);
     fn multiply(&mut self, a: u32, b: u32, dst: u32, len: Self::N);
     fn scale(&mut self, s_reg: u32, a: u32, dst: u32, len: Self::N);
     /// `dst[set] = Σ a[·] · b[·]` for every set of index pairs.
@@ -547,7 +553,8 @@ pub trait BlockOps: Sized {
             self.scale(cap, regs.shifted, regs.scores, tokens);
         }
         self.maximum(regs.scores, tokens, regs.top);
-        self.sub_scalar(regs.scores, regs.top, regs.shifted, tokens);
+        // The table aligns its input to a fixed exponent, which undoes any normalisation.
+        self.add_sub_unnormalized(true, (regs.scores, 0.into()), (regs.top, 0.into()), 0, regs.shifted, tokens);
         self.function(FN_EXP, regs.shifted, regs.weights, tokens);
         self.dots(regs.weights, ones, regs.total, 1.into(), tokens, |_, t| ((regs.weights, t), (ones, t)));
         self.reciprocal(regs.total, regs.inverse);
@@ -1827,7 +1834,7 @@ impl BlockOps for Assembly {
     }
 
 
-    fn add_sub(&mut self, subtract: bool, a: At<Expr>, b: At<Expr>, b_stride: u32, dst: u32, len: Expr) {
+    fn add_sub_unnormalized(&mut self, subtract: bool, a: At<Expr>, b: At<Expr>, b_stride: u32, dst: u32, len: Expr) {
         self.clear_shifts();
         let (ea, eb) = (self.exponent(a.0), self.exponent(b.0));
         self.binary(OP_MAX, ea, eb, self.sc(1));
@@ -1845,7 +1852,6 @@ impl BlockOps for Assembly {
         });
         self.clear_shifts();
         self.binary(OP_MOV, self.sc(3), self.sc(15), self.exponent(dst));
-        self.normalize(dst, len);
     }
 
     fn multiply(&mut self, a: u32, b: u32, dst: u32, len: Expr) {

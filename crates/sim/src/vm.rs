@@ -251,7 +251,7 @@ impl BlockOps for BlockVm {
         self.set_exp(reg, self.exp(reg) - count as i64);
     }
 
-    fn add_sub(&mut self, subtract: bool, a: Place, b: Place, b_stride: u32, dst: u32, len: u32) {
+    fn add_sub_unnormalized(&mut self, subtract: bool, a: Place, b: Place, b_stride: u32, dst: u32, len: u32) {
         let (ea, eb) = (self.exp(a.0), self.exp(b.0));
         let common = self.wrap(ea.max(eb) + 1);
         let shift_a = shift_amount(self.wrap(common - ea)).min(63);
@@ -266,7 +266,6 @@ impl BlockOps for BlockVm {
             self.set(dst, i as u32, *r);
         }
         self.set_exp(dst, common);
-        self.normalize(dst, len);
     }
 
     fn multiply(&mut self, a: u32, b: u32, dst: u32, len: u32) {

@@ -2561,15 +2561,16 @@ impl Layout {
                             ops.copy_part(mixed, value_at, vh, 0.into(), vd.into());
                             ops.normalize(vh, vd.into());
 
+                            // A table aligns its input to a fixed exponent: a normalisation
+                            // just before it would change nothing.
                             ops.copy_part(b_reg, h, work, 0.into(), 1.into());
-                            ops.normalize(work, 1.into());
                             ops.function(FN_SIGMOID, work, beta, 1.into());
 
                             ops.copy_part(a_reg, h, t[29], 0.into(), 1.into());
                             ops.normalize(t[29], 1.into());
                             ops.copy_part(bias, h, t[30], 0.into(), 1.into());
                             ops.normalize(t[30], 1.into());
-                            ops.add(t[29], t[30], work, 1.into());
+                            ops.add_sub_unnormalized(false, (t[29], 0.into()), (t[30], 0.into()), 1, work, 1.into());
                             ops.function(FN_SOFTPLUS, work, t[31], 1.into());
                             ops.copy_part(scale_a, h, t[32], 0.into(), 1.into());
                             ops.normalize(t[32], 1.into());
