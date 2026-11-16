@@ -375,7 +375,7 @@ impl ShareOut {
     pub fn microprogram(&self, layout: &mut Layout, program: &Program, chip: usize) -> Result<Microprogram, String> {
         if let Some(g) = self.group {
             let (stage, member) = (chip / g, chip % g);
-            layout.keep_weights_of_part(program, &self.plan, stage, chip == 0);
+            layout.keep_weights_of_part(program, &self.plan, stage, stage == 0);
             layout.share_rows(program, crate::lower::Shard { index: member as u32, chips: g as u32, grouped: true });
             layout.group_microprogram(program, &self.plan, stage)
         } else if self.rows {

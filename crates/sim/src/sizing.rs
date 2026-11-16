@@ -34,6 +34,9 @@ pub struct Candidate {
     pub area_mm2: f64,
     /// Silicon of each chip, which a reticle limits.
     pub die_mm2: f64,
+    /// What each chip's silicon goes to: logic, the cells' memories, the vector units'
+    /// memories and the microcode.
+    pub parts_mm2: [f64; 4],
 }
 
 /// Gate equivalents of the parts that change from one die to another.
@@ -306,8 +309,9 @@ fn evaluate(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs
     let banks = 1u64 << (cluster_bits + lane_bits);
     let vectors = 2.0 * target.process.memory_mm2(banks, (vector_words * die.cell.activation_bits as u64) >> lane_bits);
     // The sequencer keeps the microprogram in a memory of its own.
-    let die_mm2 = gates * target.process.gate_um2 / 1e6 + target.process.memory_mm2(1 << cell_bits, bits) + vectors + target.process.memory_mm2(1, microcode_bits);
-    Some(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, clock_hz: clock, tokens_per_second: clock / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / clock, gates: chips as f64 * gates, area_mm2: chips as f64 * die_mm2, die_mm2 })
+    let parts_mm2 = [gates * target.process.gate_um2 / 1e6, target.process.memory_mm2(1 << cell_bits, bits), vectors, target.process.memory_mm2(1, microcode_bits)];
+    let die_mm2 = parts_mm2.iter().sum::<f64>();
+    Some(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, clock_hz: clock, tokens_per_second: clock / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / clock, gates: chips as f64 * gates, area_mm2: chips as f64 * die_mm2, die_mm2, parts_mm2 })
 }
 
 /// For each number of chips, width of unit and number of units, the fewest cells that

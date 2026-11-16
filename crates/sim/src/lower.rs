@@ -45,7 +45,18 @@ fn state_words(program: &Program, op: &Op, context: usize) -> u64 {
 pub fn chip_plan(program: &Program, weights: &Weights, chips: usize, context: usize, activation_bits: u32) -> Result<Vec<Range<usize>>, String> {
     let bits = |index: usize| -> u64 {
         let op = &program.ops[index].op;
-        let matrices: u64 = matrices_of(program, op).iter().map(|(name, rows, cols)| (rows * cols) as u64 * weights.matrix(name).map_or(activation_bits, |m| m.cell_code_bits(*cols, activation_bits)) as u64).sum();
+        // A lookup table never goes in the cells: it stays in the image, or in vector memory.
+        if matches!(op, Op::EmbRead { .. }) {
+            return 0;
+        }
+        // Each code, and each group's scale and bias, about as wide as an activation each.
+        let matrices: u64 = matrices_of(program, op)
+            .iter()
+            .map(|(name, rows, cols)| match weights.matrix(name) {
+                Ok(m) => (rows * cols) as u64 * m.cell_code_bits(*cols, activation_bits) as u64 + (rows * m.cell_groups(*cols).1) as u64 * 2 * activation_bits as u64,
+                Err(_) => (rows * cols) as u64 * activation_bits as u64,
+            })
+            .sum();
         matrices + state_words(program, op, context) * activation_bits as u64
     };
     program.split_by(chips, bits)
@@ -1124,8 +1135,13 @@ impl Layout {
         if last_stage && last_member {
             asm.send(self.reg(hidden), length);
         }
-        if first_stage && member == 0 {
+        // The first group makes the logits together: the final hidden state comes to its first
+        // chip, which passes it down the group, and each member makes its rows.
+        if first_stage {
             asm.receive(self.reg(hidden), length);
+            if !last_member {
+                asm.send(self.reg(hidden), length);
+            }
             self.run_list(&mut asm, program, &program.ops[program.logits_from..], token, position, false)?;
         }
         self.assemble(&mut code, &asm)?;
@@ -1450,9 +1466,8 @@ impl Layout {
                 if matches!(inst.op, Op::Matvec { .. }) { &mut plain } else { &mut other }.insert(name);
             }
         }
-        // In groups, the first chip makes the logits on its own, so their matrices stay whole.
-        let tail: HashSet<String> = if shard.grouped { program.ops[program.logits_from..].iter().flat_map(|i| matrices_of(program, &i.op)).map(|(name, ..)| name).collect() } else { HashSet::new() };
-        let fits = |e: &CellEntry| plain.contains(&e.name) && !other.contains(&e.name) && !tail.contains(&e.name) && e.block == e.rows && e.rows.is_multiple_of(chips * lanes);
+        // In groups, the first group makes the logits, sharing their products as the layers'.
+        let fits = |e: &CellEntry| plain.contains(&e.name) && !other.contains(&e.name) && e.block == e.rows && e.rows.is_multiple_of(chips * lanes);
         // Products that run in one pass of the cells are shared alike, or not at all.
         let mut start = 0;
         while start < self.cell_plan.len() {
