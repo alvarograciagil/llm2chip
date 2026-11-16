@@ -1506,6 +1506,9 @@ impl Layout {
         let deltas: Vec<(usize, usize)> = ops.iter().filter_map(|op| if let Op::DeltaStep { key_heads, value_heads, .. } = op { Some((*key_heads, *value_heads)) } else { None }).collect();
         let delta_split = deltas.iter().all(|(keys, values)| divides(*keys) && divides(*values));
         let delta_out: HashSet<usize> = ops.iter().filter_map(|op| if let Op::DeltaStep { dst, .. } = op { Some(*dst) } else { None }).collect();
+        // Each chip's slice must be whole blocks of the link.
+        let block = if self.config.features.wide_link { 1usize << self.config.features.lane_bits } else { 1 };
+        let fits = |buffer: usize| buffers[buffer].is_multiple_of(n) && (buffers[buffer] / n).is_multiple_of(block);
         // What runs head by head: whether `op` reads `buffer` as heads.
         let by_heads = |op: &Op, buffer: usize| match op {
             Op::RmsGated { src, z, .. } => delta_split && delta_out.contains(src) && (*z == buffer || *src == buffer),
@@ -1514,6 +1517,10 @@ impl Layout {
             Op::Rope { buf, block, table, .. } => *buf == buffer && *table < VISION_TABLE && divides(buffers[*buf] / block),
             Op::KvAppend { key, value, window: None, .. } => *key == buffer || *value == buffer,
             Op::AttnSum { query, window: None, .. } => *query == buffer,
+            // Element by element: each chip takes its own slice, as long as it is whole
+            // blocks of the link.
+            Op::Silu { src, dst } | Op::Sigmoid { src, dst } => *src == buffer && fits(*dst),
+            Op::MulElem { a, b, dst } => (*a == buffer || *b == buffer) && fits(*dst),
             _ => false,
         };
         let readers = |buffer: usize| ops.iter().filter(move |op| buffers_read(op).contains(&buffer));
@@ -1538,6 +1545,12 @@ impl Layout {
                 Op::RmsGated { src, dst, .. } if local.contains(src) => {
                     local.insert(*dst);
                 }
+                Op::Silu { src, dst } | Op::Sigmoid { src, dst } if local.contains(src) => {
+                    local.insert(*dst);
+                }
+                Op::MulElem { a, b, dst } if local.contains(a) || local.contains(b) => {
+                    local.insert(*dst);
+                }
                 _ => {}
             }
         }
@@ -1554,9 +1567,7 @@ impl Layout {
         if local.is_empty() {
             return;
         }
-        // Each chip's slice must be whole blocks of the link.
-        let block = if self.config.features.wide_link { 1usize << self.config.features.lane_bits } else { 1 };
-        if local.iter().any(|b| !(buffers[*b] / n).is_multiple_of(block) || !buffers[*b].is_multiple_of(n)) {
+        if local.iter().any(|b| !fits(*b)) {
             return;
         }
         let gather: HashSet<usize> = local.iter().copied().filter(|b| readers(*b).any(|r| !by_heads(r, *b))).collect();
@@ -1574,6 +1585,16 @@ impl Layout {
         match self.heads_shard {
             Some((index, chips)) if self.local.contains(&buffer) => (index * count / chips, count / chips),
             _ => (0, count),
+        }
+    }
+
+    /// The elements of `buffer` this chip makes, `(first, count)`: all of them unless the
+    /// chips share the heads and `buffer` is a slice of them.
+    fn slice_of(&self, program: &Program, buffer: usize) -> (u32, u32) {
+        let len = program.buffers[buffer] as u32;
+        match self.heads_shard {
+            Some((index, chips)) if self.local.contains(&buffer) => (index * len / chips, len / chips),
+            _ => (0, len),
         }
     }
 
@@ -1938,9 +1959,9 @@ impl Layout {
     }
 
     /// `a + b` or `a · b`, a slice per unit where the die has several.
-    fn pairwise<O: BlockOps>(&self, ops: &mut O, product: bool, (a, b): (u32, u32), dst: u32, len: u32) {
+    fn pairwise<O: BlockOps>(&self, ops: &mut O, product: bool, (a, b): (u32, u32), dst: u32, (base, len): (u32, u32)) {
         let t = &self.temporaries;
-        ops.in_slabs(len, &[dst], |ops, start, count| {
+        ops.in_slabs_at(base, len, &[dst], |ops, start, count| {
             let (x, y, z) = (t[58], t[59], t[60]);
             ops.copy_part(a, start, x, 0.into(), count.into());
             ops.copy_part(b, start, y, 0.into(), count.into());
@@ -1954,8 +1975,13 @@ impl Layout {
     }
 
     fn silu<O: BlockOps>(&self, ops: &mut O, src: u32, dst: u32, len: u32) {
+        self.silu_at(ops, src, dst, (0, len));
+    }
+
+    /// SiLU of the `len` elements from `base`.
+    fn silu_at<O: BlockOps>(&self, ops: &mut O, src: u32, dst: u32, (base, len): (u32, u32)) {
         let t = &self.temporaries;
-        ops.in_slabs(len, &[dst], |ops, start, count| {
+        ops.in_slabs_at(base, len, &[dst], |ops, start, count| {
             let (x, sigmoid, y) = (t[58], t[39], t[59]);
             ops.copy_part(src, start, x, 0.into(), count.into());
             ops.function(FN_SIGMOID, x, sigmoid, count.into());
@@ -1972,6 +1998,7 @@ impl Layout {
             let made: Vec<usize> = match op {
                 Op::SplitQueryGate { query, gate, .. } => vec![*query, *gate],
                 Op::RmsNorm { dst, .. } | Op::AttnSum { dst, .. } | Op::DeltaStep { dst, .. } | Op::RmsGated { dst, .. } => vec![*dst],
+                Op::Silu { dst, .. } | Op::Sigmoid { dst, .. } | Op::MulElem { dst, .. } => vec![*dst],
                 _ => Vec::new(),
             };
             for buffer in made.into_iter().filter(|b| self.gather_local.contains(b)) {
@@ -2035,8 +2062,12 @@ impl Layout {
                 }
             }
             Op::Copy { src, dst } => ops.copy_part(self.reg(*src), zero, self.reg(*dst), zero, size(*dst)),
-            Op::Add { a, b, dst } => self.pairwise(ops, false, (self.reg(*a), self.reg(*b)), self.reg(*dst), program.buffers[*dst] as u32),
-            Op::MulElem { a, b, dst } => self.pairwise(ops, true, (self.reg(*a), self.reg(*b)), self.reg(*dst), program.buffers[*dst] as u32),
+            Op::Add { a, b, dst } => self.pairwise(ops, false, (self.reg(*a), self.reg(*b)), self.reg(*dst), (0, program.buffers[*dst] as u32)),
+            Op::MulElem { a, b, dst } => {
+                ops.slices_across_chips(self.local.contains(dst));
+                self.pairwise(ops, true, (self.reg(*a), self.reg(*b)), self.reg(*dst), self.slice_of(program, *dst));
+                ops.slices_across_chips(false);
+            }
             Op::Gelu { src, approximate, dst } => {
                 let table = t_gelu(*approximate);
                 let extra = self.temporaries[39];
@@ -2087,15 +2118,22 @@ impl Layout {
             }
             Op::Scale { src, factor, dst } => ops.scale(self.small[&format!("escala:{factor}")], self.reg(*src), self.reg(*dst), size(*dst)),
             Op::AddWeight { src, weight, dst } => ops.add(self.reg(*src), self.small[weight], self.reg(*dst), size(*dst)),
-            Op::Silu { src, dst } => self.silu(ops, self.reg(*src), self.reg(*dst), program.buffers[*dst] as u32),
+            Op::Silu { src, dst } => {
+                ops.slices_across_chips(self.local.contains(dst));
+                self.silu_at(ops, self.reg(*src), self.reg(*dst), self.slice_of(program, *dst));
+                ops.slices_across_chips(false);
+            }
             Op::Sigmoid { src, dst } => {
                 let t = &self.temporaries;
-                ops.in_slabs(program.buffers[*dst] as u32, &[self.reg(*dst)], |ops, start, count| {
+                let (base, len) = self.slice_of(program, *dst);
+                ops.slices_across_chips(self.local.contains(dst));
+                ops.in_slabs_at(base, len, &[self.reg(*dst)], |ops, start, count| {
                     let (x, y) = (t[58], t[59]);
                     ops.copy_part(self.reg(*src), start, x, 0.into(), count.into());
                     ops.function(FN_SIGMOID, x, y, count.into());
                     ops.copy_part(y, 0.into(), self.reg(*dst), start, count.into());
                 });
+                ops.slices_across_chips(false);
             }
             Op::RmsNorm { src, weight, block, dst, .. } => {
                 let count = program.buffers[*dst] / block;

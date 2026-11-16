@@ -371,6 +371,23 @@ impl ShareOut {
         self.group
     }
 
+    /// The cycles each operation of chip `chip`'s part takes for a token at `position`, after
+    /// `microprogram` has laid it out on `layout`, in program order.
+    pub fn cycles_by_op(&self, layout: &Layout, program: &Program, chip: usize, position: u32) -> Result<Vec<(String, u64)>, String> {
+        let ops = match self.group {
+            Some(g) => self.plan[chip / g].clone(),
+            None if self.rows => 0..program.ops.len(),
+            None => self.plan[chip].clone(),
+        };
+        ops.map(|i| {
+            let inst = &program.ops[i];
+            let code = layout.op_microprogram(program, inst, i == 0)?;
+            let name = format!("{:?}", inst.op);
+            Ok((name.split([' ', '{', '(']).next().unwrap_or("").to_string(), code.cycles(&layout.config(), 0, 1, position)))
+        })
+        .collect()
+    }
+
     /// Lays out chip `chip`'s part on `layout` and gives its microcode.
     pub fn microprogram(&self, layout: &mut Layout, program: &Program, chip: usize) -> Result<Microprogram, String> {
         if let Some(g) = self.group {

@@ -425,6 +425,15 @@ pub trait BlockOps: Sized {
         body(self, 0.into(), len);
     }
 
+    /// Like `in_slabs` for the `len` elements from `base`: the slices the body takes start
+    /// there, and only those elements of the outputs are written.
+    fn in_slabs_at(&mut self, base: u32, len: u32, outputs: &[u32], mut body: impl FnMut(&mut Self, Self::N, u32)) {
+        if base == 0 {
+            return self.in_slabs(len, outputs, body);
+        }
+        body(self, base.into(), len);
+    }
+
     /// Like `gather`, for parts that `each_head` left on the units that made them.
     fn gather_heads(&mut self, parts: &[(u32, u32)], dst: u32) {
         self.gather(parts, dst);
@@ -440,6 +449,12 @@ pub trait BlockOps: Sized {
 
     /// Between `true` and `false`, the heads gathered are this chip's share of them.
     fn heads_across_chips(&mut self, on: bool) {
+        let _ = on;
+    }
+
+    /// Between `true` and `false`, the vectors normalised are this chip's slice of them: the
+    /// chips of the ring agree on each shift, so each slice comes out as the whole would.
+    fn slices_across_chips(&mut self, on: bool) {
         let _ = on;
     }
 
@@ -2101,13 +2116,17 @@ impl BlockOps for Assembly {
         self.copy_part(r.next, 0.into(), r.state, 0.into(), cells.into());
     }
 
-    fn in_slabs(&mut self, len: u32, outputs: &[u32], mut body: impl FnMut(&mut Self, Expr, u32)) {
+    fn in_slabs(&mut self, len: u32, outputs: &[u32], body: impl FnMut(&mut Self, Expr, u32)) {
+        self.in_slabs_at(0, len, outputs, body);
+    }
+
+    fn in_slabs_at(&mut self, base: u32, len: u32, outputs: &[u32], mut body: impl FnMut(&mut Self, Expr, u32)) {
         // Slices of a power of two, whole blocks, that divide the vector among the units.
         let lanes = 1u32 << self.lane_bits;
         let slab = (1..=len.max(1).ilog2()).map(|bits| 1u32 << bits).find(|slab| *slab >= lanes && len.is_multiple_of(*slab) && len / slab <= self.clusters);
         // Units already running separate copies of a loop cannot split again.
-        let Some(slab) = slab.filter(|slab| self.clusters > 1 && self.streams && len / slab > 1 && !self.in_units) else {
-            return body(self, 0.into(), len);
+        let Some(slab) = slab.filter(|slab| self.clusters > 1 && self.streams && len / slab > 1 && !self.in_units && base.is_multiple_of(lanes)) else {
+            return body(self, base.into(), len);
         };
         let units = len / slab;
         let start = Var::Loop(self.loops);
@@ -2119,7 +2138,7 @@ impl BlockOps for Assembly {
         let outer_group = std::mem::replace(&mut self.slab_group, group);
         // The unit number times the slice length, so the start is known to sit on a block.
         self.in_units = true;
-        body(self, Expr::var(start) * slab, slab);
+        body(self, Expr::from(base) + Expr::var(start) * slab, slab);
         self.in_units = false;
         self.slab_group = outer_group;
         let inside = std::mem::replace(&mut self.steps, before);
@@ -2136,7 +2155,7 @@ impl BlockOps for Assembly {
             let variable = Var::Loop(self.loops);
             self.loops += 1;
             let mut step = alu(OP_MOV);
-            let at = Expr::var(variable) * unit;
+            let at = Expr::from(base) + Expr::var(variable) * unit;
             (step.a, step.dst, step.vector, step.gather_shift) = ((*output, at), (*output, at), lanes > 1, slab.trailing_zeros());
             self.steps.push(Step::Stream { variable, count: count.into(), in_elements: false, body: step });
             // Units that held no slice never wrote the exponent: they take unit 0's.
@@ -2276,6 +2295,10 @@ impl BlockOps for Assembly {
 
     fn heads_across_chips(&mut self, on: bool) {
         self.ring_heads = on && self.ring > 1;
+    }
+
+    fn slices_across_chips(&mut self, on: bool) {
+        self.across_chips = on && self.ring > 1;
     }
 
     fn gather_heads(&mut self, parts: &[(u32, u32)], dst: u32) {
