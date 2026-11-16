@@ -55,6 +55,54 @@ fn main() {
                 println!("{pc:4} x{visits:<5} {cycles:>6}  {:?}", code.words[pc]);
             }
         }
+        if std::env::var("KINDS").is_ok() {
+            // Each word by what it does: the cells, the link, a block at a time or alone.
+            let start = share.plan()[chip / share.group().unwrap_or(1)].start;
+            let ops = share.cycles_by_op(&layout, &program, chip, context - 1).unwrap().len();
+            let mut totals: std::collections::BTreeMap<&str, u64> = Default::default();
+            let mut signatures: std::collections::BTreeMap<String, u64> = Default::default();
+            for inst in &program.ops[start..start + ops] {
+                let code = layout.op_microprogram(&program, inst, false).unwrap();
+                for (pc, (_, cycles)) in profile(&code, &die, context - 1) {
+                    let w = &code.words[pc];
+                    let kind = if w.cell_feed || w.cell_run || w.cell_flush || w.chain_shift || w.chain_load || w.cell_clear_group || w.cell_seek_weights || w.cell_seek_factors {
+                        "cells"
+                    } else if w.link_send || w.op == netlist::die::OP_LINK {
+                        "link"
+                    } else if w.vector && (w.read_step || w.repeat_x || w.repeat > 0) {
+                        "blocks"
+                    } else if w.read_step || w.repeat > 0 || w.repeat_x {
+                        "streams of one"
+                    } else if w.x_write || w.set_clusters {
+                        "single: index"
+                    } else if w.use_literal && w.op == 10 {
+                        "single: immediate"
+                    } else if w.op == 0 && !w.write_en && !w.write_now && !w.magnitude_scan && !w.wide_scan && !w.max_scan && !w.accumulate && !w.wide_write && !w.load_shift_left && !w.load_shift_a && !w.wide_clear && !w.magnitude_clear && !w.halt {
+                        "single: wait"
+                    } else if w.vector {
+                        "single: one block"
+                    } else {
+                        "single: one element"
+                    };
+                    *totals.entry(kind).or_default() += cycles;
+                    if std::env::var("KINDS").as_deref() == Ok(kind) {
+                        let text = format!("{w:?}");
+                        let fields: Vec<&str> = text.trim_start_matches("ControlWord { ").trim_end_matches(" }").split(", ").filter(|f| !f.ends_with(": false") && !f.ends_with(": 0")).map(|f| f.split(':').next().unwrap()).collect();
+                        *signatures.entry(fields.join(" ")).or_default() += cycles;
+                    }
+                }
+            }
+            let mut common: Vec<_> = signatures.into_iter().collect();
+            common.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+            for (fields, cycles) in common.iter().take(25) {
+                println!("  {cycles:>7} {fields}");
+            }
+            let total: u64 = totals.values().sum();
+            println!("chip {chip}, by kind of word: {total} cycles");
+            for (kind, cycles) in totals {
+                println!("  {kind:<16} {cycles:>9} ({:.0} %)", 100.0 * cycles as f64 / total as f64);
+            }
+        }
         let mut kinds: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
         let list = share.cycles_by_op(&layout, &program, chip, context - 1).unwrap();
         if std::env::var("EACH").is_ok() {

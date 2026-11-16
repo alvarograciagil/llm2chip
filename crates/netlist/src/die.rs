@@ -3333,9 +3333,7 @@ impl DieProgram {
         let last = self.allocate();
         temporaries.push(last);
         self.set_index(last, register, literal.wrapping_sub(1));
-        let start = self.end();
-        let w = self.slot(start);
-        (w.read_reset, w.write_reset) = (true, true);
+        self.reset_counters();
         for k in 0..leading {
             let at = self.end();
             *self.slot(at) = word(k);
@@ -3345,11 +3343,20 @@ impl DieProgram {
     }
 
     /// Lays out the words of a stream of `n` elements whose results land `written` later.
+    /// Clears the read and write counters for a stream that starts at the end: in the word
+    /// before when nothing jumps to the end and that word runs once and does not jump, as a
+    /// clear only changes what the counters hold from the next cycle on.
+    fn reset_counters(&mut self) {
+        let end = self.end();
+        let before = end.checked_sub(1).map(|at| self.cycles[at]);
+        let merge = before.is_some_and(|w| !self.labels.contains(&end) && !w.x_write && !w.branch && w.repeat == 0 && !w.repeat_x && !w.halt);
+        let w = self.slot(if merge { end - 1 } else { end });
+        (w.read_reset, w.write_reset) = (true, true);
+    }
+
     fn emit_stream(&mut self, n: usize, written: usize, reset: bool, word: impl Fn(usize) -> ControlWord) {
         if reset {
-            let start = self.end();
-            let w = self.slot(start);
-            (w.read_reset, w.write_reset) = (true, true);
+            self.reset_counters();
         }
         let (from, until) = if n > written { (written, n) } else { (n + written, n + written) };
         for k in 0..from.min(n + written) {
@@ -3672,7 +3679,14 @@ impl DieProgram {
             return self.short_alu(step);
         }
         let immediate = immediate_target(step.literal, self.config);
-        let t0 = self.end();
+        // Its read shares the compute cycle of a short step before it, as another short
+        // step's would.
+        let lanes = 1u32 << self.config.features.lane_bits;
+        let t0 = match self.last_short.filter(|_| self.config.features.streams()) {
+            Some((at, previous)) if at + 1 == self.end() && !self.labels.contains(&self.end()) && !self.cycles[at].x_write && can_follow(&previous, step, lanes) => at,
+            _ => self.end(),
+        };
+        let shared = t0 < self.end();
         let extra = if step.op == OP_FUNCTION || step.op == OP_MUL {
             1
         } else if step.op == OP_MAX && step.reduce_group > 0 {
@@ -3690,12 +3704,14 @@ impl DieProgram {
             w.literal_b = step.b.1;
             w.offset_b = step.offset_b;
             (w.window_x, w.window_a, w.window_b) = (step.window_x, step.window_a, step.window_b);
-            (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
+            if !shared {
+                (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
+            }
             (w.from_cluster, w.from_group) = (step.from_cluster, step.from_group);
-            w.magnitude_clear = step.magnitude_clear;
-            w.max_clear = step.max_clear;
-            w.accumulator_clear = step.accumulator_clear;
-            w.wide_clear = step.wide_clear;
+            w.magnitude_clear |= step.magnitude_clear;
+            w.max_clear |= step.max_clear;
+            w.accumulator_clear |= step.accumulator_clear;
+            w.wide_clear |= step.wide_clear;
         }
         {
             let w = self.slot(t0 + 1);
@@ -3757,6 +3773,9 @@ impl DieProgram {
         w.link_send = step.link_send;
         w.link_loop = step.link_loop && step.link_send;
         w.load_wide_shift = step.load_wide_shift;
+        // A plain result, written in this last cycle, can be read in it by the next step.
+        let plain = step.write && !(step.load_shift_a || step.load_shift_b || step.load_shift_left || step.load_wide_shift || step.link_send || step.wide_write) && matches!(step.op, OP_MUL | OP_FUNCTION);
+        self.last_short = (plain && self.config.features.streams()).then_some((t, *step));
     }
 
     /// A step that needs nothing after its result: read, then compute and write. Its read
