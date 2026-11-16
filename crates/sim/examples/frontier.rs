@@ -4,7 +4,8 @@
 //! `cargo run --release -p sim --example frontier -- MODEL_DIR [PROMPT] [CONTEXT]`
 //!
 //! `CHIPS` lists the numbers of chips to try, `8,12,16` by default: each die must fit in
-//! the reticle.
+//! the reticle. `SHARING` is `layers` (the default), `rows` or `mixed:N`, groups of N chips
+//! that share each layer, its products and its heads.
 
 use netlist::multiplier::MultiplierKind;
 use netlist::{CellConfig, DieConfig, DieFeatures};
@@ -27,7 +28,7 @@ fn main() {
     let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 36, mac_stages: 1, adder_stages: 1, addr_bits: 24, coding: Default::default(), exponent_bits: 0, multiplier: MultiplierKind::Booth, fixed_weights: false, ecc: false, skip_zeros: false };
     let base = DieConfig { cells: 1, cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_factor_steps(8) };
     let costs = Costs::measure(base);
-    let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: std::env::var("CHIPS").unwrap_or("8,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect(), clock_hz: 5e9, process: N6, context, lane_bits: 6..=7, cluster_bits: 5..=11, cell_bits: 13..=24, sharing: sim::sizing::Sharing::Layers };
+    let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: std::env::var("CHIPS").unwrap_or("8,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect(), clock_hz: 5e9, process: N6, context, lane_bits: 6..=7, cluster_bits: 5..=11, cell_bits: 13..=24, sharing: sharing_from(&std::env::var("SHARING").unwrap_or_default()) };
     let points = frontier(&program, &weights, base, &costs, &target);
     let first = points.first().copied();
     for c in &points {
@@ -41,5 +42,14 @@ fn main() {
         if let Some(c) = balanced(&points, ratio) {
             println!("balance with each extra tok/s at no more than {ratio}x the mean area per tok/s: {} chip(s) of {} x {}, {} cells, {:.0} tok/s, {:.0} mm²", c.chips, 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.tokens_per_second, c.area_mm2);
         }
+    }
+}
+
+/// `layers`, `rows` or `mixed:N`.
+fn sharing_from(text: &str) -> sim::sizing::Sharing {
+    match text.split_once(':') {
+        Some(("mixed", n)) => sim::sizing::Sharing::Mixed(n.parse().expect("the size of the groups")),
+        _ if text == "rows" => sim::sizing::Sharing::Rows,
+        _ => sim::sizing::Sharing::Layers,
     }
 }

@@ -7,7 +7,7 @@
 //! unit once more, and each cell costs the same wherever it is.
 
 pub use crate::chip::Sharing;
-use crate::lower::{chip_plan, Layout, Shard, ENTRY_LOGITS, ENTRY_TOKEN};
+use crate::lower::{Layout, ENTRY_LOGITS, ENTRY_TOKEN};
 use crate::Weights;
 use compiler::Program;
 use netlist::{die_design, word_bits, DieConfig, DieFeatures, Microprogram};
@@ -177,9 +177,9 @@ pub fn microcode_memory(die: DieConfig, codes: &[Microprogram]) -> u64 {
 /// chips so the one with most memory has as little as can be; by rows, every chip holds
 /// an equal slice of each matrix.
 pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32, chips: u32, sharing: Sharing) -> Result<Built, String> {
-    let plan = chip_plan(program, weights, chips as usize, context as usize, die.cell.activation_bits)?;
+    let share = crate::chip::ShareOut::new(program, weights, chips as usize, context as usize, die.cell.activation_bits, sharing)?;
     let (mut cell_bits, mut vector, mut kinds) = (0, 0, Vec::new());
-    let codes = (0..plan.len())
+    let codes = (0..chips as usize)
         .map(|chip| {
             // The embedding table stays in the image, as on a large model's chip: the
             // firmware brings each token's row, so the vector memory holds one.
@@ -188,16 +188,10 @@ pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32,
                 Ok(layout) => layout,
                 Err(_) => Layout::for_image(program, weights, die, context as usize)?,
             };
-            let by_rows = sharing == Sharing::Rows && chips > 1;
-            if by_rows {
-                layout.share_rows(program, Shard { index: chip as u32, chips, grouped: false });
-            } else {
-                layout.keep_weights_of(program, &plan, chip);
-            }
+            let code = share.microprogram(&mut layout, program, chip)?;
             let (depth, groups) = layout.cell_depths();
             // The depth counts words, each as wide as the cell's weights.
             cell_bits = cell_bits.max(depth * die.cell.weight_bits as u64 + groups * 2 * die.scale_bits as u64);
-            let code = if by_rows { layout.microprogram(program)? } else { layout.die_microprogram(program, &plan, chip)? };
             // The words its own routines reach, as the compact vector memory holds them.
             let words = layout.vector_words_used();
             if words > vector {
@@ -245,6 +239,26 @@ pub struct Timing {
 }
 
 pub fn timing(codes: &[Microprogram], die: DieConfig, context: u32, prompt: u32, stride: u32, sharing: Sharing) -> Timing {
+    // Groups that share each product: the members work at once, each group waits for its
+    // slowest, and the groups follow one another as single chips would.
+    let group = match sharing {
+        Sharing::Mixed(g) if g > 1 && codes.len() > g as usize && codes.len().is_multiple_of(g as usize) => Some(g as usize),
+        Sharing::Mixed(g) if g > 1 && codes.len() > 1 && codes.len() <= g as usize => return timing(codes, die, context, prompt, stride, Sharing::Rows),
+        _ => None,
+    };
+    if let Some(g) = group {
+        let stage = |position: u32| -> Vec<u64> { codes.chunks(g).map(|members| members.iter().map(|code| code.cycles(&die, ENTRY_TOKEN, 1, position)).max().unwrap_or(0)).collect() };
+        let logits = |position: u32| codes.iter().map(|code| code.cycles(&die, ENTRY_LOGITS, 1, position)).max().unwrap_or(0);
+        let token_cycles = stage(context - 1).iter().sum::<u64>() + logits(context - 1);
+        let slowest = |position: u32| stage(position).into_iter().max().unwrap_or(0) as f64;
+        let (mut total, mut from) = (stage(0).iter().sum::<u64>() as f64, 1);
+        while from < prompt {
+            let to = (from + stride.max(1)).min(prompt);
+            total += (slowest(from) + slowest(to - 1)) / 2.0 * (to - from) as f64;
+            from = to;
+        }
+        return Timing { token_cycles, prompt_cycles: total.round() as u64 + logits(prompt.max(1) - 1) };
+    }
     let token = |position: u32| -> Vec<u64> { codes.iter().map(|code| code.cycles(&die, ENTRY_TOKEN, 1, position)).collect() };
     if sharing == Sharing::Rows {
         // The chips all work on the same token at once, waiting for one another at each

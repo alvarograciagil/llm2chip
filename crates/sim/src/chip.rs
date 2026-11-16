@@ -361,6 +361,16 @@ impl ShareOut {
         Ok(Self { group, rows, plan })
     }
 
+    /// The runs of layers of the chain: one for each chip, or for each group.
+    pub fn plan(&self) -> &[std::ops::Range<usize>] {
+        &self.plan
+    }
+
+    /// The size of the groups that share each product by rows, when the chips are in several.
+    pub fn group(&self) -> Option<usize> {
+        self.group
+    }
+
     /// Lays out chip `chip`'s part on `layout` and gives its microcode.
     pub fn microprogram(&self, layout: &mut Layout, program: &Program, chip: usize) -> Result<Microprogram, String> {
         if let Some(g) = self.group {

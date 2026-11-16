@@ -4,11 +4,13 @@
 //! `cargo run --release -p sim --example memory -- MODEL_DIR [CONTEXT]`
 //!
 //! `CHIPS` (16 by default), and `UNITS`, `LANES` and `CELLS` (log2: 6, 6 and 15 by default)
-//! give the set: the frontier's fastest point for Qwen3.8-27B.
+//! give the set: the frontier's fastest point for Qwen3.8-27B. `SHARING` is `layers` (the
+//! default), `rows` or `mixed:N` for groups of N chips. It also gives the cycles of a token at
+//! the last position of the context, through every chip.
 
 use netlist::multiplier::MultiplierKind;
 use netlist::{CellConfig, DieConfig, DieFeatures};
-use sim::sizing::{built, die_of, Sharing};
+use sim::sizing::{built, die_of, timing, Sharing};
 use sim::Weights;
 use std::path::Path;
 
@@ -27,7 +29,8 @@ fn main() {
     let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 36, mac_stages: 1, adder_stages: 1, addr_bits: 24, coding: Default::default(), exponent_bits: 0, multiplier: MultiplierKind::Booth, fixed_weights: false, ecc: false, skip_zeros: false };
     let base = DieConfig { cells: 1, cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_factor_steps(8) };
     let die = die_of(base, context, (env("UNITS", 6), env("LANES", 6), env("CELLS", 15)));
-    let set = built(&program, &weights, die, context, chips, Sharing::Layers).unwrap();
+    let sharing = sharing_from(&std::env::var("SHARING").unwrap_or_default());
+    let set = built(&program, &weights, die, context, chips, sharing).unwrap();
     let words: Vec<usize> = set.programs.iter().map(|p| p.words.len()).collect();
     println!("microprogram words of each chip: {words:?}");
     println!("vector memory of each unit, on the chip that needs most: {} words", set.vector_words);
@@ -36,4 +39,15 @@ fn main() {
     }
     println!("microcode memory: {:.2} Mbit", set.microcode_bits as f64 / 1e6);
     println!("cell memory: {} bits", set.cell_bits);
+    let time = timing(&set.programs, die, context, 1024, 256, sharing);
+    println!("a token at position {}: {} cycles, {:.0} tok/s at 1 GHz", context - 1, time.token_cycles, 1e9 / time.token_cycles as f64);
+}
+
+/// `layers`, `rows` or `mixed:N`.
+fn sharing_from(text: &str) -> Sharing {
+    match text.split_once(':') {
+        Some(("mixed", n)) => Sharing::Mixed(n.parse().expect("the size of the groups")),
+        _ if text == "rows" => Sharing::Rows,
+        _ => Sharing::Layers,
+    }
 }
