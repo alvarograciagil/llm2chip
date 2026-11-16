@@ -436,6 +436,10 @@ pub trait BlockOps: Sized {
         let _ = reg;
     }
 
+    /// The operation `leave_spread` spoke for is done: what it allowed ends with it, so a
+    /// later one that writes the same register, for another buffer, gathers it whole.
+    fn end_spread(&mut self) {}
+
     /// At the end of a head, inside `each_head`: a die whose units can agree on the
     /// largest exponent brings the head to it there, all heads at once, so that
     /// `gather_heads` only has to copy. Elsewhere `gather_heads` does it, to the same bits.
@@ -2194,6 +2198,10 @@ impl BlockOps for Assembly {
 
     fn leave_spread(&mut self, reg: u32) {
         self.spread.insert(reg);
+    }
+
+    fn end_spread(&mut self) {
+        self.spread.clear();
     }
 
     fn align_heads(&mut self, reg: u32, len: u32) {

@@ -768,16 +768,9 @@ const GROUPED: &str = r#"{
   "rope_parameters": { "rope_theta": 10000.0 }
 }"#;
 
-/// The grouped model with attention heads of `head_dim` elements. Heads of more than four
-/// rotate nothing: with rotation, dies of several units do not yet match the exact machine
-/// bit for bit on them (see the limits in the README).
+/// The grouped model with attention heads of `head_dim` elements.
 fn grouped_config(head_dim: usize) -> String {
-    let config = GROUPED.replace(r#""num_key_value_heads": 2, "head_dim": 4"#, &format!(r#""num_key_value_heads": 2, "head_dim": {head_dim}"#));
-    if head_dim > 4 {
-        config.replace(r#""partial_rotary_factor": 0.5"#, r#""partial_rotary_factor": 0.0"#)
-    } else {
-        config
-    }
+    GROUPED.replace(r#""num_key_value_heads": 2, "head_dim": 4"#, &format!(r#""num_key_value_heads": 2, "head_dim": {head_dim}"#))
 }
 
 fn grouped_checkpoint(dir: &Path, head_dim: usize) {
@@ -820,14 +813,15 @@ fn grouped_checkpoint(dir: &Path, head_dim: usize) {
 #[ignore = "slow: hundreds of thousands of cycles: only with optimizations"]
 fn heads_in_groups_of_three_run_on_units_a_power_of_two_apart() {
     // With heads of eight elements, eight units give the three of a key head 3, 3 and 2 of
-    // its columns: the last share is shorter.
-    for head_dim in [4, 8] {
-        heads_in_groups_of_three(head_dim);
+    // its columns: the last share is shorter. One lane and four: registers are shared among
+    // buffers differently, and a unit must never keep a slice of one meant to be whole.
+    for (head_dim, lane_bits) in [(4, 2), (8, 2), (4, 0), (8, 0)] {
+        heads_in_groups_of_three(head_dim, lane_bits);
     }
 }
 
-fn heads_in_groups_of_three(head_dim: usize) {
-    let dir = std::env::temp_dir().join(format!("llm2chip-grouped-{head_dim}-{}", std::process::id()));
+fn heads_in_groups_of_three(head_dim: usize, lane_bits: u32) {
+    let dir = std::env::temp_dir().join(format!("llm2chip-grouped-{head_dim}-{lane_bits}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     grouped_checkpoint(&dir, head_dim);
     let config = grouped_config(head_dim);
@@ -840,14 +834,14 @@ fn heads_in_groups_of_three(head_dim: usize) {
     // Two and four units take their heads in rounds, each keeping only its heads' keys;
     // eight units take one part of each head; sixteen take two.
     for cluster_bits in [1, 2, 3, 4] {
-        let c = DieConfig { cells: 4 << cluster_bits, features: cell_die_config().features.with_lane_bits(2).with_cluster_bits(cluster_bits), ..cell_die_config() };
+        let c = DieConfig { cells: (1 << lane_bits) << cluster_bits, features: cell_die_config().features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits), ..cell_die_config() };
         let mut run = gates_in_cells(&program, &dir, c, &tokens);
         // Some buffers stay a slice per unit: what reads them takes the same slices.
         for (buffer, length) in program.buffers.iter().enumerate().filter(|(buffer, _)| !run.layout.is_spread(*buffer) && !run.layout.is_overwritten(*buffer)) {
             let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
             for index in 0..*length as u32 {
                 let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
-                assert_eq!(mantissa, vm.mantissa(fast, index), "heads of {head_dim}, {} units, buffer {buffer}, element {index}", 1 << cluster_bits);
+                assert_eq!(mantissa, vm.mantissa(fast, index), "heads of {head_dim}, {} lanes, {} units, buffer {buffer}, element {index}", 1 << lane_bits, 1 << cluster_bits);
             }
         }
         // With every head in one round, the three units of a key head keep its cache once
@@ -1131,4 +1125,5 @@ fn a_real_model_s_token_on_the_die_matches_the_exact_machine() {
     let exact: Vec<i64> = (0..program.vocab as u32).map(|i| vm.read(logits << c.index_bits | i)).collect();
     assert_eq!(gates, exact, "logits");
 }
+
 

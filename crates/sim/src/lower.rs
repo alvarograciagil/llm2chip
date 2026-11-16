@@ -1840,6 +1840,12 @@ impl Layout {
     }
 
     fn lower_op<O: BlockOps>(&self, ops: &mut O, program: &Program, op: &Op, token: O::N, position: O::N) -> Result<(), String> {
+        let done = self.lower_one(ops, program, op, token, position);
+        ops.end_spread();
+        done
+    }
+
+    fn lower_one<O: BlockOps>(&self, ops: &mut O, program: &Program, op: &Op, token: O::N, position: O::N) -> Result<(), String> {
         let made: Vec<usize> = match op {
             Op::Matvec { matrix, dst, .. } => self.chains.get(matrix).map_or_else(|| vec![*dst], |parts| parts.iter().map(|(_, dst)| *dst).collect()),
             Op::Silu { dst, .. } | Op::Sigmoid { dst, .. } | Op::MulElem { dst, .. } | Op::Add { dst, .. } | Op::Dconv { dst, .. } => vec![*dst],
