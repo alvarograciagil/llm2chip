@@ -768,7 +768,19 @@ const GROUPED: &str = r#"{
   "rope_parameters": { "rope_theta": 10000.0 }
 }"#;
 
-fn grouped_checkpoint(dir: &Path) {
+/// The grouped model with attention heads of `head_dim` elements. Heads of more than four
+/// rotate nothing: with rotation, dies of several units do not yet match the exact machine
+/// bit for bit on them (see the limits in the README).
+fn grouped_config(head_dim: usize) -> String {
+    let config = GROUPED.replace(r#""num_key_value_heads": 2, "head_dim": 4"#, &format!(r#""num_key_value_heads": 2, "head_dim": {head_dim}"#));
+    if head_dim > 4 {
+        config.replace(r#""partial_rotary_factor": 0.5"#, r#""partial_rotary_factor": 0.0"#)
+    } else {
+        config
+    }
+}
+
+fn grouped_checkpoint(dir: &Path, head_dim: usize) {
     let mut rng = Rng(0x0F1E_2D3C_4B5A_6978);
     let mut w = Writer::default();
     w.matrix("model.embed_tokens", 8, 8, &mut rng);
@@ -782,12 +794,12 @@ fn grouped_checkpoint(dir: &Path) {
         w.matrix(&p("mlp.up_proj"), 16, 8, &mut rng);
         w.matrix(&p("mlp.down_proj"), 8, 16, &mut rng);
         if full {
-            w.matrix(&p("self_attn.q_proj"), 48, 8, &mut rng);
-            w.matrix(&p("self_attn.k_proj"), 8, 8, &mut rng);
-            w.matrix(&p("self_attn.v_proj"), 8, 8, &mut rng);
-            w.matrix(&p("self_attn.o_proj"), 8, 24, &mut rng);
-            w.floats(&p("self_attn.q_norm.weight"), &[1.0; 4]);
-            w.floats(&p("self_attn.k_norm.weight"), &[1.0; 4]);
+            w.matrix(&p("self_attn.q_proj"), 12 * head_dim, 8, &mut rng);
+            w.matrix(&p("self_attn.k_proj"), 2 * head_dim, 8, &mut rng);
+            w.matrix(&p("self_attn.v_proj"), 2 * head_dim, 8, &mut rng);
+            w.matrix(&p("self_attn.o_proj"), 8, 6 * head_dim, &mut rng);
+            w.floats(&p("self_attn.q_norm.weight"), &vec![1.0; head_dim]);
+            w.floats(&p("self_attn.k_norm.weight"), &vec![1.0; head_dim]);
         } else {
             w.matrix(&p("linear_attn.in_proj_qkv"), 40, 8, &mut rng);
             w.matrix(&p("linear_attn.in_proj_z"), 24, 8, &mut rng);
@@ -807,12 +819,21 @@ fn grouped_checkpoint(dir: &Path) {
 #[test]
 #[ignore = "slow: hundreds of thousands of cycles: only with optimizations"]
 fn heads_in_groups_of_three_run_on_units_a_power_of_two_apart() {
-    let dir = std::env::temp_dir().join(format!("llm2chip-grouped-{}", std::process::id()));
+    // With heads of eight elements, eight units give the three of a key head 3, 3 and 2 of
+    // its columns: the last share is shorter.
+    for head_dim in [4, 8] {
+        heads_in_groups_of_three(head_dim);
+    }
+}
+
+fn heads_in_groups_of_three(head_dim: usize) {
+    let dir = std::env::temp_dir().join(format!("llm2chip-grouped-{head_dim}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    grouped_checkpoint(&dir);
-    let program = compile_qwen3_5(GROUPED).unwrap();
+    grouped_checkpoint(&dir, head_dim);
+    let config = grouped_config(head_dim);
+    let program = compile_qwen3_5(&config).unwrap();
     let tokens = [3u32, 5, 1];
-    let mut vm = ExactEngine::new(compile_qwen3_5(GROUPED).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
+    let mut vm = ExactEngine::new(compile_qwen3_5(&config).unwrap(), Weights::open(&dir).unwrap(), 16).unwrap();
     for (position, token) in tokens.iter().enumerate() {
         vm.step(*token, position + 1 == tokens.len()).unwrap();
     }
@@ -826,7 +847,7 @@ fn heads_in_groups_of_three_run_on_units_a_power_of_two_apart() {
             let (gates, fast) = (run.layout.register_of(buffer), vm.register_of(buffer));
             for index in 0..*length as u32 {
                 let (mantissa, _) = read_block_value(&mut run.sim, c, gates, index);
-                assert_eq!(mantissa, vm.mantissa(fast, index), "{} units, buffer {buffer}, element {index}", 1 << cluster_bits);
+                assert_eq!(mantissa, vm.mantissa(fast, index), "heads of {head_dim}, {} units, buffer {buffer}, element {index}", 1 << cluster_bits);
             }
         }
         // With every head in one round, the three units of a key head keep its cache once
@@ -1110,3 +1131,4 @@ fn a_real_model_s_token_on_the_die_matches_the_exact_machine() {
     let exact: Vec<i64> = (0..program.vocab as u32).map(|i| vm.read(logits << c.index_bits | i)).collect();
     assert_eq!(gates, exact, "logits");
 }
+

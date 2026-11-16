@@ -458,6 +458,8 @@ pub fn addressed_die(program: &Program, weights: &Weights, base: DieConfig, cont
     let wide = layout(sized)?;
     let code = wide.microprogram(program)?;
     let die = DieConfig { microcode_bits: bits_for(code.words.len() as u64), ..crate::chip::with_registers_needed(sized, &wide) };
+    // Units that read across their group need the field's wiring.
+    let die = wide.group_field().map_or(die, |field| DieConfig { features: die.features.with_group(field), ..die });
     if die.reg_bits + die.index_bits > 32 {
         return Err(format!("{} register bits and {} element bits do not fit in 32: more cells are needed", die.reg_bits, die.index_bits));
     }

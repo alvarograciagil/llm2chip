@@ -214,6 +214,7 @@ impl DieFeatures {
 
     /// What dies running either program need, for chips built identical to each other.
     pub fn union(self, other: Self) -> Self {
+        assert!(self.group_bits == 0 || other.group_bits == 0 || (self.group_shift, self.group_bits) == (other.group_shift, other.group_bits), "two programs read across groups of different shapes");
         let mut widths = self.widths;
         widths.iter_mut().zip(other.widths).for_each(|(a, b)| *a = (*a).max(b));
         Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link, vector_bits: self.vector_bits.max(other.vector_bits), factor_bits: self.factor_bits.max(other.factor_bits), wide_bits: self.wide_bits.max(other.wide_bits), dictionary_bits: self.dictionary_bits.max(other.dictionary_bits), host_writes: self.host_writes || other.host_writes, group_shift: if self.group_bits > 0 { self.group_shift } else { other.group_shift }, group_bits: self.group_bits.max(other.group_bits) }
