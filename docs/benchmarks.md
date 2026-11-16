@@ -74,21 +74,31 @@ That die is a speed reference, not one that fits: with 262,144 cells it is far l
 
 ### Dies sized from the circuit
 
-`frontier` builds the real microprogram of every chip for each die shape, counts the words each vector unit's memory needs, adds the cells' memory, the microcode memory and the logic, and keeps the shapes whose dies fit the reticle (858 mm²). For Qwen3.8-27B with an 8,192-token context and a 1,024-token prompt (N6, estimated areas; 8, 12 or 16 chips, the default of `CHIPS`). Each row is a point of the speed-for-area frontier:
+`frontier` builds the real microprogram of every chip for each die shape, counts the words each vector unit's memory needs, adds the cells' memory, the microcode memory and the logic, and keeps the shapes whose dies fit the reticle (858 mm²). For Qwen3.8-27B with an 8,192-token context and a 1,024-token prompt (N6, estimated areas; 8, 12 or 16 chips, the default of `CHIPS`). Each row is a point of the speed-for-area frontier.
+
+Split by layers (`SHARING=layers`): each chip runs whole layers and passes one vector to the next.
 
 | Chips | Units × lanes | Cells per die | tok/s | Clock | First token | Total area | Per chip |
 |---|---|---|---|---|---|---|---|
-| 8 | 64 × 64 | 8,192 | 203 | 994 MHz | 677 ms | 6,443 mm² | 805 mm² |
-| 8 | 64 × 128 | 8,192 | 236 | 1,010 MHz | 611 ms | 6,574 mm² | 822 mm² |
-| 8 | 64 × 64 | 16,384 | 322 | 994 MHz | 399 ms | 6,718 mm² | 840 mm² |
-| 8 | 64 × 128 | 16,384 | 408 | 1,010 MHz | 338 ms | 6,842 mm² | 855 mm² |
-| 12 | 64 × 64 | 32,768 | 453 | 994 MHz | 181 ms | 7,896 mm² | 658 mm² |
-| 12 | 64 × 128 | 32,768 | 641 | 1,010 MHz | 141 ms | 8,063 mm² | 672 mm² |
-| 12 | 64 × 128 | 65,536 | 898 | 1,010 MHz | 94 ms | 9,036 mm² | 753 mm² |
-| 16 | 128 × 128 | 65,536 | 1,055 | 989 MHz | 65 ms | 12,687 mm² | 793 mm² |
-| 16 | 64 × 128 | 131,072 | **1,102** | 1,010 MHz | 53 ms | 13,252 mm² | 828 mm² |
+| 8 | 64 × 64 | 8,192 | 203 | 994 MHz | 608 ms | 6,295 mm² | 787 mm² |
+| 8 | 64 × 128 | 16,384 | 419 | 1,010 MHz | 297 ms | 6,689 mm² | 836 mm² |
+| 12 | 64 × 128 | 32,768 | 669 | 1,010 MHz | 117 ms | 7,680 mm² | 640 mm² |
+| 12 | 64 × 128 | 65,536 | 954 | 1,010 MHz | 76 ms | 8,629 mm² | 719 mm² |
+| 12 | 128 × 128 | 65,536 | 1,057 | 989 MHz | 76 ms | 9,856 mm² | 821 mm² |
+| 16 | 64 × 128 | 131,072 | 1,187 | 1,010 MHz | 49 ms | 13,235 mm² | 827 mm² |
 
-So the circuit as generated today reaches **about 1,100 tok/s within the reticle**, and 898 tok/s on 12 dies is the point with the least area for each token per second. That is under a third of the estimator's 3,750 tok/s; the rest of the gap is the cells: the estimator puts far more of them in a die than the generated one has room for once its vector memory is counted.
+Mixed split in groups of four (`SHARING=mixed:4`): the four chips of a group share every layer of their part, each with a quarter of each matrix's rows and a quarter of the attention and DeltaNet heads, and the groups are chained.
+
+| Chips | Units × lanes | Cells per die | tok/s | Clock | First token | Total area | Per chip |
+|---|---|---|---|---|---|---|---|
+| 12 | 32 × 128 | 8,192 | 549 | 1,031 MHz | 628 ms | 8,195 mm² | 683 mm² |
+| 12 | 32 × 128 | 16,384 | 807 | 1,031 MHz | 412 ms | 8,919 mm² | 743 mm² |
+| 16 | 32 × 128 | 32,768 | 1,044 | 1,031 MHz | 231 ms | 10,962 mm² | 685 mm² |
+| 16 | 64 × 128 | 32,768 | 1,194 | 1,010 MHz | 213 ms | 11,387 mm² | 712 mm² |
+| 16 | 32 × 128 | 65,536 | 1,264 | 1,031 MHz | 185 ms | 12,697 mm² | 794 mm² |
+| 16 | 64 × 128 | 65,536 | **1,468** | 1,010 MHz | 170 ms | 13,578 mm² | 849 mm² |
+
+So the circuit as generated today reaches **about 1,470 tok/s within the reticle** on 16 dies in groups of four, and 954 tok/s on 12 dies split by layers is the point with the least area for each token per second (9.0 mm² per tok/s, against 9.3 for the fastest). The mixed split needs only half the cells per die for the same speed, because each chip of a group runs a quarter of each layer; its first token is slower, because the prompt crosses the groups one after the other. Of each fastest die's 849 mm², 615 are cell memories, 145 vector memories, 88 logic and 0.1 microcode. That is still under half of the estimator's 3,750 tok/s: the matrix products take at least as many cycles as a matrix's columns divided by the vector units, and the cells of a die cannot grow while the vector memory takes a sixth of it.
 
 What each unit's vector memory holds on the busiest chip of 16 with 64 × 64 units and 32,768 cells (`memory` example):
 
