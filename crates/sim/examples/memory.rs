@@ -7,7 +7,8 @@
 //! give the set: the frontier's fastest point for Qwen3.8-27B. `SHARING` is `layers` (the
 //! default), `rows` or `mixed:N` for groups of N chips. It also gives the cycles of a token at
 //! the last position of the context, through every chip. With `PROFILE` set to a chip's
-//! number it also gives where that chip's cycles go, by kind of operation.
+//! number it also gives where that chip's cycles go, by kind of operation. `FACTOR_STEPS`
+//! (8 by default) is how many cycles each cell takes to apply a group's scale and bias.
 
 use netlist::multiplier::MultiplierKind;
 use netlist::{CellConfig, DieConfig, DieFeatures};
@@ -28,7 +29,7 @@ fn main() {
     let program = compiler::compile_model(&config).unwrap();
     let weights = Weights::open(dir).unwrap();
     let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 36, mac_stages: 1, adder_stages: 1, addr_bits: 24, coding: Default::default(), exponent_bits: 0, multiplier: MultiplierKind::Booth, fixed_weights: false, ecc: false, skip_zeros: false };
-    let base = DieConfig { cells: 1, cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_factor_steps(8) };
+    let base = DieConfig { cells: 1, cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_factor_steps(std::env::var("FACTOR_STEPS").map_or(8, |v| v.parse().expect("FACTOR_STEPS"))) };
     let die = die_of(base, context, (env("UNITS", 6), env("LANES", 6), env("CELLS", 15)));
     let sharing = sharing_from(&std::env::var("SHARING").unwrap_or_default());
     let set = built(&program, &weights, die, context, chips, sharing).unwrap();

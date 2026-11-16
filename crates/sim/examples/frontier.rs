@@ -5,7 +5,8 @@
 //!
 //! `CHIPS` lists the numbers of chips to try, `8,12,16` by default: each die must fit in
 //! the reticle. `SHARING` is `layers` (the default), `rows` or `mixed:N`, groups of N chips
-//! that share each layer, its products and its heads.
+//! that share each layer, its products and its heads. `FACTOR_STEPS` (8 by default) is how
+//! many cycles each cell takes to apply a group's scale and bias: fewer cost more logic.
 
 use netlist::multiplier::MultiplierKind;
 use netlist::{CellConfig, DieConfig, DieFeatures};
@@ -26,7 +27,7 @@ fn main() {
     let program = compiler::compile_model(&config).unwrap();
     let weights = Weights::open(dir).unwrap();
     let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 36, mac_stages: 1, adder_stages: 1, addr_bits: 24, coding: Default::default(), exponent_bits: 0, multiplier: MultiplierKind::Booth, fixed_weights: false, ecc: false, skip_zeros: false };
-    let base = DieConfig { cells: 1, cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_factor_steps(8) };
+    let base = DieConfig { cells: 1, cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_factor_steps(std::env::var("FACTOR_STEPS").map_or(8, |v| v.parse().expect("FACTOR_STEPS"))) };
     let costs = Costs::measure(base);
     let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: std::env::var("CHIPS").unwrap_or("8,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect(), clock_hz: 5e9, process: N6, context, lane_bits: range("LANES", 6..=7), cluster_bits: range("UNITS", 5..=11), cell_bits: range("CELLS", 13..=24), sharing: sharing_from(&std::env::var("SHARING").unwrap_or_default()) };
     let points = frontier(&program, &weights, base, &costs, &target);
