@@ -364,6 +364,11 @@ fn the_cells_reach_the_same_bits_as_the_exact_machine() {
                 assert_eq!(mantissa, vm.mantissa(fast, index), "{cells} cells, buffer {buffer}, element {index}");
             }
         }
+        // Several units run the two query heads of the key head and keep its cache once.
+        assert_eq!(run.layout.group_field().is_some(), cluster_bits > 0, "{cells} cells, {cluster_bits} unit bits");
+        if cluster_bits > 0 {
+            assert!(cache_words(&run.layout) < cache_words(&apart(&program, &dir, c)), "{cells} cells, {cluster_bits} unit bits");
+        }
         cycles.push(run.cycles);
     }
     eprintln!("cycles: {serial} in series; with 1, 2 and 8 cells, with 8 and 4 lanes, and with lanes and units {cycles:?}");
@@ -583,7 +588,7 @@ fn the_firmware_scores_the_draft_head_like_the_software() {
     let cell = die_config().cell;
     let die = DieConfig { reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, ..die_config() };
     let _ = cell;
-    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }] };
+    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }], group: (0, 0) };
     let setup = GenerationSetup { max_new: count as u32 + 1, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: depth as u32, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: None, think_budget: u32::MAX };
     let info = chip_info(&die, &code, 1, 8, &setup);
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
@@ -653,7 +658,7 @@ fn the_firmware_closes_the_reasoning_when_its_budget_runs_out() {
 
     let firmware = FirmwareImage::from_elf(include_bytes!("../../../firmware/prebuilt/firmware.elf")).unwrap();
     let die = DieConfig { reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, ..die_config() };
-    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }] };
+    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }], group: (0, 0) };
     let setup = GenerationSetup { max_new: count as u32, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: Some((6, close)), think_budget: budget };
     let info = chip_info(&die, &code, 1, 8, &setup);
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
@@ -690,7 +695,7 @@ fn the_cpu_profile_adds_up_and_tells_waiting_from_work() {
     let elf = include_bytes!("../../../firmware/prebuilt/firmware.elf");
     let firmware = FirmwareImage::from_elf(elf).unwrap();
     let die = DieConfig { reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, ..die_config() };
-    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }] };
+    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }], group: (0, 0) };
     let setup = GenerationSetup { max_new: 4, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: None, think_budget: u32::MAX };
     let info = chip_info(&die, &code, 1, 8, &setup);
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
@@ -824,8 +829,29 @@ fn heads_in_groups_of_three_run_on_units_a_power_of_two_apart() {
                 assert_eq!(mantissa, vm.mantissa(fast, index), "{} units, buffer {buffer}, element {index}", 1 << cluster_bits);
             }
         }
+        // With every head in one round, the three units of a key head keep its cache once
+        // between them, each a share of the columns, and read the others' shares.
+        assert_eq!(run.layout.group_field().is_some(), cluster_bits >= 3, "{} units", 1 << cluster_bits);
+        if cluster_bits >= 3 {
+            assert!(cache_words(&run.layout) < cache_words(&apart(&program, &dir, c)), "{} units", 1 << cluster_bits);
+        }
     }
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Words of each unit's vector memory that hold the attention cache.
+fn cache_words(layout: &Layout) -> u64 {
+    layout.vector_words_by_kind().iter().filter(|(kind, _)| matches!(*kind, "keys" | "values")).map(|(_, words)| words).sum()
+}
+
+/// The same die's layout with every unit keeping its own copy of its key head's cache.
+fn apart(program: &compiler::Program, dir: &Path, c: DieConfig) -> Layout {
+    let mut alone = c;
+    alone.features.widths[netlist::die::FROM_GROUP_FIELD] = 0;
+    let layout = Layout::with_cells(program, &Weights::open(dir).unwrap(), alone, CHIP_TOKENS).unwrap();
+    layout.microprogram(program).unwrap();
+    assert!(layout.group_field().is_none());
+    layout
 }
 
 #[test]

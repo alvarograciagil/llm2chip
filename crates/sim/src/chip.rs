@@ -524,7 +524,10 @@ pub fn compact_die(config: DieConfig, layout: &Layout) -> DieConfig {
     // The cells drain a whole pass at a time, so the wide memory holds whole passes.
     let wide = layout.wide_reach().next_multiple_of(config.cells.max(1 << config.features.lane_bits)).max(2);
     let wide_bits = u32::BITS - (wide - 1).leading_zeros();
-    DieConfig { features: config.features.with_vector_bits(layout.register_bases().1).with_factor_bits(factor_bits).with_wide_bits(wide_bits), ..config }
+    let features = config.features.with_vector_bits(layout.register_bases().1).with_factor_bits(factor_bits).with_wide_bits(wide_bits);
+    // Units that read across their group need the field's wiring.
+    let features = layout.group_field().map_or(features, |field| features.with_group(field));
+    DieConfig { features, ..config }
 }
 
 pub fn image_segments(config: &DieConfig, code: &Microprogram, layout: &Layout) -> Vec<Segment> {

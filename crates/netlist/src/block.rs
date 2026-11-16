@@ -543,6 +543,9 @@ pub struct Alu<N = u32> {
     pub vector: bool,
     /// Operand A comes from this vector unit, plus one; zero means its own.
     pub from_cluster: u32,
+    /// Operand B comes from the unit at this place of this one's group, plus one; zero
+    /// means its own. A group is the units that differ only in the die's group field.
+    pub from_group: u32,
     pub broadcast_a: bool,
     pub broadcast_b: bool,
     pub shift: u32,
@@ -596,6 +599,7 @@ impl<N: Default> Alu<N> {
             window_dst: false,
             vector: false,
             from_cluster: 0,
+            from_group: 0,
             broadcast_a: false,
             broadcast_b: false,
             shift: 0,
@@ -652,6 +656,7 @@ impl Alu<Expr> {
             window_dst: self.window_dst,
             vector: self.vector,
             from_cluster: self.from_cluster,
+            from_group: self.from_group,
             broadcast_a: self.broadcast_a,
             broadcast_b: self.broadcast_b,
             shift: self.shift,
@@ -723,7 +728,8 @@ pub enum Step {
     /// block each, one row a cycle, from zero.
     CombineRows { weights: At<Expr>, matrix: u32, start: Expr, rows: u32, window: Expr, window_a: bool, window_b: bool },
     /// `wide[j] += weights · matrix[start + j]` for every `j` of a row, or from zero if `fresh`.
-    Combine { weights: At<Expr>, matrix: u32, start: Expr, width: Expr, fresh: bool, window: Expr, window_a: bool, window_b: bool, moving: bool },
+    /// With `from_group`, the row is read from that unit of this one's group, plus one.
+    Combine { weights: At<Expr>, matrix: u32, start: Expr, width: Expr, fresh: bool, window: Expr, window_a: bool, window_b: bool, moving: bool, from_group: u32 },
     /// One copy of `body` on several vector units, each with its own values of `vars`.
     /// With `slots = (shift, bits, limit)`, only the units whose number has
     /// `(k >> shift) mod 2^bits < limit` take part: the others fill out a power of two.
@@ -988,6 +994,28 @@ pub struct Assembly {
     pub ring_first: bool,
     pub ring_last: bool,
     across_chips: bool,
+    /// Inside a loop over heads whose units for one key head are a group: see `HeadGroup`.
+    group: Option<HeadGroup>,
+    /// The group field this program's groups use, `(shift, bits)`: the units that differ only
+    /// in those bits of their number read operand B from one another. Set by the first loop
+    /// that forms groups, or by a die built for one; every later group must agree.
+    pub group_field: Option<(u32, u32)>,
+    /// Whether some step reads across a group.
+    pub group_used: bool,
+    /// The die can read operand B from another unit of the group.
+    group_reads: bool,
+}
+
+/// The units that run the query heads of one key head, in a loop over heads: they differ
+/// only in `bits` bits of their number from `shift` on, and the first `members` of them run.
+/// `place` is this unit's place among them. They keep the key head's cache once between
+/// them, each a share of its columns, and read the others' shares.
+#[derive(Clone, Copy, Debug)]
+struct HeadGroup {
+    shift: u32,
+    bits: u32,
+    members: u32,
+    place: Expr,
 }
 
 /// Words a chip sends before it takes as many: each link holds twice as many in its queue,
@@ -1013,6 +1041,30 @@ impl Assembly {
     /// inside a loop over heads that the units share.
     fn local_columns(&self, store: &KeyStore<Expr>) -> Option<Expr> {
         self.head_round.filter(|_| store.local && self.key_shift > 0 && self.key_capacity.is_some())
+    }
+
+    /// The group a loop over key heads of `inner` query heads each forms, when its heads
+    /// are `width` units apart in one round with `parts` units each: `second` is the loop's
+    /// query head within its key head.
+    fn head_group(&self, inner: u32, width: u32, parts: u32, second: Var) -> Option<HeadGroup> {
+        if !self.group_reads || inner < 2 || !width.is_power_of_two() || !parts.is_power_of_two() {
+            return None;
+        }
+        let field = (parts.trailing_zeros(), width.trailing_zeros());
+        if self.group_field.is_some_and(|f| f != field) {
+            return None;
+        }
+        Some(HeadGroup { shift: field.0, bits: field.1, members: inner, place: Expr::var(second) })
+    }
+
+    /// With the cache's columns kept once among a group of units, how many of a share of
+    /// `share` columns each unit keeps, and the group. Only keys written by `store_key_part`
+    /// in whole columns, in the same loop over heads, are kept that way.
+    fn group_columns(&mut self, local: bool, share: u32) -> Option<(u32, HeadGroup)> {
+        let group = self.group.filter(|_| local && self.key_shift > 0 && self.key_capacity.is_some() && self.head_round == Some(0.into()))?;
+        self.group_field = Some((group.shift, group.bits));
+        self.group_used = true;
+        Some((share.div_ceil(group.members), group))
     }
 
     fn group_bits(&self) -> u32 {
@@ -1123,14 +1175,14 @@ impl Assembly {
         }
         let zero = self.sc(10);
         self.immediate(0, zero);
-        self.steps.push(Step::Combine { weights: zero, matrix, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
-        self.each(rows.into(), |s, i| s.steps.push(Step::Combine { weights: (weights, i), matrix, start: i * width, width: width.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false }));
+        self.steps.push(Step::Combine { weights: zero, matrix, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 });
+        self.each(rows.into(), |s, i| s.steps.push(Step::Combine { weights: (weights, i), matrix, start: i * width, width: width.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 }));
         self.steps.push(Step::WideReduce { rows: width.into(), group });
         self.narrow_sums(weights, matrix, dst, width.into());
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false }
+        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0 }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1812,8 +1864,8 @@ impl BlockOps for Assembly {
         // A zero weight clears every sum, whatever the matrix holds.
         let zero = self.sc(10);
         self.immediate(0, zero);
-        self.steps.push(Step::Combine { weights: zero, matrix, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
-        self.each(count, |s, t| s.steps.push(Step::Combine { weights: (weights, t), matrix, start: t * stride + offset, width: width.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false }));
+        self.steps.push(Step::Combine { weights: zero, matrix, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 });
+        self.each(count, |s, t| s.steps.push(Step::Combine { weights: (weights, t), matrix, start: t * stride + offset, width: width.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 }));
         self.narrow_sums(weights, matrix, dst, width.into());
     }
 
@@ -1907,7 +1959,36 @@ impl BlockOps for Assembly {
         let Some(capacity) = self.key_capacity else {
             return self.row_combination(probabilities, values, dst, (width, stride, offset), tokens);
         };
-        let Some((part, parts)) = self.split.filter(|(_, parts)| width.is_multiple_of(*parts)) else {
+        let split = self.split.filter(|(_, parts)| width.is_multiple_of(*parts));
+        let (first, share, parts) = split.map_or((0.into(), width, 1), |(part, parts)| (part * (width / parts), width / parts, parts));
+        if let Some((each, group)) = self.group_columns(store.local, share) {
+            // Each unit of the group holds `each` of the columns: all read them from it in turn,
+            // and each sums its own probabilities over them.
+            let zero = self.sc(10);
+            self.immediate(0, zero);
+            self.steps.push(Step::Combine { weights: zero, matrix: values, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 });
+            for owner in 0..group.members {
+                let count = each.min(share.saturating_sub(owner * each));
+                if count == 0 {
+                    continue;
+                }
+                self.each(count.into(), |s, k| {
+                    let at = k * capacity;
+                    s.clear_accumulator();
+                    s.elements(tokens, &[0.into(), at], true, |s, t, vector| {
+                        let mut step = alu(OP_MOV);
+                        (step.a, step.b, step.write, step.accumulate, step.vector, step.from_group) = ((probabilities, t), (values, at + t), false, true, vector, owner + 1);
+                        s.push(step);
+                    });
+                    s.store_accumulator(first + k + Expr::from(owner * each));
+                });
+            }
+            if parts > 1 {
+                self.steps.push(Step::WideReduce { rows: width.into(), group: parts.trailing_zeros() });
+            }
+            return self.narrow_sums(probabilities, values, dst, width.into());
+        }
+        let Some((part, parts)) = split else {
             let column = self.local_columns(&store).map_or(offset, |round| round * width);
             return self.dots(probabilities, values, dst, width.into(), tokens, |j, t| ((probabilities, t), (values, (column + j) * capacity + t)));
         };
@@ -1916,7 +1997,7 @@ impl BlockOps for Assembly {
         let share = width / parts;
         let zero = self.sc(10);
         self.immediate(0, zero);
-        self.steps.push(Step::Combine { weights: zero, matrix: values, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
+        self.steps.push(Step::Combine { weights: zero, matrix: values, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 });
         let first = part * share;
         let column = self.local_columns(&store).map_or(offset + first, |round| round * share);
         self.each(share.into(), |s, k| {
@@ -1945,7 +2026,7 @@ impl BlockOps for Assembly {
         }
         let zero = self.sc(10);
         self.immediate(0, zero);
-        let combine = |weights: u32, matrix: u32, length: u32, fresh: bool| Step::Combine { weights: if fresh { zero } else { (weights, 0.into()) }, matrix, start: 0.into(), width: length.into(), fresh, window: 0.into(), window_a: false, window_b: false, moving: !fresh };
+        let combine = |weights: u32, matrix: u32, length: u32, fresh: bool| Step::Combine { weights: if fresh { zero } else { (weights, 0.into()) }, matrix, start: 0.into(), width: length.into(), fresh, window: 0.into(), window_a: false, window_b: false, moving: !fresh, from_group: 0 };
         self.steps.push(combine(cos, x, width, true));
         self.steps.push(combine(cos, x, width, false));
         self.steps.push(combine(sin, swapped, rotary, false));
@@ -2046,7 +2127,9 @@ impl BlockOps for Assembly {
         self.heads_at_once = outer * width * parts <= self.clusters;
         // Heads split into parts always fit the units in one round.
         self.head_round = Some(0.into());
+        self.group = self.head_group(inner, width, parts, second);
         body(self, Expr::var(first), Expr::var(second));
+        self.group = None;
         self.head_round = None;
         self.heads_at_once = false;
         self.in_units = false;
@@ -2086,7 +2169,9 @@ impl BlockOps for Assembly {
         self.in_units = true;
         self.heads_at_once = outer * width <= self.clusters;
         self.head_round = Some(round.map_or(0.into(), Expr::var));
+        self.group = if round.is_none() { self.head_group(inner, width, 1, second) } else { None };
         body(self, Expr::var(first), Expr::var(second));
+        self.group = None;
         self.head_round = None;
         self.heads_at_once = false;
         self.in_units = false;
@@ -2205,8 +2290,8 @@ impl BlockOps for Assembly {
         }
         let zero = self.sc(10);
         self.immediate(0, zero);
-        self.steps.push(Step::Combine { weights: zero, matrix: history, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
-        self.each(kernel.into(), |s, k| s.steps.push(Step::Combine { weights: (taps, k * width), matrix: history, start: k * width, width: width.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: true }));
+        self.steps.push(Step::Combine { weights: zero, matrix: history, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 });
+        self.each(kernel.into(), |s, k| s.steps.push(Step::Combine { weights: (taps, k * width), matrix: history, start: k * width, width: width.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: true, from_group: 0 }));
         self.narrow_sums(taps, history, dst, width.into());
     }
 
@@ -2217,8 +2302,8 @@ impl BlockOps for Assembly {
         assert!(self.combines, "only a die that sums rows splits the convolution");
         let zero = self.sc(10);
         self.immediate(0, zero);
-        self.steps.push(Step::Combine { weights: zero, matrix: history, start, width: len.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
-        self.each(kernel.into(), |s, k| s.steps.push(Step::Combine { weights: (taps, k * width + start), matrix: history, start: k * width + start, width: len.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: true }));
+        self.steps.push(Step::Combine { weights: zero, matrix: history, start, width: len.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 });
+        self.each(kernel.into(), |s, k| s.steps.push(Step::Combine { weights: (taps, k * width + start), matrix: history, start: k * width + start, width: len.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: true, from_group: 0 }));
         self.narrow_part_at(taps, history, dst, 0.into(), start, len.into());
     }
 
@@ -2243,6 +2328,11 @@ impl BlockOps for Assembly {
             // Columns written one element at a time: the whole key, as `store_key` does.
             return self.store_key(src, exponent, keys, slot, width);
         }
+        // A group of units keeps the key head once: each its own share of the columns.
+        let (from, len) = match self.group_columns(true, len) {
+            Some((each, group)) => (from + group.place * each, each),
+            None => (from, len),
+        };
         let start: Expr = 32u32.max(1 << self.lane_bits).into();
         let scratch = self.scratch;
         self.align_to(src, from, exponent, scratch, start, len.into());
@@ -2294,14 +2384,24 @@ impl BlockOps for Assembly {
         };
         let zero = self.sc(10);
         self.immediate(0, zero);
-        self.steps.push(Step::Combine { weights: zero, matrix: keys, start: 0.into(), width: tokens, fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false });
+        self.steps.push(Step::Combine { weights: zero, matrix: keys, start: 0.into(), width: tokens, fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 });
         // Split among units, each adds its share of the columns and the units add up.
         let (first, share, parts) = match self.split.filter(|(_, parts)| width.is_multiple_of(*parts)) {
             Some((part, parts)) => (part * (width / parts), width / parts, parts),
             None => (0.into(), width, 1),
         };
-        let column = self.local_columns(&store).map_or(offset + first, |round| round * share);
-        self.each(share.into(), |s, j| s.steps.push(Step::Combine { weights: (query, first + j), matrix: keys, start: (column + j) * capacity, width: tokens, fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false }));
+        if let Some((each, group)) = self.group_columns(store.local, share) {
+            // Each unit of the group holds `each` of the columns: all read them from it in turn.
+            for owner in 0..group.members {
+                let count = each.min(share.saturating_sub(owner * each));
+                if count > 0 {
+                    self.each(count.into(), |s, k| s.steps.push(Step::Combine { weights: (query, first + k + Expr::from(owner * each)), matrix: keys, start: k * capacity, width: tokens, fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: owner + 1 }));
+                }
+            }
+        } else {
+            let column = self.local_columns(&store).map_or(offset + first, |round| round * share);
+            self.each(share.into(), |s, j| s.steps.push(Step::Combine { weights: (query, first + j), matrix: keys, start: (column + j) * capacity, width: tokens, fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 }));
+        }
         if parts > 1 {
             self.steps.push(Step::WideReduce { rows: tokens, group: parts.trailing_zeros() });
         }

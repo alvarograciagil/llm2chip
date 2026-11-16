@@ -527,6 +527,9 @@ pub struct Layout {
     /// The rotation table when it stays in the image: its register holds only the row of the
     /// token's position, which the firmware brings before each routine that rotates.
     rotation_outside: Option<OutsideTable>,
+    /// The group field the routines read across, once one has: see `Assembly::group_field`.
+    group_field: Cell<Option<(u32, u32)>>,
+    group_used: Cell<bool>,
 }
 
 /// Where each register of a compact vector memory starts and its loop step, the words of
@@ -939,7 +942,7 @@ impl Layout {
             _ => None,
         });
         let token_range = table_rows.chain([program.vocab, program.vision.as_ref().map_or(0, |v| v.patches)]).max().unwrap_or(0) as u32;
-        let mut layout = Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: if outside.is_some() { program.vision.as_ref().map_or(program.vocab, |v| v.patches) as u32 } else { token_range }, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside, rotation_outside: None };
+        let mut layout = Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: if outside.is_some() { program.vision.as_ref().map_or(program.vocab, |v| v.patches) as u32 } else { token_range }, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside, rotation_outside: None, group_field: Cell::new(None), group_used: Cell::new(false) };
         if table_out {
             layout.rotation_out(program, matrices_in_registers);
         }
@@ -986,7 +989,7 @@ impl Layout {
         let routine = |code: &mut DieProgram, build: &mut dyn FnMut(&mut Assembly) -> Result<(), String>| {
             let mut asm = self.assembly();
             build(&mut asm)?;
-            self.assemble(code, &asm.steps)
+            self.assemble(code, &asm)
         };
         routine(&mut code, &mut |asm| self.run_range(asm, program, 0..program.logits_from, token, position, true))?;
         code.next_entry();
@@ -1022,7 +1025,7 @@ impl Layout {
                 routine(&mut code, &mut |asm| self.run_list(asm, program, &vision.ops[range.clone()], token, position, rope))?;
             }
         }
-        Ok(code.finish_program())
+        Ok(self.finish(code))
     }
 
     /// A token whose input is the image encoder's last output, at `position`.
@@ -1054,7 +1057,7 @@ impl Layout {
             let output = program.crossing(plan[die + 1].start)?;
             asm.send(self.reg(output), (program.buffers[output] as u32).into());
         }
-        self.assemble(&mut code, &asm.steps)?;
+        self.assemble(&mut code, &asm)?;
         code.next_entry();
 
         // The logits are made on the first chip, which samples them: the last one sends it
@@ -1073,8 +1076,8 @@ impl Layout {
         if first {
             self.run_list(&mut asm, program, tail, token, position, false)?;
         }
-        self.assemble(&mut code, &asm.steps)?;
-        Ok(code.finish_program())
+        self.assemble(&mut code, &asm)?;
+        Ok(self.finish(code))
     }
 
     /// The microcode of member `shard.index` of group `stage` when the chips are in groups
@@ -1106,7 +1109,7 @@ impl Layout {
             let output = program.crossing(plan[stage + 1].start)?;
             asm.send(self.reg(output), (program.buffers[output] as u32).into());
         }
-        self.assemble(&mut code, &asm.steps)?;
+        self.assemble(&mut code, &asm)?;
         code.next_entry();
 
         let mut asm = self.assembly();
@@ -1119,12 +1122,32 @@ impl Layout {
             asm.receive(self.reg(hidden), length);
             self.run_list(&mut asm, program, &program.ops[program.logits_from..], token, position, false)?;
         }
-        self.assemble(&mut code, &asm.steps)?;
-        Ok(code.finish_program())
+        self.assemble(&mut code, &asm)?;
+        Ok(self.finish(code))
+    }
+
+    /// The microprogram laid out so far, with the group field its words read across.
+    fn finish(&self, code: DieProgram) -> Microprogram {
+        let mut program = code.finish_program();
+        if self.group_used.get() {
+            program.group = self.group_field.get().unwrap_or_default();
+        }
+        program
+    }
+
+    /// The group field the routines assembled so far read across, `(shift, bits)`: the units
+    /// that run the query heads of one key head keep its cache once between them.
+    pub fn group_field(&self) -> Option<(u32, u32)> {
+        self.group_field.get().filter(|_| self.group_used.get())
     }
 
     /// Lays out a routine's steps, noting how far into each register they reach.
-    fn assemble(&self, code: &mut DieProgram, steps: &[Step]) -> Result<(), String> {
+    fn assemble(&self, code: &mut DieProgram, asm: &Assembly) -> Result<(), String> {
+        if asm.group_used {
+            self.group_field.set(asm.group_field);
+            self.group_used.set(true);
+        }
+        let steps = &asm.steps;
         let mut ranges = VarRanges::new(self.tokens, self.positions);
         let lanes = 1u32 << self.config.features.lane_bits;
         register_extents(steps, &mut ranges, lanes, self.config.features.key_shift, &mut self.extents.borrow_mut(), &mut self.windows.borrow_mut());
@@ -1273,6 +1296,8 @@ impl Layout {
 
     fn assembly(&self) -> Assembly {
         let mut asm = Assembly::new(&self.config);
+        // Every routine's groups use the field the first one chose.
+        asm.group_field = asm.group_field.or(self.group_field.get());
         asm.in_cells = self.in_cells.clone();
         asm.key_capacity = self.key_capacity;
         asm.ring = self.shard.map_or(1, |s| s.chips);
@@ -1289,8 +1314,8 @@ impl Layout {
         let mut asm = self.assembly();
         self.run_list(&mut asm, program, std::slice::from_ref(inst), Expr::var(Var::Token), Expr::var(Var::Position), first)?;
         let mut code = DieProgram::new(self.config);
-        self.assemble(&mut code, &asm.steps)?;
-        Ok(code.finish_program())
+        self.assemble(&mut code, &asm)?;
+        Ok(self.finish(code))
     }
 
     /// The cycles each operation of a token takes on this die, in program order.
@@ -1564,10 +1589,10 @@ impl Layout {
         for (list, rope) in routines {
             let mut asm = self.assembly();
             self.run_list(&mut asm, program, list, Expr::var(Var::Token), Expr::var(Var::Position), *rope)?;
-            self.assemble(&mut code, &asm.steps)?;
+            self.assemble(&mut code, &asm)?;
             code.next_entry();
         }
-        Ok(code.finish_program())
+        Ok(self.finish(code))
     }
 
     /// What the host writes into the rotation table for the rows set with `set_rotation`, at

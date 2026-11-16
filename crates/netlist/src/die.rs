@@ -66,11 +66,16 @@ pub struct DieFeatures {
     /// The CPU can write vector memory, for what the host sends in, such as a picture's
     /// patches. Only a chip that carries an image encoder needs it.
     pub host_writes: bool,
+    /// The units that differ only in `group_bits` bits of their number, from `group_shift`
+    /// on, form a group: each can read operand B from the others, so the query heads of one
+    /// key head keep its cache once between them. Zero bits: no groups.
+    pub group_shift: u32,
+    pub group_bits: u32,
 }
 
 impl Default for DieFeatures {
     fn default() -> Self {
-        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0, host_writes: false }
+        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0, host_writes: false, group_shift: 0, group_bits: 0 }
     }
 }
 
@@ -82,6 +87,12 @@ impl DieFeatures {
     /// The same die with cells that take `steps` cycles to apply a group's factors.
     pub fn with_factor_steps(mut self, steps: u32) -> Self {
         self.factor_steps = steps.max(1);
+        self
+    }
+
+    /// The same die with groups of `1 << bits` units, from bit `shift` of their number.
+    pub fn with_group(mut self, (shift, bits): (u32, u32)) -> Self {
+        (self.group_shift, self.group_bits) = (shift, bits);
         self
     }
 
@@ -178,7 +189,8 @@ impl DieFeatures {
     /// Exactly what this microprogram needs.
     pub fn of(code: &Microprogram) -> Self {
         // Additions are also how the comparator and the sequencer's own results are made.
-        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0, host_writes: false };
+        let (group_shift, group_bits) = code.group;
+        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0, host_writes: false, group_shift, group_bits };
         let mut highest_x = 0;
         for word in &code.words {
             features.ops |= 1 << word.op;
@@ -204,7 +216,7 @@ impl DieFeatures {
     pub fn union(self, other: Self) -> Self {
         let mut widths = self.widths;
         widths.iter_mut().zip(other.widths).for_each(|(a, b)| *a = (*a).max(b));
-        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link, vector_bits: self.vector_bits.max(other.vector_bits), factor_bits: self.factor_bits.max(other.factor_bits), wide_bits: self.wide_bits.max(other.wide_bits), dictionary_bits: self.dictionary_bits.max(other.dictionary_bits), host_writes: self.host_writes || other.host_writes }
+        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link, vector_bits: self.vector_bits.max(other.vector_bits), factor_bits: self.factor_bits.max(other.factor_bits), wide_bits: self.wide_bits.max(other.wide_bits), dictionary_bits: self.dictionary_bits.max(other.dictionary_bits), host_writes: self.host_writes || other.host_writes, group_shift: if self.group_bits > 0 { self.group_shift } else { other.group_shift }, group_bits: self.group_bits.max(other.group_bits) }
     }
 
     fn uses(&self, op: u32) -> bool {
@@ -300,6 +312,9 @@ pub struct ControlWord {
     pub repeat_x: bool,
     /// Operand A comes from this vector unit, plus one; zero means its own.
     pub from_cluster: u32,
+    /// Operand B comes from the unit at this place of this one's group, plus one; zero means
+    /// its own: see `DieFeatures::group_bits`.
+    pub from_group: u32,
     /// An index write only reaches this vector unit, plus one; zero means all of them.
     pub x_only: u32,
     /// Only the first `literal_b` vector units execute from now on.
@@ -350,7 +365,9 @@ pub struct ControlWord {
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 81;
+pub const FIELD_COUNT: usize = 82;
+/// The field that names a unit of the group to read operand B from.
+pub const FROM_GROUP_FIELD: usize = 81;
 const LINK_LOOP_FIELD: usize = 79;
 const LINK_TAKE_LOOP_FIELD: usize = 80;
 const LINK_SEND_FIELD: usize = 17;
@@ -480,6 +497,7 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("cell_packing", crate::cell::bits_for_packing(crate::cell::MAX_PACKING)),
         ("link_loop", 1),
         ("link_take_loop", 1),
+        ("from_group", c.features.group_bits + 1),
     ]
 }
 
@@ -572,6 +590,7 @@ impl ControlWord {
             self.cell_packing as u128,
             self.link_loop as u128,
             self.link_take_loop as u128,
+            self.from_group as u128,
         ]
     }
 
@@ -1408,6 +1427,27 @@ impl Gen {
             }).collect()).collect();
             (foreign, banks)
         };
+        // The units that differ only in the group field read operand B from one another: the
+        // place named with a read gives the data that arrives a cycle later.
+        let (group_shift, group_bits) = (c.features.group_shift as usize, c.features.group_bits as usize);
+        let group_banks: Vec<Vec<Vec<Bit>>> = if group_bits > 0 { (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("unit{k}_group_bank{lane}"), a)).collect()).collect() } else { Vec::new() };
+        let (group_any, group_picks): (Bit, Vec<Option<Bit>>) = {
+            let mut l = Logic { b: &mut b, next: 50_500 };
+            let field = fields["from_group"].clone();
+            let picks: Vec<Option<Bit>> = (0..if group_bits > 0 { 1u32 << group_bits } else { 0 })
+                .map(|k| {
+                    // A place past what the field can name is never read from.
+                    ((k + 1) >> field.len() == 0).then(|| {
+                        let now = l.equals(&field, k + 1);
+                        let late = l.fresh();
+                        l.connect_flops(&[now], &[late]);
+                        late
+                    })
+                })
+                .collect();
+            let any: Vec<Bit> = picks.iter().flatten().copied().collect();
+            (l.any(&any), picks)
+        };
         let unit_chains: Vec<Vec<Vec<Bit>>> = (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("unit{k}_chain{lane}"), wide)).collect()).collect();
         let wide_bits = 2 * a + 16 + FACTOR_FRACTION;
         let unit_wide: Vec<Vec<Vec<Bit>>> = (0..clusters).map(|k| (0..lanes).map(|lane| b.wire(&format!("unit{k}_wide{lane}"), wide_bits)).collect()).collect();
@@ -1800,6 +1840,37 @@ impl Gen {
                     }
                     l.mux_bus(foreign, own, &shared_banks[lane])
                 }).collect()
+            };
+            // Reading B from another unit of the group takes that unit's lanes.
+            let banks_b: Vec<Vec<Bit>> = if group_bits > 0 {
+                let mut l = Logic { b: &mut b, next: 52_500 };
+                let field = ((1usize << group_bits) - 1) << group_shift;
+                banks_b
+                    .iter()
+                    .enumerate()
+                    .map(|(lane, own)| {
+                        for (from, to) in own.iter().zip(&group_banks[cluster][lane]) {
+                            l.b.or_to(*from, Bit::Zero, *to);
+                        }
+                        let sources: Vec<(Bit, usize)> = group_picks
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(place, pick)| {
+                                let owner = (cluster & !field) | place << group_shift;
+                                pick.filter(|_| owner < clusters).map(|pick| (pick, owner))
+                            })
+                            .collect();
+                        let taken: Vec<Bit> = (0..a as usize)
+                            .map(|bit| {
+                                let terms: Vec<Bit> = sources.iter().map(|(pick, owner)| l.and(*pick, group_banks[*owner][lane][bit])).collect();
+                                l.any(&terms)
+                            })
+                            .collect();
+                        l.mux_bus(group_any, own, &taken)
+                    })
+                    .collect()
+            } else {
+                banks_b
             };
             let read_a = b.wire("read_a", a);
             let read_b = b.wire("read_b", a);
@@ -2932,6 +3003,8 @@ pub struct Microprogram {
     pub words: Vec<ControlWord>,
     pub entries: Vec<u32>,
     pub parameters: Vec<Parameter>,
+    /// The group field its words read across, `(shift, bits)`: see `DieFeatures::group_bits`.
+    pub group: (u32, u32),
 }
 
 const LANE_LATENCY: usize = 2;
@@ -3200,7 +3273,7 @@ impl DieProgram {
         let n = if by_blocks { count.constant() as usize } else { usize::MAX / 2 };
 
         let word = |k: usize| {
-            let mut w = ControlWord { vector: step.vector, window_x, from_cluster: step.from_cluster, gather_shift: step.gather_shift, ..Default::default() };
+            let mut w = ControlWord { vector: step.vector, window_x, from_cluster: step.from_cluster, from_group: step.from_group, gather_shift: step.gather_shift, ..Default::default() };
             if k < n {
                 w.read_step = true;
                 (w.reg_a, w.literal_a, w.offset_a, w.window_a, w.fixed_a, w.a_shift) = (step.a.0, literal_a, offset_a, step.window_a, fixed_a, a_shift);
@@ -3312,7 +3385,7 @@ impl DieProgram {
 
     /// Adds a whole row, times one weight, to the sums in the wide memory.
     fn combine(&mut self, step: &Step) {
-        let Step::Combine { weights, matrix, start, width, fresh, window, window_a, window_b, moving } = *step else {
+        let Step::Combine { weights, matrix, start, width, fresh, window, window_a, window_b, moving, from_group } = *step else {
             unreachable!("only called with a combination");
         };
         let mut temporaries = Vec::new();
@@ -3328,7 +3401,7 @@ impl DieProgram {
                 let mut w = ControlWord { vector, window_x, wide_accumulate: true, ..Default::default() };
                 w.read_step = true;
                 (w.reg_a, w.literal_a, w.offset_a, w.window_a, w.fixed_a) = (weights.0, literal_a, offset_a, window_a, !moving);
-                (w.reg_b, w.offset_b, w.window_b) = (matrix, offset_b, window_b);
+                (w.reg_b, w.offset_b, w.window_b, w.from_group) = (matrix, offset_b, window_b, from_group);
                 if k >= 1 {
                     (w.broadcast_a, w.wide_fresh) = (vector && !moving, fresh);
                 }
@@ -3348,7 +3421,7 @@ impl DieProgram {
             if k < n {
                 w.read_step = true;
                 (w.reg_a, w.literal_a, w.offset_a, w.window_a, w.fixed_a) = (weights.0, literal_a, offset_a, window_a, !moving);
-                (w.reg_b, w.offset_b, w.window_b) = (matrix, offset_b, window_b);
+                (w.reg_b, w.offset_b, w.window_b, w.from_group) = (matrix, offset_b, window_b, from_group);
             }
             if (1..n + 1).contains(&k) {
                 (w.broadcast_a, w.wide_fresh) = (vector && !moving, fresh);
@@ -3600,7 +3673,7 @@ impl DieProgram {
             w.offset_b = step.offset_b;
             (w.window_x, w.window_a, w.window_b) = (step.window_x, step.window_a, step.window_b);
             (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
-            w.from_cluster = step.from_cluster;
+            (w.from_cluster, w.from_group) = (step.from_cluster, step.from_group);
             w.magnitude_clear = step.magnitude_clear;
             w.max_clear = step.max_clear;
             w.accumulator_clear = step.accumulator_clear;
@@ -3618,7 +3691,7 @@ impl DieProgram {
             w.offset_b = step.offset_b;
             (w.window_x, w.window_a, w.window_b) = (step.window_x, step.window_a, step.window_b);
             (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
-            w.from_cluster = step.from_cluster;
+            (w.from_cluster, w.from_group) = (step.from_cluster, step.from_group);
             w.op = step.op;
             // The word that takes from a link names the port with it.
             w.link_take_loop = step.link_loop && step.op == OP_LINK;
@@ -3647,7 +3720,7 @@ impl DieProgram {
             (w.reg_b, w.literal_b, w.offset_b) = (step.b.0, step.b.1, step.offset_b);
             (w.window_x, w.window_a, w.window_b) = (step.window_x, step.window_a, step.window_b);
             (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
-            w.from_cluster = step.from_cluster;
+            (w.from_cluster, w.from_group) = (step.from_cluster, step.from_group);
             w.op = step.op;
             w.function = step.function;
         }
@@ -3690,7 +3763,7 @@ impl DieProgram {
             if !shared {
                 (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
             }
-            w.from_cluster = step.from_cluster;
+            (w.from_cluster, w.from_group) = (step.from_cluster, step.from_group);
             w.magnitude_clear |= step.magnitude_clear;
             w.max_clear |= step.max_clear;
             w.accumulator_clear |= step.accumulator_clear;
@@ -3702,7 +3775,7 @@ impl DieProgram {
         (w.reg_b, w.literal_b, w.offset_b, w.target) = (step.b.0, step.b.1, step.offset_b, immediate);
         (w.window_x, w.window_a, w.window_b, w.window_dst) = (step.window_x, step.window_a, step.window_b, step.window_dst);
         (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
-        w.from_cluster = step.from_cluster;
+        (w.from_cluster, w.from_group) = (step.from_cluster, step.from_group);
         (w.op, w.shift, w.function) = (step.op, step.shift, step.function);
         (w.magnitude_scan, w.reduce_group, w.max_scan, w.max_out) = (step.magnitude_scan, step.reduce_group, step.max_scan, step.max_out);
         (w.accumulate, w.wide_scan) = (step.accumulate, step.wide_scan);
@@ -3884,7 +3957,7 @@ impl DieProgram {
                 parameter
             })
             .collect();
-        Microprogram { words, entries, parameters }
+        Microprogram { words, entries, parameters, group: (0, 0) }
     }
 }
 
