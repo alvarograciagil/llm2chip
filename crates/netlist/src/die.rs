@@ -3065,6 +3065,66 @@ fn visit_indices(steps: &[Step], f: &mut impl FnMut(Expr)) {
     }
 }
 
+/// `steps` with `variable` fixed at `value`, unless a window moves with it: the constant
+/// part of a window is not kept in the window, so those stay loops.
+fn bind_steps(steps: &[Step], variable: Var, value: u32) -> Option<Vec<Step>> {
+    let fix = |e: Expr| e.without(variable) + Expr::from(e.coefficient(variable).wrapping_mul(value));
+    let moves = |e: &Expr| e.coefficient(variable) != 0;
+    let alu = |step: &Alu<Expr>| -> Option<Alu<Expr>> {
+        if (step.window_a || step.window_b || step.window_dst) && moves(&step.window) {
+            return None;
+        }
+        let mut bound = *step;
+        (bound.a.1, bound.b.1, bound.dst.1, bound.window) = (fix(step.a.1), fix(step.b.1), fix(step.dst.1), fix(step.window));
+        Some(bound)
+    };
+    steps
+        .iter()
+        .map(|step| {
+            Some(match step {
+                Step::One(step) => Step::One(alu(step)?),
+                Step::Repeat { variable: inner, count, body } => Step::Repeat { variable: *inner, count: fix(*count), body: bind_steps(body, variable, value)? },
+                Step::Stream { variable: inner, count, in_elements, body } => Step::Stream { variable: *inner, count: fix(*count), in_elements: *in_elements, body: alu(body)? },
+                Step::CombineRows { weights, matrix, start, rows, window, window_a, window_b } => {
+                    if (*window_a || *window_b) && moves(window) {
+                        return None;
+                    }
+                    Step::CombineRows { weights: (weights.0, fix(weights.1)), matrix: *matrix, start: fix(*start), rows: *rows, window: fix(*window), window_a: *window_a, window_b: *window_b }
+                }
+                Step::Combine { weights, matrix, start, width, fresh, window, window_a, window_b, moving, from_group } => {
+                    if (*window_a || *window_b) && moves(window) {
+                        return None;
+                    }
+                    Step::Combine { weights: (weights.0, fix(weights.1)), matrix: *matrix, start: fix(*start), width: fix(*width), fresh: *fresh, window: fix(*window), window_a: *window_a, window_b: *window_b, moving: *moving, from_group: *from_group }
+                }
+                Step::Clustered { vars, assignments, slots, body } => Step::Clustered { vars: vars.clone(), assignments: assignments.clone(), slots: *slots, body: bind_steps(body, variable, value)? },
+                Step::CellSeek { weights, factors, packing } => Step::CellSeek { weights: fix(*weights), factors: fix(*factors), packing: *packing },
+                Step::CellGroup { src, length, start, quant_bits, last } => Step::CellGroup { src: *src, length: *length, start: fix(*start), quant_bits: *quant_bits, last: *last },
+                Step::WideReduce { rows, group } => Step::WideReduce { rows: fix(*rows), group: *group },
+                Step::CellPass => Step::CellPass,
+                Step::CellDrain { rows } => Step::CellDrain { rows: *rows },
+            })
+        })
+        .collect()
+}
+
+/// About how many words `steps` lay out, counting each loop's body once per turn.
+fn step_size(steps: &[Step]) -> usize {
+    steps
+        .iter()
+        .map(|step| match step {
+            Step::Repeat { count, body, .. } => step_size(body) * if count.is_constant() { count.constant() as usize } else { 1 },
+            Step::Clustered { body, .. } => step_size(body),
+            _ => 1,
+        })
+        .sum()
+}
+
+/// Loops of a few short turns are laid out turn after turn: what each turn costs in the
+/// index registers matters more than a few more words of microcode.
+const UNROLLED_WORDS: usize = 128;
+const UNROLLED_TURNS: u32 = 64;
+
 fn only_parameters(e: &Expr) -> bool {
     e.variables().all(|(v, _)| matches!(v, Var::Token | Var::Position | Var::WindowLength(_) | Var::WindowSlot(_)))
 }
@@ -3142,6 +3202,15 @@ impl DieProgram {
 
     fn compile_loop(&mut self, variable: Var, count: Expr, body: &[Step]) {
         assert!(only_parameters(&count), "the number of iterations can only depend on the parameters");
+        if count.is_constant() && count.constant() <= UNROLLED_TURNS && count.constant() as usize * step_size(body) <= UNROLLED_WORDS && self.config.features.streams() {
+            let turns: Option<Vec<Vec<Step>>> = (0..count.constant()).map(|turn| bind_steps(body, variable, turn)).collect();
+            if let Some(turns) = turns {
+                for turn in turns {
+                    self.assemble(&turn);
+                }
+                return;
+            }
+        }
         // A loop may take over a pending drain only if every turn leaves the same one behind.
         let lanes = 1u32 << self.config.features.lane_bits;
         let carries = matches!((body.first(), body.last()), (Some(Step::CellPass), Some(Step::CellDrain { rows })) if rows.div_ceil(lanes) == self.drain_pending);
