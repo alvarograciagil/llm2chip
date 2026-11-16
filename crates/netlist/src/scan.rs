@@ -227,17 +227,62 @@ fn wrapper(b: &mut Builder, enable: Bit, scan_in: Bit, width: u32) -> Vec<Bit> {
 pub fn insert_scan_parallel(design: Design, groups: &[Vec<String>]) -> Result<ParallelScan, String> {
     let Design { top, modules } = design;
     let mut gen = Gen { modules };
+    let mut lengths = HashMap::new();
+    let (length, cell_length, wrapper_width, slice) = parallel_chains(&mut gen, &top, groups, &mut lengths)?;
+    Ok(ParallelScan { design: Design { top, modules: gen.modules }, length, cell_length, wrapper_width, slice })
+}
+
+/// The same for a design whose top holds, as instance `inner`, the module with the cells:
+/// that module's chains as `insert_scan_parallel` makes them, with its main chain part of
+/// the top's, which goes through everything else. The cells' three pins reach the top.
+/// So a whole chip is tested with its die's cells side by side.
+pub fn insert_scan_around(design: Design, inner: &str, groups: &[Vec<String>]) -> Result<ParallelScan, String> {
+    let Design { top, modules } = design;
+    let mut gen = Gen { modules };
+    let index = gen.modules[&top].instances.iter().position(|i| i.name == inner).ok_or_else(|| format!("there is no “{inner}” instance in {top}"))?;
+    let InstKind::Module(module) = gen.modules[&top].instances[index].kind.clone() else { return Err(format!("{inner} is not a module")) };
+    // One record of the modules done, so a module the inner one shares with the rest gets
+    // its chain once.
+    let mut lengths = HashMap::new();
+    let (_, cell_length, wrapper_width, slice) = parallel_chains(&mut gen, &module, groups, &mut lengths)?;
+    let length = visit(&mut gen, &top, &mut lengths, &HashSet::new());
+    let mut module_b = {
+        let module = gen.modules[&top].clone();
+        let names = module.nets.iter().map(|net| net.name.clone()).collect();
+        Builder { prefix: String::new(), module, counter: 5_000_000, group: "Cells tested in parallel".into(), names }
+    };
+    let scan_in = module_b.input(SCAN_CELLS_IN, 1);
+    let (out, differ) = (module_b.output(SCAN_CELLS_OUT, 1), module_b.output(SCAN_CELLS_DIFFER, 1));
+    let (from_out, from_differ) = (module_b.wire("cells_out", 1), module_b.wire("cells_differ", 1));
+    let conns = &mut module_b.module.instances[index].conns;
+    conns.insert(SCAN_CELLS_IN.into(), scan_in);
+    conns.insert(SCAN_CELLS_OUT.into(), from_out.clone());
+    conns.insert(SCAN_CELLS_DIFFER.into(), from_differ.clone());
+    module_b.or_to(from_out[0], Bit::Zero, out[0]);
+    module_b.or_to(from_differ[0], Bit::Zero, differ[0]);
+    gen.modules.insert(top.clone(), module_b.module);
+    Ok(ParallelScan { design: Design { top, modules: gen.modules }, length, cell_length, wrapper_width, slice })
+}
+
+/// `insert_scan_parallel` on module `top` of `gen`: gives its main chain's length, each
+/// cell's, the wrapper's width and the slice the patterns are made on.
+/// The chains `parallel_chains` makes: the main one's length, each cell's, the wrapper's
+/// width and the slice the patterns are made on.
+type Chains = (usize, usize, usize, Design);
+
+fn parallel_chains(gen: &mut Gen, top: &str, groups: &[Vec<String>], lengths: &mut HashMap<String, usize>) -> Result<Chains, String> {
+    let top = top.to_string();
     let find = |gen: &Gen, name: &str| gen.modules[&top].instances.iter().position(|i| i.name == name).ok_or_else(|| format!("there is no “{name}” instance in {top}"));
     let mut cells = Vec::new();
     for group in groups {
-        cells.push(group.iter().map(|name| find(&gen, name)).collect::<Result<Vec<_>, _>>()?);
+        cells.push(group.iter().map(|name| find(gen, name)).collect::<Result<Vec<_>, _>>()?);
     }
     let first = *cells.iter().flatten().next().ok_or("there are no cells")?;
     let InstKind::Module(cell) = gen.modules[&top].instances[first].kind.clone() else { return Err("the cells must be modules".into()) };
     if cells.iter().flatten().any(|i| !matches!(&gen.modules[&top].instances[*i].kind, InstKind::Module(m) if *m == cell)) {
         return Err("all the cells must be of the same module".into());
     }
-    let (testable, width) = testable_module(&mut gen, &cell);
+    let (testable, width) = testable_module(gen, &cell);
     for i in cells.iter().flatten() {
         gen.modules.get_mut(&top).unwrap().instances[*i].kind = InstKind::Module(testable.clone());
     }
@@ -247,10 +292,9 @@ pub fn insert_scan_parallel(design: Design, groups: &[Vec<String>]) -> Result<Pa
     }
     // One record of the modules done for both: a module shared by the cell and the rest
     // gets its chain once.
-    let mut lengths = HashMap::new();
-    let cell_chain = visit(&mut gen, &testable, &mut lengths, &HashSet::new());
+    let cell_chain = visit(gen, &testable, lengths, &HashSet::new());
     let skip: HashSet<usize> = cells.iter().flatten().copied().collect();
-    let length = visit(&mut gen, &top, &mut lengths, &skip);
+    let length = visit(gen, &top, lengths, &skip);
 
     // The cells' chains, after the main one has given the top its pins.
     let module = gen.modules[&top].clone();
@@ -317,5 +361,5 @@ pub fn insert_scan_parallel(design: Design, groups: &[Vec<String>]) -> Result<Pa
     let mut modules = gen.modules.clone();
     modules.insert("test_slice".into(), s.finish());
     let slice = Design { top: "test_slice".into(), modules };
-    Ok(ParallelScan { design: Design { top, modules: gen.modules }, length, cell_length: cell_chain + width as usize, wrapper_width: width as usize, slice })
+    Ok((length, cell_chain + width as usize, width as usize, slice))
 }

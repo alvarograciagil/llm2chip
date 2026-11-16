@@ -2,6 +2,9 @@
 //!
 //! `cargo run --release -p netlist --example atpg [block…]`, the blocks among `cell`, `cpu`,
 //! `sampler` and `die`; without any, all but the die, which takes much longer.
+//!
+//! With `STIL=folder`, each block's test is also written there in STIL (IEEE 1450), the
+//! format testers read, as `block.stil`.
 
 use netlist::atpg;
 use netlist::format::WeightCoding;
@@ -48,6 +51,11 @@ fn main() {
             r.chain_length, r.faults, r.detected, r.chain, r.untestable, r.aborted, r.random_patterns, r.deterministic_patterns,
             r.fault_coverage() * 100.0, r.test_coverage() * 100.0, started.elapsed().as_secs_f64()
         );
+        if let Some(folder) = std::env::var_os("STIL") {
+            let path = std::path::Path::new(&folder).join(format!("{name}.stil"));
+            std::fs::write(&path, netlist::stil::write(&scanned.design, &r)).expect("the STIL file");
+            eprintln!("{}", path.display());
+        }
         // With ATPG_MISSED, where the faults no pattern finds sit, by module.
         if std::env::var("ATPG_MISSED").is_ok() {
             let lost: Vec<_> = r.outcomes.iter().filter(|(_, o)| *o != atpg::Outcome::Detected).collect();

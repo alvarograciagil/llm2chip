@@ -11,7 +11,7 @@ What is verified about the chip, what rules the board must follow, and what is s
 | A real model, stories260K, through the whole chip, at instruction level and in gates | The firmware tokenizes "Once upon a time" and writes ", there was", the same as the die's machine driven from the host and as floating point; the gates, in the same 1,909,169 cycles | `a_real_model_writes_the_same_text_through_the_whole_chip` (about 4 min), and the die alone in `a_real_model_s_token_on_the_die_matches_the_exact_machine` |
 | Blocks, die and cells in Verilog against the gate simulator | Icarus Verilog, cycle by cycle | `crates/netlist/tests` |
 | Synthesis and routing for FPGA | Yosys and nextpnr (ECP5); Gowin and Cyclone IV by synthesis | `docs/fpga.md` |
-| Scan chain and factory test patterns | The ATPG patterns, applied in the gate simulator as a tester would, give what was predicted; with an injected fault, they fail if the ATPG said they would find it and do not fail if it said it was undetectable. The Verilog with scan gives the same in Icarus | `crates/netlist/tests/scan.rs` |
+| Scan chain and factory test patterns | The ATPG patterns, applied in the gate simulator as a tester would, give what was predicted; with an injected fault, they fail if the ATPG said they would find it and do not fail if it said it was undetectable. The Verilog with scan gives the same in Icarus. The STIL file, read back, does the same. The chip with its chains works as the one without them | `crates/netlist/tests/scan.rs` |
 
 ### A bug that only showed up with a real model
 
@@ -106,7 +106,15 @@ With the chains off, the die does the same thing cycle by cycle.
 - **Per vector unit:** the wrapper's 51 flip-flops.
 - **The test time of each pattern** is what the longest chain takes to shift: about 1,300 cycles here, however many cells there are. With a single serial chain, a die of 100,000 cells of about 300 flip-flops each would need about 30 million cycles per pattern.
 
-The test signals are pins of their own for now. The alternative that saves pins is driving the chain from the JTAG TAP with internal scan instructions.
+**The whole chip** (`chip::chip_design_for_test`) carries the chains: the die's cells side by side as above, and one main chain through everything else, from the die's sequencer and vector units to the CPU, the memories' shadows and the sampler (`scan::insert_scan_around`). On the small test chip the main chain has 3,981 flip-flops and each cell's 299. With the test pins at zero the chip does what `chip::chip_design` does, cycle by cycle, and in test mode each chain carries a pattern from its input to its output (`crates/netlist/tests/scan.rs`). The FPGA builds go without it: an FPGA is tested by its maker and does not need it.
+
+The test signals are pins of their own. The alternative that saves pins is driving the chain from the JTAG TAP with internal scan instructions.
+
+### The tester's file: STIL
+
+`netlist::stil::write` gives the test of a design with one chain in STIL (IEEE 1450), the format testers read. Each test cycle drives the inputs at its start, strobes the outputs at 40 ns and pulses `clk` from 50 to 80 ns. The file has the chain test (`0011…` shifted through and read back), then each pattern: its state shifted in while the previous one's result shifts out (`load_unload`), and one cycle that sets the input pins, reads the output pins and captures (`capture`).
+
+`netlist::stil::read` takes that file back and expands it into test cycles, and `netlist::stil::run` applies them on the gate simulator as a tester would. The cell's file runs without a mismatch on the fault-free circuit, and fails with a fault the patterns find and with one on the shift path (`crates/netlist/tests/scan.rs`). `STIL=folder cargo run --release -p netlist --example atpg` writes each block's file.
 
 ## What manufacturing still needs
 
@@ -114,8 +122,8 @@ The test signals are pins of their own for now. The alternative that saves pins 
 - **Placement, clock tree and routing,** timing analysis at every process corner, power and IR drop, and DRC and LVS checks down to GDSII. With an open PDK (SKY130, GF180 or IHP SG13G2), OpenROAD does this.
 - **A pad ring** with electrostatic discharge protection, and a package.
 - **Factory tests:**
-  - there is a memory self-test, JTAG, a scan chain and ATPG patterns per block;
-  - the chain is not yet in the default chip, with its own pins or behind the TAP;
-  - there is no tester format yet, STIL or WGL;
+  - there is a memory self-test, JTAG, scan chains in the chip for manufacturing, ATPG patterns per block and their STIL files;
+  - the patterns of the chip's main chain are not generated whole, only per block: the current search is too slow for a whole die;
+  - the chains have pins of their own, not the JTAG TAP;
   - at-speed delay (transition) faults are missing.
 - **Silicon:** nothing has been tested on a physical FPGA or in a chip.

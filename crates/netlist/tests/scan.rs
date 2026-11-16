@@ -362,3 +362,99 @@ fn a_cell_s_patterns_test_every_cell_of_the_die_at_once() {
         }
     }
 }
+
+/// The STIL file a tester would read: taken back, its cycles give on the gate simulator
+/// what the patterns predicted, and fail with a fault the patterns find or one on the shift
+/// path, which its chain test finds.
+#[test]
+fn the_stil_file_runs_the_patterns_and_fails_with_a_fault() {
+    use netlist::stil;
+    let scanned = insert_scan(small_cell());
+    let report = atpg::generate(&scanned.design, 200).unwrap();
+    let text = stil::write(&scanned.design, &report);
+    assert!(text.starts_with("STIL 1.0;"));
+    let cycles = stil::read(&text).unwrap();
+    // The chain test, each pattern's shift and capture, and the last shift out.
+    let length = report.chain_length;
+    assert_eq!(cycles.len(), (length + 1) * (report.patterns.len() + 2) + report.patterns.len());
+    assert!(cycles.iter().filter(|c| !c.expect.is_empty()).count() > report.patterns.len());
+    let mut sim = Simulator::new(&scanned.design).unwrap();
+    assert_eq!(stil::run(&mut sim, &cycles).unwrap(), Vec::<usize>::new(), "the fault-free circuit gives what was predicted");
+
+    let found = report.outcomes.iter().find_map(|(f, o)| match (f.site, o) {
+        (Site::Stem(signal), Outcome::Detected) => Some((signal, f.stuck)),
+        _ => None,
+    });
+    let (signal, stuck) = found.expect("a fault the patterns find");
+    let mut faulty = Simulator::new(&scanned.design).unwrap();
+    faulty.stick_signal(signal, stuck);
+    assert!(!stil::run(&mut faulty, &cycles).unwrap().is_empty(), "a fault the patterns find fails the test");
+
+    let shift = atpg::chain_faults(&scanned.design).unwrap().into_iter().find_map(|f| match f.site {
+        Site::Stem(signal) => Some((signal, f.stuck)),
+        _ => None,
+    });
+    let (signal, stuck) = shift.expect("a fault on the shift path");
+    let mut faulty = Simulator::new(&scanned.design).unwrap();
+    faulty.stick_signal(signal, stuck);
+    assert!(!stil::run(&mut faulty, &cycles).unwrap().is_empty(), "a fault on the shift path fails the chain test");
+}
+
+fn small_chip() -> netlist::chip::ChipConfig {
+    use netlist::demo::block_config;
+    netlist::chip::ChipConfig {
+        soc: netlist::soc::SocConfig { program_bits: 8, data_bits: 8, fifo_bits: 4 },
+        die: netlist::DieConfig { reg_bits: 3, index_bits: 4, microcode_bits: 6, cell: CellConfig { addr_bits: 4, ..block_config().cell }, ..block_config() },
+        sampler: netlist::sampler::SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 },
+    }
+}
+
+/// The chip for manufacturing: with its test pins at zero it does what the chip without
+/// them does, cycle by cycle; in test mode its main chain and its cells' chains carry a
+/// pattern from their input to their output, the cells' all alike.
+#[test]
+fn the_chip_for_test_works_as_before_and_its_chains_shift() {
+    let config = small_chip();
+    let plain = netlist::chip::chip_design(config);
+    let scanned = netlist::chip::chip_design_for_test(config).unwrap();
+    assert!(scanned.length > 0 && scanned.cell_length > 0);
+    let (mut a, mut b) = (Simulator::new(&plain).unwrap(), Simulator::new(&scanned.design).unwrap());
+    let mut rng = Rng(41);
+    for cycle in 0..400 {
+        for (name, width) in ports(&plain, Dir::Input) {
+            // Reset for the first cycles, then whatever comes.
+            let value: Vec<u32> = if name == "reset" { vec![(cycle < 4) as u32] } else { (0..width.div_ceil(32)).map(|_| rng.next() as u32).collect() };
+            a.set_words(&name, &value).unwrap();
+            b.set_words(&name, &value).unwrap();
+        }
+        a.tick();
+        b.tick();
+        for (name, _) in ports(&plain, Dir::Output) {
+            assert_eq!(a.get_words(&name), b.get_words(&name), "{name} at cycle {cycle}");
+        }
+    }
+    // In test mode a pattern goes through each chain in as many cycles as it is long.
+    let mut sim = Simulator::new(&scanned.design).unwrap();
+    sim.set("test_mode", 1).unwrap();
+    sim.set("scan_enable", 1).unwrap();
+    let bit = |i: usize| (i / 2) % 2 == 1 || i.is_multiple_of(7);
+    let longest = scanned.length.max(scanned.cell_length);
+    let (mut main, mut cells, mut differed) = (true, true, false);
+    for i in 0..longest + 16 {
+        sim.set("scan_in", bit(i) as u64).unwrap();
+        sim.set("scan_cells_in", bit(i) as u64).unwrap();
+        sim.settle();
+        if i >= scanned.length {
+            main &= (sim.get("scan_out").unwrap() == 1) == bit(i - scanned.length);
+        }
+        if i >= scanned.cell_length {
+            cells &= (sim.get("scan_cells_out").unwrap() == 1) == bit(i - scanned.cell_length);
+            differed |= sim.get("scan_cells_differ").unwrap() == 1;
+        }
+        sim.tick();
+    }
+    assert!(main, "the main chain of {} flip-flops", scanned.length);
+    assert!(cells, "the cells' chains of {} flip-flops", scanned.cell_length);
+    assert!(!differed, "every cell's chain carries the same");
+    eprintln!("chip for test: {} flip-flops in the main chain, {} in each cell's", scanned.length, scanned.cell_length);
+}

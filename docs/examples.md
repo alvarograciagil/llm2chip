@@ -21,6 +21,7 @@ The second argument patches any field of `ChipParams` (see [parameters.md](param
 cargo run --release -p sim --example size -- <folder> 500 1000        # 500 tok/s, first token within 1 s
 cargo run --release -p sim --example frontier -- <folder>              # speed against logic, and where speed stops paying
 cargo run --release -p sim --example kinds -- <folder>                 # where one token's cycles go, operation by operation
+cargo run --release -p sim --example memory -- <folder>                # what each chip's memories hold: microcode, and each unit's vector memory by kind
 ```
 
 **Calibrate against layouts.** Compares the estimator with the OpenROAD layouts in `tests/golden/asic.json` and fits each process's gate delay.
@@ -131,10 +132,11 @@ tools/synth/families.sh chip.v       # Yosys for Xilinx, Gowin, ECP5 and Cyclone
 cargo run -p netlist --example board -- board/
 ```
 
-**Factory tests:** scan chains and ATPG patterns with their fault coverage.
+**Factory tests:** scan chains and ATPG patterns with their fault coverage; with `STIL`, each block's test in the format testers read.
 
 ```bash
 cargo run --release -p netlist --example atpg -- cell cpu sampler
+STIL=out cargo run --release -p netlist --example atpg -- cell          # writes out/cell.stil
 ```
 
 **Critical paths** of dies of several sizes, and gate counts of the cell by part:

@@ -524,6 +524,15 @@ pub fn chip_design(config: ChipConfig) -> Design {
     crate::self_test::insert(Design { top, modules: gen.modules })
 }
 
+/// The chip for manufacturing: `chip_design` with the factory test's scan chains
+/// (`scan::insert_scan_around`). The die's cells are tested side by side from
+/// `scan_cells_in`; one chain from `scan_in` to `scan_out` goes through everything else,
+/// the die's sequencer and vector units, the CPU, the memories' shadows and the sampler.
+/// With the test pins at zero it works as `chip_design` does. FPGA builds go without it.
+pub fn chip_design_for_test(config: ChipConfig) -> Result<crate::scan::ParallelScan, String> {
+    crate::scan::insert_scan_around(chip_design(config), "die", &crate::die::cell_groups(config.die))
+}
+
 /// The chip for one FPGA board on its own: the same firmware runs the same way, without
 /// the JTAG port, the memories' march tests or the chain to other chips, which the board
 /// does not need and which take logic the FPGA can use for the model.
