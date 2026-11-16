@@ -530,6 +530,12 @@ pub struct Layout {
     /// The group field the routines read across, once one has: see `Assembly::group_field`.
     group_field: Cell<Option<(u32, u32)>>,
     group_used: Cell<bool>,
+    /// With the products shared by rows, the attention's heads shared too: this chip's place
+    /// in the ring and how many chips, the buffers each chip holds only its heads' slice of,
+    /// and those of them that are gathered whole as soon as they are made.
+    heads_shard: Option<(u32, u32)>,
+    local: HashSet<usize>,
+    gather_local: HashSet<usize>,
 }
 
 /// Where each register of a compact vector memory starts and its loop step, the words of
@@ -942,7 +948,7 @@ impl Layout {
             _ => None,
         });
         let token_range = table_rows.chain([program.vocab, program.vision.as_ref().map_or(0, |v| v.patches)]).max().unwrap_or(0) as u32;
-        let mut layout = Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: if outside.is_some() { program.vision.as_ref().map_or(program.vocab, |v| v.patches) as u32 } else { token_range }, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside, rotation_outside: None, group_field: Cell::new(None), group_used: Cell::new(false) };
+        let mut layout = Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: if outside.is_some() { program.vision.as_ref().map_or(program.vocab, |v| v.patches) as u32 } else { token_range }, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside, rotation_outside: None, group_field: Cell::new(None), group_used: Cell::new(false), heads_shard: None, local: HashSet::new(), gather_local: HashSet::new() };
         if table_out {
             layout.rotation_out(program, matrices_in_registers);
         }
@@ -1412,6 +1418,13 @@ impl Layout {
     /// Like `keep_weights_of` for the part `die` of the plan, with the logits' matrices
     /// only if `logits`: in groups, only the first member of the first group makes them.
     pub fn keep_weights_of_part(&mut self, program: &Program, plan: &[Range<usize>], die: usize, logits: bool) {
+        // What goes from one chip to the next leaves whole: the link carries what the first
+        // vector unit holds, so a vector left a slice per unit would arrive in part.
+        for cut in plan.iter().skip(1).map(|part| part.start).chain([program.logits_from]) {
+            if let Ok(buffer) = program.crossing(cut) {
+                self.spread.remove(&buffer);
+            }
+        }
         let tail = program.logits_from..program.ops.len();
         let used: HashSet<String> = plan[die].clone().chain(if logits { tail } else { 0..0 }).flat_map(|i| matrices_of(program, &program.ops[i].op)).map(|(name, ..)| name).collect();
         let mut dropped: HashSet<u32> = self.weights.iter().filter(|(name, _)| !used.contains(*name)).map(|(_, reg)| *reg).collect();
@@ -1456,6 +1469,85 @@ impl Layout {
         }
         self.shard = Some(shard);
         self.in_cells = place_in_cells(&self.cell_plan, self.config.cells as usize, 1 << self.config.features.cluster_bits, 1 << self.config.features.lane_bits).0;
+        self.share_heads(program);
+    }
+
+    /// Shares the attention's heads among the chips of the ring as well: the products that
+    /// only heads read keep this chip's rows, which are its heads', and everything up to the
+    /// attention's output works on those heads alone. What something else reads is gathered
+    /// whole as soon as it is made. Only when every attention divides evenly among the chips.
+    fn share_heads(&mut self, program: &Program) {
+        let Some(Shard { index, chips, .. }) = self.shard else { return };
+        let n = chips as usize;
+        let ops: Vec<&Op> = all_ops(program).map(|i| &i.op).collect();
+        let buffers = &program.buffers;
+        let attention: Vec<(usize, usize)> = ops.iter().filter_map(|op| if let Op::AttnSum { heads, kv_heads, .. } = op { Some((*heads, *kv_heads)) } else { None }).collect();
+        let divides = |count: usize| count.is_multiple_of(n) && count <= PARTS;
+        if n < 2 || attention.is_empty() || attention.iter().any(|(heads, kv)| !divides(*heads) || !divides(*kv)) || program.vision.is_some() || ops.iter().any(|op| matches!(op, Op::Mla { .. })) {
+            return;
+        }
+        // What runs head by head: whether `op` reads `buffer` as heads.
+        let by_heads = |op: &Op, buffer: usize| match op {
+            Op::SplitQueryGate { src, query, block, .. } => *src == buffer && 2 * (buffers[*query] / block) <= PARTS && divides(buffers[*query] / block),
+            Op::RmsNorm { src, block, dst, .. } => *src == buffer && buffers[*dst] > *block && divides(buffers[*dst] / block),
+            Op::Rope { buf, block, table, .. } => *buf == buffer && *table < VISION_TABLE && divides(buffers[*buf] / block),
+            Op::KvAppend { key, value, window: None, .. } => *key == buffer || *value == buffer,
+            Op::AttnSum { query, window: None, .. } => *query == buffer,
+            _ => false,
+        };
+        let readers = |buffer: usize| ops.iter().filter(move |op| buffers_read(op).contains(&buffer));
+        let mut local: HashSet<usize> = HashSet::new();
+        for op in &ops {
+            match op {
+                Op::Matvec { matrix, dst, .. } if self.by_rows.contains(matrix) && readers(*dst).count() > 0 && readers(*dst).all(|r| by_heads(r, *dst)) => {
+                    local.insert(*dst);
+                }
+                Op::SplitQueryGate { src, query, gate, .. } if local.contains(src) => {
+                    local.extend([*query, *gate]);
+                }
+                Op::RmsNorm { src, dst, .. } if local.contains(src) => {
+                    local.insert(*dst);
+                }
+                Op::AttnSum { query, dst, .. } if local.contains(query) => {
+                    local.insert(*dst);
+                }
+                _ => {}
+            }
+        }
+        // A cache is written and read alike: by heads, or whole.
+        for op in &ops {
+            if let Op::KvAppend { slot, key, value, .. } = op {
+                let query = ops.iter().find_map(|o| if let Op::AttnSum { slot: s, query, .. } = o { (s == slot).then_some(*query) } else { None });
+                let sides = [local.contains(key), local.contains(value), query.is_some_and(|q| local.contains(&q))];
+                if sides.iter().any(|s| *s != sides[0]) {
+                    return;
+                }
+            }
+        }
+        if local.is_empty() {
+            return;
+        }
+        // Each chip's slice must be whole blocks of the link.
+        let block = if self.config.features.wide_link { 1usize << self.config.features.lane_bits } else { 1 };
+        if local.iter().any(|b| !(buffers[*b] / n).is_multiple_of(block) || !buffers[*b].is_multiple_of(n)) {
+            return;
+        }
+        let gather: HashSet<usize> = local.iter().copied().filter(|b| readers(*b).any(|r| !by_heads(r, *b))).collect();
+        (self.heads_shard, self.local, self.gather_local) = (Some((index, chips)), local, gather);
+    }
+
+    /// Whether the chips of the ring share the attention's heads.
+    pub fn shares_heads(&self) -> bool {
+        self.heads_shard.is_some()
+    }
+
+    /// Of `count` heads, the first this chip runs and how many: all of them unless the
+    /// chips share the heads and `buffer` is a slice of them.
+    fn heads_of(&self, buffer: usize, count: u32) -> (u32, u32) {
+        match self.heads_shard {
+            Some((index, chips)) if self.local.contains(&buffer) => (index * count / chips, count / chips),
+            _ => (0, count),
+        }
     }
 
     /// Leaves the embedding table in the image instead of in the vector memory: before each
@@ -1773,7 +1865,9 @@ impl Layout {
         self.buffers[buf]
     }
 
-    fn rms_blocks<O: BlockOps>(&self, ops: &mut O, src: u32, weight: Option<u32>, block: usize, count: usize, dst: u32) {
+    /// `rms_blocks` for the `mine` blocks from `first` of `count`: those of a chip that shares
+    /// the heads with others.
+    fn rms_blocks_of<O: BlockOps>(&self, ops: &mut O, src: u32, weight: Option<u32>, block: usize, (first_block, mine, count): (usize, usize, usize), dst: u32) {
         let t = &self.temporaries;
         let d = block as u32;
         let first = self.parts[0];
@@ -1795,7 +1889,10 @@ impl Layout {
             });
         }
         // Each block is normalised on its own, so several vector units can share them.
-        ops.each_head(count as u32, 1, |ops, b, _| {
+        let shared = mine < count;
+        ops.heads_across_chips(shared);
+        ops.each_head(mine as u32, 1, |ops, local, _| {
+            let b = local + (first_block as u32).into();
             ops.with_window(b, &[first], |ops, offset| {
                 let part = first + offset;
                 ops.copy_part(src, b * d, t[40], 0.into(), d.into());
@@ -1808,8 +1905,9 @@ impl Layout {
                 ops.align_heads(part, d);
             });
         });
-        let parts: Vec<(u32, u32)> = (0..count).map(|b| (self.parts[b], d)).collect();
-        ops.gather_heads(&parts, dst);
+        let parts: Vec<(u32, u32)> = (first_block..first_block + mine).map(|b| (self.parts[b], d)).collect();
+        ops.gather_heads_at(&parts, dst, first_block as u32 * d);
+        ops.heads_across_chips(false);
     }
 
     /// `a + b` or `a · b`, a slice per unit where the die has several.
@@ -1842,6 +1940,18 @@ impl Layout {
     fn lower_op<O: BlockOps>(&self, ops: &mut O, program: &Program, op: &Op, token: O::N, position: O::N) -> Result<(), String> {
         let done = self.lower_one(ops, program, op, token, position);
         ops.end_spread();
+        // A slice of heads something else reads becomes whole again.
+        if let Some((index, chips)) = self.heads_shard {
+            let made: Vec<usize> = match op {
+                Op::SplitQueryGate { query, gate, .. } => vec![*query, *gate],
+                Op::RmsNorm { dst, .. } | Op::AttnSum { dst, .. } => vec![*dst],
+                _ => Vec::new(),
+            };
+            for buffer in made.into_iter().filter(|b| self.gather_local.contains(b)) {
+                let share = program.buffers[buffer] as u32 / chips;
+                ops.all_gather(self.reg(buffer), share, index);
+            }
+        }
         done
     }
 
@@ -1877,12 +1987,15 @@ impl Layout {
                 if let Some(chain) = self.chains.get(matrix) {
                     let parts: Vec<(u32, u32, u32, u32)> = chain.iter().map(|(name, dst)| (self.weights[name], self.reg(*dst), share(*dst), index * share(*dst))).collect();
                     ops.matvecs_rows(matrix, &parts, self.reg(*src));
-                    for (_, dst) in chain {
+                    // A slice only its heads read stays this chip's.
+                    for (_, dst) in chain.iter().filter(|(_, dst)| !self.local.contains(dst)) {
                         ops.all_gather(self.reg(*dst), share(*dst), index);
                     }
                 } else if !self.followers.contains(matrix) {
                     ops.matvec_rows(matrix, self.weights[matrix], self.reg(*src), self.reg(*dst), share(*dst), index * share(*dst));
-                    ops.all_gather(self.reg(*dst), share(*dst), index);
+                    if !self.local.contains(dst) {
+                        ops.all_gather(self.reg(*dst), share(*dst), index);
+                    }
                 }
             }
             Op::Matvec { matrix, src, dst } => {
@@ -1960,7 +2073,9 @@ impl Layout {
             Op::RmsNorm { src, weight, block, dst, .. } => {
                 let count = program.buffers[*dst] / block;
                 let w = self.small[&format!("{weight}.weight")];
-                self.rms_blocks(ops, self.reg(*src), Some(w), *block, count, self.reg(*dst));
+                // A chip that shares the heads normalises its own.
+                let (first, mine) = self.heads_of(*src, count as u32);
+                self.rms_blocks_of(ops, self.reg(*src), Some(w), *block, (first as usize, mine as usize, count), self.reg(*dst));
             }
             Op::LayerNorm { src, weight, block, dst } => {
                 let count = (program.buffers[*dst] / block) as u32;
@@ -2061,9 +2176,14 @@ impl Layout {
                 let d = *block as u32;
                 let src = self.reg(*src);
                 if 2 * heads <= PARTS {
-                    // Each unit takes the two halves of its own head.
+                    // Each unit takes the two halves of its own head; a chip that shares the
+                    // heads, its own heads only.
                     let (first_query, first_gate) = (self.parts[0], self.parts[heads]);
-                    ops.each_head(heads as u32, 1, |ops, h, _| {
+                    let (h0, count) = self.heads_of(*query, heads as u32);
+                    let shared = count < heads as u32;
+                    ops.heads_across_chips(shared);
+                    ops.each_head(count, 1, |ops, local, _| {
+                        let h = local + h0.into();
                         ops.with_window(h, &[first_query, first_gate], |ops, offset| {
                             ops.copy_part(src, h * (2 * d), first_query + offset, 0.into(), d.into());
                             ops.copy_part(src, h * (2 * d) + d.into(), first_gate + offset, 0.into(), d.into());
@@ -2071,8 +2191,10 @@ impl Layout {
                             ops.align_heads(first_gate + offset, d);
                         });
                     });
-                    ops.gather_heads(&(0..heads).map(|h| (self.parts[h], d)).collect::<Vec<_>>(), self.reg(*query));
-                    ops.gather_heads(&(0..heads).map(|h| (self.parts[heads + h], d)).collect::<Vec<_>>(), self.reg(*gate));
+                    let mine = h0 as usize..(h0 + count) as usize;
+                    ops.gather_heads_at(&mine.clone().map(|h| (self.parts[h], d)).collect::<Vec<_>>(), self.reg(*query), h0 * d);
+                    ops.gather_heads_at(&mine.map(|h| (self.parts[heads + h], d)).collect::<Vec<_>>(), self.reg(*gate), h0 * d);
+                    ops.heads_across_chips(false);
                 } else {
                     ops.each((heads as u32).into(), |ops, h| {
                         ops.copy_part(src, h * (2 * d), t[0], h * d, d.into());
@@ -2100,7 +2222,11 @@ impl Layout {
                     }
                 };
                 let heads = total / d;
-                ops.each_head(heads, 1, |ops, head, _| {
+                // A chip that shares the heads rotates its own.
+                let (h0, count) = self.heads_of(*buf, heads);
+                ops.heads_across_chips(count < heads);
+                ops.each_head(count, 1, |ops, local, _| {
+                    let head = local + h0.into();
                     ops.with_window(head, &[first], |ops, offset| {
                         let (x, swapped) = (t[52], t[53]);
                         ops.copy_part(reg, head * d, x, zero, d.into());
@@ -2110,8 +2236,9 @@ impl Layout {
                         ops.align_heads(first + offset, d);
                     });
                 });
-                let parts: Vec<(u32, u32)> = (0..heads as usize).map(|part| (self.parts[part], d)).collect();
-                ops.gather_heads(&parts, reg);
+                let parts: Vec<(u32, u32)> = (h0..h0 + count).map(|part| (self.parts[part as usize], d)).collect();
+                ops.gather_heads_at(&parts, reg, h0 * d);
+                ops.heads_across_chips(false);
             }
             Op::KvAppend { slot, key, value, window } => {
                 let width = program.buffers[*key] as u32;
@@ -2124,12 +2251,16 @@ impl Layout {
                     _ => None,
                 });
                 let (keys, values) = (self.keys[*slot], self.values[*slot]);
+                let key_buffer = *key;
                 let (key, value) = (self.reg(*key), self.reg(*value));
                 match reader {
                     // Units hold the columns they read: each writes just those, all at once.
                     Some((heads, kv_heads, head_dim)) if (kv_heads * head_dim) as u32 == width => {
                         let d = head_dim as u32;
-                        ops.each_head_split(kv_heads as u32, (heads / kv_heads) as u32, |ops, kv_head, _| {
+                        // A chip that shares the heads keeps its own key heads.
+                        let (k0, count) = self.heads_of(key_buffer, kv_heads as u32);
+                        ops.each_head_split(count, (heads / kv_heads) as u32, |ops, local, _| {
+                            let kv_head = local + k0.into();
                             ops.store_key_part(key, STATE_EXPONENT, keys, slot_place, width, kv_head * d, d);
                             ops.store_key_part(value, STATE_EXPONENT, values, slot_place, width, kv_head * d, d);
                         });
@@ -2155,9 +2286,14 @@ impl Layout {
                 let capped = softcap.map(|cap| (self.small[&format!("escala:{}", 1.0 / cap)], self.small[&format!("escala:{cap}")]));
                 let regs = AttentionRegs { scores: t[10], top: t[11], shifted: t[12], weights: t[13], total: t[14], inverse: t[15], probabilities: t[16], softcap: capped };
                 let first = self.parts[0];
+                // A chip that shares the heads attends with its own.
+                let (k0, kv_count) = self.heads_of(*query, *kv_heads as u32);
+                let sharing = kv_count < *kv_heads as u32;
+                ops.heads_across_chips(sharing);
                 let query = self.reg(*query);
-                ops.each_head_split(*kv_heads as u32, group as u32, |ops, kv_head, shared| {
+                ops.each_head_split(kv_count, group as u32, |ops, mine, shared| {
                     {
+                        let kv_head = mine + k0.into();
                         let h = kv_head * group as u32 + shared;
                         ops.with_window(h, &[first], |ops, offset| {
                             let qh = t[20];
@@ -2177,8 +2313,10 @@ impl Layout {
                         });
                     }
                 });
-                let parts: Vec<(u32, u32)> = (0..*heads).map(|h| (self.parts[h], d)).collect();
-                ops.gather_heads(&parts, self.reg(*dst));
+                let h0 = (k0 as usize) * group;
+                let parts: Vec<(u32, u32)> = (h0..h0 + kv_count as usize * group).map(|h| (self.parts[h], d)).collect();
+                ops.gather_heads_at(&parts, self.reg(*dst), h0 as u32 * d);
+                ops.heads_across_chips(false);
             }
             Op::Dconv { slot, weight, src, dst } => {
                 let (dim, kernel) = program.conv_slots[*slot];

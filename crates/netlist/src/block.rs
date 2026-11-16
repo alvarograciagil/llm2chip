@@ -430,6 +430,19 @@ pub trait BlockOps: Sized {
         self.gather(parts, dst);
     }
 
+    /// `gather_heads` into `dst` from element `start`, for a chip that runs only some of the
+    /// heads: the chips of the ring agree on the exponent and the normalisation, so each
+    /// slice comes out as the whole vector would on one chip.
+    fn gather_heads_at(&mut self, parts: &[(u32, u32)], dst: u32, start: u32) {
+        assert_eq!(start, 0, "only a die that shares heads among chips gathers them from an offset");
+        self.gather_heads(parts, dst);
+    }
+
+    /// Between `true` and `false`, the heads gathered are this chip's share of them.
+    fn heads_across_chips(&mut self, on: bool) {
+        let _ = on;
+    }
+
     /// The next operation that writes `reg` a slice per unit may leave it that way: what
     /// reads it next takes the same slices. Elsewhere the whole vector is there anyway.
     fn leave_spread(&mut self, reg: u32) {
@@ -1008,6 +1021,8 @@ pub struct Assembly {
     pub group_used: bool,
     /// The die can read operand B from another unit of the group.
     group_reads: bool,
+    /// The heads being gathered are this chip's share of them: see `heads_across_chips`.
+    ring_heads: bool,
 }
 
 /// The units that run the query heads of one key head, in a loop over heads: they differ
@@ -1186,7 +1201,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0 }
+        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1618,10 +1633,14 @@ impl Assembly {
 }
 
 fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32) {
+    // The die adds an index register to the register's number, with nothing literal: a
+    // constant part of the step moves the register itself.
+    let (moved, variable) = (step.constant(), step.without_constant());
+    let shift = |register: &mut u32| *register = register.wrapping_add(moved);
     for item in steps {
         match item {
             Step::One(alu) => {
-                alu.window = step;
+                alu.window = variable;
                 alu.window_a = windowed.contains(&alu.a.0);
                 alu.window_b = windowed.contains(&alu.b.0);
                 alu.window_dst = windowed.contains(&alu.dst.0);
@@ -1630,6 +1649,15 @@ fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32)
                     if at.0 == exponents && at.1.is_constant() && windowed.contains(&at.1.constant()) {
                         at.1 = at.1 + step;
                     }
+                }
+                if alu.window_a {
+                    shift(&mut alu.a.0);
+                }
+                if alu.window_b {
+                    shift(&mut alu.b.0);
+                }
+                if alu.window_dst {
+                    shift(&mut alu.dst.0);
                 }
             }
             Step::Repeat { body, .. } => mark_window(body, step, windowed, exponents),
@@ -1641,9 +1669,15 @@ fn mark_window(steps: &mut [Step], step: Expr, windowed: &[u32], exponents: u32)
                 }
             }
             Step::Combine { weights, matrix, window, window_a, window_b, .. } | Step::CombineRows { weights, matrix, window, window_a, window_b, .. } => {
-                *window = step;
+                *window = variable;
                 *window_a = windowed.contains(&weights.0);
                 *window_b = windowed.contains(matrix);
+                if *window_a {
+                    shift(&mut weights.0);
+                }
+                if *window_b {
+                    shift(matrix);
+                }
             }
             Step::Clustered { body, .. } => mark_window(body, step, windowed, exponents),
             Step::CellGroup { src, .. } => assert!(!windowed.contains(src), "the cells read from fixed registers"),
@@ -2212,7 +2246,8 @@ impl BlockOps for Assembly {
     }
 
     fn align_heads(&mut self, reg: u32, len: u32) {
-        if !(self.in_units && self.heads_at_once) {
+        // A chip with only some of the heads agrees with the others when it gathers them.
+        if !(self.in_units && self.heads_at_once) || self.ring_heads {
             return;
         }
         self.clear_shifts();
@@ -2239,8 +2274,17 @@ impl BlockOps for Assembly {
         self.heads_aligned += 1;
     }
 
+    fn heads_across_chips(&mut self, on: bool) {
+        self.ring_heads = on && self.ring > 1;
+    }
+
     fn gather_heads(&mut self, parts: &[(u32, u32)], dst: u32) {
-        if self.clusters <= 1 {
+        self.gather_heads_at(parts, dst, 0);
+    }
+
+    fn gather_heads_at(&mut self, parts: &[(u32, u32)], dst: u32, start: u32) {
+        if self.clusters <= 1 && !self.ring_heads {
+            assert_eq!(start, 0, "a die of one unit gathers whole vectors");
             return self.gather(parts, dst);
         }
         self.clear_shifts();
@@ -2255,7 +2299,7 @@ impl BlockOps for Assembly {
             let mut read = alu(OP_MOV);
             (read.a, read.b, read.dst, read.from_cluster) = (self.exponent(parts[0].0), zero, self.exponent(dst), unit_of(0, units));
             self.push(read);
-            let mut offset = 0;
+            let mut offset = start;
             for (part, (reg, len)) in parts.iter().enumerate() {
                 let at: Expr = offset.into();
                 self.elements((*len).into(), &[at], true, |s, i, vector| {
@@ -2278,7 +2322,11 @@ impl BlockOps for Assembly {
                 self.binary(OP_MAX, largest, exponent, largest);
             }
         }
-        let mut offset = 0;
+        // A chip with some of the heads takes the largest exponent of all the chips'.
+        if self.ring_heads {
+            self.ring_max(largest, self.sc(4));
+        }
+        let mut offset = start;
         for (part, (reg, len)) in parts.iter().enumerate() {
             let mut read = alu(OP_MOV);
             (read.a, read.b, read.dst, read.from_cluster) = (self.exponent(*reg), zero, exponent, unit_of(part, units));
@@ -2296,7 +2344,10 @@ impl BlockOps for Assembly {
             offset += len;
         }
         self.binary(OP_MOV, largest, zero, self.exponent(dst));
-        self.normalize(dst, offset.into());
+        // The chips normalise their slices alike, as the whole vector would be.
+        let across = std::mem::replace(&mut self.across_chips, self.ring_heads);
+        self.normalize_from(dst, start.into(), (offset - start).into());
+        self.across_chips = across;
     }
 
     fn depthwise(&mut self, taps: u32, history: u32, dst: u32, width: u32, kernel: u32) {

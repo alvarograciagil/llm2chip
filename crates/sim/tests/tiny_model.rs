@@ -1127,3 +1127,100 @@ fn a_real_model_s_token_on_the_die_matches_the_exact_machine() {
 }
 
 
+
+/// Runs `routine` with `token` at `position` on every die at once, joined by `wires`
+/// `(from, to, port)`, until all have halted. Gives the cycles it took.
+fn run_joined(dies: &mut [(Simulator, Microprogram)], wires: &[(usize, usize, &str)], routine: usize, token: u32, position: u32) -> u64 {
+    for (sim, code) in dies.iter_mut() {
+        sim.set("start", 0).unwrap();
+        sim.set("param_write", 1).unwrap();
+        for parameter in &code.parameters {
+            sim.set("param_index", parameter.register as u64).unwrap();
+            sim.set("param_data", parameter.value(token, position) as u64).unwrap();
+            sim.tick();
+        }
+        sim.set("param_write", 0).unwrap();
+        sim.set("entry", code.entries[routine] as u64).unwrap();
+        sim.set("start", 1).unwrap();
+        sim.tick();
+        sim.set("start", 0).unwrap();
+    }
+    let mut cycles = 0u64;
+    while dies.iter().any(|(sim, _)| sim.get("halted").unwrap() == 0) {
+        let outputs: Vec<_> = wires
+            .iter()
+            .map(|(from, to, p)| {
+                let (a, b) = (&dies[*from].0, &dies[*to].0);
+                (a.get(&format!("{p}_tx_valid")).unwrap(), a.get_wide(&format!("{p}_tx_bits")).unwrap(), b.get(&format!("{p}_rx_ready")).unwrap(), b.get(&format!("{p}_rx_ack")).unwrap())
+            })
+            .collect();
+        for ((from, to, p), (valid, bits, ready, ack)) in wires.iter().zip(outputs) {
+            dies[*to].0.set(&format!("{p}_rx_valid"), valid).unwrap();
+            dies[*to].0.set_wide(&format!("{p}_rx_bits"), bits).unwrap();
+            dies[*from].0.set(&format!("{p}_tx_ready"), ready).unwrap();
+            dies[*from].0.set(&format!("{p}_tx_ack"), ack).unwrap();
+        }
+        for (sim, _) in dies.iter_mut() {
+            sim.tick();
+        }
+        cycles += 1;
+        assert!(cycles < 2_000_000, "routine {routine} at position {position}: the dies do not finish");
+    }
+    cycles
+}
+
+/// Chips that share the products by rows share the attention's heads too: each keeps and
+/// attends with its own heads and the chips gather the attention's output. Over a few tokens,
+/// so the cache counts, the first chip's logits are those of one die alone, bit for bit:
+/// two chips in one ring, and two groups of two.
+#[test]
+#[ignore = "slow: several dies gate by gate over several tokens"]
+fn chips_that_share_the_heads_give_the_logits_of_one_die() {
+    let dir = std::env::temp_dir().join(format!("llm2chip-heads-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    grouped_checkpoint(&dir, 8);
+    let config = grouped_config(8);
+    let program = compile_qwen3_5(&config).unwrap();
+    let weights = Weights::open(&dir).unwrap();
+    let tokens = [3u32, 5, 1];
+    // Two chips in one ring sharing the heads; two in a chain by layers, which share none;
+    // and two groups of two sharing them, on dies of several units.
+    for (cluster_bits, sharing, chips, wires) in [
+        (1u32, sim::chip::Sharing::Rows, 2usize, vec![(0usize, 1usize, "link"), (1, 0, "link")]),
+        (1, sim::chip::Sharing::Layers, 2, vec![(0, 1, "link"), (1, 0, "link")]),
+        (2, sim::chip::Sharing::Mixed(2), 4, vec![(0, 1, "link"), (1, 2, "link"), (2, 3, "link"), (3, 0, "link"), (1, 0, "loop"), (3, 2, "loop")]),
+    ] {
+        let base = DieConfig { microcode_bits: 15, cells: 4 << cluster_bits, features: cell_die_config().features.with_lane_bits(2).with_cluster_bits(cluster_bits), ..cell_die_config() };
+        let share = sim::chip::ShareOut::new(&program, &weights, chips, CHIP_TOKENS, base.cell.activation_bits, sharing).unwrap();
+        let mut first = None;
+        let mut shared = false;
+        let mut dies: Vec<(Simulator, Microprogram)> = (0..chips)
+            .map(|chip| {
+                let mut layout = Layout::with_cells(&program, &weights, base, CHIP_TOKENS).unwrap();
+                let code = share.microprogram(&mut layout, &program, chip).unwrap();
+                shared |= layout.shares_heads();
+                let die = loaded_die(&layout, &code, &weights, base);
+                if chip == 0 {
+                    first = Some((layout.logits_register(&program), sim::chip::compact_die(base, &layout)));
+                }
+                (die, code)
+            })
+            .collect();
+        // The chips with the attention's layers share its heads, unless they share no rows.
+        assert_eq!(shared, sharing != sim::chip::Sharing::Layers, "{chips} chips, {sharing:?}");
+        for (position, token) in tokens.iter().enumerate() {
+            run_joined(&mut dies, &wires, ENTRY_TOKEN, *token, position as u32);
+        }
+        run_joined(&mut dies, &wires, ENTRY_LOGITS, tokens[2], 2);
+        let mut alone = gates_in_cells(&program, &dir, base, &tokens);
+        let (logits, c) = first.unwrap();
+        let single = alone.layout.logits_register(&program);
+        let alone_c = sim::chip::compact_die(base, &alone.layout);
+        for index in 0..8 {
+            let (got, _) = read_block_value(&mut dies[0].0, c, logits, index);
+            let (want, _) = read_block_value(&mut alone.sim, alone_c, single, index);
+            assert_eq!(got, want, "{chips} chips, {sharing:?}, logit {index}");
+        }
+    }
+    std::fs::remove_dir_all(dir).ok();
+}
