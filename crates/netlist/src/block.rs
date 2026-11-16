@@ -1048,7 +1048,7 @@ impl Assembly {
     /// units in between sit out.
     fn head_slots(&self, outer: u32, inner: u32, parts: u32) -> (u32, Option<(u32, u32, u32)>) {
         let padded = inner.next_power_of_two();
-        if padded != inner && outer > 1 && outer * padded * parts <= self.clusters {
+        if padded != inner && outer * padded * parts <= self.clusters {
             (padded, Some((parts.trailing_zeros(), padded.trailing_zeros(), inner)))
         } else {
             (inner, None)

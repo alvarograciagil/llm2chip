@@ -1486,8 +1486,14 @@ impl Layout {
         if n < 2 || attention.is_empty() || attention.iter().any(|(heads, kv)| !divides(*heads) || !divides(*kv)) || program.vision.is_some() || ops.iter().any(|op| matches!(op, Op::Mla { .. })) {
             return;
         }
+        // The delta rule's heads go with the chips too, when they divide evenly: each keeps
+        // the state of its own heads only.
+        let deltas: Vec<(usize, usize)> = ops.iter().filter_map(|op| if let Op::DeltaStep { key_heads, value_heads, .. } = op { Some((*key_heads, *value_heads)) } else { None }).collect();
+        let delta_split = deltas.iter().all(|(keys, values)| divides(*keys) && divides(*values));
+        let delta_out: HashSet<usize> = ops.iter().filter_map(|op| if let Op::DeltaStep { dst, .. } = op { Some(*dst) } else { None }).collect();
         // What runs head by head: whether `op` reads `buffer` as heads.
         let by_heads = |op: &Op, buffer: usize| match op {
+            Op::RmsGated { src, z, .. } => delta_split && delta_out.contains(src) && (*z == buffer || *src == buffer),
             Op::SplitQueryGate { src, query, block, .. } => *src == buffer && 2 * (buffers[*query] / block) <= PARTS && divides(buffers[*query] / block),
             Op::RmsNorm { src, block, dst, .. } => *src == buffer && buffers[*dst] > *block && divides(buffers[*dst] / block),
             Op::Rope { buf, block, table, .. } => *buf == buffer && *table < VISION_TABLE && divides(buffers[*buf] / block),
@@ -1509,6 +1515,12 @@ impl Layout {
                     local.insert(*dst);
                 }
                 Op::AttnSum { query, dst, .. } if local.contains(query) => {
+                    local.insert(*dst);
+                }
+                Op::DeltaStep { dst, .. } if delta_split => {
+                    local.insert(*dst);
+                }
+                Op::RmsGated { src, dst, .. } if local.contains(src) => {
                     local.insert(*dst);
                 }
                 _ => {}
@@ -1944,7 +1956,7 @@ impl Layout {
         if let Some((index, chips)) = self.heads_shard {
             let made: Vec<usize> = match op {
                 Op::SplitQueryGate { query, gate, .. } => vec![*query, *gate],
-                Op::RmsNorm { dst, .. } | Op::AttnSum { dst, .. } => vec![*dst],
+                Op::RmsNorm { dst, .. } | Op::AttnSum { dst, .. } | Op::DeltaStep { dst, .. } | Op::RmsGated { dst, .. } => vec![*dst],
                 _ => Vec::new(),
             };
             for buffer in made.into_iter().filter(|b| self.gather_local.contains(b)) {
@@ -2341,8 +2353,12 @@ impl Layout {
                 let (a_reg, b_reg) = (self.reg(*a), self.reg(*b));
                 let (scale_a, bias) = (self.small[a_log], self.small[dt_bias]);
                 let (first_state, first_out, first_part) = (self.delta[*slot][0], self.delta_parts[0], self.parts[0]);
-                ops.each_head_split(*key_heads as u32, ratio as u32, |ops, key_head, shared| {
+                // A chip that shares the heads runs the delta rule of its own.
+                let (k0, key_count) = self.heads_of(*dst, *key_heads as u32);
+                ops.heads_across_chips(key_count < *key_heads as u32);
+                ops.each_head_split(key_count, ratio as u32, |ops, mine, shared| {
                     {
+                        let key_head = mine + k0.into();
                         let h = key_head * ratio as u32 + shared;
                         // A unit with a head of its own keeps its state in one register: the
                         // others, one per head, would only take room in every unit.
@@ -2387,8 +2403,10 @@ impl Layout {
                         });
                     }
                 });
-                let parts: Vec<(u32, u32)> = (0..*value_heads).map(|h| (self.parts[h], vd)).collect();
-                ops.gather_heads(&parts, self.reg(*dst));
+                let h0 = k0 as usize * ratio;
+                let parts: Vec<(u32, u32)> = (h0..h0 + key_count as usize * ratio).map(|h| (self.parts[h], vd)).collect();
+                ops.gather_heads_at(&parts, self.reg(*dst), h0 as u32 * vd);
+                ops.heads_across_chips(false);
             }
             Op::RmsGated { src, z, weight, block, dst } => {
                 let count = program.buffers[*src] / block;
@@ -2404,8 +2422,12 @@ impl Layout {
                     Op::DeltaStep { dst, key_heads, value_heads, .. } if dst == program_src => Some((key_heads as u32, (value_heads / key_heads) as u32)),
                     _ => None,
                 });
+                // A chip that shares the heads normalises its own, where its delta rule left them.
+                let (k0, key_count) = source.map_or((0, 0), |(key_heads, _)| self.heads_of(program_src, key_heads));
+                let shared = source.is_some_and(|(key_heads, _)| key_count < key_heads);
+                ops.heads_across_chips(shared);
                 let split = |ops: &mut O, body: &mut dyn FnMut(&mut O, O::N)| match source.filter(|_| by_head) {
-                    Some((key_heads, ratio)) => ops.each_head_split(key_heads, ratio, |ops, k, s| body(ops, k * ratio + s)),
+                    Some((_, ratio)) => ops.each_head_split(key_count, ratio, |ops, k, s| body(ops, (k + k0.into()) * ratio + s)),
                     None if by_head => ops.each_head_split(count as u32, 1, |ops, b, _| body(ops, b)),
                     None => ops.each_head(count as u32, 1, |ops, b, _| body(ops, b)),
                 };
@@ -2429,8 +2451,13 @@ impl Layout {
                         ops.align_heads(first_part + offset, d);
                     });
                 });
-                let parts: Vec<(u32, u32)> = (0..count).map(|b| (self.parts[b], d)).collect();
-                ops.gather_heads(&parts, self.reg(*dst));
+                let (h0, mine) = match source {
+                    Some((_, ratio)) if shared => ((k0 * ratio) as usize, (key_count * ratio) as usize),
+                    _ => (0, count),
+                };
+                let parts: Vec<(u32, u32)> = (h0..h0 + mine).map(|b| (self.parts[b], d)).collect();
+                ops.gather_heads_at(&parts, self.reg(*dst), h0 as u32 * d);
+                ops.heads_across_chips(false);
             }
             Op::Concat { a, b, dst } => {
                 let (la, lb) = (program.buffers[*a] as u32, program.buffers[*b] as u32);
