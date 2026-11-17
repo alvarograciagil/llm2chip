@@ -555,11 +555,18 @@ pub trait BlockOps: Sized {
         self.maximum(regs.scores, tokens, regs.top);
         // The table aligns its input to a fixed exponent, which undoes any normalisation.
         self.add_sub_unnormalized(true, (regs.scores, 0.into()), (regs.top, 0.into()), 0, regs.shifted, tokens);
-        self.function(FN_EXP, regs.shifted, regs.weights, tokens);
+        self.exp_from_top(regs.shifted, regs.weights, tokens);
         self.dots(regs.weights, ones, regs.total, 1.into(), tokens, |_, t| ((regs.weights, t), (ones, t)));
         self.reciprocal(regs.total, regs.inverse);
         self.scale(regs.inverse, regs.weights, regs.probabilities, tokens);
         self.combine_values(regs.probabilities, store, dst, width, tokens);
+    }
+
+    /// `exp` of scores less their largest. The largest becomes exactly zero, whose entry
+    /// in the table is the top value, so the result is normalised already: a die may skip
+    /// the normalisation, which would shift by nothing.
+    fn exp_from_top(&mut self, src: u32, dst: u32, len: Self::N) {
+        self.function(FN_EXP, src, dst, len);
     }
 
     /// One Gated DeltaNet head: the delta rule on a `key × value` state matrix.
@@ -1059,6 +1066,8 @@ pub struct Assembly {
     group_reads: bool,
     /// The heads being gathered are this chip's share of them: see `heads_across_chips`.
     ring_heads: bool,
+    /// The function being laid out is `exp_from_top`'s, normalised already.
+    from_top: bool,
 }
 
 /// The units that run the query heads of one key head, in a loop over heads: they differ
@@ -1267,7 +1276,7 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false }
+        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -2082,7 +2091,15 @@ impl BlockOps for Assembly {
         });
         let exponent = if function == FN_SOFTPLUS { SOFTPLUS_OUTPUT_EXPONENT } else { UNIT_OUTPUT_EXPONENT };
         self.immediate(exponent, self.exponent(dst));
-        self.normalize(dst, len);
+        if function != FN_EXP || !self.from_top {
+            self.normalize(dst, len);
+        }
+    }
+
+    fn exp_from_top(&mut self, src: u32, dst: u32, len: Expr) {
+        self.from_top = true;
+        self.function(FN_EXP, src, dst, len);
+        self.from_top = false;
     }
 
     fn reciprocal(&mut self, src: u32, dst: u32) {

@@ -2,7 +2,7 @@
 //! the microcode bit for bit, which the tiny-model test proves against the gates.
 
 use crate::weights::Weights;
-use netlist::block::{accumulator_bits, round_right, tables, BlockOps, Place, FN_RECIPROCAL, FN_INV_SQRT, FN_SOFTPLUS, RECIPROCAL_OUTPUT_EXPONENT, SOFTPLUS_OUTPUT_EXPONENT, TABLE_INPUT_EXPONENT, UNIT_OUTPUT_EXPONENT};
+use netlist::block::{accumulator_bits, round_right, tables, BlockOps, Place, FN_EXP, FN_RECIPROCAL, FN_INV_SQRT, FN_SOFTPLUS, RECIPROCAL_OUTPUT_EXPONENT, SOFTPLUS_OUTPUT_EXPONENT, TABLE_INPUT_EXPONENT, UNIT_OUTPUT_EXPONENT};
 use netlist::DieConfig;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -327,6 +327,12 @@ impl BlockOps for BlockVm {
         }
         self.set_exp(dst, if function == FN_SOFTPLUS { SOFTPLUS_OUTPUT_EXPONENT } else { UNIT_OUTPUT_EXPONENT });
         self.normalize(dst, len);
+    }
+
+    fn exp_from_top(&mut self, src: u32, dst: u32, len: u32) {
+        self.function(FN_EXP, src, dst, len);
+        // The dies skip this normalisation: it must have shifted by nothing.
+        assert_eq!(self.exp(dst), UNIT_OUTPUT_EXPONENT, "exp of scores less their largest is normalised already");
     }
 
     fn reciprocal(&mut self, src: u32, dst: u32) {
