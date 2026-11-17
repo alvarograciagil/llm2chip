@@ -119,9 +119,6 @@ pub struct DeltaRegs {
     pub update: u32,
     pub next: u32,
     pub out: u32,
-    /// Room for the rows of the key and the query that one unit keeps, when a head is shared.
-    pub key_rows: u32,
-    pub query_rows: u32,
 }
 
 /// A quantity the fixed microprogram only knows while it runs.
@@ -1258,19 +1255,38 @@ impl Assembly {
         self.clear_shifts();
     }
 
-    /// `dst[j] = Σ weights[i] · matrix[i · width + j]` over this unit's `rows`, added
-    /// across a group of `1 << group` units.
-    fn combine_rows(&mut self, weights: u32, matrix: u32, dst: u32, (width, rows): (u32, u32), group: u32) {
+    /// `dst[i · cols + j] = a[from + i] · b[j]`.
+    fn outer_rows(&mut self, (a, from): At<Expr>, b: u32, dst: u32, rows: u32, cols: u32) {
+        let shift = self.bits - 1;
+        self.each(rows.into(), |s, i| {
+            s.elements(cols.into(), &[i * cols], a != dst && b != dst, |s, j, vector| {
+                let mut product = alu(OP_MUL);
+                product.a = (a, from + i);
+                product.b = (b, j);
+                product.dst = (dst, i * cols + j);
+                product.shift = shift;
+                (product.vector, product.broadcast_a) = (vector, vector);
+                s.push(product);
+            });
+        });
+        self.stream_last(1 << self.lane_bits);
+        self.product_exponent(a, b, dst, 0);
+        self.normalize(dst, (rows * cols).into());
+    }
+
+    /// `dst[j] = Σ weights[from + i] · matrix[i · width + j]` over this unit's `rows`,
+    /// added across a group of `1 << group` units.
+    fn combine_rows(&mut self, (weights, from): At<Expr>, matrix: u32, dst: u32, (width, rows): (u32, u32), group: u32) {
         if self.rows_stream && width == 1 << self.lane_bits && rows > 1 {
             // Rows of one block go through one a cycle, adding up in a single block.
-            self.steps.push(Step::CombineRows { weights: (weights, 0.into()), matrix, start: 0.into(), rows, window: 0.into(), window_a: false, window_b: false });
+            self.steps.push(Step::CombineRows { weights: (weights, from), matrix, start: 0.into(), rows, window: 0.into(), window_a: false, window_b: false });
             self.steps.push(Step::WideReduce { rows: width.into(), group });
             return self.narrow_sums(weights, matrix, dst, width.into());
         }
         let zero = self.sc(10);
         self.immediate(0, zero);
         self.steps.push(Step::Combine { weights: zero, matrix, start: 0.into(), width: width.into(), fresh: true, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 });
-        self.each(rows.into(), |s, i| s.steps.push(Step::Combine { weights: (weights, i), matrix, start: i * width, width: width.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 }));
+        self.each(rows.into(), |s, i| s.steps.push(Step::Combine { weights: (weights, from + i), matrix, start: i * width, width: width.into(), fresh: false, window: 0.into(), window_a: false, window_b: false, moving: false, from_group: 0 }));
         self.steps.push(Step::WideReduce { rows: width.into(), group });
         self.narrow_sums(weights, matrix, dst, width.into());
     }
@@ -1996,22 +2012,9 @@ impl BlockOps for Assembly {
     }
 
     fn outer_product(&mut self, a: u32, b: u32, dst: u32, rows: u32, cols: u32) {
-        let shift = self.bits - 1;
-        self.each(rows.into(), |s, i| {
-            s.elements(cols.into(), &[i * cols], a != dst && b != dst, |s, j, vector| {
-                let mut product = alu(OP_MUL);
-                product.a = (a, i);
-                product.b = (b, j);
-                product.dst = (dst, i * cols + j);
-                product.shift = shift;
-                (product.vector, product.broadcast_a) = (vector, vector);
-                s.push(product);
-            });
-        });
-        self.stream_last(1 << self.lane_bits);
-        self.product_exponent(a, b, dst, 0);
-        self.normalize(dst, (rows * cols).into());
+        self.outer_rows((a, 0.into()), b, dst, rows, cols);
     }
+
 
     fn dots<F>(&mut self, a: u32, b: u32, dst: u32, sets: Expr, terms: Expr, indices: F)
     where
@@ -2255,19 +2258,19 @@ impl BlockOps for Assembly {
         // and the sums over rows add up across the group, exact, before anything rounds.
         let (rows, group) = (key / parts, parts.trailing_zeros());
         let cells = rows * value;
-        self.copy_part(r.key, part * rows, r.key_rows, 0.into(), rows.into());
-        self.copy_part(r.query, part * rows, r.query_rows, 0.into(), rows.into());
+        // This unit's rows of the key and the query are read where they are.
+        let first = part * rows;
         self.scale(r.decay, r.state, r.state, cells.into());
-        self.combine_rows(r.key_rows, r.state, r.memory, (value, rows), group);
+        self.combine_rows((r.key, first), r.state, r.memory, (value, rows), group);
         self.add_sub(true, (r.value, 0.into()), (r.memory, 0.into()), 1, r.error, value.into());
         self.scale(r.beta, r.error, r.delta, value.into());
-        self.combine_rows(r.query_rows, r.state, r.next, (value, rows), group);
+        self.combine_rows((r.query, first), r.state, r.next, (value, rows), group);
         self.dot(r.key, r.query, r.memory, key.into());
         self.scale(r.memory, r.delta, r.update, value.into());
         self.add(r.next, r.update, r.out, value.into());
-        self.outer_product(r.key_rows, r.delta, r.update, rows, value);
-        self.add(r.state, r.update, r.next, cells.into());
-        self.copy_part(r.next, 0.into(), r.state, 0.into(), cells.into());
+        self.outer_rows((r.key, first), r.delta, r.update, rows, value);
+        // In place: each element is read before it is written.
+        self.add(r.state, r.update, r.state, cells.into());
     }
 
     fn in_slabs(&mut self, len: u32, outputs: &[u32], body: impl FnMut(&mut Self, Expr, u32)) {

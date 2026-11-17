@@ -189,7 +189,7 @@ fn delta_rule_matches_floating_point() {
     asm.load_vector(3, &v);
     asm.load_vector(4, &[beta]);
     asm.load_vector(5, &[decay]);
-    let regs = DeltaRegs { state: 0, key: 1, query: 2, value: 3, beta: 4, decay: 5, memory: 6, error: 7, delta: 8, update: 9, next: 10, out: 11, key_rows: 0, query_rows: 0 };
+    let regs = DeltaRegs { state: 0, key: 1, query: 2, value: 3, beta: 4, decay: 5, memory: 6, error: 7, delta: 8, update: 9, next: 10, out: 11 };
     asm.delta_step(regs, key as u32, value as u32);
 
     let mut sim = run_gates(c, &asm);

@@ -2578,7 +2578,7 @@ impl Layout {
                             ops.multiply(t[33], self.minus_one, work, 1.into());
                             ops.function(FN_EXP, work, decay, 1.into());
 
-                            let regs = DeltaRegs { state: if own { first_state } else { first_state + offset }, key: kh, query: qh, value: vh, beta, decay, memory: t[10], error: t[11], delta: t[12], update: t[13], next: t[14], out: first_out + offset, key_rows: t[56], query_rows: t[57] };
+                            let regs = DeltaRegs { state: if own { first_state } else { first_state + offset }, key: kh, query: qh, value: vh, beta, decay, memory: t[10], error: t[11], delta: t[12], update: t[13], next: t[14], out: first_out + offset };
                             ops.delta_step(regs, kd, vd);
                             // The gated norm reads each head's output where it was made, so a
                             // copy of it is the one brought to the shared exponent.
