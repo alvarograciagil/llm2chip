@@ -968,8 +968,10 @@ impl Gen {
         b.group("Compute cell");
         let group_sum = b.wire("group_sum", acc);
         // A flush takes the group's sum and starts the next group with whatever product
-        // arrives in that cycle, so groups can follow each other with no gap.
-        let mut compute_pins = vec![("clear", vec![clear]), ("clear_total", vec![clear_group]), ("restart", vec![flush]), ("run", vec![run]), ("x", x.clone()), ("total", group_sum.clone()), ("seek", seek_weights), ("seek_addr", seek_addr.clone())];
+        // arrives in that cycle, so groups can follow each other with no gap. Clearing the
+        // group's total leaves the sums alone: every group starts with a flush anyway, and
+        // the next pass's first group may already be summing when the total clears.
+        let mut compute_pins = vec![("clear", vec![clear]), ("clear_total", vec![Bit::Zero]), ("restart", vec![flush]), ("run", vec![run]), ("x", x.clone()), ("total", group_sum.clone()), ("seek", seek_weights), ("seek_addr", seek_addr.clone())];
         if cfg.most_packing() > 0 {
             compute_pins.push(("packing", b.input("packing", crate::cell::bits_for_packing(cfg.most_packing()))));
         }
@@ -1009,8 +1011,7 @@ impl Gen {
         let unused = b.wire("x_carry", 1);
         b.inst("x_adder", &adder, &[("a", x_kept), ("b", x_gated), ("cin", vec![Bit::Zero]), ("sum", x_next.clone()), ("cout", unused)]);
         let keep = b.wire("x_keep", 1)[0];
-        let reset = bus_or(&mut b, clear, clear_group, "x_reset");
-        b.not_to(reset, keep);
+        b.not_to(clear, keep);
         let x_d = b.wire("x_d", acc);
         for i in 0..acc as usize {
             b.and_to(keep, x_next[i], x_d[i]);
@@ -2916,6 +2917,10 @@ pub struct DieProgram {
     /// Blocks of totals loaded into the result chains and not yet moved to the wide memory:
     /// the next pass of the cells moves them while it computes.
     drain_pending: u32,
+    /// The cycle the chains load the totals of a pass that the next one, already feeding
+    /// its cells, overlaps: no block may move out of the chains before it.
+    load_at: Option<usize>,
+    drain_after: usize,
     /// The last two-cycle step and the cycle it computes in, which the next step's read
     /// may share when it does not depend on it.
     last_short: Option<(usize, Alu)>,
@@ -3133,7 +3138,7 @@ impl DieProgram {
     pub fn new(config: DieConfig) -> Self {
         // The microcode read port takes one cycle to deliver the first word.
         let cycles = vec![ControlWord::default()];
-        Self { config, cycles, labels: BTreeSet::from([0]), entries: vec![0], parameters: Vec::new(), scoped: HashMap::new(), active: Vec::new(), in_use: BTreeSet::new(), cells_settle: 0, drain_pending: 0, last_short: None, max_ready: 0, acc_ready: 0 }
+        Self { config, cycles, labels: BTreeSet::from([0]), entries: vec![0], parameters: Vec::new(), scoped: HashMap::new(), active: Vec::new(), in_use: BTreeSet::new(), cells_settle: 0, drain_pending: 0, load_at: None, drain_after: 0, last_short: None, max_ready: 0, acc_ready: 0 }
     }
 
     fn slot(&mut self, at: usize) -> &mut ControlWord {
@@ -3211,6 +3216,8 @@ impl DieProgram {
                 return;
             }
         }
+        // A load inside the loop's words would come again in every turn.
+        self.place_load();
         // A loop may take over a pending drain only if every turn leaves the same one behind.
         let lanes = 1u32 << self.config.features.lane_bits;
         let carries = matches!((body.first(), body.last()), (Some(Step::CellPass), Some(Step::CellDrain { rows })) if rows.div_ceil(lanes) == self.drain_pending);
@@ -3257,6 +3264,7 @@ impl DieProgram {
         self.labels.insert(start);
         self.active.push(variable);
         self.assemble(body);
+        self.place_load();
         self.active.pop();
         // A group fed at the end of the last turn is still settling after the jump back.
         let fed_inside = self.cells_settle > self.end();
@@ -3643,15 +3651,37 @@ impl DieProgram {
 
     /// Starts one round of the cells over the input vector.
     fn cell_pass(&mut self) {
-        let t = self.after_cells();
+        // A pass that follows one still settling starts at once: the load of the one before
+        // clears the totals in the cycle they are complete.
+        let overlapped = self.load_at.is_some();
+        let end = self.end();
+        // Straight after the last word that fed the pass before, that word clears the read
+        // counter: a clear only changes it from the next cycle on.
+        if overlapped && end > 0 && !self.labels.contains(&end) && self.cycles[end - 1].cell_end && self.cycles[end - 1].repeat == 0 && self.load_at != Some(end) {
+            self.cycles[end - 1].read_reset = true;
+            return;
+        }
+        let t = if overlapped { end } else { self.after_cells() };
         let w = self.slot(t);
-        (w.read_reset, w.cell_clear_group) = (true, true);
+        (w.read_reset, w.cell_clear_group) = (true, !overlapped);
         self.drain_into(t);
+    }
+
+    /// Loads the chains with the totals of the pass that settled at `load_at`, in that cycle,
+    /// and clears the totals for the pass already feeding the cells.
+    fn place_load(&mut self) {
+        if let Some(t) = self.load_at.take() {
+            let w = self.slot(t);
+            (w.chain_load, w.cell_clear_group) = (true, true);
+        }
     }
 
     /// Moves one pending block of totals from the chains into the wide memory at `t`.
     fn drain_into(&mut self, t: usize) {
-        if self.drain_pending > 0 {
+        if self.load_at == Some(t) {
+            self.place_load();
+        }
+        if self.drain_pending > 0 && t > self.drain_after && self.load_at.is_none() {
             let (vector, units) = (self.config.features.lane_bits > 0, self.config.features.cluster_bits);
             let w = self.slot(t);
             (w.wide_write, w.wide_from_chain, w.chain_shift) = (true, true, true);
@@ -3664,6 +3694,7 @@ impl DieProgram {
 
     /// Moves whatever the chains still hold.
     fn finish_drain(&mut self) {
+        self.place_load();
         while self.drain_pending > 0 {
             let t = self.end();
             self.drain_into(t);
@@ -3708,11 +3739,15 @@ impl DieProgram {
         let lane_bits = self.config.features.lane_bits;
         let lanes = 1u32 << lane_bits;
         if self.config.features.feeds_cells() {
-            // Load the chains now; the next pass moves them while it computes.
+            // The chains load the totals, and clear them, in the cycle they are complete. A
+            // pass that comes next starts feeding the cells meanwhile, and the load lands
+            // among its words: its first group reaches the totals a whole group later. The
+            // pass after that moves the blocks out while it computes.
             self.finish_drain();
             let t = self.after_cells();
-            self.slot(t).chain_load = true;
             self.drain_pending = rows.div_ceil(lanes);
+            self.drain_after = t;
+            self.load_at = Some(t);
             return;
         }
         let t = self.after_cells();
