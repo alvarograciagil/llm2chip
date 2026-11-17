@@ -91,17 +91,18 @@ Mixed split in groups of four (`SHARING=mixed:4`): the four chips of a group sha
 
 | Chips | Units × lanes | Cells per die | tok/s | Clock | First token | Total area | Per chip |
 |---|---|---|---|---|---|---|---|
-| 12 | 32 × 64 | 8,192 | 660 | 1,014 MHz | 458 ms | 5,696 mm² | 475 mm² |
-| 12 | 32 × 128 | 8,192 | 828 | 1,031 MHz | 396 ms | 5,785 mm² | 482 mm² |
-| 12 | 32 × 128 | 16,384 | 1,214 | 1,031 MHz | 256 ms | 6,465 mm² | 539 mm² |
-| 12 | 64 × 128 | 16,384 | 1,367 | 1,023 MHz | 242 ms | 6,782 mm² | 565 mm² |
-| 12 | 64 × 128 | 32,768 | 1,911 | 1,023 MHz | 166 ms | 7,687 mm² | 641 mm² |
-| 12 | 128 × 128 | 32,768 | 2,020 | 1,016 MHz | 166 ms | 8,845 mm² | 737 mm² |
-| 12 | 64 × 128 | 65,536 | 2,363 | 1,023 MHz | 130 ms | 9,537 mm² | 795 mm² |
-| 12 | 128 × 128 | 65,536 | 2,660 | 1,016 MHz | 123 ms | 10,141 mm² | 845 mm² |
-| 16 | 64 × 128 | 131,072 | **2,761** | 1,023 MHz | 81 ms | 12,889 mm² | 806 mm² |
+| 12 | 32 × 64 | 8,192 | 692 | 1,014 MHz | 434 ms | 5,692 mm² | 474 mm² |
+| 12 | 32 × 128 | 8,192 | 869 | 1,031 MHz | 375 ms | 5,776 mm² | 481 mm² |
+| 12 | 32 × 64 | 16,384 | 951 | 1,014 MHz | 290 ms | 6,372 mm² | 531 mm² |
+| 12 | 32 × 128 | 16,384 | 1,312 | 1,031 MHz | 233 ms | 6,456 mm² | 538 mm² |
+| 12 | 64 × 128 | 16,384 | 1,472 | 1,023 MHz | 223 ms | 6,774 mm² | 564 mm² |
+| 12 | 64 × 64 | 32,768 | 1,554 | 1,007 MHz | 183 ms | 7,517 mm² | 626 mm² |
+| 12 | 64 × 128 | 32,768 | 2,140 | 1,023 MHz | 146 ms | 7,678 mm² | 640 mm² |
+| 12 | 128 × 128 | 32,768 | 2,244 | 1,016 MHz | 148 ms | 8,837 mm² | 736 mm² |
+| 12 | 64 × 128 | 65,536 | 2,631 | 1,023 MHz | 115 ms | 9,533 mm² | 794 mm² |
+| 12 | 128 × 128 | 65,536 | **3,102** | 1,016 MHz | 103 ms | 10,133 mm² | 844 mm² |
 
-So the circuit as generated today reaches **about 2,760 tok/s within the reticle** on 16 dies in groups of four, and 2,660 tok/s on 12 dies of 128 × 128 units is the point with the least area for each token per second (3.8 mm² per tok/s). Of the fastest die's 806 mm², 547 are cell memories, 92 vector memories, 167 logic and 0.1 microcode. The mixed split needs a quarter of the cells per die for the same speed, because each chip of a group runs a quarter of each layer; its first token is slower than with layers, because the prompt crosses the groups one after the other.
+So the circuit as generated today reaches **about 3,100 tok/s within the reticle** on 12 dies of 128 × 128 units in groups of four, which is also the point with the least area for each token per second (3.3 mm² per tok/s). Sixteen dies are no longer on the frontier: twelve are now both faster and smaller. Of each fastest die's 844 mm², 555 are cell memories, 190 vector memories, 99 logic and 0.1 microcode. The mixed split needs a quarter of the cells per die for the same speed, because each chip of a group runs a quarter of each layer; its first token is slower than with layers, because the prompt crosses the groups one after the other.
 
 Most of the gain over the first mixed frontier (1,468 tok/s on 13,578 mm²) came from the microprogram and the links (November 2026):
 - each chip of a group runs SiLU, sigmoid and element-wise products on its own slice, and DeltaNet's projection, convolution and SiLU on its own heads' channels, so a vector is gathered only where something reads it whole;
@@ -111,7 +112,14 @@ Most of the gain over the first mixed frontier (1,468 tok/s on 13,578 mm²) came
 - chips agree on a largest value by passing every value round at once;
 - long single steps share cycles with their neighbours, short loops are laid out turn after turn, and no normalisation is spent just before a table that aligns its input.
 
-With 64 × 128 units a token went from 687,745 cycles on 65,536 cells to 370,627 on 131,072, which now fit. The rest of the gap to the estimator's 3,750 tok/s is mostly attention at full context (about a quarter of the cycles: six heads use 48 of the 64 units, and each head's softmax is repeated in the eight units that share it) and the delta rule's short steps.
+A later round cut the single-cycle bookkeeping, from 370,627 to 334,195 cycles a token on 16 dies of 64 × 128 units:
+- a narrowed product takes its normalisation from the shift the chips already agreed on, so it needs no second scan and no second round of the ring;
+- the constants of the exponent arithmetic come in the image instead of being written before each use;
+- the next pass of the cells starts feeding while the last one settles, its totals loaded and cleared among the new pass's words;
+- the delta rule shared among units updates its state in place and reads its rows of the key and query where they are;
+- streams clear their counters in the word before, and attention does not normalise exponentials that are normalised already.
+
+With 64 × 128 units a token went from 687,745 cycles on 65,536 cells to 334,195 on 131,072. The rest of the gap to the estimator's 3,750 tok/s is mostly attention at full context (about a quarter of the cycles: six heads use 48 of the 64 units, and each head's softmax is repeated in the eight units that share it) and the delta rule's short steps.
 
 What each unit's vector memory holds on the busiest chip of 16 with 64 × 64 units and 32,768 cells (`memory` example):
 
