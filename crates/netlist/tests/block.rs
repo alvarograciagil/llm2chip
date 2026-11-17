@@ -20,19 +20,22 @@ fn config() -> DieConfig {
     }
 }
 
-/// `config` on a die that can scan what a step writes as it writes it.
+/// `config` on a die that scans what a step writes as it writes it, shifts a wide read
+/// left and aligns either way in one pass.
 fn scanning_config() -> DieConfig {
     let mut c = config();
-    c.features.widths[netlist::die::SCAN_WRITTEN_FIELD] = 1;
+    for field in [netlist::die::SCAN_WRITTEN_FIELD, netlist::die::WIDE_LEFT_FIELD, netlist::die::ALIGN_SHIFT_FIELD] {
+        c.features.widths[field] = 1;
+    }
     c
 }
 
-/// How many steps, in loops too, scan what they write.
-fn scanning_steps(steps: &[netlist::block::Step]) -> usize {
+/// How many steps, in loops too, have `which` on.
+fn steps_with(steps: &[netlist::block::Step], which: fn(&Alu<netlist::block::Expr>) -> bool) -> usize {
     use netlist::block::Step;
     steps.iter().map(|step| match step {
-        Step::One(s) | Step::Stream { body: s, .. } => usize::from(s.scan_written),
-        Step::Repeat { body, .. } | Step::Clustered { body, .. } => scanning_steps(body),
+        Step::One(s) | Step::Stream { body: s, .. } => usize::from(which(s)),
+        Step::Repeat { body, .. } | Step::Clustered { body, .. } => steps_with(body, which),
         _ => 0,
     }).sum()
 }
@@ -152,7 +155,7 @@ fn norms_and_function_tables_work_in_gates() {
 }
 
 #[test]
-fn steps_that_scan_what_they_write_normalise_as_a_scan_would() {
+fn steps_with_the_newer_fields_compute_what_the_model_does() {
     // Norms, tables, attention and the delta rule, with the normalisations that follow a
     // step taken from what the step wrote: the gates agree with the model exactly.
     let c = scanning_config();
@@ -162,7 +165,9 @@ fn steps_that_scan_what_they_write_normalise_as_a_scan_would() {
     asm.l2_normalize(0, 4, 4, (5, 6), None);
     asm.function(FN_SIGMOID, 0, 7, 4.into());
     asm.function(FN_SOFTPLUS, 0, 8, 4.into());
-    assert!(scanning_steps(&asm.steps) > 0, "no step scans what it writes");
+    assert!(steps_with(&asm.steps, |s| s.scan_written) > 0, "no step scans what it writes");
+    assert!(steps_with(&asm.steps, |s| s.wide_left) > 0, "no wide read shifts left");
+    assert!(steps_with(&asm.steps, |s| s.align_shift) > 0, "no alignment in one pass");
     let mut sim = run_gates(c, &asm);
     let mut model = Behavior::new(&c, &asm.initial);
     model.run(&asm.steps);

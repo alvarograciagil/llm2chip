@@ -613,6 +613,11 @@ pub struct Alu<N = u32> {
     /// Every element it writes counts in the magnitude, as a scan of it would; with
     /// `magnitude_clear`, the magnitude clears once before the first.
     pub scan_written: bool,
+    /// A wide read shifts left by the left shifter when that is not zero (`wide_left` on
+    /// the die), and a left shift takes A rounded right when its shifter is not zero
+    /// (`align_shift`).
+    pub wide_left: bool,
+    pub align_shift: bool,
     /// A count of leading zeros looks at the magnitude of `1 << reduce_group` neighbouring units.
     pub reduce_group: u32,
     /// Keeps the largest mantissa read, across every lane of a block.
@@ -658,6 +663,8 @@ impl<N: Default> Alu<N> {
             from_cluster: 0,
             from_group: 0,
             scan_written: false,
+            wide_left: false,
+            align_shift: false,
             broadcast_a: false,
             broadcast_b: false,
             shift: 0,
@@ -717,6 +724,8 @@ impl Alu<Expr> {
             from_cluster: self.from_cluster,
             from_group: self.from_group,
             scan_written: self.scan_written,
+            wide_left: self.wide_left,
+            align_shift: self.align_shift,
             broadcast_a: self.broadcast_a,
             broadcast_b: self.broadcast_b,
             shift: self.shift,
@@ -765,6 +774,7 @@ impl From<Alu<u32>> for Alu<Expr> {
         out.load_wide_shift = s.load_wide_shift;
         out.magnitude_scan = s.magnitude_scan;
         out.scan_written = s.scan_written;
+        (out.wide_left, out.align_shift) = (s.wide_left, s.align_shift);
         out.reduce_group = s.reduce_group;
         (out.max_scan, out.max_clear, out.max_out, out.write_spread, out.gather_shift) = (s.max_scan, s.max_clear, s.max_out, s.write_spread, s.gather_shift);
         out.magnitude_clear = s.magnitude_clear;
@@ -1073,6 +1083,9 @@ pub struct Assembly {
     from_top: bool,
     /// The die can scan what a step writes as it writes it.
     scans_writes: bool,
+    /// The die shifts a wide read left, and aligns either way, in one pass.
+    widens: bool,
+    aligns: bool,
 }
 
 /// The units that run the query heads of one key head, in a loop over heads: they differ
@@ -1229,6 +1242,23 @@ impl Assembly {
             load.load_wide_shift = true;
             self.push(load);
         }
+        if self.widens {
+            // The left shift is known before the sums are read (see below), so each is
+            // shifted left as it is read when no shift right is needed: one pass.
+            self.clear_shifts();
+            self.load_left_from_count();
+            self.elements(sets, &[wide, from], true, |s, set, vector| {
+                let mut out = alu(OP_WIDE_OUT);
+                (out.a, out.dst, out.vector, out.wide_left) = ((0, wide + set), (dst, from + set), vector, true);
+                s.push(out);
+            });
+            self.binary(OP_ADD, self.exponent(a), self.exponent(b), self.sc(5));
+            self.binary(OP_ADD, self.sc(5), self.sc(4), self.sc(6));
+            let offset = self.value(1 - self.bits as i64, self.sc(7));
+            self.binary(OP_ADD, self.sc(6), offset, self.sc(8));
+            self.binary(OP_SUB, self.sc(8), self.sc(0), self.exponent(dst));
+            return self.clear_shifts();
+        }
         self.elements(sets, &[wide, from], true, |s, set, vector| {
             let mut out = alu(OP_WIDE_OUT);
             out.a = (0, wide + set);
@@ -1247,6 +1277,13 @@ impl Assembly {
         // unit and chip, so the narrowed sums need neither a second scan nor a second round
         // of the ring. The reference machine narrows the same way.
         self.clear_shifts();
+        self.load_left_from_count();
+        self.shift_left_from(dst, from, sets);
+    }
+
+    /// The left shift of a narrowing, the shift right in scratch 4 less the count in
+    /// scratch 2, into scratch 0 and the left shifter.
+    fn load_left_from_count(&mut self) {
         let mut left = alu(OP_SUB);
         (left.a, left.b, left.dst) = (self.sc(4), self.sc(2), self.sc(0));
         if self.shifts_now {
@@ -1257,7 +1294,6 @@ impl Assembly {
             self.push(left);
             self.load_shifts(None, None, Some(self.sc(0)));
         }
-        self.shift_left_from(dst, from, sets);
     }
 
     /// When the steps just before wrote exactly `len` elements of `reg` from `from`, and
@@ -1367,7 +1403,7 @@ impl Assembly {
 
     pub fn new(c: &DieConfig) -> Self {
         let initial = constants(c.cell.activation_bits).iter().enumerate().map(|(i, v)| ((scratch_register(c), CONSTANT_FIRST + i as u32), *v)).collect();
-        Self { steps: Vec::new(), initial, wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false, scans_writes: c.features.widths[crate::die::SCAN_WRITTEN_FIELD] > 0 }
+        Self { steps: Vec::new(), initial, wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false, scans_writes: c.features.widths[crate::die::SCAN_WRITTEN_FIELD] > 0, widens: c.features.widths[crate::die::WIDE_LEFT_FIELD] > 0, aligns: c.features.widths[crate::die::ALIGN_SHIFT_FIELD] > 0 }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -2753,6 +2789,15 @@ impl BlockOps for Assembly {
 
     fn align_to(&mut self, src: u32, from: Expr, exponent: i64, dst: u32, to: Expr, len: Expr) {
         self.load_alignment(src, exponent);
+        if self.aligns {
+            // Only one of the two shifts is ever needed, and one pass takes whichever it is.
+            self.elements(len, &[from, to], src != dst || from == to, |s, i, vector| {
+                let mut step = alu(OP_SHIFT_LEFT);
+                (step.a, step.dst, step.vector, step.align_shift) = ((src, from + i), (dst, to + i), vector, true);
+                s.push(step);
+            });
+            return self.clear_shifts();
+        }
         let apart = src != dst || from == to;
         self.elements(len, &[from, to], true, |s, i, vector| {
             let mut right = alu(OP_MOV);
@@ -3071,6 +3116,12 @@ impl Behavior {
                 let width = accumulator_bits(bits) - 1;
                 (width - (64 - (self.wide_magnitude & ((1 << width) - 1)).leading_zeros())) as i64
             }
+            OP_WIDE_OUT if s.wide_left && self.shift_left > 0 => {
+                let low = wrap(wide_value as i128, bits);
+                let wide = wrap((low as i128) << self.shift_left, 2 * bits);
+                let top = (1i64 << (bits - 1)) - 1;
+                wide.clamp(-top - 1, top)
+            }
             OP_WIDE_OUT => round_right(wide_value as i128, self.wide_shift.min(63), bits),
             OP_EQUAL => {
                 if wrap(aligned_a as i128 - aligned_b as i128, bits) == 0 && !self.equal_seen {
@@ -3080,6 +3131,7 @@ impl Behavior {
                     0
                 }
             }
+            OP_SHIFT_LEFT if s.align_shift && self.shift_a > 0 => aligned_a,
             OP_SHIFT_LEFT => {
                 let wide = wrap((a as i128) << self.shift_left, 2 * bits);
                 let top = (1i64 << (bits - 1)) - 1;

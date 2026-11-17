@@ -318,6 +318,12 @@ pub struct ControlWord {
     pub from_group: u32,
     /// What this word writes counts in the magnitude, as a scan would.
     pub scan_written: bool,
+    /// A wide read shifts left by the left shifter, when that is not zero, instead of
+    /// rounding right: a narrowing that needs no shift right is normalised as it goes.
+    pub wide_left: bool,
+    /// A left shift takes A rounded right by its shifter instead, when that is not zero:
+    /// one pass aligns either way.
+    pub align_shift: bool,
     /// An index write only reaches this vector unit, plus one; zero means all of them.
     pub x_only: u32,
     /// Only the first `literal_b` vector units execute from now on.
@@ -368,10 +374,12 @@ pub struct ControlWord {
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 83;
+pub const FIELD_COUNT: usize = 85;
 /// The field that names a unit of the group to read operand B from.
 pub const FROM_GROUP_FIELD: usize = 81;
 pub const SCAN_WRITTEN_FIELD: usize = 82;
+pub const WIDE_LEFT_FIELD: usize = 83;
+pub const ALIGN_SHIFT_FIELD: usize = 84;
 const LINK_LOOP_FIELD: usize = 79;
 const LINK_TAKE_LOOP_FIELD: usize = 80;
 const LINK_SEND_FIELD: usize = 17;
@@ -503,6 +511,8 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("link_take_loop", 1),
         ("from_group", c.features.group_bits + 1),
         ("scan_written", 1),
+        ("wide_left", 1),
+        ("align_shift", 1),
     ]
 }
 
@@ -597,6 +607,8 @@ impl ControlWord {
             self.link_take_loop as u128,
             self.from_group as u128,
             self.scan_written as u128,
+            self.wide_left as u128,
+            self.align_shift as u128,
         ]
     }
 
@@ -2270,6 +2282,38 @@ impl Gen {
             let widened: Vec<Bit> = (0..left_bits as usize).map(|i| read_a.get(i).copied().unwrap_or(raw_sign)).collect();
             let moved_left = barrel_left(&mut b, &left_mux, "shift_left_barrel", &widened, &shift_left);
             let saturated = saturate(&mut b, &moved_left, a);
+            // One pass aligns either way, and a narrowing with no shift right is normalised
+            // as it goes: a second path beside each, never one after the other.
+            let (aligns, widens) = (c.features.widths[ALIGN_SHIFT_FIELD] > 0, c.features.widths[WIDE_LEFT_FIELD] > 0);
+            let (align_select, wide_select) = {
+                let mut l = Logic { b: &mut b, next: 59_700 };
+                let right = l.any(&shift_a);
+                let left = l.any(&shift_left);
+                let align = if aligns { l.and(fields["align_shift"][0], right) } else { Bit::Zero };
+                let wide = if widens { l.and(fields["wide_left"][0], left) } else { Bit::Zero };
+                (align, wide)
+            };
+            let left_of_wide = |b: &mut Builder, name: &str, value: &[Bit]| -> Vec<Bit> {
+                let sign = value[a as usize - 1];
+                let widened: Vec<Bit> = (0..left_bits as usize).map(|i| if i < a as usize { value[i] } else { sign }).collect();
+                let moved = barrel_left(b, &left_mux, name, &widened, &shift_left);
+                saturate(b, &moved, a)
+            };
+            let saturated = if aligns {
+                let y = b.wire("align_either", a);
+                b.inst("align_select", &mux_a, &[("s", vec![align_select]), ("a", saturated), ("b", aligned_a.clone()), ("y", y.clone())]);
+                y
+            } else {
+                saturated
+            };
+            let wide_shifted = if widens {
+                let left = left_of_wide(&mut b, "wide_left_barrel", &wide_read);
+                let y = b.wire("wide_either", a);
+                b.inst("wide_select", &mux_a, &[("s", vec![wide_select]), ("a", wide_shifted), ("b", left), ("y", y.clone())]);
+                y
+            } else {
+                wide_shifted
+            };
 
             b.group("Function table");
             let table_out = b.wire("table_out", a);
@@ -2376,9 +2420,24 @@ impl Gen {
                 let widened: Vec<Bit> = (0..left_bits as usize).map(|i| operand_a.get(i).copied().unwrap_or(raw_sign)).collect();
                 let moved_left = barrel_left(&mut b, &left_mux, &name("shift_left"), &widened, &shift_left);
                 let saturated = saturate(&mut b, &moved_left, a);
+                let saturated = if aligns {
+                    let y = b.wire(&name("align_either"), a);
+                    b.inst(&name("align_select"), &mux_a, &[("s", vec![align_select]), ("a", saturated), ("b", lane_a.clone()), ("y", y.clone())]);
+                    y
+                } else {
+                    saturated
+                };
                 let mut leaves = vec![zero_leaf.clone(); 16];
                 leaves[OP_ADD as usize] = sum.clone();
                     let wide_out = self.rounded_right(&mut b, &name("wide_right"), &wide_banks[lane][fraction..], &wide_shift, a as usize);
+                    let wide_out = if widens {
+                        let left = left_of_wide(&mut b, &name("wide_left_barrel"), &wide_banks[lane][fraction..]);
+                        let y = b.wire(&name("wide_either"), a);
+                        b.inst(&name("wide_select"), &mux_a, &[("s", vec![wide_select]), ("a", wide_out), ("b", left), ("y", y.clone())]);
+                        y
+                    } else {
+                        wide_out
+                    };
             let link_leaf = link_lane_in.get(lane - 1).cloned().unwrap_or_else(|| zero_leaf.clone());
             for (op, leaf) in [(OP_MUL, shifted), (OP_FUNCTION, table), (OP_SUB, sum), (OP_MOV, lane_a), (OP_SHIFT_LEFT, saturated), (OP_WIDE_OUT, wide_out), (OP_LINK, link_leaf)] {
                     if c.features.uses(op) {
@@ -3446,6 +3505,7 @@ impl DieProgram {
             }
             if (1..n + 1 + extra).contains(&k) {
                 (w.op, w.shift, w.function, w.magnitude_scan, w.accumulate, w.wide_scan, w.max_scan) = (step.op, step.shift, step.function, step.magnitude_scan && k <= n, step.accumulate && k <= n, step.wide_scan && k <= n, step.max_scan && k <= n);
+                (w.wide_left, w.align_shift) = (step.wide_left, step.align_shift);
                 (w.broadcast_a, w.broadcast_b) = (step.broadcast_a, step.broadcast_b);
                 // A stream that takes from a link takes from the port its step names.
                 w.link_take_loop = step.op == OP_LINK && if step.link_send { step.take_loop } else { step.link_loop };
@@ -3535,6 +3595,7 @@ impl DieProgram {
             if j >= 1 {
                 (slot.op, slot.shift, slot.function, slot.magnitude_scan, slot.accumulate) = (w.op, w.shift, w.function, w.magnitude_scan, w.accumulate);
                 (slot.wide_scan, slot.max_scan, slot.broadcast_a, slot.broadcast_b, slot.link_take_loop) = (w.wide_scan, w.max_scan, w.broadcast_a, w.broadcast_b, w.link_take_loop);
+                (slot.wide_left, slot.align_shift) = (w.wide_left, w.align_shift);
             }
         }
         // The reads start in the tail, so the read counter clears in the word before them;
@@ -3958,6 +4019,7 @@ impl DieProgram {
             (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
             (w.from_cluster, w.from_group) = (step.from_cluster, step.from_group);
             w.op = step.op;
+            (w.wide_left, w.align_shift) = (step.wide_left, step.align_shift);
             // The word that takes from a link names the port with it.
             w.link_take_loop = step.op == OP_LINK && if step.link_send { step.take_loop } else { step.link_loop };
             w.shift = step.shift;
@@ -4045,7 +4107,7 @@ impl DieProgram {
         (w.window_x, w.window_a, w.window_b, w.window_dst) = (step.window_x, step.window_a, step.window_b, step.window_dst);
         (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
         (w.from_cluster, w.from_group) = (step.from_cluster, step.from_group);
-        (w.op, w.shift, w.function) = (step.op, step.shift, step.function);
+        (w.op, w.shift, w.function, w.wide_left, w.align_shift) = (step.op, step.shift, step.function, step.wide_left, step.align_shift);
         (w.magnitude_scan, w.reduce_group, w.max_scan, w.max_out) = (step.magnitude_scan, step.reduce_group, step.max_scan, step.max_out);
         (w.accumulate, w.wide_scan) = (step.accumulate, step.wide_scan);
         (w.reg_dst, w.literal_dst, w.offset_dst, w.write_now, w.scan_written) = (step.dst.0, step.dst.1, step.offset_dst, step.write, step.scan_written);
