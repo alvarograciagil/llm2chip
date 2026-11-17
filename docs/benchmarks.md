@@ -91,14 +91,27 @@ Mixed split in groups of four (`SHARING=mixed:4`): the four chips of a group sha
 
 | Chips | Units × lanes | Cells per die | tok/s | Clock | First token | Total area | Per chip |
 |---|---|---|---|---|---|---|---|
-| 12 | 32 × 128 | 8,192 | 549 | 1,031 MHz | 628 ms | 8,195 mm² | 683 mm² |
-| 12 | 32 × 128 | 16,384 | 807 | 1,031 MHz | 412 ms | 8,919 mm² | 743 mm² |
-| 16 | 32 × 128 | 32,768 | 1,044 | 1,031 MHz | 231 ms | 10,962 mm² | 685 mm² |
-| 16 | 64 × 128 | 32,768 | 1,194 | 1,010 MHz | 213 ms | 11,387 mm² | 712 mm² |
-| 16 | 32 × 128 | 65,536 | 1,264 | 1,031 MHz | 185 ms | 12,697 mm² | 794 mm² |
-| 16 | 64 × 128 | 65,536 | **1,468** | 1,010 MHz | 170 ms | 13,578 mm² | 849 mm² |
+| 12 | 32 × 64 | 8,192 | 660 | 1,014 MHz | 458 ms | 5,696 mm² | 475 mm² |
+| 12 | 32 × 128 | 8,192 | 828 | 1,031 MHz | 396 ms | 5,785 mm² | 482 mm² |
+| 12 | 32 × 128 | 16,384 | 1,214 | 1,031 MHz | 256 ms | 6,465 mm² | 539 mm² |
+| 12 | 64 × 128 | 16,384 | 1,367 | 1,023 MHz | 242 ms | 6,782 mm² | 565 mm² |
+| 12 | 64 × 128 | 32,768 | 1,911 | 1,023 MHz | 166 ms | 7,687 mm² | 641 mm² |
+| 12 | 128 × 128 | 32,768 | 2,020 | 1,016 MHz | 166 ms | 8,845 mm² | 737 mm² |
+| 12 | 64 × 128 | 65,536 | 2,363 | 1,023 MHz | 130 ms | 9,537 mm² | 795 mm² |
+| 12 | 128 × 128 | 65,536 | 2,660 | 1,016 MHz | 123 ms | 10,141 mm² | 845 mm² |
+| 16 | 64 × 128 | 131,072 | **2,761** | 1,023 MHz | 81 ms | 12,889 mm² | 806 mm² |
 
-So the circuit as generated today reaches **about 1,470 tok/s within the reticle** on 16 dies in groups of four, and 954 tok/s on 12 dies split by layers is the point with the least area for each token per second (9.0 mm² per tok/s, against 9.3 for the fastest). The mixed split needs only half the cells per die for the same speed, because each chip of a group runs a quarter of each layer; its first token is slower, because the prompt crosses the groups one after the other. Of each fastest die's 849 mm², 615 are cell memories, 145 vector memories, 88 logic and 0.1 microcode. That is still under half of the estimator's 3,750 tok/s: the matrix products take at least as many cycles as a matrix's columns divided by the vector units, and the cells of a die cannot grow while the vector memory takes a sixth of it.
+So the circuit as generated today reaches **about 2,760 tok/s within the reticle** on 16 dies in groups of four, and 2,660 tok/s on 12 dies of 128 × 128 units is the point with the least area for each token per second (3.8 mm² per tok/s). Of the fastest die's 806 mm², 547 are cell memories, 92 vector memories, 167 logic and 0.1 microcode. The mixed split needs a quarter of the cells per die for the same speed, because each chip of a group runs a quarter of each layer; its first token is slower than with layers, because the prompt crosses the groups one after the other.
+
+Most of the gain over the first mixed frontier (1,468 tok/s on 13,578 mm²) came from the microprogram and the links (November 2026):
+- each chip of a group runs SiLU, sigmoid and element-wise products on its own slice, and DeltaNet's projection, convolution and SiLU on its own heads' channels, so a vector is gathered only where something reads it whole;
+- products that cannot all be shared (DeltaNet's 48-row `in_proj_a` and `in_proj_b`) take a pass of their own, so the large projections in the same pass are shared too, which also cuts each cell's memory by a quarter;
+- the vector units narrow a slice each of a product shared by rows;
+- exchanges between chips go as streams, 16 blocks a chunk, and a chip passes each block on in the cycle it arrives; the dies hold their read addresses while a link waits, so a stream loses nothing;
+- chips agree on a largest value by passing every value round at once;
+- long single steps share cycles with their neighbours, short loops are laid out turn after turn, and no normalisation is spent just before a table that aligns its input.
+
+With 64 × 128 units a token went from 687,745 cycles on 65,536 cells to 370,627 on 131,072, which now fit. The rest of the gap to the estimator's 3,750 tok/s is mostly attention at full context (about a quarter of the cycles: six heads use 48 of the 64 units, and each head's softmax is repeated in the eight units that share it) and the delta rule's short steps.
 
 What each unit's vector memory holds on the busiest chip of 16 with 64 × 64 units and 32,768 cells (`memory` example):
 
