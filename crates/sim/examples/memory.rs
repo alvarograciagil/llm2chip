@@ -69,7 +69,9 @@ fn main() {
             let ops = share.cycles_by_op(&layout, &program, chip, context - 1).unwrap().len();
             let mut totals: std::collections::BTreeMap<&str, u64> = Default::default();
             let mut signatures: std::collections::BTreeMap<String, u64> = Default::default();
+            let mut by_op: std::collections::BTreeMap<(String, &str), u64> = Default::default();
             for inst in &program.ops[start..start + ops] {
+                let name = format!("{:?}", inst.op).split([' ', '{', '(']).next().unwrap().to_string();
                 let code = layout.op_microprogram(&program, inst, false).unwrap();
                 for (pc, (_, cycles)) in profile(&code, &die, context - 1) {
                     let w = &code.words[pc];
@@ -93,6 +95,7 @@ fn main() {
                         "single: one element"
                     };
                     *totals.entry(kind).or_default() += cycles;
+                    *by_op.entry((name.clone(), if kind.starts_with("single") { "single" } else { kind })).or_default() += cycles;
                     if std::env::var("KINDS").as_deref() == Ok(kind) {
                         let text = format!("{w:?}");
                         let fields: Vec<&str> = text.trim_start_matches("ControlWord { ").trim_end_matches(" }").split(", ").filter(|f| !f.ends_with(": false") && !f.ends_with(": 0")).map(|f| f.split(':').next().unwrap()).collect();
@@ -104,6 +107,11 @@ fn main() {
             common.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
             for (fields, cycles) in common.iter().take(25) {
                 println!("  {cycles:>7} {fields}");
+            }
+            let mut rows: Vec<_> = by_op.into_iter().collect();
+            rows.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+            for ((name, kind), cycles) in rows.iter().take(30) {
+                println!("  {name:<16} {kind:<16} {cycles:>8}");
             }
             let total: u64 = totals.values().sum();
             println!("chip {chip}, by kind of word: {total} cycles");
