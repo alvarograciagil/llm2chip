@@ -3418,7 +3418,7 @@ impl DieProgram {
     fn reset_counters(&mut self) {
         let end = self.end();
         let before = end.checked_sub(1).map(|at| self.cycles[at]);
-        let merge = before.is_some_and(|w| !self.labels.contains(&end) && !w.x_write && !w.branch && w.repeat == 0 && !w.repeat_x && !w.halt);
+        let merge = before.is_some_and(|w| !self.labels.contains(&end) && !w.branch && w.repeat == 0 && !w.repeat_x && !w.halt);
         let w = self.slot(if merge { end - 1 } else { end });
         (w.read_reset, w.write_reset) = (true, true);
     }
