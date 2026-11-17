@@ -316,6 +316,8 @@ pub struct ControlWord {
     /// Operand B comes from the unit at this place of this one's group, plus one; zero means
     /// its own: see `DieFeatures::group_bits`.
     pub from_group: u32,
+    /// What this word writes counts in the magnitude, as a scan would.
+    pub scan_written: bool,
     /// An index write only reaches this vector unit, plus one; zero means all of them.
     pub x_only: u32,
     /// Only the first `literal_b` vector units execute from now on.
@@ -366,9 +368,10 @@ pub struct ControlWord {
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 82;
+pub const FIELD_COUNT: usize = 83;
 /// The field that names a unit of the group to read operand B from.
 pub const FROM_GROUP_FIELD: usize = 81;
+pub const SCAN_WRITTEN_FIELD: usize = 82;
 const LINK_LOOP_FIELD: usize = 79;
 const LINK_TAKE_LOOP_FIELD: usize = 80;
 const LINK_SEND_FIELD: usize = 17;
@@ -499,6 +502,7 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("link_loop", 1),
         ("link_take_loop", 1),
         ("from_group", c.features.group_bits + 1),
+        ("scan_written", 1),
     ]
 }
 
@@ -592,6 +596,7 @@ impl ControlWord {
             self.link_loop as u128,
             self.link_take_loop as u128,
             self.from_group as u128,
+            self.scan_written as u128,
         ]
     }
 
@@ -805,7 +810,9 @@ fn writes_at_once(s: &Alu) -> bool {
 /// agree. Addresses only matter when they are presented, so those may differ.
 fn can_follow(previous: &Alu, next: &Alu, lanes: u32) -> bool {
     // A clear in the read cycle loses only what `previous` would gather in that cycle.
-    let clears = (next.magnitude_clear && previous.magnitude_scan)
+    // A count of the magnitude needs the last written value already in it.
+    let clears = (next.magnitude_clear && (previous.magnitude_scan || previous.scan_written))
+        || (previous.scan_written && next.op == OP_LZC)
         || (next.max_clear && previous.max_scan)
         || (next.accumulator_clear && previous.accumulate)
         || (next.wide_clear && previous.wide_scan);
@@ -1807,6 +1814,8 @@ impl Gen {
             // What each lane computes this cycle, for a block written as it is computed.
             let lane_direct: Vec<Vec<Bit>> = (0..lanes).map(|lane| if lane == 0 { direct_result.clone() } else { b.wire(&format!("lane{lane}_direct"), a) }).collect();
             let (mut banks_a, mut banks_b) = (Vec::with_capacity(lanes), Vec::with_capacity(lanes));
+            // What each lane writes, and whether it does, for a scan of the written values.
+            let mut lane_writes: Vec<(Bit, Vec<Bit>)> = Vec::with_capacity(lanes);
             {
                 let bank_bits = mem_bits - lane_bits as u32;
                 let mut l = Logic { b: &mut b, next: 40_000 };
@@ -1835,6 +1844,7 @@ impl Gen {
                     let (read_this_a, read_this_b) = (l.b.wire(&format!("{name_a}_data"), a), l.b.wire(&format!("{name_b}_data"), a));
                     l.b.ram2p(&name_a, bank_bits, a, &[("raddr", raddr_a[lane_bits..].to_vec()), ("waddr", waddr[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data.clone()), ("rdata", read_this_a.clone())]);
                     l.b.ram2p(&name_b, bank_bits, a, &[("raddr", addr_b[lane_bits..].to_vec()), ("waddr", waddr[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data.clone()), ("rdata", read_this_b.clone())]);
+                    lane_writes.push((write, data.clone()));
                     let written = l.fresh_bus(a as usize);
                     l.connect_flops(&data, &written);
                     let take = |l: &mut Logic, same: Bit, memory: Vec<Bit>| -> Vec<Bit> {
@@ -1984,6 +1994,7 @@ impl Gen {
 
             b.group("Magnitude detector");
             let scan = ctl("magnitude_scan", &mut b, &fields);
+            let scan_written = if c.features.widths[SCAN_WRITTEN_FIELD] > 0 { ctl("scan_written", &mut b, &fields) } else { Bit::Zero };
             let magnitude_clear = ctl("magnitude_clear", &mut b, &fields);
             let magnitude = b.wire("magnitude", a);
             let keep_magnitude = b.wire("magnitude_keep", 1)[0];
@@ -2009,6 +2020,19 @@ impl Gen {
                 }
                 let seen = b.wire(&format!("mag_seen{i}"), 1)[0];
                 b.and_to(scan, differs, seen);
+                // A word that scans what it writes looks at every lane it writes.
+                let seen = if scan_written != Bit::Zero && i != top {
+                    let mut l = Logic { b: &mut b, next: 59_300 };
+                    let bits: Vec<Bit> = lane_writes.iter().map(|(write, data)| {
+                        let here = l.xor(data[i], data[top]);
+                        l.and(*write, here)
+                    }).collect();
+                    let any = l.any(&bits);
+                    let counted = l.and(scan_written, any);
+                    l.or(seen, counted)
+                } else {
+                    seen
+                };
                 let merged = b.wire(&format!("mag_merged{i}"), 1)[0];
                 b.or_to(magnitude[i], seen, merged);
                 b.and_to(keep_magnitude, merged, magnitude_d[i]);
@@ -3401,6 +3425,8 @@ impl DieProgram {
 
         let word = |k: usize| {
             let mut w = ControlWord { vector: step.vector, window_x, from_cluster: step.from_cluster, from_group: step.from_group, gather_shift: step.gather_shift, ..Default::default() };
+            // A stream that scans what it writes clears the magnitude as it starts.
+            w.magnitude_clear = k == 0 && step.magnitude_clear;
             if k < n {
                 w.read_step = true;
                 (w.reg_a, w.literal_a, w.offset_a, w.window_a, w.fixed_a, w.a_shift) = (step.a.0, literal_a, offset_a, step.window_a, fixed_a, a_shift);
@@ -3413,7 +3439,7 @@ impl DieProgram {
                 w.link_take_loop = step.op == OP_LINK && if step.link_send { step.take_loop } else { step.link_loop };
             }
             if (written..n + written).contains(&k) {
-                (w.reg_dst, w.offset_dst, w.window_dst, w.write_en, w.write_spread) = (step.dst.0, offset_dst, step.window_dst, step.write, step.write_spread);
+                (w.reg_dst, w.offset_dst, w.window_dst, w.write_en, w.write_spread, w.scan_written) = (step.dst.0, offset_dst, step.window_dst, step.write, step.write_spread, step.scan_written);
                 // What would be written goes out on the link instead.
                 (w.link_send, w.link_loop) = (step.link_send, step.link_loop && step.link_send);
             }
@@ -3478,7 +3504,7 @@ impl DieProgram {
         let first = word(0);
         let d = (t.written - 1).min(leading);
         let reads_dst = |w: &ControlWord| w.read_step && (w.reg_a == t.dst || w.reg_b == t.dst);
-        if d == 0 || (first.vector, first.window_x, first.from_cluster, first.from_group, first.gather_shift) != t.shared || (0..d).any(|j| reads_dst(&word(j))) {
+        if d == 0 || first.magnitude_clear || (first.vector, first.window_x, first.from_cluster, first.from_group, first.gather_shift) != t.shared || (0..d).any(|j| reads_dst(&word(j))) {
             return 0;
         }
         for j in 0..d {
@@ -3960,6 +3986,7 @@ impl DieProgram {
         (w.window_x, w.window_dst) = (step.window_x, step.window_dst);
         w.vector = step.vector;
         w.write_en = step.write;
+        w.scan_written = step.scan_written;
         w.load_shift_a = step.load_shift_a;
         w.load_shift_b = step.load_shift_b;
         w.load_shift_left = step.load_shift_left;
@@ -4009,7 +4036,7 @@ impl DieProgram {
         (w.op, w.shift, w.function) = (step.op, step.shift, step.function);
         (w.magnitude_scan, w.reduce_group, w.max_scan, w.max_out) = (step.magnitude_scan, step.reduce_group, step.max_scan, step.max_out);
         (w.accumulate, w.wide_scan) = (step.accumulate, step.wide_scan);
-        (w.reg_dst, w.literal_dst, w.offset_dst, w.write_now) = (step.dst.0, step.dst.1, step.offset_dst, step.write);
+        (w.reg_dst, w.literal_dst, w.offset_dst, w.write_now, w.scan_written) = (step.dst.0, step.dst.1, step.offset_dst, step.write, step.scan_written);
         (w.load_shift_a, w.load_shift_b, w.load_shift_left, w.shift_now) = (step.load_shift_a, step.load_shift_b, step.load_shift_left, step.shift_now);
         w.load_wide_shift = step.load_wide_shift;
     }

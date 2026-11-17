@@ -20,6 +20,23 @@ fn config() -> DieConfig {
     }
 }
 
+/// `config` on a die that can scan what a step writes as it writes it.
+fn scanning_config() -> DieConfig {
+    let mut c = config();
+    c.features.widths[netlist::die::SCAN_WRITTEN_FIELD] = 1;
+    c
+}
+
+/// How many steps, in loops too, scan what they write.
+fn scanning_steps(steps: &[netlist::block::Step]) -> usize {
+    use netlist::block::Step;
+    steps.iter().map(|step| match step {
+        Step::One(s) | Step::Stream { body: s, .. } => usize::from(s.scan_written),
+        Step::Repeat { body, .. } | Step::Clustered { body, .. } => scanning_steps(body),
+        _ => 0,
+    }).sum()
+}
+
 fn mask(v: i64, bits: u32) -> u128 {
     (v as u64 as u128) & ((1u128 << bits) - 1)
 }
@@ -132,6 +149,54 @@ fn norms_and_function_tables_work_in_gates() {
         close(model.value(7, i as u32), 1.0 / (1.0 + (-v).exp()), 0.05, "sigmoide");
         close(model.value(8, i as u32), (1.0 + v.exp()).ln(), 0.08, "softplus");
     }
+}
+
+#[test]
+fn steps_that_scan_what_they_write_normalise_as_a_scan_would() {
+    // Norms, tables, attention and the delta rule, with the normalisations that follow a
+    // step taken from what the step wrote: the gates agree with the model exactly.
+    let c = scanning_config();
+    let mut asm = Assembly::new(&c);
+    asm.load_vector(0, &[3.0, -4.0, 1.5, 0.5]);
+    asm.rms_normalize(0, 1, 4, (2, 3), None, None);
+    asm.l2_normalize(0, 4, 4, (5, 6), None);
+    asm.function(FN_SIGMOID, 0, 7, 4.into());
+    asm.function(FN_SOFTPLUS, 0, 8, 4.into());
+    assert!(scanning_steps(&asm.steps) > 0, "no step scans what it writes");
+    let mut sim = run_gates(c, &asm);
+    let mut model = Behavior::new(&c, &asm.initial);
+    model.run(&asm.steps);
+    for (reg, len) in [(1, 4), (4, 4), (7, 4), (8, 4)] {
+        assert_same(&mut sim, &model, c, reg, len);
+    }
+
+    let mut asm = Assembly::new(&c);
+    asm.load_vector(0, &[0.4, -0.2, 0.7, 0.1]);
+    asm.load_vector(1, &[0.3, 0.1, 0.9, -0.2, -0.5, 0.4, 0.2, 0.6, 0.8, -0.3, -0.1, 0.25]);
+    asm.load_vector(2, &[1.2, -0.7, 0.3, 2.0, -1.1, 0.4, 0.9, -0.6, 0.5, 1.5, -2.1, 0.2]);
+    asm.load_vector(3, &[1.0; 3]);
+    let regs = AttentionRegs { scores: 5, top: 6, shifted: 7, weights: 8, total: 9, inverse: 10, probabilities: 11, softcap: None };
+    asm.attention(0, KeyStore { keys: 1, values: 2, stride: 4, offset: 0.into(), local: false }, 3, 4, 4, 3.into(), None, regs);
+    let mut sim = run_gates(c, &asm);
+    let mut model = Behavior::new(&c, &asm.initial);
+    model.run(&asm.steps);
+    assert_same(&mut sim, &model, c, 4, 4);
+    assert_same(&mut sim, &model, c, 11, 3);
+
+    let mut asm = Assembly::new(&c);
+    asm.load_vector(0, &[0.5, -0.25, 0.1, 0.4, -0.3, 0.2]);
+    asm.load_vector(1, &[0.6, -0.48, 0.64]);
+    asm.load_vector(2, &[0.2, 0.5, -0.3]);
+    asm.load_vector(3, &[1.1, -0.6]);
+    asm.load_vector(4, &[0.75]);
+    asm.load_vector(5, &[0.9]);
+    let regs = DeltaRegs { state: 0, key: 1, query: 2, value: 3, beta: 4, decay: 5, memory: 6, error: 7, delta: 8, update: 9, next: 10, out: 11 };
+    asm.delta_step(regs, 3, 2);
+    let mut sim = run_gates(c, &asm);
+    let mut model = Behavior::new(&c, &asm.initial);
+    model.run(&asm.steps);
+    assert_same(&mut sim, &model, c, 0, 6);
+    assert_same(&mut sim, &model, c, 11, 2);
 }
 
 #[test]

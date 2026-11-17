@@ -610,6 +610,9 @@ pub struct Alu<N = u32> {
     pub shift_now: bool,
     pub load_wide_shift: bool,
     pub magnitude_scan: bool,
+    /// Every element it writes counts in the magnitude, as a scan of it would; with
+    /// `magnitude_clear`, the magnitude clears once before the first.
+    pub scan_written: bool,
     /// A count of leading zeros looks at the magnitude of `1 << reduce_group` neighbouring units.
     pub reduce_group: u32,
     /// Keeps the largest mantissa read, across every lane of a block.
@@ -654,6 +657,7 @@ impl<N: Default> Alu<N> {
             vector: false,
             from_cluster: 0,
             from_group: 0,
+            scan_written: false,
             broadcast_a: false,
             broadcast_b: false,
             shift: 0,
@@ -712,6 +716,7 @@ impl Alu<Expr> {
             vector: self.vector,
             from_cluster: self.from_cluster,
             from_group: self.from_group,
+            scan_written: self.scan_written,
             broadcast_a: self.broadcast_a,
             broadcast_b: self.broadcast_b,
             shift: self.shift,
@@ -759,6 +764,7 @@ impl From<Alu<u32>> for Alu<Expr> {
         out.shift_now = s.shift_now;
         out.load_wide_shift = s.load_wide_shift;
         out.magnitude_scan = s.magnitude_scan;
+        out.scan_written = s.scan_written;
         out.reduce_group = s.reduce_group;
         (out.max_scan, out.max_clear, out.max_out, out.write_spread, out.gather_shift) = (s.max_scan, s.max_clear, s.max_out, s.write_spread, s.gather_shift);
         out.magnitude_clear = s.magnitude_clear;
@@ -1065,6 +1071,8 @@ pub struct Assembly {
     ring_heads: bool,
     /// The function being laid out is `exp_from_top`'s, normalised already.
     from_top: bool,
+    /// The die can scan what a step writes as it writes it.
+    scans_writes: bool,
 }
 
 /// The units that run the query heads of one key head, in a loop over heads: they differ
@@ -1151,7 +1159,9 @@ impl Assembly {
     /// Normalises `len` elements of `reg` from `from`, sharing its one exponent.
     fn normalize_from(&mut self, reg: u32, from: Expr, len: Expr) {
         self.clear_shifts();
-        self.scan_and_shift(reg, from, len);
+        if !self.scan_as_written(reg, from, len) {
+            self.scan_and_shift(reg, from, len);
+        }
 
         let mut count = alu(OP_LZC);
         count.dst = self.sc(0);
@@ -1250,6 +1260,61 @@ impl Assembly {
         self.shift_left_from(dst, from, sets);
     }
 
+    /// When the steps just before wrote exactly `len` elements of `reg` from `from`, and
+    /// nothing since has touched the magnitude or `reg`, they scan what they write: the
+    /// first clears the magnitude, and no scan of its own is needed. Says whether they do.
+    fn scan_as_written(&mut self, reg: u32, from: Expr, len: Expr) -> bool {
+        if !self.scans_writes {
+            return false;
+        }
+        let lanes = 1u32 << self.lane_bits;
+        let touches = |s: &Alu<Expr>| s.magnitude_scan || s.magnitude_clear || s.scan_written;
+        let plain_write = |s: &Alu<Expr>| s.write && s.dst.0 == reg && !touches(s) && !s.write_spread && !s.window_dst && s.offset_dst == 0;
+        // The span each step writes, from its first element to one past its last.
+        let span = |step: &Step| -> Option<(Expr, Expr)> {
+            match step {
+                Step::One(s) if plain_write(s) => Some((s.dst.1, s.dst.1 + Expr::from(if s.vector { lanes } else { 1 }))),
+                Step::Stream { variable, count, in_elements, body } if plain_write(body) => {
+                    let unit = if body.vector { lanes } else { 1 };
+                    let start = body.dst.1.without(*variable);
+                    (body.dst.1.coefficient(*variable) == unit).then(|| (start, start + if *in_elements { *count } else { *count * unit }))
+                }
+                _ => None,
+            }
+        };
+        let mut at = self.steps.len();
+        while at > 0 {
+            match &self.steps[at - 1] {
+                Step::One(s) if !touches(s) && !(s.write && s.dst.0 == reg) => at -= 1,
+                _ => break,
+            }
+        }
+        let end = at;
+        while at > 0 && span(&self.steps[at - 1]).is_some() {
+            at -= 1;
+        }
+        if at == end {
+            return false;
+        }
+        // The steps must write the span one after another, no more and no less.
+        let mut next = from;
+        for step in &self.steps[at..end] {
+            let (first, last) = span(step).expect("a writing step");
+            if first != next {
+                return false;
+            }
+            next = last;
+        }
+        if next != from + len {
+            return false;
+        }
+        for (k, step) in self.steps[at..end].iter_mut().enumerate() {
+            let (Step::One(s) | Step::Stream { body: s, .. }) = step else { unreachable!("a writing step") };
+            (s.scan_written, s.magnitude_clear) = (true, k == 0);
+        }
+        true
+    }
+
     /// Shifts `len` elements of `reg` from `from` left by the count in the left shifter,
     /// held in scratch 0, and takes it from the exponent.
     fn shift_left_from(&mut self, reg: u32, from: Expr, len: Expr) {
@@ -1302,7 +1367,7 @@ impl Assembly {
 
     pub fn new(c: &DieConfig) -> Self {
         let initial = constants(c.cell.activation_bits).iter().enumerate().map(|(i, v)| ((scratch_register(c), CONSTANT_FIRST + i as u32), *v)).collect();
-        Self { steps: Vec::new(), initial, wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false }
+        Self { steps: Vec::new(), initial, wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false, scans_writes: c.features.widths[crate::die::SCAN_WRITTEN_FIELD] > 0 }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1919,7 +1984,7 @@ fn can_stream(variable: Var, step: &Alu<Expr>, unit: u32, per_block: bool) -> bo
     let safe = |operand: At<Expr>| operand.0 != step.dst.0 || (stride(operand.1) == unit && (operand.1 == step.dst.1 || operand.1.is_after(step.dst.1)));
     // A word that waits on the link holds the stream where it is, reads included.
     let sends = step.link_send && step.op == OP_MOV && !step.write;
-    let plain = !(step.load_shift_a || step.load_shift_b || step.load_shift_left || step.load_wide_shift || (step.link_send && !sends) || step.magnitude_clear || step.max_clear || step.max_out || step.accumulator_clear || step.wide_clear || step.wide_write) && step.literal.is_none();
+    let plain = !(step.load_shift_a || step.load_shift_b || step.load_shift_left || step.load_wide_shift || (step.link_send && !sends) || (step.magnitude_clear && !step.scan_written) || step.max_clear || step.max_out || step.accumulator_clear || step.wide_clear || step.wide_write) && step.literal.is_none();
     let streamable = matches!(step.op, OP_ADD | OP_SUB | OP_MUL | OP_MOV | OP_FUNCTION | OP_SHIFT_LEFT | OP_WIDE_OUT | OP_LINK);
     let scans = !step.write;
     plain && streamable && (scans || stride(step.dst.1) == unit) && (moves_with(step.a.1) || a_per_block) && moves_with(step.b.1) && (scans || (safe(step.a) && safe(step.b)))
@@ -2934,7 +2999,10 @@ impl Behavior {
             });
             match step {
                 Step::One(alu) => {
-                    let bound = alu.map_indices(|e| value(loops, e));
+                    let mut bound = alu.map_indices(|e| value(loops, e));
+                    if bound.scan_written && bound.magnitude_clear {
+                        (self.magnitude, bound.magnitude_clear) = (0, false);
+                    }
                     // A block is the same thing as its elements one after another.
                     let (lanes, moved) = (if bound.vector { self.lanes } else { 1 }, |at: At<u32>, on: bool, j: u32| (at.0, at.1 + if on { j } else { 0 }));
                     for j in 0..lanes {
@@ -2948,9 +3016,13 @@ impl Behavior {
                     }
                 }
                 Step::Stream { variable, count, body, .. } => {
+                    let mut body = *body;
+                    if body.scan_written && body.magnitude_clear {
+                        (self.magnitude, body.magnitude_clear) = (0, false);
+                    }
                     for i in 0..value(loops, *count) {
                         loops.insert(*variable, i);
-                        self.walk(&[Step::One(*body)], token, position, loops);
+                        self.walk(&[Step::One(body)], token, position, loops);
                     }
                 }
                 Step::Clustered { .. } | Step::Combine { .. } | Step::CombineRows { .. } | Step::CellSeek { .. } | Step::CellPass | Step::CellGroup { .. } | Step::CellDrain { .. } | Step::WideReduce { .. } => panic!("this model does not keep the cells' weights"),
@@ -3039,6 +3111,11 @@ impl Behavior {
         }
         if s.write {
             self.registers.insert(s.dst, result);
+            if s.scan_written {
+                let sign = (result >> (bits - 1)) & 1;
+                let mask = (1u64 << (bits - 1)) - 1;
+                self.magnitude |= if sign == 1 { !(result as u64) & mask } else { result as u64 & mask };
+            }
         }
         let low = (result & 63) as u32;
         if s.load_shift_a {
