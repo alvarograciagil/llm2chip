@@ -1159,15 +1159,7 @@ impl Assembly {
             self.push(count);
             self.load_shifts(None, None, Some(self.sc(0)));
         }
-        self.elements(len, &[from], true, |s, i, vector| {
-            let mut shift = alu(OP_SHIFT_LEFT);
-            shift.a = (reg, from + i);
-            shift.dst = (reg, from + i);
-            shift.vector = vector;
-            s.push(shift);
-        });
-        self.binary(OP_SUB, self.exponent(reg), self.sc(0), self.exponent(reg));
-        self.clear_shifts();
+        self.shift_left_from(reg, from, len);
     }
 
     /// Narrows `sets` wide sums from `from` into the same places of `dst`.
@@ -1223,7 +1215,38 @@ impl Assembly {
         self.binary(OP_ADD, self.sc(5), self.sc(4), self.sc(6));
         self.immediate(1 - self.bits as i64, self.sc(7));
         self.binary(OP_ADD, self.sc(6), self.sc(7), self.exponent(dst));
-        self.normalize_from(dst, from, sets);
+        // The shift agreed above settles the normalisation too: with no shift the sums keep
+        // the magnitude just counted, and a shift right leaves the largest at the top (only
+        // when rounding pulls a lone largest negative sum in by one does it end a bit lower,
+        // and it is left so). The left shift is the shift less the count, alike on every
+        // unit and chip, so the narrowed sums need neither a second scan nor a second round
+        // of the ring. The reference machine narrows the same way.
+        self.clear_shifts();
+        let mut left = alu(OP_SUB);
+        (left.a, left.b, left.dst) = (self.sc(4), self.sc(2), self.sc(0));
+        if self.shifts_now {
+            (left.load_shift_left, left.shift_now) = (true, true);
+            self.shift_zero[2] = false;
+            self.push(left);
+        } else {
+            self.push(left);
+            self.load_shifts(None, None, Some(self.sc(0)));
+        }
+        self.shift_left_from(dst, from, sets);
+    }
+
+    /// Shifts `len` elements of `reg` from `from` left by the count in the left shifter,
+    /// held in scratch 0, and takes it from the exponent.
+    fn shift_left_from(&mut self, reg: u32, from: Expr, len: Expr) {
+        self.elements(len, &[from], true, |s, i, vector| {
+            let mut shift = alu(OP_SHIFT_LEFT);
+            shift.a = (reg, from + i);
+            shift.dst = (reg, from + i);
+            shift.vector = vector;
+            s.push(shift);
+        });
+        self.binary(OP_SUB, self.exponent(reg), self.sc(0), self.exponent(reg));
+        self.clear_shifts();
     }
 
     /// `dst[j] = Σ weights[i] · matrix[i · width + j]` over this unit's `rows`, added

@@ -164,7 +164,12 @@ impl BlockVm {
         }
         let exponent = self.wrap(self.wrap(self.wrap(ea + eb) + shift) - self.fraction() as i64);
         self.set_exp(dst, exponent);
-        self.normalize(dst, sums.len() as u32);
+        // Without a shift the sums keep their magnitude and are normalised from it. A shift
+        // right leaves the largest at the top, but for a lone largest negative sum that
+        // rounding pulls in by one: it stays a bit low, as the chips leave it.
+        if shift == 0 {
+            self.normalize(dst, sums.len() as u32);
+        }
     }
 
     fn aligned(&self, src: u32, from: u32, exponent: i64, len: u32) -> Vec<i64> {
