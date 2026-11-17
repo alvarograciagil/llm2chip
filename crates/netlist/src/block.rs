@@ -1073,6 +1073,11 @@ struct HeadGroup {
     place: Expr,
 }
 
+/// Scratch places for the values of the other chips of a ring while they agree on the
+/// largest: below 32, where a table's input starts.
+const RING_FIRST: u32 = 20;
+const RING_SLOTS: u32 = 8;
+
 /// Blocks a chip sends before it takes as many, each way as a stream: a link's queue holds
 /// four times as many and warns at half, so chips that all send at once, one of them a
 /// chunk ahead, never wait on one another.
@@ -1529,6 +1534,28 @@ impl Assembly {
     /// The largest `value` among the chips of the ring, in every one of them: each passes
     /// on the largest it has seen, and after one turn less than there are chips, all have it.
     fn ring_max(&mut self, value: At<Expr>, spare: At<Expr>) {
+        // With streams, each chip sends its value and passes on every other as it arrives,
+        // then takes the largest of them: no turn waits for a comparison. Each turn is a
+        // step of its own: a stream would pass a value on only once the next one had come,
+        // which in a ring comes only after it has been passed on.
+        if self.streams && (3..=RING_SLOTS + 1).contains(&self.ring) {
+            self.send_place(value);
+            self.on_ring_send();
+            for k in 0..self.ring - 1 {
+                let mut take = alu(OP_LINK);
+                take.dst = self.sc(RING_FIRST + k);
+                if k + 2 < self.ring {
+                    (take.link_send, take.link_loop, take.take_loop) = (true, self.ring_last, self.ring_first);
+                } else {
+                    take.link_loop = self.ring_first;
+                }
+                self.push(take);
+            }
+            for k in 0..self.ring - 1 {
+                self.binary(OP_MAX, value, self.sc(RING_FIRST + k), value);
+            }
+            return;
+        }
         for _ in 1..self.ring {
             self.send_place(value);
             self.on_ring_send();
