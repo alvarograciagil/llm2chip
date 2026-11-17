@@ -2900,6 +2900,22 @@ pub fn die_design(config: DieConfig) -> Design {
     design
 }
 
+/// The last words of a stream of fixed length, which only finish what it read before:
+/// the next stream may read, and compute, in them.
+#[derive(Clone, Copy, Debug)]
+struct StreamTail {
+    /// The cycle of the first of them, and how many there are.
+    start: usize,
+    written: usize,
+    /// How many of them still compute, after the first.
+    extra: usize,
+    /// What every word of the stream carries, which the next one must carry too.
+    shared: (bool, u32, u32, u32, u32),
+    /// The register it writes, and the index registers its last writes use.
+    dst: u32,
+    used: [u32; 2],
+}
+
 /// Lays operations out on a per-cycle timeline and compresses it into microcode.
 pub struct DieProgram {
     config: DieConfig,
@@ -2927,6 +2943,10 @@ pub struct DieProgram {
     /// The first cycle a step may read the largest element found so far in: the tree
     /// across the lanes delivers each block's a few cycles after it computes.
     max_ready: usize,
+    /// The tail of the stream laid out last, while nothing has come after it.
+    tail: Option<StreamTail>,
+    /// Index registers a stream sets up may be written in the tail of the one before.
+    hoist: bool,
     /// The first cycle a step may read the accumulator in: products reach it a cycle
     /// after they are computed.
     acc_ready: usize,
@@ -3138,7 +3158,7 @@ impl DieProgram {
     pub fn new(config: DieConfig) -> Self {
         // The microcode read port takes one cycle to deliver the first word.
         let cycles = vec![ControlWord::default()];
-        Self { config, cycles, labels: BTreeSet::from([0]), entries: vec![0], parameters: Vec::new(), scoped: HashMap::new(), active: Vec::new(), in_use: BTreeSet::new(), cells_settle: 0, drain_pending: 0, load_at: None, drain_after: 0, last_short: None, max_ready: 0, acc_ready: 0 }
+        Self { config, cycles, labels: BTreeSet::from([0]), entries: vec![0], parameters: Vec::new(), scoped: HashMap::new(), active: Vec::new(), in_use: BTreeSet::new(), cells_settle: 0, drain_pending: 0, load_at: None, drain_after: 0, tail: None, hoist: false, last_short: None, max_ready: 0, acc_ready: 0 }
     }
 
     fn slot(&mut self, at: usize) -> &mut ControlWord {
@@ -3173,7 +3193,12 @@ impl DieProgram {
     }
 
     fn allocate(&mut self) -> u32 {
-        let register = ((self.parameters.len() as u32 + 1)..1 << x_bits(&self.config)).rev().find(|r| !self.in_use.contains(r)).expect("index registers are missing");
+        // While a stream sets up, it leaves alone those the tail before it still uses, so
+        // it can set them in that tail.
+        let avoid = self.open_tail().filter(|_| self.hoist).map_or([0; 2], |t| t.used);
+        let free = |r: &u32| !self.in_use.contains(r);
+        let mut candidates = ((self.parameters.len() as u32 + 1)..1 << x_bits(&self.config)).rev();
+        let register = candidates.clone().find(|r| free(r) && !avoid.contains(r)).or_else(|| candidates.find(free)).expect("index registers are missing");
         self.in_use.insert(register);
         register
     }
@@ -3183,7 +3208,15 @@ impl DieProgram {
     }
 
     fn set_index(&mut self, dst: u32, src: u32, value: u32) {
-        let at = self.end();
+        let mut at = self.end();
+        // A stream's index register can be set in the first word of the tail before, which
+        // no longer reads: it holds from the next cycle on, and the tail does not use it.
+        if let Some(t) = self.open_tail().filter(|_| self.hoist) {
+            let w = self.cycles[t.start];
+            if !w.x_write && !w.branch && dst != 0 && !t.used.contains(&dst) {
+                at = t.start;
+            }
+        }
         let mask = (1u64 << self.config.index_bits) - 1;
         let w = self.slot(at);
         w.x_write = true;
@@ -3348,6 +3381,7 @@ impl DieProgram {
     fn stream(&mut self, variable: Var, count: Expr, in_elements: bool, step: &Alu<Expr>) {
         let moves = |index: Expr| index.coefficient(variable) != 0;
         let mut temporaries = Vec::new();
+        self.hoist = true;
         let place = |this: &mut Self, index: Expr, temporaries: &mut Vec<u32>| {
             if moves(index) { (0, this.moving_offset(index.without(variable), temporaries)) } else { this.resolve(index) }
         };
@@ -3385,12 +3419,16 @@ impl DieProgram {
             }
             w
         };
+        let shared = { let w = word(0); (w.vector, w.window_x, w.from_cluster, w.from_group, w.gather_shift) };
         if by_blocks {
             self.emit_stream(n, written, true, word);
         } else {
             let leading = if step.write { written } else { 1 };
             self.emit_variable_stream(count, leading, &mut temporaries, word);
         }
+        self.hoist = false;
+        let end = self.end();
+        self.tail = (by_blocks && n >= 1 && self.config.features.streams()).then_some(StreamTail { start: end - written, written, extra, shared, dst: step.dst.0, used: [offset_dst, window_x] });
         // The last block computes no later than the cycle after the stream's words.
         if step.max_scan {
             self.max_ready = self.end() + max_scan_stages(self.config.features.lane_bits) + 1;
@@ -3410,13 +3448,63 @@ impl DieProgram {
         let last = self.allocate();
         temporaries.push(last);
         self.set_index(last, register, literal.wrapping_sub(1));
-        self.reset_counters();
-        for k in 0..leading {
+        let merged = self.overlap(leading, &word);
+        if merged == 0 {
+            self.reset_counters();
+        }
+        for k in merged..leading {
             let at = self.end();
             *self.slot(at) = word(k);
         }
         let at = self.end();
         *self.slot(at) = ControlWord { repeat_x: true, x_limit: last, ..word(leading) };
+    }
+
+    /// The tail of the last stream, if nothing has been laid out after it and nothing
+    /// jumps into it or out of it.
+    fn open_tail(&self) -> Option<StreamTail> {
+        let t = self.tail?;
+        let end = t.start + t.written;
+        let jumps = (t.start + 1..=end).any(|at| self.labels.contains(&at));
+        (self.end() == end && !jumps && !self.cycles[end - 1].branch && !self.cycles[end - 1].x_write).then_some(t)
+    }
+
+    /// Lays the first words of a stream into the tail of the one before, when they fit:
+    /// each reads where the tail no longer does, and computes where it no longer does.
+    /// Clears the counters in time and gives how many words went in.
+    fn overlap(&mut self, leading: usize, word: &impl Fn(usize) -> ControlWord) -> usize {
+        // Only plain streams know which of their fields each stage uses.
+        let Some(t) = self.open_tail().filter(|_| self.hoist) else { return 0 };
+        let first = word(0);
+        let d = (t.written - 1).min(leading);
+        let reads_dst = |w: &ControlWord| w.read_step && (w.reg_a == t.dst || w.reg_b == t.dst);
+        if d == 0 || (first.vector, first.window_x, first.from_cluster, first.from_group, first.gather_shift) != t.shared || (0..d).any(|j| reads_dst(&word(j))) {
+            return 0;
+        }
+        for j in 0..d {
+            let at = t.start + t.written - d + j;
+            // The tail computes in its first `1 + extra` words; a word that computes goes after.
+            if (j >= 1 && at - t.start <= t.extra) || self.cycles[at].x_write {
+                return 0;
+            }
+        }
+        for j in 0..d {
+            let at = t.start + t.written - d + j;
+            let w = word(j);
+            let slot = &mut self.cycles[at];
+            (slot.reg_a, slot.literal_a, slot.offset_a, slot.window_a, slot.fixed_a, slot.a_shift) = (w.reg_a, w.literal_a, w.offset_a, w.window_a, w.fixed_a, w.a_shift);
+            (slot.reg_b, slot.literal_b, slot.offset_b, slot.window_b, slot.fixed_b, slot.read_step) = (w.reg_b, w.literal_b, w.offset_b, w.window_b, w.fixed_b, w.read_step);
+            if j >= 1 {
+                (slot.op, slot.shift, slot.function, slot.magnitude_scan, slot.accumulate) = (w.op, w.shift, w.function, w.magnitude_scan, w.accumulate);
+                (slot.wide_scan, slot.max_scan, slot.broadcast_a, slot.broadcast_b, slot.link_take_loop) = (w.wide_scan, w.max_scan, w.broadcast_a, w.broadcast_b, w.link_take_loop);
+            }
+        }
+        // The reads start in the tail, so the read counter clears in the word before them;
+        // the tail's last word still writes with the write counter, and clears it.
+        self.cycles[t.start + t.written - d - 1].read_reset = true;
+        self.cycles[t.start + t.written - 1].write_reset = true;
+        self.tail = None;
+        d
     }
 
     /// Lays out the words of a stream of `n` elements whose results land `written` later.
@@ -3432,11 +3520,12 @@ impl DieProgram {
     }
 
     fn emit_stream(&mut self, n: usize, written: usize, reset: bool, word: impl Fn(usize) -> ControlWord) {
-        if reset {
+        let (from, until) = if n > written { (written, n) } else { (n + written, n + written) };
+        let merged = if reset { self.overlap(from.min(n + written).min(written), &word) } else { 0 };
+        if reset && merged == 0 {
             self.reset_counters();
         }
-        let (from, until) = if n > written { (written, n) } else { (n + written, n + written) };
-        for k in 0..from.min(n + written) {
+        for k in merged..from.min(n + written) {
             let at = self.end();
             *self.slot(at) = word(k);
         }
