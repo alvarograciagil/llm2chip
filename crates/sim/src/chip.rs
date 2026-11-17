@@ -340,6 +340,7 @@ pub enum Sharing {
 pub struct ShareOut {
     group: Option<usize>,
     rows: bool,
+    chips: usize,
     plan: Vec<std::ops::Range<usize>>,
 }
 
@@ -356,9 +357,10 @@ impl ShareOut {
             Sharing::Mixed(group) => chips <= group as usize,
             Sharing::Layers => false,
         };
-        let stages = group.map_or(chips, |g| chips / g);
+        // Chips that share every product by rows make one stage of the chain between them.
+        let stages = group.map_or(if rows { 1 } else { chips }, |g| chips / g);
         let plan = crate::lower::chip_plan(program, weights, stages, chip_tokens, activation_bits)?;
-        Ok(Self { group, rows, plan })
+        Ok(Self { group, rows, chips, plan })
     }
 
     /// The runs of layers of the chain: one for each chip, or for each group.
@@ -396,7 +398,7 @@ impl ShareOut {
             layout.share_rows(program, crate::lower::Shard { index: member as u32, chips: g as u32, grouped: true });
             layout.group_microprogram(program, &self.plan, stage)
         } else if self.rows {
-            layout.share_rows(program, crate::lower::Shard { index: chip as u32, chips: self.plan.len() as u32, grouped: false });
+            layout.share_rows(program, crate::lower::Shard { index: chip as u32, chips: self.chips as u32, grouped: false });
             layout.microprogram(program)
         } else {
             layout.keep_weights_of(program, &self.plan, chip);

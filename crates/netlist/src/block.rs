@@ -624,6 +624,9 @@ pub struct Alu<N = u32> {
     /// The word sends or takes over the loop back, not the link to the next chip: the last
     /// and first chips of a group close their ring with it.
     pub link_loop: bool,
+    /// A word that takes from the link and sends what it took on: it takes over the loop
+    /// back, while `link_loop` says where it sends.
+    pub take_loop: bool,
     pub wide_write: bool,
     pub wide_scan: bool,
     pub wide_clear: bool,
@@ -670,6 +673,7 @@ impl<N: Default> Alu<N> {
             accumulator_clear: false,
             link_send: false,
             link_loop: false,
+            take_loop: false,
             wide_write: false,
             wide_scan: false,
             wide_clear: false,
@@ -727,6 +731,7 @@ impl Alu<Expr> {
             accumulator_clear: self.accumulator_clear,
             link_send: self.link_send,
             link_loop: self.link_loop,
+            take_loop: self.take_loop,
             wide_write: self.wide_write,
             wide_scan: self.wide_scan,
             wide_clear: self.wide_clear,
@@ -757,6 +762,7 @@ impl From<Alu<u32>> for Alu<Expr> {
         out.accumulator_clear = s.accumulator_clear;
         out.link_send = s.link_send;
         out.link_loop = s.link_loop;
+        out.take_loop = s.take_loop;
         out.wide_write = s.wide_write;
         out.wide_scan = s.wide_scan;
         out.wide_clear = s.wide_clear;
@@ -1578,11 +1584,57 @@ impl Assembly {
     /// turn a chip passes on the block it received in the turn before.
     fn ring_all_gather(&mut self, reg: u32, block: u32, index: u32) {
         let chips = self.ring;
+        let unit = if self.wide_link { 1 << self.lane_bits } else { 1 };
+        if self.streams && chips > 1 && block.is_multiple_of(unit) {
+            return self.forwarding_gather(reg, block, index, unit);
+        }
         for turn in 0..chips - 1 {
             let sent = (index + chips - turn) % chips;
             let received = (index + 2 * chips - turn - 1) % chips;
             self.exchange(reg, sent * block, received * block, block);
         }
+    }
+
+    /// `ring_all_gather` a chunk at a time, passing each block on in the cycle it arrives:
+    /// a chip sends its own chunk, then takes each of the others' as it comes round the
+    /// ring, sending it on to the next chip in the same cycle unless the next chip made it.
+    fn forwarding_gather(&mut self, reg: u32, block: u32, index: u32, unit: u32) {
+        self.clear_shifts();
+        let chips = self.ring;
+        let words = block / unit;
+        let chunk = EXCHANGE_CHUNK.min(words);
+        let pass = |s: &mut Self, first: Expr, count: u32| {
+            if count == 0 {
+                return;
+            }
+            let stream = |s: &mut Self, mut word: Alu<Expr>, at: Expr, place: u32| {
+                let variable = Var::Loop(s.loops);
+                s.loops += 1;
+                let moved = Expr::from(place * block) + first + at + Expr::var(variable) * unit;
+                if word.op == OP_LINK {
+                    word.dst = (reg, moved);
+                } else {
+                    word.a = (reg, moved);
+                }
+                word.vector = unit > 1;
+                s.steps.push(Step::Stream { variable, count: count.into(), in_elements: false, body: word });
+            };
+            let mut own = alu(OP_MOV);
+            (own.write, own.link_send, own.link_loop) = (false, true, s.ring_last);
+            stream(s, own, 0.into(), index);
+            for turn in 0..chips - 1 {
+                // The block the chip before had to send in this turn: its own, then the
+                // ones it passed on.
+                let received = (index + 2 * chips - turn - 1) % chips;
+                let mut take = alu(OP_LINK);
+                let passes_on = turn + 2 < chips;
+                take.link_send = passes_on;
+                (take.link_loop, take.take_loop) = if passes_on { (s.ring_last, s.ring_first) } else { (s.ring_first, false) };
+                stream(s, take, 0.into(), received);
+            }
+        };
+        self.each((words / chunk).into(), |s, c| pass(s, c * (chunk * unit), chunk));
+        pass(self, Expr::from(words / chunk * chunk * unit), words % chunk);
     }
 
     /// Sends `len` elements of `reg` from `sent` to the next chip while it takes as many

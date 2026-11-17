@@ -239,6 +239,15 @@ fn chips_sharing_rows_over_a_wide_link_say_what_one_says() {
 }
 
 #[test]
+#[ignore = "slow: four whole chips in gates: only with optimizations"]
+fn four_chips_in_a_ring_pass_blocks_on_and_say_what_one_says() {
+    let Some(firmware) = build_firmware() else { return };
+    let base = cell_die_config();
+    let die = DieConfig { cells: 4, microcode_bits: 15, features: base.features.with_lane_bits(2).with_wide_link(true), ..base };
+    chips_say_what_one_says(&firmware, die, "rows-ring", Sharing::Rows, 4);
+}
+
+#[test]
 #[ignore = "slow: two whole chips in gates: only with optimizations"]
 fn a_wide_link_moves_blocks_between_two_chips_and_keeps_the_text() {
     let Some(firmware) = build_firmware() else { return };

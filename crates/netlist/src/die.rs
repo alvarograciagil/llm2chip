@@ -3368,7 +3368,7 @@ impl DieProgram {
                 (w.op, w.shift, w.function, w.magnitude_scan, w.accumulate, w.wide_scan, w.max_scan) = (step.op, step.shift, step.function, step.magnitude_scan && k <= n, step.accumulate && k <= n, step.wide_scan && k <= n, step.max_scan && k <= n);
                 (w.broadcast_a, w.broadcast_b) = (step.broadcast_a, step.broadcast_b);
                 // A stream that takes from a link takes from the port its step names.
-                w.link_take_loop = step.link_loop && step.op == OP_LINK;
+                w.link_take_loop = step.op == OP_LINK && if step.link_send { step.take_loop } else { step.link_loop };
             }
             if (written..n + written).contains(&k) {
                 (w.reg_dst, w.offset_dst, w.window_dst, w.write_en, w.write_spread) = (step.dst.0, offset_dst, step.window_dst, step.write, step.write_spread);
@@ -3797,7 +3797,7 @@ impl DieProgram {
             (w.from_cluster, w.from_group) = (step.from_cluster, step.from_group);
             w.op = step.op;
             // The word that takes from a link names the port with it.
-            w.link_take_loop = step.link_loop && step.op == OP_LINK;
+            w.link_take_loop = step.op == OP_LINK && if step.link_send { step.take_loop } else { step.link_loop };
             w.shift = step.shift;
             w.function = step.function;
             w.magnitude_scan = step.magnitude_scan;
