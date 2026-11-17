@@ -1844,9 +1844,13 @@ impl Gen {
                     let (read_this_a, read_this_b) = (l.b.wire(&format!("{name_a}_data"), a), l.b.wire(&format!("{name_b}_data"), a));
                     l.b.ram2p(&name_a, bank_bits, a, &[("raddr", raddr_a[lane_bits..].to_vec()), ("waddr", waddr[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data.clone()), ("rdata", read_this_a.clone())]);
                     l.b.ram2p(&name_b, bank_bits, a, &[("raddr", addr_b[lane_bits..].to_vec()), ("waddr", waddr[lane_bits..].to_vec()), ("we", vec![write]), ("wdata", data.clone()), ("rdata", read_this_b.clone())]);
-                    lane_writes.push((write, data.clone()));
                     let written = l.fresh_bus(a as usize);
                     l.connect_flops(&data, &written);
+                    // A scan of what is written looks at it a cycle later, from the flops
+                    // that keep it, so it adds nothing to the path into the memory.
+                    let wrote = l.fresh();
+                    l.connect_flops(&[write], &[wrote]);
+                    lane_writes.push((wrote, written.clone()));
                     let take = |l: &mut Logic, same: Bit, memory: Vec<Bit>| -> Vec<Bit> {
                         let now = l.and(write, same);
                         let late = l.fresh();
@@ -1994,7 +1998,15 @@ impl Gen {
 
             b.group("Magnitude detector");
             let scan = ctl("magnitude_scan", &mut b, &fields);
-            let scan_written = if c.features.widths[SCAN_WRITTEN_FIELD] > 0 { ctl("scan_written", &mut b, &fields) } else { Bit::Zero };
+            // The written values reach the magnitude a cycle after the word that writes them.
+            let scan_written = if c.features.widths[SCAN_WRITTEN_FIELD] > 0 {
+                let now = ctl("scan_written", &mut b, &fields);
+                let late = b.wire("scan_written_late", 1)[0];
+                b.dff_to(now, late);
+                late
+            } else {
+                Bit::Zero
+            };
             let magnitude_clear = ctl("magnitude_clear", &mut b, &fields);
             let magnitude = b.wire("magnitude", a);
             let keep_magnitude = b.wire("magnitude_keep", 1)[0];
