@@ -21,6 +21,11 @@ pub(crate) fn load_initial(vm: &mut BlockVm, initial: &HashMap<Place, i64>, expo
     let mut by_register: BTreeMap<u32, Vec<(u32, i64)>> = BTreeMap::new();
     let mut scales = Vec::new();
     for ((register, index), value) in initial {
+        // The register just below the exponents is the die's scratch, whose constants only
+        // its own steps read: the exact machine has no use for them.
+        if *register + 1 == exponents {
+            continue;
+        }
         if *register == exponents {
             scales.push((*index, *value));
         } else {
@@ -114,7 +119,8 @@ impl DieEngine for VmEngine {
         let (register, index) = (address >> self.index_bits, address & ((1 << self.index_bits) - 1));
         if register == self.exponents {
             self.vm.set_register_exponent(index, value)
-        } else {
+        } else if register + 1 != self.exponents {
+            // The die's scratch, just below the exponents, is not modelled here.
             self.vm.write_mantissa(register, index, value)
         }
     }

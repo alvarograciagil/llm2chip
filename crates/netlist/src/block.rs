@@ -1083,6 +1083,15 @@ struct HeadGroup {
 /// largest: below 32, where a table's input starts.
 const RING_FIRST: u32 = 20;
 const RING_SLOTS: u32 = 8;
+/// Scratch places, between the ring's and a table's input, that the image fills with the
+/// values the exponent arithmetic keeps needing, so no step has to write them first.
+const CONSTANT_FIRST: u32 = RING_FIRST + RING_SLOTS;
+
+/// The values kept from `CONSTANT_FIRST` on: one, the narrowing count's offset, the
+/// narrowed exponent's offset and a table's input exponent.
+fn constants(bits: u32) -> [i64; 4] {
+    [1, accumulator_bits(bits) as i64 - bits as i64, 1 - bits as i64, TABLE_INPUT_EXPONENT]
+}
 
 /// Blocks a chip sends before it takes as many, each way as a stream: a link's queue holds
 /// four times as many and warns at half, so chips that all send at once, one of them a
@@ -1151,10 +1160,10 @@ impl Assembly {
         if self.across_chips {
             // The chips agree on the smallest count, as the maximum of its negation.
             self.push(count);
-            self.immediate(0, self.sc(1));
-            self.binary(OP_SUB, self.sc(1), self.sc(0), self.sc(2));
+            let zero = self.zero_place();
+            self.binary(OP_SUB, zero, self.sc(0), self.sc(2));
             self.ring_max(self.sc(2), self.sc(3));
-            self.binary(OP_SUB, self.sc(1), self.sc(2), self.sc(0));
+            self.binary(OP_SUB, zero, self.sc(2), self.sc(0));
             self.load_shifts(None, None, Some(self.sc(0)));
         } else if self.shifts_now {
             // The count goes into the left shifter as it is written.
@@ -1191,19 +1200,19 @@ impl Assembly {
         count.dst = self.sc(0);
         count.reduce_group = self.group_bits();
         self.push(count);
-        self.immediate(accumulator_bits(self.bits) as i64 - self.bits as i64, self.sc(1));
-        self.binary(OP_SUB, self.sc(1), self.sc(0), self.sc(2));
+        let offset = self.value(accumulator_bits(self.bits) as i64 - self.bits as i64, self.sc(1));
+        self.binary(OP_SUB, offset, self.sc(0), self.sc(2));
         if self.across_chips {
             self.ring_max(self.sc(2), self.sc(3));
         }
-        self.immediate(0, self.sc(3));
+        let zero = self.zero_place();
         if self.shifts_now {
             // The shift goes into the wide shifter as it is written.
             let mut most = alu(OP_MAX);
-            (most.a, most.b, most.dst, most.load_wide_shift, most.shift_now) = (self.sc(2), self.sc(3), self.sc(4), true, true);
+            (most.a, most.b, most.dst, most.load_wide_shift, most.shift_now) = (self.sc(2), zero, self.sc(4), true, true);
             self.push(most);
         } else {
-            self.binary(OP_MAX, self.sc(2), self.sc(3), self.sc(4));
+            self.binary(OP_MAX, self.sc(2), zero, self.sc(4));
             let mut load = alu(OP_MOV);
             load.a = self.sc(4);
             load.write = false;
@@ -1219,8 +1228,8 @@ impl Assembly {
         });
         self.binary(OP_ADD, self.exponent(a), self.exponent(b), self.sc(5));
         self.binary(OP_ADD, self.sc(5), self.sc(4), self.sc(6));
-        self.immediate(1 - self.bits as i64, self.sc(7));
-        self.binary(OP_ADD, self.sc(6), self.sc(7), self.exponent(dst));
+        let offset = self.value(1 - self.bits as i64, self.sc(7));
+        self.binary(OP_ADD, self.sc(6), offset, self.exponent(dst));
         // The shift agreed above settles the normalisation too: with no shift the sums keep
         // the magnitude just counted, and a shift right leaves the largest at the top (only
         // when rounding pulls a lone largest negative sum in by one does it end a bit lower,
@@ -1292,7 +1301,8 @@ impl Assembly {
     }
 
     pub fn new(c: &DieConfig) -> Self {
-        Self { steps: Vec::new(), initial: HashMap::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false }
+        let initial = constants(c.cell.activation_bits).iter().enumerate().map(|(i, v)| ((scratch_register(c), CONSTANT_FIRST + i as u32), *v)).collect();
+        Self { steps: Vec::new(), initial, wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1309,6 +1319,21 @@ impl Assembly {
     }
 
     /// Writes a small constant, composing it when it does not fit one literal.
+    /// A place that holds `value`: a constant the image filled, or `spare` once a step has
+    /// written it there.
+    fn value(&mut self, value: i64, spare: At<Expr>) -> At<Expr> {
+        if value == 0 {
+            return self.zero_place();
+        }
+        match constants(self.bits).iter().position(|c| *c == value) {
+            Some(i) => self.sc(CONSTANT_FIRST + i as u32),
+            None => {
+                self.immediate(value, spare);
+                spare
+            }
+        }
+    }
+
     fn immediate(&mut self, value: i64, dst: At<Expr>) {
         let bits = self.immediate_bits;
         let limit = (1i64 << (bits - 1)) - 1;
@@ -1343,12 +1368,12 @@ impl Assembly {
     /// Sets the shifters so that a vector of `src` lands on the fixed `exponent`.
     fn load_alignment(&mut self, src: u32, exponent: i64) {
         let e = self.exponent(src);
-        self.immediate(exponent, self.sc(8));
-        self.binary(OP_SUB, e, self.sc(8), self.sc(9));
-        self.immediate(0, self.sc(10));
-        self.binary(OP_MAX, self.sc(9), self.sc(10), self.sc(11));
-        self.binary(OP_SUB, self.sc(8), e, self.sc(12));
-        self.binary(OP_MAX, self.sc(12), self.sc(10), self.sc(13));
+        let target = self.value(exponent, self.sc(8));
+        self.binary(OP_SUB, e, target, self.sc(9));
+        let zero = self.zero_place();
+        self.binary(OP_MAX, self.sc(9), zero, self.sc(11));
+        self.binary(OP_SUB, target, e, self.sc(12));
+        self.binary(OP_MAX, self.sc(12), zero, self.sc(13));
         self.load_shifts(Some(self.sc(13)), None, Some(self.sc(11)));
     }
 
@@ -1508,9 +1533,12 @@ impl Assembly {
     }
 
     fn product_exponent(&mut self, a: u32, b: u32, dst: u32, extra: i64) {
+        if extra == 0 {
+            return self.binary(OP_ADD, self.exponent(a), self.exponent(b), self.exponent(dst));
+        }
         self.binary(OP_ADD, self.exponent(a), self.exponent(b), self.sc(6));
-        self.immediate(extra, self.sc(7));
-        self.binary(OP_ADD, self.sc(6), self.sc(7), self.exponent(dst));
+        let extra = self.value(extra, self.sc(7));
+        self.binary(OP_ADD, self.sc(6), extra, self.exponent(dst));
     }
 
     fn clear_accumulator(&mut self) {
@@ -1965,8 +1993,8 @@ impl BlockOps for Assembly {
         self.clear_shifts();
         let (ea, eb) = (self.exponent(a.0), self.exponent(b.0));
         self.binary(OP_MAX, ea, eb, self.sc(1));
-        self.immediate(1, self.sc(2));
-        self.binary(OP_ADD, self.sc(1), self.sc(2), self.sc(3));
+        let one = self.value(1, self.sc(2));
+        self.binary(OP_ADD, self.sc(1), one, self.sc(3));
         self.binary(OP_SUB, self.sc(3), ea, self.sc(4));
         self.binary(OP_SUB, self.sc(3), eb, self.sc(5));
         self.load_shifts(Some(self.sc(4)), Some(self.sc(5)), None);
@@ -2107,8 +2135,8 @@ impl BlockOps for Assembly {
 
     fn reciprocal(&mut self, src: u32, dst: u32) {
         self.table_input(FN_RECIPROCAL, (src, 0.into()), (dst, 0.into()));
-        self.immediate(RECIPROCAL_OUTPUT_EXPONENT, self.sc(1));
-        self.binary(OP_SUB, self.sc(1), self.exponent(src), self.exponent(dst));
+        let exponent = self.value(RECIPROCAL_OUTPUT_EXPONENT, self.sc(1));
+        self.binary(OP_SUB, exponent, self.exponent(src), self.exponent(dst));
         self.normalize(dst, 1.into());
     }
 
@@ -2124,12 +2152,12 @@ impl BlockOps for Assembly {
         self.clear_shifts();
         self.binary(OP_ADD, e, self.sc(1), self.sc(3));
         self.table_input(FN_INV_SQRT, self.sc(2), (dst, 0.into()));
-        self.immediate(1, self.sc(4));
-        self.load_shifts(Some(self.sc(4)), None, None);
+        let one = self.value(1, self.sc(4));
+        self.load_shifts(Some(one), None, None);
         self.binary(OP_MOV, self.sc(3), self.sc(15), self.sc(5));
         self.clear_shifts();
-        self.immediate(RECIPROCAL_OUTPUT_EXPONENT, self.sc(6));
-        self.binary(OP_SUB, self.sc(6), self.sc(5), self.exponent(dst));
+        let exponent = self.value(RECIPROCAL_OUTPUT_EXPONENT, self.sc(6));
+        self.binary(OP_SUB, exponent, self.sc(5), self.exponent(dst));
         self.normalize(dst, 1.into());
     }
 
