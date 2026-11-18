@@ -341,7 +341,7 @@ impl Search<'_> {
 
     /// Measures one design, or takes it from what was measured before.
     fn measure(&self, chips: u32, sharing: Sharing, units: u32, lanes: u32, cells: u32) -> Option<Design> {
-        let key = format!("{chips}/{}/{units}/{lanes}/{cells}/{}/{}/{}", sharing_name(sharing), self.target.context, self.target.prompt, self.target.clock_hz as u64);
+        let key = self.key(chips, sharing, units, lanes, cells);
         let known = self.store.lock().unwrap().measured.get(&key).copied();
         let candidate = match known {
             Some(c) => {
@@ -367,6 +367,31 @@ impl Search<'_> {
             }
         };
         candidate.map(|c| self.design(c))
+    }
+
+    /// What a measurement is kept under: the design, and everything else it depends on.
+    fn key(&self, chips: u32, sharing: Sharing, units: u32, lanes: u32, cells: u32) -> String {
+        format!("{chips}/{}/{units}/{lanes}/{cells}/{}", sharing_name(sharing), self.conditions())
+    }
+
+    /// The part of a key that this search shares with every measurement it may use: the
+    /// context, the prompt, the clock and the cycles a cell takes to apply its factors.
+    fn conditions(&self) -> String {
+        format!("{}/{}/{}/{}", self.target.context, self.target.prompt, self.target.clock_hz as u64, self.silicon.base.features.factor_steps)
+    }
+
+    /// Whether a kept measurement answers this search: the same conditions, a way of sharing
+    /// it tries and a shape within its ranges. Earlier searches may have asked otherwise.
+    fn in_scope(&self, key: &str, families: &[(u32, Sharing)]) -> bool {
+        let parts: Vec<&str> = key.splitn(6, '/').collect();
+        let [chips, sharing, units, lanes, cells, conditions] = parts[..] else { return false };
+        let number = |s: &str| s.parse::<u32>().ok();
+        let (Some(chips), Some(units), Some(lanes), Some(cells)) = (number(chips), number(units), number(lanes), number(cells)) else { return false };
+        conditions == self.conditions()
+            && families.iter().any(|(n, s)| *n == chips && sharing_name(*s) == sharing)
+            && self.target.cluster_bits.contains(&units)
+            && self.target.lane_bits.contains(&lanes)
+            && self.target.cell_bits.contains(&cells)
     }
 
     /// A measured candidate with its energy, power and the designer's parameters.
@@ -480,9 +505,10 @@ impl Search<'_> {
     fn report(&self, found: Vec<Design>, too_few: Vec<u32>) -> Report {
         // Everything measured for this search's numbers of chips, the steps on the way
         // included: the best of them by the goal is the one recommended.
+        let families = sharings(&self.target);
         let mut everything: Vec<Design> = {
             let store = self.store.lock().unwrap();
-            store.measured.values().flatten().map(|c| self.design(*c)).filter(|d| self.target.chips.contains(&d.candidate.chips)).collect()
+            store.measured.iter().filter(|(key, _)| self.in_scope(key, &families)).filter_map(|(_, c)| *c).map(|c| self.design(c)).collect()
         };
         everything.extend(found);
         everything.sort_by(|a, b| self.order(Some(a), Some(b)));

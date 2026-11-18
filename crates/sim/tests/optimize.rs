@@ -74,3 +74,25 @@ fn asking_again_measures_nothing_new() {
     assert_eq!(shape(&again), shape(&first));
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn a_search_uses_only_what_answers_its_own_question() {
+    let dir = checkpoint("scope");
+    let cache = dir.join("sizing.json");
+    let shape = |r: &Report| r.recommended.as_ref().map(|d| (d.candidate.chips, d.candidate.sharing, d.candidate.cluster_bits, d.candidate.lane_bits, d.candidate.cell_bits));
+    // A longer context first, kept; then a shorter one, with the same file and without one.
+    search(&dir, &small(Goal::Speed), Some(&cache));
+    let mut shorter = small(Goal::Speed);
+    shorter.context = 32;
+    let kept = search(&dir, &shorter, Some(&cache));
+    let fresh = search(&dir, &shorter, None);
+    assert_eq!(shape(&kept), shape(&fresh));
+    assert_eq!(kept.frontier.len(), fresh.frontier.len(), "nothing from the other context");
+    // A narrower space only recommends from within it.
+    let mut narrow = small(Goal::Speed);
+    narrow.space.chips = vec![1];
+    narrow.space.cell_bits = (3, 5);
+    let report = search(&dir, &narrow, Some(&cache));
+    assert!(report.frontier.iter().all(|d| d.candidate.chips == 1 && d.candidate.cell_bits <= 5));
+    std::fs::remove_dir_all(dir).ok();
+}
