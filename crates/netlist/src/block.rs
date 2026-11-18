@@ -457,6 +457,14 @@ pub trait BlockOps: Sized {
         let _ = on;
     }
 
+    /// Until `release_gathers`, the heads that chips gather wait, so that several gathers
+    /// agree on their exponents and normalisations in the same rounds of the ring. What
+    /// they gather from must not be written in the meantime.
+    fn hold_gathers(&mut self) {}
+
+    /// Gathers what `hold_gathers` kept, together.
+    fn release_gathers(&mut self) {}
+
     /// Between `true` and `false`, the vectors normalised are this chip's slice of them: the
     /// chips of the ring agree on each shift, so each slice comes out as the whole would.
     fn slices_across_chips(&mut self, on: bool) {
@@ -1038,6 +1046,8 @@ pub struct Assembly {
     /// How many neighbouring units the last loop over heads gave each head.
     /// The unit that holds each head `each_head` laid out, for `gather_heads`.
     head_units: Vec<u32>,
+    /// Gathers held by `hold_gathers`, each with the units its heads are on.
+    held: Option<Vec<HeldGather>>,
     /// Which of the A, B and left shifters are known to hold zero.
     shift_zero: [bool; 3],
     /// The die loads its shifters from the read ports, as described in `load_shifts_now`.
@@ -1111,6 +1121,15 @@ const RING_SLOTS: u32 = 8;
 /// Scratch places, between the ring's and a table's input, that the image fills with the
 /// values the exponent arithmetic keeps needing, so no step has to write them first.
 const CONSTANT_FIRST: u32 = RING_FIRST + RING_SLOTS;
+/// A gather of heads across chips that waits for others to share its rounds of the ring.
+#[derive(Clone, Debug)]
+struct HeldGather {
+    parts: Vec<(u32, u32)>,
+    dst: u32,
+    start: u32,
+    units: Vec<u32>,
+}
+
 /// Where products of one pass of the cells agree on their shifts at once, a lane each: the
 /// first block of scratch past its single places (the constants are the last of them),
 /// with the blocks after it for what comes round the ring.
@@ -1426,7 +1445,7 @@ impl Assembly {
 
     pub fn new(c: &DieConfig) -> Self {
         let initial = constants(c.cell.activation_bits).iter().enumerate().map(|(i, v)| ((scratch_register(c), CONSTANT_FIRST + i as u32), *v)).collect();
-        Self { steps: Vec::new(), initial, wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, slabs_keep_shifts: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false, scans_writes: c.features.widths[crate::die::SCAN_WRITTEN_FIELD] > 0, widens: c.features.widths[crate::die::WIDE_LEFT_FIELD] > 0, aligns: c.features.widths[crate::die::ALIGN_SHIFT_FIELD] > 0 }
+        Self { steps: Vec::new(), initial, wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, slabs_keep_shifts: false, held: None, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false, scans_writes: c.features.widths[crate::die::SCAN_WRITTEN_FIELD] > 0, widens: c.features.widths[crate::die::WIDE_LEFT_FIELD] > 0, aligns: c.features.widths[crate::die::ALIGN_SHIFT_FIELD] > 0 }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1801,8 +1820,7 @@ impl Assembly {
         self.cell_matvec(place, 0.into(), src, total);
         self.across_chips = true;
         let lanes = 1u32 << self.lane_bits;
-        // A short ring costs little a round, and the batch's own steps would cost as much.
-        if parts.len() > 1 && parts.len() as u32 <= lanes && self.wide_link && self.streams && (6..=RING_SLOTS + 1).contains(&self.ring) {
+        if self.batches_rings(parts.len()) {
             // The parts agree on their shifts in one round of the ring, each in a lane of
             // one block: they count, the block goes round, then each narrows.
             for (p, (&(_, _, rows, offset), start)) in parts.iter().zip(&starts).enumerate() {
@@ -1832,6 +1850,82 @@ impl Assembly {
             }
         }
         self.across_chips = false;
+    }
+
+    /// Whether `count` values the chips agree on can share one round of the ring, a lane
+    /// each: a short ring costs little a round, and the batch's own steps would cost as much.
+    fn batches_rings(&self, count: usize) -> bool {
+        count > 1 && count as u32 <= 1 << self.lane_bits && self.wide_link && self.streams && (6..=RING_SLOTS + 1).contains(&self.ring)
+    }
+
+    /// Several gathers of heads across chips, as `gather_heads_at` makes each, with the
+    /// largest exponents agreed in one round of the ring and the normalisations in another.
+    fn gather_heads_together(&mut self, held: &[HeldGather]) {
+        self.clear_shifts();
+        let lanes = 1u32 << self.lane_bits;
+        let base = ring_batch(lanes);
+        let lane = |s: &Self, g: usize| (s.scratch, Expr::from(base + g as u32));
+        let zero = self.sc(15);
+        let (largest, shift, exponent) = (self.sc(1), self.sc(2), self.sc(3));
+        let units = self.clusters;
+        let unit_of = |units_of: &[u32], part: usize| units_of.get(part).copied().unwrap_or(part as u32) % units + 1;
+        // Each gather's largest exponent among its parts, into its lane.
+        for (g, h) in held.iter().enumerate() {
+            for (part, (reg, _)) in h.parts.iter().enumerate() {
+                let mut read = alu(OP_MOV);
+                (read.a, read.b, read.dst, read.from_cluster) = (self.exponent(*reg), zero, exponent, unit_of(&h.units, part));
+                self.push(read);
+                if part == 0 {
+                    self.binary(OP_MOV, exponent, zero, lane(self, g));
+                } else {
+                    self.binary(OP_MAX, lane(self, g), exponent, lane(self, g));
+                }
+            }
+        }
+        self.ring_max_block(base);
+        // Each brings its parts to the agreed exponent, and counts how far its whole may
+        // move left, as the negation, into its lane.
+        for (g, h) in held.iter().enumerate() {
+            self.binary(OP_MOV, lane(self, g), zero, largest);
+            let mut offset = h.start;
+            for (part, (reg, len)) in h.parts.iter().enumerate() {
+                let mut read = alu(OP_MOV);
+                (read.a, read.b, read.dst, read.from_cluster) = (self.exponent(*reg), zero, exponent, unit_of(&h.units, part));
+                self.push(read);
+                self.binary(OP_SUB, largest, exponent, shift);
+                self.load_shifts(Some(shift), None, None);
+                let at: Expr = offset.into();
+                let from = unit_of(&h.units, part);
+                self.elements((*len).into(), &[at], true, |s, i, vector| {
+                    let mut step = alu(OP_MOV);
+                    (step.a, step.b, step.dst, step.from_cluster) = ((*reg, i), zero, (h.dst, at + i), from);
+                    (step.vector, step.broadcast_b) = (vector, vector);
+                    s.push(step);
+                });
+                self.clear_shifts();
+                offset += len;
+            }
+            self.binary(OP_MOV, largest, zero, self.exponent(h.dst));
+            let (from, len): (Expr, Expr) = (h.start.into(), (offset - h.start).into());
+            if !self.scan_as_written(h.dst, from, len) {
+                self.scan_and_shift(h.dst, from, len);
+            }
+            let mut count = alu(OP_LZC);
+            count.dst = self.sc(0);
+            count.reduce_group = self.group_bits();
+            self.push(count);
+            let zero = self.zero_place();
+            self.binary(OP_SUB, zero, self.sc(0), lane(self, g));
+        }
+        self.ring_max_block(base);
+        // Each moves left by the smallest count of all the chips'.
+        for (g, h) in held.iter().enumerate() {
+            let zero = self.zero_place();
+            self.binary(OP_SUB, zero, lane(self, g), self.sc(0));
+            self.load_shifts(None, None, Some(self.sc(0)));
+            let len: u32 = h.parts.iter().map(|(_, len)| len).sum();
+            self.shift_left_from(h.dst, h.start.into(), len.into());
+        }
     }
 
     /// The largest of each lane of the block of scratch at `at` among the chips of the ring,
@@ -2675,7 +2769,32 @@ impl BlockOps for Assembly {
         self.gather_heads_at(parts, dst, 0);
     }
 
+    fn hold_gathers(&mut self) {
+        if self.batches_rings(2) {
+            self.held = Some(Vec::new());
+        }
+    }
+
+    fn release_gathers(&mut self) {
+        let Some(held) = self.held.take() else { return };
+        match held.len() {
+            0 => {}
+            1 => {
+                let g = &held[0];
+                let (units, ring) = (std::mem::replace(&mut self.head_units, g.units.clone()), std::mem::replace(&mut self.ring_heads, true));
+                self.gather_heads_at(&g.parts, g.dst, g.start);
+                (self.head_units, self.ring_heads) = (units, ring);
+            }
+            _ => self.gather_heads_together(&held),
+        }
+    }
+
     fn gather_heads_at(&mut self, parts: &[(u32, u32)], dst: u32, start: u32) {
+        let units = if self.ring_heads && self.held.is_some() { self.head_units.clone() } else { Vec::new() };
+        if let Some(held) = self.held.as_mut().filter(|_| self.ring_heads) {
+            held.push(HeldGather { parts: parts.to_vec(), dst, start, units });
+            return;
+        }
         if self.clusters <= 1 && !self.ring_heads {
             assert_eq!(start, 0, "a die of one unit gathers whole vectors");
             return self.gather(parts, dst);

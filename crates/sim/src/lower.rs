@@ -21,6 +21,8 @@ const EXPERT_EXPONENT: i64 = 2;
 const ONES_LENGTH: usize = 1 << 17;
 const TEMPORARIES: usize = 64;
 const PARTS: usize = 128;
+/// Where the second of two operations that gather their heads together keeps its parts.
+const PAIRED_PARTS: usize = 64;
 
 /// Words of vector memory the operation keeps from one token to the next: the keys and
 /// values of every position it can attend to, and the recurrent and convolution states.
@@ -576,6 +578,9 @@ pub struct Layout {
     /// Slices of heads fewer than the chips, each the same on `chips / parts` of them: the
     /// keys and values when there are fewer of their heads than chips in the ring.
     replicas: HashMap<usize, u32>,
+    /// Where the per-head parts of the operation being lowered start: past the first's when
+    /// two operations gather their heads together.
+    part_base: Cell<usize>,
 }
 
 /// Where each register of a compact vector memory starts and its loop step, the words of
@@ -988,7 +993,7 @@ impl Layout {
             _ => None,
         });
         let token_range = table_rows.chain([program.vocab, program.vision.as_ref().map_or(0, |v| v.patches)]).max().unwrap_or(0) as u32;
-        let mut layout = Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: if outside.is_some() { program.vision.as_ref().map_or(program.vocab, |v| v.patches) as u32 } else { token_range }, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside, rotation_outside: None, group_field: Cell::new(None), group_used: Cell::new(false), heads_shard: None, local: HashSet::new(), gather_local: HashSet::new(), replicas: HashMap::new() };
+        let mut layout = Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: if outside.is_some() { program.vision.as_ref().map_or(program.vocab, |v| v.patches) as u32 } else { token_range }, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside, rotation_outside: None, group_field: Cell::new(None), group_used: Cell::new(false), heads_shard: None, local: HashSet::new(), gather_local: HashSet::new(), replicas: HashMap::new(), part_base: Cell::new(0) };
         if table_out {
             layout.rotation_out(program, matrices_in_registers);
         }
@@ -1998,10 +2003,42 @@ impl Layout {
                 None => self.load_rope(ops, program, position),
             }
         }
-        for inst in list {
-            self.lower_op(ops, program, &inst.op, token, position)?;
+        let mut i = 0;
+        while i < list.len() {
+            if let Some(next) = list.get(i + 1).filter(|next| self.gathers_with(program, &list[i].op, &next.op)) {
+                // Two operations on heads that chips share gather them together, the second
+                // with parts of its own past the first's, which wait to be gathered.
+                ops.hold_gathers();
+                self.lower_op(ops, program, &list[i].op, token, position)?;
+                self.part_base.set(PAIRED_PARTS);
+                let done = self.lower_op(ops, program, &next.op, token, position);
+                self.part_base.set(0);
+                done?;
+                ops.release_gathers();
+                i += 2;
+                continue;
+            }
+            self.lower_op(ops, program, &list[i].op, token, position)?;
+            i += 1;
         }
         Ok(())
+    }
+
+    /// Whether `first` and `second`, one after the other, each gather heads that the chips
+    /// share and could do so together: two norms or two rotations by heads, the second not
+    /// reading what the first makes.
+    fn gathers_with(&self, program: &Program, first: &Op, second: &Op) -> bool {
+        let shared = |buffer: &usize| self.heads_shard.is_some() && self.local.contains(buffer);
+        let heads = |buffer: usize, block: usize| program.buffers[buffer] / block;
+        match (first, second) {
+            (Op::RmsNorm { src: a, dst: da, block: ba, .. }, Op::RmsNorm { src: b, dst: db, block: bb, .. }) => {
+                shared(a) && shared(b) && heads(*da, *ba) > 1 && heads(*db, *bb) > 1 && b != da && heads(*da, *ba) <= PAIRED_PARTS
+            }
+            (Op::Rope { buf: a, block: ba, table: ta, .. }, Op::Rope { buf: b, block: bb, table: tb, .. }) => {
+                shared(a) && shared(b) && a != b && *ta < VISION_TABLE && *tb < VISION_TABLE && heads(*a, *ba) <= PAIRED_PARTS && heads(*b, *bb) <= PARTS - PAIRED_PARTS
+            }
+            _ => false,
+        }
     }
 
     pub fn run_draft<O: BlockOps>(&self, ops: &mut O, program: &Program, token: O::N, position: O::N, want_logits: bool) -> Result<(), String> {
@@ -2094,7 +2131,8 @@ impl Layout {
     fn rms_blocks_of<O: BlockOps>(&self, ops: &mut O, src: u32, weight: Option<u32>, block: usize, (first_block, mine, count): (usize, usize, usize), dst: u32) {
         let t = &self.temporaries;
         let d = block as u32;
-        let first = self.parts[0];
+        let base = self.part_base.get();
+        let first = self.parts[base];
         // One long block is sliced among the units, its sum of squares added across them.
         if count == 1 {
             let w = weight;
@@ -2129,7 +2167,7 @@ impl Layout {
                 ops.align_heads(part, d);
             });
         });
-        let parts: Vec<(u32, u32)> = (first_block..first_block + mine).map(|b| (self.parts[b], d)).collect();
+        let parts: Vec<(u32, u32)> = (first_block..first_block + mine).map(|b| (self.parts[base + b], d)).collect();
         ops.gather_heads_at(&parts, dst, first_block as u32 * d);
         ops.heads_across_chips(false);
     }
@@ -2442,8 +2480,11 @@ impl Layout {
                         });
                     });
                     let mine = h0 as usize..(h0 + count) as usize;
+                    // The queries and the gates, apart from each other, agree together.
+                    ops.hold_gathers();
                     ops.gather_heads_at(&mine.clone().map(|h| (self.parts[h], d)).collect::<Vec<_>>(), self.reg(*query), h0 * d);
                     ops.gather_heads_at(&mine.map(|h| (self.parts[heads + h], d)).collect::<Vec<_>>(), self.reg(*gate), h0 * d);
+                    ops.release_gathers();
                     ops.heads_across_chips(false);
                 } else {
                     ops.each((heads as u32).into(), |ops, h| {
@@ -2462,7 +2503,8 @@ impl Layout {
                     _ => (*block as u32, self.rope_half as u32, self.rope[*table]),
                 };
                 // One table of factors for each element, so each head is one pair of sweeps.
-                let first = self.parts[0];
+                let base = self.part_base.get();
+                let first = self.parts[base];
                 let rotary = 2 * h;
                 let (cos, sin) = match self.rope_factors {
                     Some((block, factors)) if block == d && *table < VISION_TABLE => factors[*table],
@@ -2486,7 +2528,7 @@ impl Layout {
                         ops.align_heads(first + offset, d);
                     });
                 });
-                let parts: Vec<(u32, u32)> = (h0..h0 + count).map(|part| (self.parts[part as usize], d)).collect();
+                let parts: Vec<(u32, u32)> = (h0..h0 + count).map(|part| (self.parts[base + part as usize], d)).collect();
                 ops.gather_heads_at(&parts, reg, h0 * d);
                 ops.heads_across_chips(false);
             }
