@@ -1256,8 +1256,9 @@ impl Gen {
         let link_lane_in: Vec<Vec<Bit>> = (1..link_lanes).map(|k| b.wire(&format!("link_in{k}"), a)).collect();
         let link_lane_out: Vec<Vec<Bit>> = (1..link_lanes).map(|k| b.wire(&format!("link_out{k}"), a)).collect();
         // The loop back: the last chip of a group closes the group's ring to the first with
-        // it, while the link goes on to the next group.
-        let loop_pins = c.features.uses_loop().then(|| LinkPins::new(&mut b, "loop", a));
+        // it, while the link goes on to the next group. It is as wide as the link, so the
+        // blocks that go round a group's ring cross it whole.
+        let loop_pins: Option<Vec<LinkPins>> = c.features.uses_loop().then(|| (0..link_lanes).map(|k| LinkPins::new(&mut b, &if k == 0 { "loop".to_string() } else { format!("loop{k}") }, a)).collect());
 
         // --- Sequencer ---
         b.group("Sequencer");
@@ -2611,10 +2612,11 @@ impl Gen {
             // Every lane of the link sends and takes a word together: a block goes when all
             // can send, and is taken when all have one.
             let lanes_in = std::iter::once(LinkPins { tx_valid: link_tx_valid, tx_bits: link_tx_bits, tx_ready: link_tx_ready, rx_valid: link_rx_valid, rx_bits: link_rx_bits, rx_ready: link_rx_ready, tx_ack: link_tx_ack, rx_ack: link_rx_ack.clone() }).chain(extra_link);
-            let data_out = std::iter::once(write_data.clone()).chain(link_lane_out);
-            // With a loop back, the link's word comes in on its own wire and is chosen.
+            let data_out = std::iter::once(write_data.clone()).chain(link_lane_out.iter().cloned());
+            // With a loop back, each lane's word comes in on its own wire and is chosen.
             let main_in = if loop_pins.is_some() { b.wire("link_main_in", a) } else { link_in.clone() };
-            let data_in = std::iter::once(main_in.clone()).chain(link_lane_in);
+            let main_lanes: Vec<Vec<Bit>> = if loop_pins.is_some() { (1..link_lanes).map(|k| b.wire(&format!("link_main_in{k}"), a)).collect() } else { link_lane_in.clone() };
+            let data_in = std::iter::once(main_in.clone()).chain(main_lanes.iter().cloned());
             let (main_send, main_pop) = match loop_pins {
                 Some(_) => {
                     let mut l = Logic { b: &mut b, next: 21_500 };
@@ -2652,46 +2654,64 @@ impl Gen {
                 corrected.push(lane_corrected);
                 failed.push(lane_failed);
             }
-            if let Some(pins) = loop_pins {
-                let (loop_can, loop_has, loop_corrected, loop_failed) = (b.wire("loop_can_send", 1)[0], b.wire("loop_has_data", 1)[0], b.wire("loop_corrected", 1)[0], b.wire("loop_failed", 1)[0]);
-                let loop_in = b.wire("loop_in", a);
+            if let Some(loops) = loop_pins {
                 let (loop_send, loop_pop) = {
                     let mut l = Logic { b: &mut b, next: 21_600 };
                     (l.and(link_send, link_loop), l.and(link_pop, take_loop))
                 };
-                b.inst("loop", &endpoint, &[
-                    ("tx_send", vec![loop_send]),
-                    ("tx_data", write_data),
-                    ("tx_can_send", vec![loop_can]),
-                    ("pin_tx_valid", pins.tx_valid),
-                    ("pin_tx_bits", pins.tx_bits),
-                    ("pin_tx_ready", pins.tx_ready),
-                    ("pin_rx_valid", pins.rx_valid),
-                    ("pin_rx_bits", pins.rx_bits),
-                    ("pin_rx_ready", pins.rx_ready),
-                    ("pin_tx_ack", pins.tx_ack),
-                    ("pin_rx_ack", pins.rx_ack),
-                    ("pin_rx_stall", link_rx_stall.clone()),
-                    ("core_stall", vec![Bit::Zero]),
-                    ("rx_pop", vec![loop_pop]),
-                    ("rx_data", loop_in.clone()),
-                    ("rx_has_data", vec![loop_has]),
-                    ("corrected", vec![loop_corrected]),
-                    ("failed", vec![loop_failed]),
-                ]);
+                let outs = std::iter::once(write_data).chain(link_lane_out);
+                let (mut loop_can, mut loop_has, mut loop_in, mut loop_corrected, mut loop_failed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                for (k, (pins, out)) in loops.into_iter().zip(outs).enumerate() {
+                    let name = if k == 0 { "loop".to_string() } else { format!("loop{k}") };
+                    let (can, has, fixed, lost) = (b.wire(&format!("{name}_can_send"), 1)[0], b.wire(&format!("{name}_has_data"), 1)[0], b.wire(&format!("{name}_corrected"), 1)[0], b.wire(&format!("{name}_failed"), 1)[0]);
+                    let into = b.wire(&if k == 0 { "loop_in".to_string() } else { format!("loop_in{k}") }, a);
+                    b.inst(&name, &endpoint, &[
+                        ("tx_send", vec![loop_send]),
+                        ("tx_data", out),
+                        ("tx_can_send", vec![can]),
+                        ("pin_tx_valid", pins.tx_valid),
+                        ("pin_tx_bits", pins.tx_bits),
+                        ("pin_tx_ready", pins.tx_ready),
+                        ("pin_rx_valid", pins.rx_valid),
+                        ("pin_rx_bits", pins.rx_bits),
+                        ("pin_rx_ready", pins.rx_ready),
+                        ("pin_tx_ack", pins.tx_ack),
+                        ("pin_rx_ack", pins.rx_ack),
+                        ("pin_rx_stall", link_rx_stall.clone()),
+                        ("core_stall", vec![Bit::Zero]),
+                        ("rx_pop", vec![loop_pop]),
+                        ("rx_data", into.clone()),
+                        ("rx_has_data", vec![has]),
+                        ("corrected", vec![fixed]),
+                        ("failed", vec![lost]),
+                    ]);
+                    loop_can.push(can);
+                    loop_has.push(has);
+                    loop_in.push(into);
+                    loop_corrected.push(fixed);
+                    loop_failed.push(lost);
+                }
                 let mut l = Logic { b: &mut b, next: 21_000 };
                 let (all_can, all_have) = (l.all(&sendable), l.all(&ready));
-                let can = l.mux(link_loop, all_can, loop_can);
-                let have = l.mux(take_loop, all_have, loop_has);
+                let (loop_all_can, loop_all_have) = (l.all(&loop_can), l.all(&loop_has));
+                let can = l.mux(link_loop, all_can, loop_all_can);
+                let have = l.mux(take_loop, all_have, loop_all_have);
                 l.b.or_to(can, Bit::Zero, can_send);
                 l.b.or_to(have, Bit::Zero, has_data);
-                let chosen = l.mux_bus(take_loop, &main_in, &loop_in);
-                for (bit, into) in chosen.iter().zip(&link_in) {
-                    l.b.or_to(*bit, Bit::Zero, *into);
+                // Each lane takes the loop's word or the link's.
+                let mains = std::iter::once(&main_in).chain(&main_lanes);
+                let intos = std::iter::once(&link_in).chain(&link_lane_in);
+                for ((main, from_loop), into) in mains.zip(&loop_in).zip(intos) {
+                    let chosen = l.mux_bus(take_loop, main, from_loop);
+                    for (bit, wire) in chosen.iter().zip(into) {
+                        l.b.or_to(*bit, Bit::Zero, *wire);
+                    }
                 }
-                // Errors on the loop are counted with the link's first lane.
-                corrected[0] = l.or(corrected[0], loop_corrected);
-                failed[0] = l.or(failed[0], loop_failed);
+                // Errors on the loop are counted with the link's lane of the same number.
+                for (lane, (fixed, lost)) in loop_corrected.iter().zip(&loop_failed).enumerate() {
+                    corrected[lane] = l.or(corrected[lane], *fixed);
+                    failed[lane] = l.or(failed[lane], *lost);
+                }
                 for (lane, (fixed, lost)) in corrected.iter().zip(&failed).enumerate() {
                     l.b.or_to(*fixed, Bit::Zero, link_corrected[lane]);
                     l.b.or_to(*lost, Bit::Zero, link_failed[lane]);

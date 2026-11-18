@@ -126,7 +126,11 @@ impl<'a> Board<'a> {
             }
             for last in group.into_iter().flat_map(|g| (g - 1..count).step_by(g)) {
                 let group = group.unwrap();
-                wires.push(Wire::new(last, last + 1 - group, ("loop_tx".into(), "loop_rx".into()), netlist::link::wire_bits(16)));
+                // The loop back is as wide as the link.
+                for lane in 0..link_lanes {
+                    let p = if lane == 0 { "loop".to_string() } else { format!("loop{lane}") };
+                    wires.push(Wire::new(last, last + 1 - group, (format!("{p}_tx"), format!("{p}_rx")), netlist::link::wire_bits(16)));
+                }
             }
         }
         Self { chips, wires, pending: vec![None; count], image, noise: Noise(0x0BAD_C0DE_1234_5678), flips: 0, doubles: 0, input, fed: 0, output: Vec::new(), cycles: 0 }

@@ -94,7 +94,8 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
     // A wide link's further lanes, and the loop back of a group's ring, go straight from
     // the die to pins of the same names.
     let ack = crate::link::ACK_BITS as u32;
-    let prefixes: Vec<String> = (1..c.die.features.link_lanes()).map(|k| format!("link{k}")).chain(c.die.features.uses_loop().then(|| "loop".to_string())).collect();
+    let loops = if c.die.features.uses_loop() { c.die.features.link_lanes() } else { 0 };
+    let prefixes: Vec<String> = (1..c.die.features.link_lanes()).map(|k| format!("link{k}")).chain((0..loops).map(|k| if k == 0 { "loop".to_string() } else { format!("loop{k}") })).collect();
     let extra_link: Vec<(String, Vec<Bit>)> = prefixes
         .iter()
         .flat_map(|p| {

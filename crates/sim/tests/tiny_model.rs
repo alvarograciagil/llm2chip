@@ -1131,6 +1131,18 @@ fn a_real_model_s_token_on_the_die_matches_the_exact_machine() {
 /// Runs `routine` with `token` at `position` on every die at once, joined by `wires`
 /// `(from, to, port)`, until all have halted. Gives the cycles it took.
 fn run_joined(dies: &mut [(Simulator, Microprogram)], wires: &[(usize, usize, &str)], routine: usize, token: u32, position: u32) -> u64 {
+    // A link a block wide has a wire of its own for every lane after the first.
+    let mut lanes: Vec<(usize, usize, String)> = Vec::new();
+    for (from, to, p) in wires {
+        lanes.push((*from, *to, p.to_string()));
+        let mut k = 1;
+        while dies[*from].0.get(&format!("{p}{k}_tx_valid")).is_some() {
+            lanes.push((*from, *to, format!("{p}{k}")));
+            k += 1;
+        }
+    }
+    let wires: Vec<(usize, usize, &str)> = lanes.iter().map(|(from, to, p)| (*from, *to, p.as_str())).collect();
+    let wires = wires.as_slice();
     for (sim, code) in dies.iter_mut() {
         sim.set("start", 0).unwrap();
         sim.set("param_write", 1).unwrap();
@@ -1188,22 +1200,26 @@ fn chips_that_share_the_heads_give_the_logits_of_one_die() {
     // Two chips in one ring sharing the heads; two in a chain by layers, which share none;
     // and two groups of two sharing them, on dies of several units.
     let ring = |chips: usize| (0..chips).map(|c| (c, (c + 1) % chips, "link")).collect::<Vec<_>>();
-    for (cluster_bits, lane_bits, sharing, chips, wires, heads) in [
-        (1u32, 2u32, sim::chip::Sharing::Rows, 2usize, vec![(0usize, 1usize, "link"), (1, 0, "link")], true),
-        (1, 2, sim::chip::Sharing::Layers, 2, vec![(0, 1, "link"), (1, 0, "link")], false),
-        (2, 2, sim::chip::Sharing::Mixed(2), 4, vec![(0, 1, "link"), (1, 2, "link"), (2, 3, "link"), (3, 0, "link"), (1, 0, "loop"), (3, 2, "loop")], true),
+    for (cluster_bits, lane_bits, sharing, chips, wires, heads, wide) in [
+        (1u32, 2u32, sim::chip::Sharing::Rows, 2usize, vec![(0usize, 1usize, "link"), (1, 0, "link")], true, false),
+        (1, 2, sim::chip::Sharing::Layers, 2, vec![(0, 1, "link"), (1, 0, "link")], false, false),
+        (2, 2, sim::chip::Sharing::Mixed(2), 4, vec![(0, 1, "link"), (1, 2, "link"), (2, 3, "link"), (3, 0, "link"), (1, 0, "loop"), (3, 2, "loop")], true, false),
         // Four chips in one ring pass each block on as it arrives; the attention's heads do
         // not divide, but the element-wise steps still take a slice each.
-        (1, 2, sim::chip::Sharing::Rows, 4, ring(4), true),
+        (1, 2, sim::chip::Sharing::Rows, 4, ring(4), true, false),
         // Six: a query head each, and each of the two key heads on three chips.
-        (1, 1, sim::chip::Sharing::Rows, 6, ring(6), true),
+        (1, 1, sim::chip::Sharing::Rows, 6, ring(6), true, false),
         // Three: the rows' last share overlaps the one before; the key heads do not divide.
-        (1, 1, sim::chip::Sharing::Rows, 3, ring(3), false),
+        (1, 1, sim::chip::Sharing::Rows, 3, ring(3), false, false),
         // Two, with shares of several blocks: each unit narrows a slice of this chip's rows,
         // which the chips gather only once every unit holds them all.
-        (1, 1, sim::chip::Sharing::Rows, 2, ring(2), true),
+        (1, 1, sim::chip::Sharing::Rows, 2, ring(2), true, false),
+        // Over links a block wide: two groups of two, whose rings close over the loop back,
+        // and six in a ring, whose products of one pass agree on their shifts in one round.
+        (2, 2, sim::chip::Sharing::Mixed(2), 4, vec![(0, 1, "link"), (1, 2, "link"), (2, 3, "link"), (3, 0, "link"), (1, 0, "loop"), (3, 2, "loop")], true, true),
+        (1, 1, sim::chip::Sharing::Rows, 6, ring(6), true, true),
     ] {
-        let base = DieConfig { microcode_bits: 15, cells: 4 << cluster_bits, features: cell_die_config().features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits), ..cell_die_config() };
+        let base = DieConfig { microcode_bits: 15, cells: 4 << cluster_bits, features: cell_die_config().features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits).with_wide_link(wide), ..cell_die_config() };
         let share = sim::chip::ShareOut::new(&program, &weights, chips, CHIP_TOKENS, base.cell.activation_bits, sharing).unwrap();
         let mut first = None;
         let mut shared = false;
@@ -1220,7 +1236,7 @@ fn chips_that_share_the_heads_give_the_logits_of_one_die() {
             })
             .collect();
         // The chips share heads or slices, unless they share no rows.
-        assert_eq!(shared, heads, "{chips} chips, {sharing:?}");
+        assert_eq!(shared, heads, "{chips} chips, {sharing:?}, wide {wide}");
         for (position, token) in tokens.iter().enumerate() {
             run_joined(&mut dies, &wires, ENTRY_TOKEN, *token, position as u32);
         }
@@ -1232,7 +1248,7 @@ fn chips_that_share_the_heads_give_the_logits_of_one_die() {
         for index in 0..8 {
             let (got, _) = read_block_value(&mut dies[0].0, c, logits, index);
             let (want, _) = read_block_value(&mut alone.sim, alone_c, single, index);
-            assert_eq!(got, want, "{chips} chips, {sharing:?}, logit {index}");
+            assert_eq!(got, want, "{chips} chips, {sharing:?}, wide {wide}, logit {index}");
         }
     }
     std::fs::remove_dir_all(dir).ok();

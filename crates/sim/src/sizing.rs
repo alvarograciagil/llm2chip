@@ -53,6 +53,9 @@ pub struct Costs {
     pub level: f64,
     pub level_lane: f64,
     pub cell: f64,
+    /// The end of a link for each further lane of a link a block wide, on the link to the
+    /// next chip and on the loop back of a group: its code and its queue.
+    pub link_lane: f64,
     /// The slowest path between registers, in full-adder delays: with one unit of four
     /// lanes, and how much each doubling of the lanes and of the units adds.
     pub path: f64,
@@ -87,6 +90,12 @@ impl Costs {
         let ((f4, u4, l4), (f8, u8, l8)) = (at(2), at(3));
         let lane = (u8 - u4) / 4.0;
         let level_lane = (l8 - l4) / 4.0;
+        // A link a block wide: three more lanes on the link and three on the loop back.
+        let wide = {
+            let c = DieConfig { cells: 4, features: base.features.with_lane_bits(2).with_cluster_bits(0).with_wide_link(true), ..base };
+            die_design(c).gate_equivalents()
+        };
+        let link_lane = (wide - gates(0, 2, 1)) / 6.0;
         // The clock: grows with the logarithm of the lanes and of the units, so three
         // small dies give its line.
         // The simulator holds every memory, so they are made small: only the index adders
@@ -97,7 +106,7 @@ impl Costs {
             netlist::Simulator::new(&die_design(c)).map_or(f64::INFINITY, |sim| sim.critical_path(GATE_DELAYS))
         };
         let (start, wider, four, many) = (path(0, 2), path(0, 4), path(2, 2), path(5, 2));
-        Costs { fixed: (f4 + f8) / 2.0, unit: u4 - 4.0 * lane, lane, level: l4 - 4.0 * level_lane, level_lane, cell, path: start, path_lane_bit: (wider - start) / 2.0, path_four_units: four, path_unit_bit: ((many - four) / 3.0).max(0.0) }
+        Costs { fixed: (f4 + f8) / 2.0, unit: u4 - 4.0 * lane, lane, level: l4 - 4.0 * level_lane, level_lane, cell, link_lane, path: start, path_lane_bit: (wider - start) / 2.0, path_four_units: four, path_unit_bit: ((many - four) / 3.0).max(0.0) }
     }
 
     /// The fastest clock of a die, given the delay of a full adder in its process.
@@ -114,7 +123,8 @@ impl Costs {
     pub fn gates(&self, cluster_bits: u32, lane_bits: u32, cell_bits: u32) -> f64 {
         let (units, lanes) = ((1u64 << cluster_bits) as f64, (1u64 << lane_bits) as f64);
         let per_unit = self.unit + lanes * self.lane + cluster_bits as f64 * (self.level + lanes * self.level_lane);
-        self.fixed + units * per_unit + (1u64 << cell_bits) as f64 * self.cell
+        // The dies the searches size talk over links a block wide, with a loop back.
+        self.fixed + units * per_unit + (1u64 << cell_bits) as f64 * self.cell + 2.0 * (lanes - 1.0) * self.link_lane
     }
 }
 
