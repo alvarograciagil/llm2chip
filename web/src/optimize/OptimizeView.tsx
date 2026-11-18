@@ -55,15 +55,62 @@ function NumberField({ label, value, onChange, unit }: { label: string; value: n
   );
 }
 
-function Span({ label, value, onChange }: { label: string; value: [number, number]; onChange: (v: [number, number]) => void }) {
+/** A range of powers of two, from `low` to `high` (log2), chosen from lists. */
+function Span({ label, value, low, high, onChange }: { label: string; value: [number, number]; low: number; high: number; onChange: (v: [number, number]) => void }) {
+  const t = useT();
+  const bits = Array.from({ length: high - low + 1 }, (_, i) => low + i);
+  return (
+    <div className="optimize-field">
+      <span>{label}</span>
+      <select aria-label={`${label} (${t("from")})`} value={value[0]} onChange={(e) => onChange([Number(e.target.value), Math.max(Number(e.target.value), value[1])])}>
+        {bits.map((b) => <option key={b} value={b}>{formatNumber(2 ** b)}</option>)}
+      </select>
+      <span aria-hidden="true">–</span>
+      <select aria-label={`${label} (${t("to")})`} value={value[1]} onChange={(e) => onChange([Math.min(value[0], Number(e.target.value)), Number(e.target.value)])}>
+        {bits.map((b) => <option key={b} value={b}>{formatNumber(2 ** b)}</option>)}
+      </select>
+    </div>
+  );
+}
+
+/** One value from a list. */
+function Choose({ label, value, options, onChange, unit }: { label: string; value: number; options: [number, string][]; onChange: (v: number) => void; unit?: string }) {
   return (
     <label className="optimize-field">
       <span>{label}</span>
-      <input type="number" value={value[0]} onChange={(e) => onChange([Number(e.target.value), value[1]])} />
-      <span aria-hidden="true">–</span>
-      <input type="number" value={value[1]} onChange={(e) => onChange([value[0], Number(e.target.value)])} />
+      <select value={value} onChange={(e) => onChange(Number(e.target.value))}>
+        {options.map(([v, name]) => <option key={v} value={v}>{name}</option>)}
+      </select>
+      {unit && <span className="muted-text">{unit}</span>}
     </label>
   );
+}
+
+/** Several values from a list, as boxes to tick. */
+function Ticks<V extends string | number>({ label, values, options, onChange }: { label: string; values: V[]; options: [V, string][]; onChange: (v: V[]) => void }) {
+  return (
+    <fieldset className="optimize-ticks">
+      <legend>{label}</legend>
+      {options.map(([v, name]) => (
+        <label key={String(v)} className="check">
+          <input type="checkbox" checked={values.includes(v)} onChange={(e) => onChange(e.target.checked ? [...values, v] : values.filter((x) => x !== v))} />
+          {name}
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+const CHIP_CHOICES = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
+const GROUP_CHOICES = [2, 3, 4, 6, 8, 12, 16];
+const CONTEXTS = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+const PROMPTS = [32, 128, 512, 1024, 2048, 4096, 8192];
+const CLOCKS = [0.5, 1, 1.5, 2, 3, 5];
+const FACTOR_STEPS = [1, 2, 4, 8, 16];
+
+/** The ways of sharing as boxes, and as the list the engine reads. */
+function sharingsOf(text: string): string[] {
+  return text.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
 function shape(d: Design): string {
@@ -83,6 +130,7 @@ function DesignRow({ design, label, onApply }: { design: Design; label: string; 
       <td>{design.area_per_tok_s.toLocaleString(locale(), { maximumSignificantDigits: 3 })}</td>
       <td>{design.energy_mj === null ? "—" : formatNumber(design.energy_mj)}</td>
       <td>{design.power_w === null ? "—" : formatNumber(design.power_w)}</td>
+      <td>{design.power_w ? formatNumber(design.tokens_per_second / design.power_w) : "—"}</td>
       <td>
         <button type="button" className="button" onClick={onApply}>{t("Apply")}</button>
       </td>
@@ -104,7 +152,6 @@ export function OptimizeView() {
   const usable = models.filter((m) => m.supported);
   const [path, setPath] = useState("");
   const [factorSteps, setFactorSteps] = useState(8);
-  const [chipsText, setChipsText] = useState(request.space.chips.join(", "));
   const running = status.state === "running";
 
   useEffect(() => {
@@ -123,8 +170,7 @@ export function OptimizeView() {
   const limits = (patch: Partial<Request["limits"]>) => setRequest({ ...request, limits: { ...request.limits, ...patch } });
   const space = (patch: Partial<Request["space"]>) => setRequest({ ...request, space: { ...request.space, ...patch } });
   const run = () => {
-    const chips = chipsText.split(/[\s,]+/).map(Number).filter((n) => Number.isInteger(n) && n > 0);
-    void start(chosen, { ...request, space: { ...request.space, chips } }, factorSteps);
+    void start(chosen, request, factorSteps);
   };
   // A design applied to the designer, on its model.
   const apply = (design: Design) => {
@@ -166,27 +212,30 @@ export function OptimizeView() {
             <p className="muted-text">{t(GOAL_HELP[request.goal])}</p>
             <NumberField label={t("Minimum speed")} unit="tok/s" value={request.limits.min_tok_s} onChange={(v) => limits({ min_tok_s: v })} />
             <NumberField label={t("Longest wait for the first token")} unit="ms" value={request.limits.max_first_token_ms} onChange={(v) => limits({ max_first_token_ms: v })} />
-            <NumberField label={t("Most chips")} value={request.limits.max_chips} onChange={(v) => limits({ max_chips: v })} />
+            <Choose label={t("Most chips")} value={request.limits.max_chips} options={[[0, t("No limit")], ...CHIP_CHOICES.map((n): [number, string] => [n, String(n)])]} onChange={(max_chips) => limits({ max_chips })} />
             <NumberField label={t("Most silicon")} unit="mm²" value={request.limits.max_area_mm2} onChange={(v) => limits({ max_area_mm2: v })} />
             <NumberField label={t("Most power")} unit="W" value={request.limits.max_power_w} onChange={(v) => limits({ max_power_w: v })} />
             <details className="optimize-advanced">
               <summary>{t("Advanced options")}</summary>
-              <label className="optimize-field">
-                <span>{t("Numbers of chips to try")}</span>
-                <input type="text" value={chipsText} onChange={(e) => setChipsText(e.target.value)} />
-              </label>
-              <label className="optimize-field">
-                <span>{t("Ways of sharing")}</span>
-                <input type="text" value={request.space.sharing} onChange={(e) => space({ sharing: e.target.value })} />
-              </label>
-              <p className="muted-text">{t("layers, rows or mixed:N, separated by commas; mixed:auto tries every group size that divides the chips.")}</p>
-              <Span label={t("Units per die (log2)")} value={request.space.cluster_bits} onChange={(v) => space({ cluster_bits: v })} />
-              <Span label={t("Lanes per unit (log2)")} value={request.space.lane_bits} onChange={(v) => space({ lane_bits: v })} />
-              <Span label={t("Cells per die (log2)")} value={request.space.cell_bits} onChange={(v) => space({ cell_bits: v })} />
-              <NumberField label={t("Context")} unit="tokens" value={request.context} onChange={(v) => setRequest({ ...request, context: v || 8192 })} />
-              <NumberField label={t("Prompt for the first token")} unit="tokens" value={request.prompt} onChange={(v) => setRequest({ ...request, prompt: v || 1024 })} />
-              <NumberField label={t("Highest clock")} unit="GHz" value={request.max_clock_ghz} onChange={(v) => setRequest({ ...request, max_clock_ghz: v || 5 })} />
-              <NumberField label={t("Cycles to apply a group's scale")} value={factorSteps} onChange={(v) => setFactorSteps(v || 8)} />
+              <Ticks label={t("Numbers of chips to try")} values={request.space.chips} options={CHIP_CHOICES.map((n) => [n, String(n)])} onChange={(chips) => space({ chips: [...chips].sort((a, b) => a - b) })} />
+              <Ticks
+                label={t("Ways of sharing")}
+                values={sharingsOf(request.space.sharing)}
+                options={[
+                  ["layers", t("By layers: each chip runs whole layers")],
+                  ["rows", t("One group: every chip shares each layer")],
+                  ["mixed:auto", t("Groups of every size that divides the chips")],
+                  ...GROUP_CHOICES.map((g): [string, string] => [`mixed:${g}`, t(`Groups of ${g}`)]),
+                ]}
+                onChange={(list) => space({ sharing: list.join(",") })}
+              />
+              <Span label={t("Units per die")} low={0} high={11} value={request.space.cluster_bits} onChange={(v) => space({ cluster_bits: v })} />
+              <Span label={t("Lanes per unit")} low={0} high={8} value={request.space.lane_bits} onChange={(v) => space({ lane_bits: v })} />
+              <Span label={t("Cells per die")} low={3} high={26} value={request.space.cell_bits} onChange={(v) => space({ cell_bits: v })} />
+              <Choose label={t("Context")} unit="tokens" value={request.context} options={CONTEXTS.map((c) => [c, formatNumber(c)])} onChange={(context) => setRequest({ ...request, context })} />
+              <Choose label={t("Prompt for the first token")} unit="tokens" value={request.prompt} options={PROMPTS.map((p) => [p, formatNumber(p)])} onChange={(prompt) => setRequest({ ...request, prompt })} />
+              <Choose label={t("Highest clock")} unit="GHz" value={request.max_clock_ghz} options={CLOCKS.map((c) => [c, formatNumber(c)])} onChange={(max_clock_ghz) => setRequest({ ...request, max_clock_ghz })} />
+              <Choose label={t("Cycles to apply a group's scale")} value={factorSteps} options={FACTOR_STEPS.map((s) => [s, String(s)])} onChange={setFactorSteps} />
               <Segmented<Effort> label={t("Search")} value={request.effort} options={[["quick", t("Quick")], ["thorough", t("Thorough")]]} onChange={(effort) => setRequest({ ...request, effort })} />
             </details>
             <div className="optimize-actions">
@@ -231,8 +280,9 @@ export function OptimizeView() {
                       <th>{t("Total mm²")}</th>
                       <th>{t("mm² per die")}</th>
                       <th>{t("mm² per tok/s")}</th>
-                      <th>{t("mJ per token")}</th>
+                      <th>{t("Energy per token (mJ)")}</th>
                       <th>W</th>
+                      <th>{t("tok/s per W")}</th>
                       <th></th>
                     </tr>
                   </thead>

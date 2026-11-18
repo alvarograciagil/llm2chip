@@ -3354,3 +3354,21 @@ label:hover > .hint-icon {
   display: flex;
   gap: 8px;
 }
+
+.optimize-ticks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  border: none;
+  margin: 6px 0 4px;
+  padding: 0;
+}
+
+.optimize-ticks legend {
+  width: 100%;
+  margin-bottom: 4px;
+}
+
+.optimize-ticks .check {
+  align-items: center;
+}

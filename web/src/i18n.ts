@@ -932,10 +932,6 @@ const ES: Record<string, string> = {
   "Advanced options": "Opciones avanzadas",
   "Numbers of chips to try": "Números de chips a probar",
   "Ways of sharing": "Formas de reparto",
-  "layers, rows or mixed:N, separated by commas; mixed:auto tries every group size that divides the chips.": "layers, rows o mixed:N, separados por comas; mixed:auto prueba cada tamaño de grupo que divide los chips.",
-  "Units per die (log2)": "Unidades por die (log2)",
-  "Lanes per unit (log2)": "Carriles por unidad (log2)",
-  "Cells per die (log2)": "Celdas por die (log2)",
   "Prompt for the first token": "Prompt para el primer token",
   "Highest clock": "Reloj máximo",
   "Cycles to apply a group's scale": "Ciclos para aplicar la escala de un grupo",
@@ -949,7 +945,6 @@ const ES: Record<string, string> = {
   "Total mm²": "mm² en total",
   "mm² per die": "mm² por die",
   "mm² per tok/s": "mm² por tok/s",
-  "mJ per token": "mJ por token",
   "Speed, clock and silicon are measured on each design's own circuit; energy and power are estimated by the architecture model at that speed.": "Velocidad, reloj y silicio se miden sobre el propio circuito de cada diseño; la energía y la potencia las estima el modelo de arquitectura a esa velocidad.",
   "No design in the space meets every limit.": "Ningún diseño del espacio cumple todos los límites.",
   "One could not be built": "Uno no se pudo construir",
@@ -962,6 +957,13 @@ const ES: Record<string, string> = {
   "tokens": "tokens",
   "Create and optimise": "Crear y optimizar",
   "Create the project and search for the best set of chips, measured on the generated circuits": "Crea el proyecto y busca el mejor conjunto de chips, medido sobre los circuitos generados",
+  "from": "desde",
+  "By layers: each chip runs whole layers": "Por capas: cada chip ejecuta capas enteras",
+  "One group: every chip shares each layer": "Un solo grupo: todos los chips comparten cada capa",
+  "Groups of every size that divides the chips": "Grupos de cada tamaño que divida los chips",
+  "Units per die": "Unidades por die",
+  "Energy per token (mJ)": "Energía por token (mJ)",
+  "tok/s per W": "tok/s por W",
 };
 
 
