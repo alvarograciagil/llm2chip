@@ -4,8 +4,9 @@
 //! `cargo run --release -p sim --example frontier -- MODEL_DIR [PROMPT] [CONTEXT]`
 //!
 //! `CHIPS` lists the numbers of chips to try, `8,12,16` by default: each die must fit in
-//! the reticle. `SHARING` is `layers` (the default), `rows` or `mixed:N`, groups of N chips
-//! that share each layer, its products and its heads. `FACTOR_STEPS` (8 by default) is how
+//! the reticle. `SHARING` lists the ways of sharing the model to try, each with every
+//! number of chips it suits: `layers` (the default), `rows` or `mixed:N`, groups of N chips
+//! that share each layer, its products and its heads, as in `mixed:4,mixed:8`. `FACTOR_STEPS` (8 by default) is how
 //! many cycles each cell takes to apply a group's scale and bias: fewer cost more logic.
 
 use netlist::multiplier::MultiplierKind;
@@ -29,22 +30,31 @@ fn main() {
     let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 36, mac_stages: 1, adder_stages: 1, addr_bits: 24, coding: Default::default(), exponent_bits: 0, multiplier: MultiplierKind::Booth, fixed_weights: false, ecc: false, skip_zeros: false };
     let base = DieConfig { cells: 1, cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_factor_steps(std::env::var("FACTOR_STEPS").map_or(8, |v| v.parse().expect("FACTOR_STEPS"))) };
     let costs = Costs::measure(base);
-    let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: std::env::var("CHIPS").unwrap_or("8,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect(), clock_hz: 5e9, process: N6, context, lane_bits: range("LANES", 6..=7), cluster_bits: range("UNITS", 5..=11), cell_bits: range("CELLS", 13..=24), sharing: sharing_from(&std::env::var("SHARING").unwrap_or_default()) };
+    let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: std::env::var("CHIPS").unwrap_or("8,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect(), clock_hz: 5e9, process: N6, context, lane_bits: range("LANES", 6..=7), cluster_bits: range("UNITS", 5..=11), cell_bits: range("CELLS", 13..=24), sharing: std::env::var("SHARING").unwrap_or_default().split(',').map(sharing_from).collect() };
     let points = frontier(&program, &weights, base, &costs, &target);
     let first = points.first().copied();
     for c in &points {
         let extra = first.map_or(0.0, |f| c.area_mm2 / f.area_mm2);
-        println!("{} chip(s) {:>5} x {:>3}, {:>9} cells: {:>6.0} tok/s at {:>4.0} MHz, first token {:>6.1} ms, {:>9.1} M gates, {:>7.0} mm² ({extra:>4.2}x, {:>4.0} per chip), {:>5.3} mm² per tok/s", c.chips, 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.tokens_per_second, c.clock_hz / 1e6, c.prompt_seconds * 1e3, c.gates / 1e6, c.area_mm2, c.die_mm2, c.area_mm2 / c.tokens_per_second);
+        println!("{} chip(s) {:>9} {:>5} x {:>3}, {:>9} cells: {:>6.0} tok/s at {:>4.0} MHz, first token {:>6.1} ms, {:>9.1} M gates, {:>7.0} mm² ({extra:>4.2}x, {:>4.0} per chip), {:>5.3} mm² per tok/s", c.chips, shared(c.sharing), 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.tokens_per_second, c.clock_hz / 1e6, c.prompt_seconds * 1e3, c.gates / 1e6, c.area_mm2, c.die_mm2, c.area_mm2 / c.tokens_per_second);
         let [logic, cells, vectors, code] = c.parts_mm2;
         println!("    per chip: logic {logic:.0} mm², cell memories {cells:.0}, vector memories {vectors:.0}, microcode {code:.1}");
     }
     if let Some(c) = efficient(&points) {
-        println!("most speed per area: {} chip(s) of {} x {}, {} cells, {:.0} tok/s, {:.0} mm², {:.3} mm² per tok/s", c.chips, 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.tokens_per_second, c.area_mm2, c.area_mm2 / c.tokens_per_second);
+        println!("most speed per area: {} chip(s) {} of {} x {}, {} cells, {:.0} tok/s, {:.0} mm², {:.3} mm² per tok/s", c.chips, shared(c.sharing), 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.tokens_per_second, c.area_mm2, c.area_mm2 / c.tokens_per_second);
     }
     for ratio in [1.5, 2.0, 3.0] {
         if let Some(c) = balanced(&points, ratio) {
-            println!("balance with each extra tok/s at no more than {ratio}x the mean area per tok/s: {} chip(s) of {} x {}, {} cells, {:.0} tok/s, {:.0} mm²", c.chips, 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.tokens_per_second, c.area_mm2);
+            println!("balance with each extra tok/s at no more than {ratio}x the mean area per tok/s: {} chip(s) {} of {} x {}, {} cells, {:.0} tok/s, {:.0} mm²", c.chips, shared(c.sharing), 1u64 << c.cluster_bits, 1u64 << c.lane_bits, 1u64 << c.cell_bits, c.tokens_per_second, c.area_mm2);
         }
+    }
+}
+
+/// How the chips share the model, as `SHARING` names it.
+fn shared(sharing: sim::sizing::Sharing) -> String {
+    match sharing {
+        sim::sizing::Sharing::Layers => "layers".into(),
+        sim::sizing::Sharing::Rows => "rows".into(),
+        sim::sizing::Sharing::Mixed(n) => format!("mixed:{n}"),
     }
 }
 

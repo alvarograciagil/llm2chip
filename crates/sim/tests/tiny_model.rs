@@ -1172,7 +1172,9 @@ fn run_joined(dies: &mut [(Simulator, Microprogram)], wires: &[(usize, usize, &s
 /// Chips that share the products by rows share the attention's heads too: each keeps and
 /// attends with its own heads and the chips gather the attention's output. Over a few tokens,
 /// so the cache counts, the first chip's logits are those of one die alone, bit for bit:
-/// two chips in one ring, and two groups of two.
+/// two chips in one ring, and two groups of two. Six chips in one ring hold each key head
+/// on three of them, and three share rows in whole blocks that overlap where they do not
+/// divide.
 #[test]
 #[ignore = "slow: several dies gate by gate over several tokens"]
 fn chips_that_share_the_heads_give_the_logits_of_one_die() {
@@ -1185,15 +1187,21 @@ fn chips_that_share_the_heads_give_the_logits_of_one_die() {
     let tokens = [3u32, 5, 1];
     // Two chips in one ring sharing the heads; two in a chain by layers, which share none;
     // and two groups of two sharing them, on dies of several units.
+    let ring = |chips: usize| (0..chips).map(|c| (c, (c + 1) % chips, "link")).collect::<Vec<_>>();
     for (cluster_bits, lane_bits, sharing, chips, wires, heads) in [
         (1u32, 2u32, sim::chip::Sharing::Rows, 2usize, vec![(0usize, 1usize, "link"), (1, 0, "link")], true),
         (1, 2, sim::chip::Sharing::Layers, 2, vec![(0, 1, "link"), (1, 0, "link")], false),
         (2, 2, sim::chip::Sharing::Mixed(2), 4, vec![(0, 1, "link"), (1, 2, "link"), (2, 3, "link"), (3, 0, "link"), (1, 0, "loop"), (3, 2, "loop")], true),
-        // Four chips in one ring pass each block on as it arrives; the heads do not divide.
-        (1, 2, sim::chip::Sharing::Rows, 4, vec![(0, 1, "link"), (1, 2, "link"), (2, 3, "link"), (3, 0, "link")], false),
+        // Four chips in one ring pass each block on as it arrives; the attention's heads do
+        // not divide, but the element-wise steps still take a slice each.
+        (1, 2, sim::chip::Sharing::Rows, 4, ring(4), true),
+        // Six: a query head each, and each of the two key heads on three chips.
+        (1, 1, sim::chip::Sharing::Rows, 6, ring(6), true),
+        // Three: the rows' last share overlaps the one before; the key heads do not divide.
+        (1, 1, sim::chip::Sharing::Rows, 3, ring(3), false),
         // Two, with shares of several blocks: each unit narrows a slice of this chip's rows,
         // which the chips gather only once every unit holds them all.
-        (1, 1, sim::chip::Sharing::Rows, 2, vec![(0, 1, "link"), (1, 0, "link")], true),
+        (1, 1, sim::chip::Sharing::Rows, 2, ring(2), true),
     ] {
         let base = DieConfig { microcode_bits: 15, cells: 4 << cluster_bits, features: cell_die_config().features.with_lane_bits(lane_bits).with_cluster_bits(cluster_bits), ..cell_die_config() };
         let share = sim::chip::ShareOut::new(&program, &weights, chips, CHIP_TOKENS, base.cell.activation_bits, sharing).unwrap();
@@ -1211,7 +1219,7 @@ fn chips_that_share_the_heads_give_the_logits_of_one_die() {
                 (die, code)
             })
             .collect();
-        // The chips with the attention's layers share its heads, unless they share no rows.
+        // The chips share heads or slices, unless they share no rows.
         assert_eq!(shared, heads, "{chips} chips, {sharing:?}");
         for (position, token) in tokens.iter().enumerate() {
             run_joined(&mut dies, &wires, ENTRY_TOKEN, *token, position as u32);

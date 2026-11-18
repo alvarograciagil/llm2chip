@@ -39,7 +39,7 @@ fn main() {
     println!("gates: fixed {:.0}, unit {:.0} + {:.0}/lane, level {:.0} + {:.0}/lane, cell {:.0}", costs.fixed, costs.unit, costs.lane, costs.level, costs.level_lane, costs.cell);
     println!("critical path: {:.1} full adders with one unit, {:.1} with four, + {:.1} for each doubling of lanes and + {:.1} for each further doubling of units", costs.path, costs.path_four_units, costs.path_lane_bit, costs.path_unit_bit);
     // N6: the delay of a full adder in that process.
-    let target = Target { tokens_per_second: wanted, prompt_seconds: first_ms / 1e3, prompt, chips: std::env::var("CHIPS").unwrap_or("8,10,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect(), clock_hz: ghz * 1e9, process: N6, context, lane_bits: 6..=7, cluster_bits: 5..=11, cell_bits: 13..=25, sharing: sim::sizing::Sharing::Layers };
+    let target = Target { tokens_per_second: wanted, prompt_seconds: first_ms / 1e3, prompt, chips: std::env::var("CHIPS").unwrap_or("8,10,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect(), clock_hz: ghz * 1e9, process: N6, context, lane_bits: 6..=7, cluster_bits: 5..=11, cell_bits: 13..=25, sharing: vec![sim::sizing::Sharing::Layers] };
     let found = search(&program, &weights, base, &costs, &target);
     if found.is_empty() {
         println!("no set of chips in the range reaches {wanted} tok/s and the first token in {first_ms} ms");

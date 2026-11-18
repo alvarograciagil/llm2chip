@@ -340,9 +340,11 @@ pub trait BlockOps: Sized {
         let _ = (parts, src);
         unimplemented!("{first}: only a die with cells splits the products among chips")
     }
-    /// Gives every chip of the ring the blocks of `reg` the others made.
-    fn all_gather(&mut self, reg: u32, block: u32, index: u32) {
-        let _ = (reg, block, index);
+    /// Gives every chip of the ring the blocks of `reg` the others made: `block` elements
+    /// each, of `total`. The last ones start early enough to end at `total`, so they may
+    /// overlap the ones before, which made the same elements.
+    fn all_gather(&mut self, reg: u32, block: u32, index: u32, total: u32) {
+        let _ = (reg, block, index, total);
         unimplemented!("only a die with cells splits the products among chips")
     }
     /// True only when an implementation can prove `reg[index]` is zero and may skip work.
@@ -1784,25 +1786,27 @@ impl Assembly {
     }
 
     /// Every chip of the ring made `block` elements of `reg`, the one at `index` those from
-    /// `index * block`: after a turn less than there are chips, each has them all. In each
-    /// turn a chip passes on the block it received in the turn before.
-    fn ring_all_gather(&mut self, reg: u32, block: u32, index: u32) {
+    /// `index * block`, or the last `block` of `total` when that is less: after a turn less
+    /// than there are chips, each has them all. In each turn a chip passes on the block it
+    /// received in the turn before.
+    fn ring_all_gather(&mut self, reg: u32, block: u32, index: u32, total: u32) {
         let chips = self.ring;
         let unit = if self.wide_link { 1 << self.lane_bits } else { 1 };
+        let start = |chip: u32| (chip * block).min(total - block);
         if self.streams && chips > 1 && block.is_multiple_of(unit) {
-            return self.forwarding_gather(reg, block, index, unit);
+            return self.forwarding_gather(reg, block, index, unit, start);
         }
         for turn in 0..chips - 1 {
             let sent = (index + chips - turn) % chips;
             let received = (index + 2 * chips - turn - 1) % chips;
-            self.exchange(reg, sent * block, received * block, block);
+            self.exchange(reg, start(sent), start(received), block);
         }
     }
 
     /// `ring_all_gather` a chunk at a time, passing each block on in the cycle it arrives:
     /// a chip sends its own chunk, then takes each of the others' as it comes round the
     /// ring, sending it on to the next chip in the same cycle unless the next chip made it.
-    fn forwarding_gather(&mut self, reg: u32, block: u32, index: u32, unit: u32) {
+    fn forwarding_gather(&mut self, reg: u32, block: u32, index: u32, unit: u32, start: impl Fn(u32) -> u32) {
         self.clear_shifts();
         let chips = self.ring;
         let words = block / unit;
@@ -1814,7 +1818,7 @@ impl Assembly {
             let stream = |s: &mut Self, mut word: Alu<Expr>, at: Expr, place: u32| {
                 let variable = Var::Loop(s.loops);
                 s.loops += 1;
-                let moved = Expr::from(place * block) + first + at + Expr::var(variable) * unit;
+                let moved = Expr::from(start(place)) + first + at + Expr::var(variable) * unit;
                 if word.op == OP_LINK {
                     word.dst = (reg, moved);
                 } else {
@@ -2919,8 +2923,8 @@ impl BlockOps for Assembly {
         self.ring_matvecs_rows(first, parts, src);
     }
 
-    fn all_gather(&mut self, reg: u32, block: u32, index: u32) {
-        self.ring_all_gather(reg, block, index);
+    fn all_gather(&mut self, reg: u32, block: u32, index: u32, total: u32) {
+        self.ring_all_gather(reg, block, index, total);
     }
 }
 

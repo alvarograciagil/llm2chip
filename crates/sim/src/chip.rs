@@ -341,6 +341,20 @@ pub enum Sharing {
     Mixed(u32),
 }
 
+impl Sharing {
+    /// What this asks for comes to with `chips` of them: groups that do not divide the chips
+    /// go by layers, and a single group shares every product by rows.
+    pub fn for_chips(self, chips: usize) -> Sharing {
+        match self {
+            Sharing::Mixed(group) if group > 1 && chips > group as usize && chips.is_multiple_of(group as usize) => self,
+            Sharing::Mixed(group) if chips > 1 && chips <= group as usize => Sharing::Rows,
+            Sharing::Mixed(_) => Sharing::Layers,
+            Sharing::Rows if chips < 2 => Sharing::Layers,
+            other => other,
+        }
+    }
+}
+
 /// How `chips` of them share the model: the groups' size when they are in several groups,
 /// whether each product is shared by rows, and the runs of layers of the chain.
 pub struct ShareOut {
