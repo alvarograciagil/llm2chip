@@ -9,13 +9,13 @@ import { useT, type Language } from "../i18n";
 import type { View } from "../store";
 
 const VIEWS: [View, string][] = [
+  ["optimize", "Optimise"],
   ["floorplan", "Floorplan"],
   ["logic", "How it works"],
   ["schematic", "Schematic"],
   ["simulator", "Simulator"],
   ["images", "Images"],
   ["explorer", "Explorer"],
-  ["optimize", "Optimise"],
   ["numeric", "Numerics"],
   ["models", "Models"],
   ["parameters", "Parameters"],

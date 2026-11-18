@@ -1,4 +1,6 @@
 import { useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { useT } from "../i18n";
 
 export function Switch({ checked, label, onChange }: { checked: boolean; label: string; onChange: (v: boolean) => void }) {
   return (
@@ -77,5 +79,32 @@ export function IconButton({
         {children}
       </svg>
     </button>
+  );
+}
+
+/** A "?" that explains something while the pointer or the focus is on it, above everything
+ * so no scrolling panel cuts it, and opens its documentation when pressed, if it has any. */
+export function InfoTip({ id, label, text, onOpen }: { id: string; label: string; text: string; onOpen?: () => void }) {
+  const t = useT();
+  const [at, setAt] = useState<{ x: number; y: number; above: boolean } | null>(null);
+  const show = (e: { currentTarget: HTMLElement }) => {
+    const box = e.currentTarget.getBoundingClientRect();
+    const above = box.bottom + 160 > window.innerHeight;
+    setAt({ x: Math.max(8, Math.min(box.left - 8, window.innerWidth - 276)), y: above ? box.top - 6 : box.bottom + 6, above });
+  };
+  return (
+    <span className="info">
+      <button className="info-button" aria-label={t(`What ${label} is`)} aria-describedby={id} onClick={onOpen} onMouseEnter={show} onMouseLeave={() => setAt(null)} onFocus={show} onBlur={() => setAt(null)}>
+        ?
+      </button>
+      {/* The sidebar's blur would make a fixed position its own: the tip lives in the page. */}
+      {createPortal(
+        <span className={at ? "tooltip shown" : "tooltip"} role="tooltip" id={id} style={at ? { left: at.x, top: at.y, transform: at.above ? "translateY(-100%)" : undefined } : undefined}>
+          {text}
+          {onOpen && <em>{t("Click to see the full documentation.")}</em>}
+        </span>,
+        document.body,
+      )}
+    </span>
   );
 }

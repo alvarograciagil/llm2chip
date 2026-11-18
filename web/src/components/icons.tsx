@@ -51,6 +51,19 @@ const ICONS = {
       <path d="M10 2v3M10 15v3M2 10h3M15 10h3" {...line} />
     </>
   ),
+  // A lightning bolt: speed.
+  speed: <path d="M11 2 4 11.5h5L8 18l7-9.5h-5z" {...line} />,
+  // A die on a wafer grid: silicon.
+  silicon: (
+    <>
+      <rect x="5" y="5" width="10" height="10" rx="1.5" {...line} />
+      <path d="M8 2.5V5M12 2.5V5M8 15v2.5M12 15v2.5M2.5 8H5M2.5 12H5M15 8h2.5M15 12h2.5" {...line} />
+    </>
+  ),
+  // A balance: the best value for the silicon.
+  balance: <path d="M10 3v14M6 17h8M4 6h12M4 6l-2.5 5a2.5 2.5 0 0 0 5 0zM16 6l-2.5 5a2.5 2.5 0 0 0 5 0z" {...line} />,
+  // A drop of energy.
+  energy: <path d="M10 2.5S4.5 9 4.5 12.5a5.5 5.5 0 0 0 11 0C15.5 9 10 2.5 10 2.5zM10.5 8.5 8.5 12h3l-2 3.5" {...line} />,
   // A histogram: how the numbers spread.
   numeric: <path d="M4 16V11M8 16V6M12 16V9M16 16V13M3 16.5h14" {...line} />,
   // Stacked layers of a model.

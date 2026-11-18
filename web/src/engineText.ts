@@ -944,6 +944,7 @@ export const ENGINE_TEXT: [string, string][] = [
   ["From {s}.", "De {0}."],
   ["Generating circuits: {n} of {n}", "Generando circuitos: {0} de {1}"],
   ["Groups of {n}", "Grupos de {0}"],
+  ["in groups of {n}", "en grupos de {0}"],
   ["large loss", "pérdida grande"],
   ["Measured {n} designs of about {n}", "Medidos {0} diseños de unos {1}"],
   ["Measured {n} designs; {n} came from earlier searches", "Medidos {0} diseños; {1} venían de búsquedas anteriores"],

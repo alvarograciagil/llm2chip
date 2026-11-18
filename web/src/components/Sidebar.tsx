@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { createPortal } from "react-dom";
 import { fpgaBoards, type Maturity, type QualityRisk } from "../engine";
 import { makers, type FpgaBoard } from "../wizard/plan";
 import { formatNumber, fromLog, locale, toLog } from "../format";
@@ -8,7 +7,7 @@ import { matchingPreset, PARAM_GROUPS, type Field } from "../params";
 import { useDesign } from "../store";
 import { useT } from "../i18n";
 import { PARAM_HELP_ES } from "../paramHelpEs";
-import { Disclosure, Segmented, Switch } from "./controls";
+import { Disclosure, InfoTip, Segmented, Switch } from "./controls";
 
 const LOG_STEPS = 1000;
 
@@ -51,33 +50,6 @@ function ValueInput({ field, value, onCommit }: { field: RangeField; value: numb
         }}
       />
       {field.unit && <small>{t(field.unit)}</small>}
-    </span>
-  );
-}
-
-/** A "?" that explains a parameter while the pointer is on it, above everything so no
- * scrolling panel cuts it, and opens its documentation when pressed. */
-function InfoTip({ id, label, text, onOpen }: { id: string; label: string; text: string; onOpen: () => void }) {
-  const t = useT();
-  const [at, setAt] = useState<{ x: number; y: number; above: boolean } | null>(null);
-  const show = (e: { currentTarget: HTMLElement }) => {
-    const box = e.currentTarget.getBoundingClientRect();
-    const above = box.bottom + 160 > window.innerHeight;
-    setAt({ x: Math.max(8, Math.min(box.left - 8, window.innerWidth - 276)), y: above ? box.top - 6 : box.bottom + 6, above });
-  };
-  return (
-    <span className="info">
-      <button className="info-button" aria-label={t(`What ${label} is`)} aria-describedby={id} onClick={onOpen} onMouseEnter={show} onMouseLeave={() => setAt(null)} onFocus={show} onBlur={() => setAt(null)}>
-        ?
-      </button>
-      {/* The sidebar's blur would make a fixed position its own: the tip lives in the page. */}
-      {createPortal(
-        <span className={at ? "tooltip shown" : "tooltip"} role="tooltip" id={id} style={at ? { left: at.x, top: at.y, transform: at.above ? "translateY(-100%)" : undefined } : undefined}>
-          {text}
-          <em>{t("Click to see the full documentation.")}</em>
-        </span>,
-        document.body,
-      )}
     </span>
   );
 }
