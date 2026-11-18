@@ -91,18 +91,28 @@ Mixed split in groups of four (`SHARING=mixed:4`): the four chips of a group sha
 
 | Chips | Units × lanes | Cells per die | tok/s | Clock | First token | Total area | Per chip |
 |---|---|---|---|---|---|---|---|
-| 12 | 32 × 64 | 8,192 | 709 | 1,014 MHz | 423 ms | 5,693 mm² | 474 mm² |
-| 12 | 32 × 128 | 8,192 | 884 | 1,031 MHz | 369 ms | 5,779 mm² | 482 mm² |
-| 12 | 32 × 64 | 16,384 | 985 | 1,014 MHz | 279 ms | 6,373 mm² | 531 mm² |
-| 12 | 32 × 128 | 16,384 | 1,347 | 1,031 MHz | 227 ms | 6,459 mm² | 538 mm² |
-| 12 | 64 × 128 | 16,384 | 1,507 | 1,023 MHz | 219 ms | 6,779 mm² | 565 mm² |
-| 12 | 64 × 64 | 32,768 | 1,612 | 1,007 MHz | 177 ms | 7,520 mm² | 627 mm² |
-| 12 | 64 × 128 | 32,768 | 2,214 | 1,023 MHz | 141 ms | 7,684 mm² | 640 mm² |
-| 12 | 128 × 128 | 32,768 | 2,314 | 1,016 MHz | 144 ms | 8,847 mm² | 737 mm² |
-| 12 | 64 × 128 | 65,536 | 2,744 | 1,023 MHz | 110 ms | 9,538 mm² | 795 mm² |
-| 12 | 128 × 128 | 65,536 | **3,236** | 1,016 MHz | 100 ms | 10,143 mm² | 845 mm² |
+| 12 | 32 × 64 | 8,192 | 708 | 1,014 MHz | 424 ms | 5,693 mm² | 474 mm² |
+| 12 | 32 × 128 | 8,192 | 883 | 1,031 MHz | 370 ms | 5,779 mm² | 482 mm² |
+| 12 | 32 × 64 | 16,384 | 982 | 1,014 MHz | 281 ms | 6,373 mm² | 531 mm² |
+| 12 | 32 × 128 | 16,384 | 1,343 | 1,031 MHz | 228 ms | 6,459 mm² | 538 mm² |
+| 12 | 64 × 128 | 16,384 | 1,502 | 1,023 MHz | 219 ms | 6,779 mm² | 565 mm² |
+| 12 | 64 × 64 | 32,768 | 1,603 | 1,007 MHz | 178 ms | 7,520 mm² | 627 mm² |
+| 12 | 64 × 128 | 32,768 | 2,204 | 1,023 MHz | 142 ms | 7,684 mm² | 640 mm² |
+| 12 | 64 × 128 | 65,536 | 2,729 | 1,023 MHz | 111 ms | 9,538 mm² | 795 mm² |
+| 12 | 128 × 128 | 65,536 | **3,215** | 1,016 MHz | 100 ms | 10,143 mm² | 845 mm² |
 
-So the circuit as generated today reaches **about 3,240 tok/s within the reticle** on 12 dies of 128 × 128 units in groups of four, which is also the point with the least area for each token per second (3.1 mm² per tok/s). Sixteen dies are no longer on the frontier: twelve are now both faster and smaller. Of each fastest die's 845 mm², 555 are cell memories, 190 vector memories, 100 logic and 0.1 microcode. The mixed split needs a quarter of the cells per die for the same speed, because each chip of a group runs a quarter of each layer; its first token is slower than with layers, because the prompt crosses the groups one after the other.
+So the circuit as generated today reaches **about 3,220 tok/s within the reticle** on 12 dies of 128 × 128 units in groups of four, which is also the point with the least area for each token per second (3.2 mm² per tok/s). Of each fastest die's 845 mm², 555 are cell memories, 190 vector memories, 100 logic and 0.1 microcode. The mixed split needs a quarter of the cells per die for the same speed, because each chip of a group runs a quarter of each layer; its first token is slower than with layers, because the prompt crosses the groups one after the other.
+
+Groups of eight (`SHARING=mixed:8`, 16 chips in two groups): each chip runs an eighth of each layer, and the two chips of a pair keep the same key and value head, since there are only four. The frontier takes several group sizes at once (`SHARING=mixed:4,mixed:8`) and keeps the best of each shape:
+
+| Chips | Units × lanes | Cells per die | tok/s | Clock | First token | Total area | Per chip |
+|---|---|---|---|---|---|---|---|
+| 16 | 64 × 128 | 32,768 | 3,012 | 1,023 MHz | 151 ms | 9,709 mm² | 607 mm² |
+| 16 | 128 × 128 | 32,768 | 3,356 | 1,016 MHz | 140 ms | 10,767 mm² | 673 mm² |
+| 16 | 64 × 128 | 65,536 | 3,611 | 1,023 MHz | 123 ms | 11,371 mm² | 711 mm² |
+| 16 | 128 × 128 | 65,536 | **3,953** | 1,016 MHz | 118 ms | 12,906 mm² | 807 mm² |
+
+Groups of eight are about 23 % faster than groups of four for 27 % more silicon: the fastest point is the one above, while the least area for each token per second is a tie, 3.15 mm² per tok/s, between 12 dies of 128 × 128 units in groups of four and 16 dies of 64 × 128 in groups of eight. A ring of eight pays more for each agreement between chips (seven hops instead of three), and each chip of a pair holds a whole key and value head, so the vector memories grow from 190 to 213 mm². With 131,072 cells each, 16 dies would reach about 4,370 tok/s at 1 GHz, but they no longer fit the reticle.
 
 Most of the gain over the first mixed frontier (1,468 tok/s on 13,578 mm²) came from the microprogram and the links (November 2026):
 - each chip of a group runs SiLU, sigmoid and element-wise products on its own slice, and DeltaNet's projection, convolution and SiLU on its own heads' channels, so a vector is gathered only where something reads it whole;
