@@ -1069,6 +1069,8 @@ pub struct Assembly {
     pub ring_first: bool,
     pub ring_last: bool,
     across_chips: bool,
+    /// The body `in_slabs_at` runs loads no shift, so the shifters stay as they were.
+    slabs_keep_shifts: bool,
     /// Inside a loop over heads whose units for one key head are a group: see `HeadGroup`.
     group: Option<HeadGroup>,
     /// The group field this program's groups use, `(shift, bits)`: the units that differ only
@@ -1109,6 +1111,12 @@ const RING_SLOTS: u32 = 8;
 /// Scratch places, between the ring's and a table's input, that the image fills with the
 /// values the exponent arithmetic keeps needing, so no step has to write them first.
 const CONSTANT_FIRST: u32 = RING_FIRST + RING_SLOTS;
+/// Where products of one pass of the cells agree on their shifts at once, a lane each: the
+/// first block of scratch past its single places (the constants are the last of them),
+/// with the blocks after it for what comes round the ring.
+fn ring_batch(lanes: u32) -> u32 {
+    (CONSTANT_FIRST + constants(16).len() as u32).next_multiple_of(lanes)
+}
 
 /// The values kept from `CONSTANT_FIRST` on: one, the narrowing count's offset, the
 /// narrowed exponent's offset and a table's input exponent.
@@ -1209,6 +1217,17 @@ impl Assembly {
 
     /// Like `narrow_part`, with the sums taken from `wide` on in the wide memory.
     fn narrow_part_at(&mut self, a: u32, b: u32, dst: u32, wide: Expr, from: Expr, sets: Expr) {
+        self.narrow_count(wide, from, sets, self.sc(2));
+        if self.across_chips {
+            self.ring_max(self.sc(2), self.sc(3));
+        }
+        self.narrow_finish(a, b, dst, wide, from, sets, self.sc(2));
+    }
+
+    /// The first half of a narrowing: how far the largest of `sets` wide sums from `wide`
+    /// must move right to fit, into `shift`, which the chips of a ring then agree on. They
+    /// go to `from`, which sets how they are read as `narrow_finish` will.
+    fn narrow_count(&mut self, wide: Expr, from: Expr, sets: Expr, shift: At<Expr>) {
         let mut clear = alu(OP_MOV);
         clear.write = false;
         clear.wide_clear = true;
@@ -1226,18 +1245,20 @@ impl Assembly {
         count.reduce_group = self.group_bits();
         self.push(count);
         let offset = self.value(accumulator_bits(self.bits) as i64 - self.bits as i64, self.sc(1));
-        self.binary(OP_SUB, offset, self.sc(0), self.sc(2));
-        if self.across_chips {
-            self.ring_max(self.sc(2), self.sc(3));
-        }
+        self.binary(OP_SUB, offset, self.sc(0), shift);
+    }
+
+    /// The rest of a narrowing, from the shift in `shift`.
+    #[allow(clippy::too_many_arguments)]
+    fn narrow_finish(&mut self, a: u32, b: u32, dst: u32, wide: Expr, from: Expr, sets: Expr, shift: At<Expr>) {
         let zero = self.zero_place();
         if self.shifts_now {
             // The shift goes into the wide shifter as it is written.
             let mut most = alu(OP_MAX);
-            (most.a, most.b, most.dst, most.load_wide_shift, most.shift_now) = (self.sc(2), zero, self.sc(4), true, true);
+            (most.a, most.b, most.dst, most.load_wide_shift, most.shift_now) = (shift, zero, self.sc(4), true, true);
             self.push(most);
         } else {
-            self.binary(OP_MAX, self.sc(2), zero, self.sc(4));
+            self.binary(OP_MAX, shift, zero, self.sc(4));
             let mut load = alu(OP_MOV);
             load.a = self.sc(4);
             load.write = false;
@@ -1248,7 +1269,7 @@ impl Assembly {
             // The left shift is known before the sums are read (see below), so each is
             // shifted left as it is read when no shift right is needed: one pass.
             self.clear_shifts();
-            self.load_left_from_count();
+            self.load_left_from(shift);
             self.elements(sets, &[wide, from], true, |s, set, vector| {
                 let mut out = alu(OP_WIDE_OUT);
                 (out.a, out.dst, out.vector, out.wide_left) = ((0, wide + set), (dst, from + set), vector, true);
@@ -1279,15 +1300,15 @@ impl Assembly {
         // unit and chip, so the narrowed sums need neither a second scan nor a second round
         // of the ring. The reference machine narrows the same way.
         self.clear_shifts();
-        self.load_left_from_count();
+        self.load_left_from(shift);
         self.shift_left_from(dst, from, sets);
     }
 
     /// The left shift of a narrowing, the shift right in scratch 4 less the count in
-    /// scratch 2, into scratch 0 and the left shifter.
-    fn load_left_from_count(&mut self) {
+    /// `shift`, into scratch 0 and the left shifter.
+    fn load_left_from(&mut self, shift: At<Expr>) {
         let mut left = alu(OP_SUB);
-        (left.a, left.b, left.dst) = (self.sc(4), self.sc(2), self.sc(0));
+        (left.a, left.b, left.dst) = (self.sc(4), shift, self.sc(0));
         if self.shifts_now {
             (left.load_shift_left, left.shift_now) = (true, true);
             self.shift_zero[2] = false;
@@ -1405,7 +1426,7 @@ impl Assembly {
 
     pub fn new(c: &DieConfig) -> Self {
         let initial = constants(c.cell.activation_bits).iter().enumerate().map(|(i, v)| ((scratch_register(c), CONSTANT_FIRST + i as u32), *v)).collect();
-        Self { steps: Vec::new(), initial, wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false, scans_writes: c.features.widths[crate::die::SCAN_WRITTEN_FIELD] > 0, widens: c.features.widths[crate::die::WIDE_LEFT_FIELD] > 0, aligns: c.features.widths[crate::die::ALIGN_SHIFT_FIELD] > 0 }
+        Self { steps: Vec::new(), initial, wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, slabs_keep_shifts: false, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false, scans_writes: c.features.widths[crate::die::SCAN_WRITTEN_FIELD] > 0, widens: c.features.widths[crate::die::WIDE_LEFT_FIELD] > 0, aligns: c.features.widths[crate::die::ALIGN_SHIFT_FIELD] > 0 }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -1779,10 +1800,64 @@ impl Assembly {
         let (starts, total) = chained_rows(&rows, 1 << self.lane_bits);
         self.cell_matvec(place, 0.into(), src, total);
         self.across_chips = true;
-        for (&(matrix, dst, rows, offset), start) in parts.iter().zip(starts) {
-            self.in_slabs_at(offset, rows, &[dst], |s, from, count| s.narrow_part_at(matrix, src, dst, from + start.wrapping_sub(offset).into(), from, count.into()));
+        let lanes = 1u32 << self.lane_bits;
+        // A short ring costs little a round, and the batch's own steps would cost as much.
+        if parts.len() > 1 && parts.len() as u32 <= lanes && self.wide_link && self.streams && (6..=RING_SLOTS + 1).contains(&self.ring) {
+            // The parts agree on their shifts in one round of the ring, each in a lane of
+            // one block: they count, the block goes round, then each narrows.
+            for (p, (&(_, _, rows, offset), start)) in parts.iter().zip(&starts).enumerate() {
+                let lane = (self.scratch, Expr::from(ring_batch(lanes) + p as u32));
+                if rows <= 2 * lanes {
+                    // Every unit holds every sum: a block or two are counted whole sooner
+                    // than the units would split them.
+                    self.narrow_count((*start).into(), offset.into(), rows.into(), lane);
+                    continue;
+                }
+                // Counting loads no shift.
+                self.slabs_keep_shifts = true;
+                self.in_slabs_at(offset, rows, &[], |s, from, count| {
+                    s.narrow_count(from + start.wrapping_sub(offset).into(), from, count.into(), lane);
+                });
+                self.slabs_keep_shifts = false;
+            }
+            self.ring_max_block(ring_batch(lanes));
+            for (p, (&(matrix, dst, rows, offset), start)) in parts.iter().zip(starts).enumerate() {
+                self.in_slabs_at(offset, rows, &[dst], |s, from, count| {
+                    s.narrow_finish(matrix, src, dst, from + start.wrapping_sub(offset).into(), from, count.into(), (s.scratch, Expr::from(ring_batch(lanes) + p as u32)));
+                });
+            }
+        } else {
+            for (&(matrix, dst, rows, offset), start) in parts.iter().zip(starts) {
+                self.in_slabs_at(offset, rows, &[dst], |s, from, count| s.narrow_part_at(matrix, src, dst, from + start.wrapping_sub(offset).into(), from, count.into()));
+            }
         }
         self.across_chips = false;
+    }
+
+    /// The largest of each lane of the block of scratch at `at` among the chips of the ring,
+    /// in every one of them: the block goes round once, as `ring_max` sends one value, into
+    /// the blocks after it, and each lane keeps its largest.
+    fn ring_max_block(&mut self, at: u32) {
+        let lanes = 1u32 << self.lane_bits;
+        let mut send = alu(OP_MOV);
+        (send.a, send.write, send.link_send, send.vector) = ((self.scratch, at.into()), false, true, true);
+        self.push(send);
+        self.on_ring_send();
+        for k in 0..self.ring - 1 {
+            let mut take = alu(OP_LINK);
+            (take.dst, take.vector) = ((self.scratch, Expr::from(at + (k + 1) * lanes)), true);
+            if k + 2 < self.ring {
+                (take.link_send, take.link_loop, take.take_loop) = (true, self.ring_last, self.ring_first);
+            } else {
+                take.link_loop = self.ring_first;
+            }
+            self.push(take);
+        }
+        for k in 0..self.ring - 1 {
+            let mut most = alu(OP_MAX);
+            (most.a, most.b, most.dst, most.vector) = ((self.scratch, at.into()), (self.scratch, Expr::from(at + (k + 1) * lanes)), (self.scratch, at.into()), true);
+            self.push(most);
+        }
     }
 
     /// Every chip of the ring made `block` elements of `reg`, the one at `index` those from
@@ -2422,6 +2497,8 @@ impl BlockOps for Assembly {
         let start = Var::Loop(self.loops);
         self.loops += 1;
         self.zero_place();
+        // A body that loads no shift leaves the shifters as they were.
+        let kept = self.slabs_keep_shifts.then_some(self.shift_zero);
         self.forget_shifts();
         let before = std::mem::take(&mut self.steps);
         let group = units.next_power_of_two().trailing_zeros();
@@ -2434,6 +2511,9 @@ impl BlockOps for Assembly {
         let inside = std::mem::replace(&mut self.steps, before);
         self.forget_shifts();
         self.steps.push(Step::Clustered { vars: vec![start], assignments: (0..units).map(|unit| vec![unit]).collect(), slots: None, body: inside });
+        if let Some(zero) = kept {
+            self.shift_zero = zero;
+        }
         self.clear_shifts();
         // The units are told apart by the stream's counter, so the copy is a stream however
         // short it is.

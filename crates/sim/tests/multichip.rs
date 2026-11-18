@@ -248,6 +248,17 @@ fn four_chips_in_a_ring_pass_blocks_on_and_say_what_one_says() {
 }
 
 #[test]
+#[ignore = "slow: six whole chips in gates: only with optimizations"]
+fn six_chips_in_a_ring_agree_on_a_pass_in_one_round_and_say_what_one_says() {
+    // Lanes of two: the gate and up products share every pass by rows, and in a ring this
+    // long their narrowings agree on both shifts in one round, a lane each.
+    let Some(firmware) = build_firmware() else { return };
+    let base = cell_die_config();
+    let die = DieConfig { cells: 4, microcode_bits: 15, features: base.features.with_lane_bits(1).with_wide_link(true), ..base };
+    chips_say_what_one_says(&firmware, die, "rows-six", Sharing::Rows, 6);
+}
+
+#[test]
 #[ignore = "slow: two whole chips in gates: only with optimizations"]
 fn a_wide_link_moves_blocks_between_two_chips_and_keeps_the_text() {
     let Some(firmware) = build_firmware() else { return };

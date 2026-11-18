@@ -194,6 +194,9 @@ impl DieFeatures {
         let mut highest_x = 0;
         for word in &code.words {
             features.ops |= 1 << word.op;
+            if word.vector && word.op == OP_MAX {
+                features.ops |= 1 << LANE_MAX;
+            }
             // Blocks that go to or come from the link need a link lane per vector lane.
             features.wide_link |= word.vector && (word.link_send || word.op == OP_LINK);
             for (width, value) in features.widths.iter_mut().zip(word.field_values()) {
@@ -412,6 +415,9 @@ pub const OP_LINK: u32 = 12;
 pub const OP_WIDE_LZC: u32 = 13;
 pub const OP_WIDE_OUT: u32 = 14;
 pub const OP_EQUAL: u32 = 15;
+/// Not an operation: the bit of `DieFeatures::ops` that says some block takes the largest
+/// of two lane by lane, so every lane, not only the first, has a comparator.
+pub const LANE_MAX: u32 = 16;
 const OP_BITS: u32 = 4;
 const SHIFT_REG_BITS: u32 = 6;
 
@@ -2411,6 +2417,17 @@ impl Gen {
                 let sum = b.wire(&name("sum"), a);
                 let unused = b.wire(&name("carry"), 1);
                 b.inst(&name("adder"), &add, &[("a", lane_a.clone()), ("b", flipped), ("cin", vec![subtract]), ("sum", sum.clone()), ("cout", unused)]);
+                // The adder subtracts for OP_MAX too (bit 2 of its code), so the largest of
+                // the two is a choice on the sign of the difference, as in the first lane.
+                let maximum = c.features.uses(LANE_MAX).then(|| {
+                    let signs_differ = b.wire(&name("signs_differ"), 1)[0];
+                    b.xor_to(lane_a[top], lane_b[top], signs_differ);
+                    let a_is_less = b.wire(&name("a_is_less"), 1)[0];
+                    b.mux_to(signs_differ, sum[top], lane_a[top], a_is_less);
+                    let y = b.wire(&name("maximum"), a);
+                    b.inst(&name("max_select"), &mux_a, &[("s", vec![a_is_less]), ("a", lane_a.clone()), ("b", lane_b.clone()), ("y", y.clone())]);
+                    y
+                });
                 let shifted = self.rounded_right(&mut b, &name("product_shift"), &held_products[lane], &fields["shift"], a as usize);
                 let table = b.wire(&name("table"), a);
                 let mut index: Vec<Bit> = operand_a[(a - c.function_bits) as usize..].to_vec();
@@ -2443,6 +2460,9 @@ impl Gen {
                     if c.features.uses(op) {
                         leaves[op as usize] = leaf;
                     }
+                }
+                if let Some(maximum) = maximum {
+                    leaves[OP_MAX as usize] = maximum;
                 }
                 if combines {
                     let (adder_name, sum) = (name("wide_sum"), &lane_sums[lane]);
