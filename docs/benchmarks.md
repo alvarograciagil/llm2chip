@@ -114,6 +114,26 @@ Groups of eight (`SHARING=mixed:8`, 16 chips in two groups): each chip runs an e
 
 Groups of eight are about 23 % faster than groups of four for 27 % more silicon: the fastest point is the one above, while the least area for each token per second is a tie, 3.15 mm² per tok/s, between 12 dies of 128 × 128 units in groups of four and 16 dies of 64 × 128 in groups of eight. A ring of eight pays more for each agreement between chips (seven hops instead of three), and each chip of a pair holds a whole key and value head, so the vector memories grow from 190 to 213 mm². With 131,072 cells each, 16 dies would reach about 4,370 tok/s at 1 GHz, but they no longer fit the reticle.
 
+The group size is a parameter, `SHARING=mixed:N` in the `frontier` and `memory` examples (and `tensor_group` in the designer's estimate): groups of N chips share every layer of their part, and the chips divided by N groups run in a chain. A list tries several sizes, and `mixed:auto` every size that divides one of the numbers of chips. When N does not suit a number of chips it falls back, and the frontier says so on each point: N that does not divide the chips goes by layers, and a single group (N at least the chips) shares every product by rows. Every matrix is shared by rows in whole blocks; the heads of attention and of DeltaNet go with the chips only where they divide: the query heads by N, the key heads by N or N by the key heads (each kept whole by the chips whose queries read it), and DeltaNet's key and value heads by N. What does not divide runs whole on every chip, so how well a group size works depends on the model. A token at full context on Qwen3.8-27B (24 query heads over 4 key heads; DeltaNet's 16 key and 48 value heads), dies of 128 × 128 units and 65,536 cells, cycles at 1 GHz:
+
+| Chips | Group | Cycles | What runs whole on every chip |
+|---|---|---|---|
+| 12 | 2 | 501,517 | nothing |
+| 12 | 3 | 519,293 | attention, DeltaNet |
+| 12 | 4 | 315,954 | nothing |
+| 12 | 6 | 426,608 | attention, DeltaNet |
+| 12 | 12 (rows) | 410,625 | DeltaNet |
+| 16 | 2 | 503,203 | nothing |
+| 16 | 4 | 316,799 | nothing |
+| 16 | 8 | 256,994 | nothing |
+| 16 | 16 (rows) | 416,619 | attention |
+| 24 | 8 | 257,839 | nothing |
+| 24 | 12 | 411,649 | DeltaNet |
+| 32 | 8 | 258,684 | nothing |
+| 32 | 16 | 417,643 | attention |
+
+Past eight, each agreement between chips goes round more of the ring, one turn at a time beyond nine chips, so for this model eight is the largest group worth having; groups of 12 or 16 suit models whose heads divide by them.
+
 Most of the gain over the first mixed frontier (1,468 tok/s on 13,578 mm²) came from the microprogram and the links (November 2026):
 - each chip of a group runs SiLU, sigmoid and element-wise products on its own slice, and DeltaNet's projection, convolution and SiLU on its own heads' channels, so a vector is gathered only where something reads it whole;
 - products that cannot all be shared (DeltaNet's 48-row `in_proj_a` and `in_proj_b`) take a pass of their own, so the large projections in the same pass are shared too, which also cuts each cell's memory by a quarter;

@@ -6,7 +6,8 @@
 //! `CHIPS` lists the numbers of chips to try, `8,12,16` by default: each die must fit in
 //! the reticle. `SHARING` lists the ways of sharing the model to try, each with every
 //! number of chips it suits: `layers` (the default), `rows` or `mixed:N`, groups of N chips
-//! that share each layer, its products and its heads, as in `mixed:4,mixed:8`. `FACTOR_STEPS` (8 by default) is how
+//! that share each layer, its products and its heads, as in `mixed:4,mixed:8`. `mixed:auto`
+//! tries every group size that divides one of the numbers of chips. `FACTOR_STEPS` (8 by default) is how
 //! many cycles each cell takes to apply a group's scale and bias: fewer cost more logic.
 
 use netlist::multiplier::MultiplierKind;
@@ -30,7 +31,8 @@ fn main() {
     let cell = CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 36, mac_stages: 1, adder_stages: 1, addr_bits: 24, coding: Default::default(), exponent_bits: 0, multiplier: MultiplierKind::Booth, fixed_weights: false, ecc: false, skip_zeros: false };
     let base = DieConfig { cells: 1, cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_factor_steps(std::env::var("FACTOR_STEPS").map_or(8, |v| v.parse().expect("FACTOR_STEPS"))) };
     let costs = Costs::measure(base);
-    let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: std::env::var("CHIPS").unwrap_or("8,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect(), clock_hz: 5e9, process: N6, context, lane_bits: range("LANES", 6..=7), cluster_bits: range("UNITS", 5..=11), cell_bits: range("CELLS", 13..=24), sharing: std::env::var("SHARING").unwrap_or_default().split(',').map(sharing_from).collect() };
+    let chips: Vec<u32> = std::env::var("CHIPS").unwrap_or("8,12,16".into()).split(',').map(|n| n.parse().expect("CHIPS")).collect();
+    let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: chips.clone(), clock_hz: 5e9, process: N6, context, lane_bits: range("LANES", 6..=7), cluster_bits: range("UNITS", 5..=11), cell_bits: range("CELLS", 13..=24), sharing: sharings_from(&std::env::var("SHARING").unwrap_or_default(), &chips) };
     let points = frontier(&program, &weights, base, &costs, &target);
     let first = points.first().copied();
     for c in &points {
@@ -56,6 +58,22 @@ fn shared(sharing: sim::sizing::Sharing) -> String {
         sim::sizing::Sharing::Rows => "rows".into(),
         sim::sizing::Sharing::Mixed(n) => format!("mixed:{n}"),
     }
+}
+
+/// The ways of sharing in `SHARING`, a list: `mixed:auto` stands for groups of every size
+/// that divides one of `chips` and leaves more than one group.
+fn sharings_from(text: &str, chips: &[u32]) -> Vec<sim::sizing::Sharing> {
+    let mut all = Vec::new();
+    for part in text.split(',') {
+        if part == "mixed:auto" {
+            let sizes = chips.iter().flat_map(|&n| (2..n).filter(move |g| n.is_multiple_of(*g)));
+            all.extend(sizes.map(sim::sizing::Sharing::Mixed));
+        } else {
+            all.push(sharing_from(part));
+        }
+    }
+    all.dedup();
+    all
 }
 
 /// `layers`, `rows` or `mixed:N`.
