@@ -62,6 +62,13 @@ function dieLine(d: Design, t: T): string {
   return `${t("dies of")} ${formatNumber(d.die_mm2)} mm² · ${formatNumber(2 ** d.cluster_bits)} ${t("units")} × ${formatNumber(2 ** d.lane_bits)} ${t("lanes")} · ${formatNumber(2 ** d.cell_bits)} ${t("cells")} · ${formatNumber(d.clock_hz / 1e6)} MHz`;
 }
 
+/** About how long is left, from how fast the designs measured so far went. */
+function remaining(startedAt: number | null, done: number, planned: number, t: T): string {
+  if (!startedAt || done < 3 || planned <= done) return "";
+  const minutes = Math.ceil(((Date.now() - startedAt) / done) * (planned - done) / 60000);
+  return ` · ${minutes <= 1 ? t("about a minute left") : t(`about ${minutes} minutes left`)}`;
+}
+
 const significant = (v: number) => v.toLocaleString(locale(), { maximumSignificantDigits: 3 });
 
 function percent(ratio: number): string {
@@ -189,7 +196,7 @@ function Alternative({ label, design, best, onApply }: { label: string; design: 
 /** The search for the best set of chips for a model, each design measured on its circuit. */
 export function OptimizeView() {
   const t = useT();
-  const { status, error, start, poll, cancel, draft: request, setDraft: setRequest } = useOptimize();
+  const { status, error, start, poll, cancel, startedAt, draft: request, setDraft: setRequest } = useOptimize();
   const connect = useSimulator((s) => s.connect);
   const online = useSimulator((s) => s.online);
   const models = useSimulator((s) => s.models);
@@ -393,7 +400,10 @@ export function OptimizeView() {
               })}
             </ol>
             <progress max={Math.max(progress.planned, 1)} value={progress.done} />
-            <p className="muted-text">{t(`Measured ${progress.done} designs of about ${progress.planned}`)}</p>
+            <p className="muted-text">
+              {t(`Measured ${progress.done} designs of about ${progress.planned}`)}
+              {remaining(startedAt, progress.done, progress.planned, t)}
+            </p>
             {progress.best && (
               <p>
                 <span className="muted-text">{t("Best so far")}</span> <strong>{headline(progress.best, t)}</strong> · {formatNumber(progress.best.tokens_per_second)} tok/s · {formatNumber(progress.best.area_mm2)} mm²

@@ -73,9 +73,26 @@ export const DEFAULT_REQUEST: Request = {
   max_clock_ghz: 5,
 };
 
+const DRAFT_KEY = "llm2chip.optimize.draft";
+
+/** The last search asked for on this browser, over the defaults. */
+function savedDraft(): Request {
+  try {
+    const saved = JSON.parse(localStorage.getItem(DRAFT_KEY) ?? "null") as Partial<Request> | null;
+    if (saved && typeof saved === "object") {
+      return { ...DEFAULT_REQUEST, ...saved, limits: { ...DEFAULT_REQUEST.limits, ...saved.limits }, space: { ...DEFAULT_REQUEST.space, ...saved.space } };
+    }
+  } catch {
+    // Without storage, the defaults.
+  }
+  return DEFAULT_REQUEST;
+}
+
 interface OptimizeState {
   status: Status;
   error: string | null;
+  /** When this browser started the search that is running, to tell how long is left. */
+  startedAt: number | null;
   /** What the form asks, kept here so the project wizard can fill it in. */
   draft: Request;
   setDraft: (draft: Request) => void;
@@ -97,12 +114,20 @@ const text = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export const useOptimize = create<OptimizeState>((set, get) => ({
   status: { state: "idle" },
   error: null,
-  draft: DEFAULT_REQUEST,
-  setDraft: (draft) => set({ draft }),
+  draft: savedDraft(),
+  startedAt: null,
+  setDraft: (draft) => {
+    set({ draft });
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+    } catch {
+      // Kept only for this visit.
+    }
+  },
   async start(path, request, factorSteps) {
     try {
       await call("/api/optimize", { method: "POST", headers: json, body: JSON.stringify({ path, request, factor_steps: factorSteps }) });
-      set({ error: null });
+      set({ error: null, startedAt: Date.now() });
       await get().poll();
     } catch (e) {
       set({ error: text(e) });

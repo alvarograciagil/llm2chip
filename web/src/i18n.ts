@@ -1051,6 +1051,7 @@ const ES: Record<string, string> = {
   "Looks for the fewest chips and cells that still reach the minimum speed and the other requirements. Set a minimum speed, or the smallest design that runs at all wins.": "Busca los menos chips y celdas que aún alcanzan la velocidad mínima y los demás requisitos. Pon una velocidad mínima, o ganará el diseño más pequeño que funcione.",
   "Divides the silicon by the speed: the design where each token per second costs least. Usually the sensible choice when cost matters as much as speed.": "Divide el silicio entre la velocidad: el diseño donde cada token por segundo cuesta menos. Suele ser la elección sensata cuando el coste importa tanto como la velocidad.",
   "The energy each token takes, from the architecture model at the speed measured on the circuit: the multiplications, memory reads and links, plus the leakage while the token is made.": "La energía que gasta cada token, según el modelo de arquitectura a la velocidad medida en el circuito: multiplicaciones, lecturas de memoria y enlaces, más las fugas mientras se genera.",
+  "about a minute left": "queda un minuto o menos",
 };
 
 

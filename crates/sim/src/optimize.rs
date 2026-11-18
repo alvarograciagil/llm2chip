@@ -269,6 +269,16 @@ impl Search<'_> {
         let leaders: Vec<(u32, Sharing)> = screened.iter().filter(|(_, d)| d.is_some()).take(keep).map(|(f, _)| *f).collect();
         let climbed: Vec<Option<Design>> = leaders.par_iter().flat_map(|&family| lanes.par_iter().map(move |&l| self.climb(family, middle_units, l))).collect();
         let mut found: Vec<Design> = screened.into_iter().filter_map(|(_, d)| d).chain(climbed.into_iter().flatten()).collect();
+        // 4. Around the best: groups half and twice as large, at its shape.
+        found.sort_by(|a, b| self.order(Some(a), Some(b)));
+        if let Some(best) = found.first().map(|d| d.candidate) {
+            let near: Vec<(u32, Sharing)> = match best.sharing {
+                Sharing::Mixed(g) => [g / 2, g * 2].into_iter().filter(|n| *n >= 2).map(|n| (best.chips, Sharing::Mixed(n).for_chips(best.chips as usize))).filter(|f| !leaders.contains(f)).collect(),
+                _ => Vec::new(),
+            };
+            let refined: Vec<Option<Design>> = near.par_iter().map(|&family| self.best_cells(family, best.cluster_bits, best.lane_bits)).collect();
+            found.extend(refined.into_iter().flatten());
+        }
         found.sort_by(|a, b| self.order(Some(a), Some(b)));
         self.set_phase("done");
         Ok(self.report(found, too_few))
