@@ -25,7 +25,7 @@ cargo run --release -p sim --example optimize -- <folder> --goal area --min-tok-
 cargo run --release -p sim --example optimize -- <folder> --goal efficiency --chips 12,16 --sharing mixed:auto --thorough
 ```
 
-On Qwen3.8-27B, `--goal speed --max-chips 16` measured 68 designs in about 8 minutes on a 12-core machine and found the fastest point of the full frontier (16 dies in groups of eight, 128 × 128 units, 65,536 cells, about 3,950 tok/s), held back by the reticle, with 16 dies of 64 × 128 units as the least silicon per tok/s; the full frontier over the same chips takes about 53 minutes.
+On Qwen3.8-27B, `--goal speed --max-chips 16` measured 68 designs in about 8 minutes on a 12-core machine and found the fastest point of the full frontier then (16 dies in groups of eight, 128 × 128 units, 65,536 cells, about 3,950 tok/s; about 4,050 since), held back by the reticle, with 16 dies of 64 × 128 units as the least silicon per tok/s; the full frontier over the same chips takes about 53 minutes.
 
 ```bash
 cargo run --release -p sim --example size -- <folder> 500 1000        # 500 tok/s, first token within 1 s

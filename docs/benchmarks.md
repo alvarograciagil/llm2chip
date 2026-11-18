@@ -91,28 +91,28 @@ Mixed split in groups of four (`SHARING=mixed:4`): the four chips of a group sha
 
 | Chips | Units × lanes | Cells per die | tok/s | Clock | First token | Total area | Per chip |
 |---|---|---|---|---|---|---|---|
-| 12 | 32 × 64 | 8,192 | 708 | 1,014 MHz | 424 ms | 5,693 mm² | 474 mm² |
-| 12 | 32 × 128 | 8,192 | 883 | 1,031 MHz | 370 ms | 5,779 mm² | 482 mm² |
-| 12 | 32 × 64 | 16,384 | 982 | 1,014 MHz | 281 ms | 6,373 mm² | 531 mm² |
-| 12 | 32 × 128 | 16,384 | 1,343 | 1,031 MHz | 228 ms | 6,459 mm² | 538 mm² |
-| 12 | 64 × 128 | 16,384 | 1,502 | 1,023 MHz | 219 ms | 6,779 mm² | 565 mm² |
-| 12 | 64 × 64 | 32,768 | 1,603 | 1,007 MHz | 178 ms | 7,520 mm² | 627 mm² |
-| 12 | 64 × 128 | 32,768 | 2,204 | 1,023 MHz | 142 ms | 7,684 mm² | 640 mm² |
-| 12 | 64 × 128 | 65,536 | 2,729 | 1,023 MHz | 111 ms | 9,538 mm² | 795 mm² |
-| 12 | 128 × 128 | 65,536 | **3,215** | 1,016 MHz | 100 ms | 10,143 mm² | 845 mm² |
+| 12 | 32 × 64 | 8,192 | 708 | 1,014 MHz | 424 ms | 5,695 mm² | 475 mm² |
+| 12 | 32 × 128 | 8,192 | 883 | 1,031 MHz | 370 ms | 5,783 mm² | 482 mm² |
+| 12 | 32 × 64 | 16,384 | 982 | 1,014 MHz | 281 ms | 6,375 mm² | 531 mm² |
+| 12 | 32 × 128 | 16,384 | 1,343 | 1,031 MHz | 228 ms | 6,463 mm² | 539 mm² |
+| 12 | 64 × 128 | 16,384 | 1,502 | 1,023 MHz | 219 ms | 6,783 mm² | 565 mm² |
+| 12 | 64 × 64 | 32,768 | 1,603 | 1,007 MHz | 178 ms | 7,522 mm² | 627 mm² |
+| 12 | 64 × 128 | 32,768 | 2,204 | 1,023 MHz | 142 ms | 7,688 mm² | 641 mm² |
+| 12 | 64 × 128 | 65,536 | 2,729 | 1,023 MHz | 111 ms | 9,543 mm² | 795 mm² |
+| 12 | 128 × 128 | 65,536 | **3,215** | 1,016 MHz | 100 ms | 10,148 mm² | 846 mm² |
 
-So the circuit as generated today reaches **about 3,220 tok/s within the reticle** on 12 dies of 128 × 128 units in groups of four, which is also the point with the least area for each token per second (3.2 mm² per tok/s). Of each fastest die's 845 mm², 555 are cell memories, 190 vector memories, 100 logic and 0.1 microcode. The mixed split needs a quarter of the cells per die for the same speed, because each chip of a group runs a quarter of each layer; its first token is slower than with layers, because the prompt crosses the groups one after the other.
+So the circuit as generated today reaches **about 3,220 tok/s within the reticle** on 12 dies of 128 × 128 units in groups of four, at 3.16 mm² per tok/s. Of each fastest die's 846 mm², 555 are cell memories, 190 vector memories, 100 logic and 0.1 microcode. The mixed split needs a quarter of the cells per die for the same speed, because each chip of a group runs a quarter of each layer; its first token is slower than with layers, because the prompt crosses the groups one after the other.
 
 Groups of eight (`SHARING=mixed:8`, 16 chips in two groups): each chip runs an eighth of each layer, and the two chips of a pair keep the same key and value head, since there are only four. The frontier takes several group sizes at once (`SHARING=mixed:4,mixed:8`) and keeps the best of each shape:
 
 | Chips | Units × lanes | Cells per die | tok/s | Clock | First token | Total area | Per chip |
 |---|---|---|---|---|---|---|---|
-| 16 | 64 × 128 | 32,768 | 3,012 | 1,023 MHz | 151 ms | 9,709 mm² | 607 mm² |
-| 16 | 128 × 128 | 32,768 | 3,356 | 1,016 MHz | 140 ms | 10,767 mm² | 673 mm² |
-| 16 | 64 × 128 | 65,536 | 3,611 | 1,023 MHz | 123 ms | 11,371 mm² | 711 mm² |
-| 16 | 128 × 128 | 65,536 | **3,953** | 1,016 MHz | 118 ms | 12,906 mm² | 807 mm² |
+| 16 | 64 × 128 | 32,768 | 3,066 | 1,023 MHz | 147 ms | 9,715 mm² | 607 mm² |
+| 16 | 128 × 128 | 32,768 | 3,424 | 1,016 MHz | 137 ms | 10,773 mm² | 673 mm² |
+| 16 | 64 × 128 | 65,536 | 3,691 | 1,023 MHz | 120 ms | 11,376 mm² | 711 mm² |
+| 16 | 128 × 128 | 65,536 | **4,048** | 1,016 MHz | 114 ms | 12,912 mm² | 807 mm² |
 
-Groups of eight are about 23 % faster than groups of four for 27 % more silicon: the fastest point is the one above, while the least area for each token per second is a tie, 3.15 mm² per tok/s, between 12 dies of 128 × 128 units in groups of four and 16 dies of 64 × 128 in groups of eight. A ring of eight pays more for each agreement between chips (seven hops instead of three), and each chip of a pair holds a whole key and value head, so the vector memories grow from 190 to 213 mm². With 131,072 cells each, 16 dies would reach about 4,370 tok/s at 1 GHz, but they no longer fit the reticle.
+So **about 4,050 tok/s within the reticle** on 16 dies of 128 × 128 units in groups of eight: 26 % faster than groups of four for 27 % more silicon. The least area for each token per second is now 16 dies of 64 × 128 units in groups of eight, 3.08 mm² per tok/s. A ring of eight pays more for each agreement between chips (seven hops instead of three), and each chip of a pair holds a whole key and value head, so the vector memories grow from 190 to 213 mm².
 
 The group size is a parameter, `SHARING=mixed:N` in the `frontier` and `memory` examples (and `tensor_group` in the designer's estimate): groups of N chips share every layer of their part, and the chips divided by N groups run in a chain. A list tries several sizes, and `mixed:auto` every size that divides one of the numbers of chips. When N does not suit a number of chips it falls back, and the frontier says so on each point: N that does not divide the chips goes by layers, and a single group (N at least the chips) shares every product by rows. Every matrix is shared by rows in whole blocks; the heads of attention and of DeltaNet go with the chips only where they divide: the query heads by N, the key heads by N or N by the key heads (each kept whole by the chips whose queries read it), and DeltaNet's key and value heads by N. What does not divide runs whole on every chip, so how well a group size works depends on the model. A token at full context on Qwen3.8-27B (24 query heads over 4 key heads; DeltaNet's 16 key and 48 value heads), dies of 128 × 128 units and 65,536 cells, cycles at 1 GHz:
 
@@ -125,7 +125,7 @@ The group size is a parameter, `SHARING=mixed:N` in the `frontier` and `memory` 
 | 12 | 12 (rows) | 410,625 | DeltaNet |
 | 16 | 2 | 503,203 | nothing |
 | 16 | 4 | 316,799 | nothing |
-| 16 | 8 | 256,994 | nothing |
+| 16 | 8 | 256,994 (250,946 after the fifth round below) | nothing |
 | 16 | 16 (rows) | 416,619 | attention |
 | 24 | 8 | 257,839 | nothing |
 | 24 | 12 | 411,649 | DeltaNet |
@@ -156,6 +156,14 @@ A third round, measured on that fastest shape (12 dies of 128 × 128 units, 65,5
 A fourth round added two control bits, each a parallel path and a multiplexer, and took the same shape from 318,637 to 313,906 cycles a token with the same clock and 9 mm² more over the 12 dies:
 - the wide output of a narrowing shifts left as well as right, so the normalisation after narrowing a product rides in the same pass;
 - a left shift can take the A operand rounded right, so aligning a vector to an exponent takes one pass instead of two.
+
+A fifth round (16 dies in groups of eight: 256,994 to 250,946 cycles a token, the same clock, 6 mm² more over the 16 dies; groups of four unchanged) cut the rounds of the ring, which were about 1,180 a token there:
+- the products of one pass of the cells (queries, keys and values; the delta rule's projections; gate and up) count their narrowing shifts into the lanes of one block, which goes round the ring once, instead of a round each; every lane now has a comparator when a program takes the largest of two blocks lane by lane, a choice on the sign of the subtraction its adder already makes;
+- gathers of heads that do not depend on each other (queries and gates; the norms and the rotations of queries and keys) share their two rounds the same way. Both only on rings of six or more, where a round costs more than the batch's own steps.
+
+The same round found that the loop back closing each group's ring had a single lane while the link had one for each vector lane, so groups on links a block wide lost all but the first lane of whatever crossed it: the loop now has a lane for each, the joined test runs groups and long rings on wide links, and the sizing counts every lane's link ends (about 0.4 mm² a die).
+
+The cycles here are counted from the words of each chip's own microprogram, which leaves out how long a word takes to cross a link. Measured on the test model's dies in gates, each single take from the link (not one of a stream) waits about one cycle more than counted; on Qwen3.8-27B that would add about 1 % on 12 dies in groups of four and about 3 % on 16 in groups of eight. A board's wires would add a little more.
 
 With 64 × 128 units a token went from 687,745 cycles on 65,536 cells to 334,195 on 131,072. The rest of the gap to the estimator's 3,750 tok/s is mostly attention at full context (about a quarter of the cycles: six heads use 48 of the 64 units, and each head's softmax is repeated in the eight units that share it) and the delta rule's short steps.
 
