@@ -2126,7 +2126,11 @@ impl Layout {
             Op::Silu { dst, .. } | Op::Sigmoid { dst, .. } | Op::MulElem { dst, .. } | Op::Add { dst, .. } | Op::Dconv { dst, .. } => vec![*dst],
             _ => Vec::new(),
         };
-        for buffer in made.into_iter().filter(|b| self.spread.contains(b)) {
+        // A product shared by rows that the chips then gather is made whole in every unit
+        // first: the ring passes on what the first unit holds, and each unit's slice of
+        // this chip's rows is not the slice of the whole vector it would keep.
+        let gathered = |buffer: &usize| matches!(op, Op::Matvec { matrix, .. } if self.by_rows.contains(matrix)) && !self.local.contains(buffer);
+        for buffer in made.into_iter().filter(|b| self.spread.contains(b) && !gathered(b)) {
             ops.leave_spread(self.reg(buffer));
         }
         let t = &self.temporaries;
