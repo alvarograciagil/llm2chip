@@ -43,6 +43,14 @@ const ICONS = {
   ),
   // A curve over axes, what the sweeps draw.
   explorer: <path d="M3 3v14h14M6 13l3.5-4 3 2.5L17 6" {...line} />,
+  // A target: aiming at the best design.
+  optimize: (
+    <>
+      <circle cx="10" cy="10" r="7" {...line} />
+      <circle cx="10" cy="10" r="3.5" {...line} />
+      <path d="M10 2v3M10 15v3M2 10h3M15 10h3" {...line} />
+    </>
+  ),
   // A histogram: how the numbers spread.
   numeric: <path d="M4 16V11M8 16V6M12 16V9M16 16V13M3 16.5h14" {...line} />,
   // Stacked layers of a model.

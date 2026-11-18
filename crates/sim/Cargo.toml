@@ -5,7 +5,9 @@ license.workspace = true
 edition.workspace = true
 
 [dependencies]
+arch = { path = "../arch" }
 compiler = { path = "../compiler" }
+model-ir = { path = "../model-ir" }
 netlist = { path = "../netlist" }
 ash = "0.38"
 half = "2"
@@ -38,7 +40,6 @@ name = "numeric"
 name = "mtp"
 
 [dev-dependencies]
-arch = { path = "../arch" }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 half = "2"
 serde_json.workspace = true

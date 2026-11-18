@@ -13,6 +13,7 @@ import { SchematicView } from "./schematic/SchematicView";
 import { ModelsPanel, ModelsView } from "./models/ModelsView";
 import { NumericPanel, NumericView } from "./numeric/NumericView";
 import { ParamDocsView } from "./docs/ParamDocsView";
+import { OptimizePanel, OptimizeView } from "./optimize/OptimizeView";
 import { useCellSim } from "./schematic/simStore";
 import { useDesign } from "./store";
 
@@ -62,6 +63,8 @@ export function App() {
         {view === "images" && <ImagesPanel />}
         {view === "explorer" && <ExplorerView />}
         {view === "explorer" && <CalibrationPanel />}
+        {view === "optimize" && <OptimizeView />}
+        {view === "optimize" && <OptimizePanel />}
         {view === "numeric" && <NumericView />}
         {view === "numeric" && <NumericPanel />}
         {view === "models" && <ModelsView />}

@@ -3319,3 +3319,38 @@ label:hover > .hint-icon {
   margin-top: 6px;
   color: var(--label-2);
 }
+
+.optimize-form {
+  display: grid;
+  gap: 10px;
+  max-width: 640px;
+}
+
+.optimize-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.optimize-field > span:first-child {
+  min-width: 220px;
+}
+
+.optimize-field input[type="number"] {
+  width: 110px;
+}
+
+.optimize-advanced {
+  display: grid;
+  gap: 8px;
+}
+
+.optimize-advanced summary {
+  cursor: pointer;
+  margin-bottom: 6px;
+}
+
+.optimize-actions {
+  display: flex;
+  gap: 8px;
+}

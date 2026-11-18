@@ -3,6 +3,7 @@
 mod catalog;
 mod hub;
 mod layout;
+mod optimizer;
 mod prompt;
 mod retouch;
 
@@ -82,6 +83,7 @@ struct App {
     image: Arc<Mutex<Option<Arc<ImageJob>>>>,
     layout: Arc<Mutex<Option<Arc<layout::LayoutJob>>>>,
     retouch: Arc<Mutex<Option<Arc<retouch::RetouchJob>>>>,
+    optimize: Arc<Mutex<Option<Arc<optimizer::OptimizeJob>>>>,
     painter: retouch::Painter,
     chip_painter: retouch::ChipPainter,
 }
@@ -379,6 +381,37 @@ async fn layout_start(State(app): State<App>, Json(request): Json<layout::Layout
         *job.outcome.lock().unwrap() = Some(outcome);
     });
     StatusCode::ACCEPTED.into_response()
+}
+
+/// Starts the search for the best set of chips for a model, one at a time.
+async fn optimize_start(State(app): State<App>, Json(start): Json<optimizer::OptimizeStart>) -> Response {
+    let running = app.optimize.lock().unwrap().as_ref().is_some_and(|job| job.outcome.lock().unwrap().is_none());
+    if running {
+        return refused("a search is already running".into());
+    }
+    let Some(entry) = app.catalog.find(&start.path) else { return refused("the model is not in the known folders".into()) };
+    if !entry.supported {
+        return refused(entry.adaptation.reason.unwrap_or_else(|| "this architecture cannot run yet".into()));
+    }
+    let job = Arc::new(optimizer::OptimizeJob { name: Mutex::new(entry.name.clone()), ..Default::default() });
+    *app.optimize.lock().unwrap() = Some(job.clone());
+    tokio::task::spawn_blocking(move || {
+        let outcome = optimizer::run(&entry, &start, &job, &home());
+        *job.outcome.lock().unwrap() = Some(outcome);
+    });
+    StatusCode::ACCEPTED.into_response()
+}
+
+async fn optimize_status(State(app): State<App>) -> Response {
+    let job = app.optimize.lock().unwrap().clone();
+    Json(job.map_or_else(|| serde_json::json!({ "state": "idle" }), |job| job.status())).into_response()
+}
+
+async fn optimize_cancel(State(app): State<App>) -> Response {
+    if let Some(job) = app.optimize.lock().unwrap().as_ref() {
+        job.cancel.store(true, Relaxed);
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn layout_status(State(app): State<App>) -> Response {
@@ -1201,7 +1234,7 @@ fn session_token() -> String {
 
 #[tokio::main]
 async fn main() {
-    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)), layout: Arc::new(Mutex::new(None)), retouch: Arc::new(Mutex::new(None)), painter: Arc::new(Mutex::new(None)), chip_painter: Arc::new(Mutex::new(None)) };
+    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)), layout: Arc::new(Mutex::new(None)), retouch: Arc::new(Mutex::new(None)), optimize: Arc::new(Mutex::new(None)), painter: Arc::new(Mutex::new(None)), chip_painter: Arc::new(Mutex::new(None)) };
     let routes = Router::new()
         .route("/api/models", get(models))
         .route("/api/status", get(status))
@@ -1216,6 +1249,8 @@ async fn main() {
         .route("/api/image", get(image_status).post(image_start))
         .route("/api/image/cancel", post(image_cancel))
         .route("/api/layout", get(layout_status).post(layout_start))
+        .route("/api/optimize", get(optimize_status).post(optimize_start))
+        .route("/api/optimize/cancel", post(optimize_cancel))
         // A picture of 512 × 512 travels as some 3 MB of JSON, past the default limit.
         .route("/api/retouch", get(retouch_status).post(retouch_start).layer(axum::extract::DefaultBodyLimit::max(32 << 20)))
         .route("/api/retouch/cancel", post(retouch_cancel))

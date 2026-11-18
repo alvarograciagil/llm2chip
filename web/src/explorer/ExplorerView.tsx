@@ -59,14 +59,14 @@ function ticks(min: number, max: number, log: boolean): number[] {
   return Array.from({ length: 5 }, (_, i) => min + ((max - min) * i) / 4);
 }
 
-interface Point {
+export interface Point {
   x: number;
   y: number;
   ok: boolean;
   label: string;
 }
 
-function Plot({ points, xLabel, yLabel, xLog, yLog, line, onPick }: { points: Point[]; xLabel: string; yLabel: string; xLog: boolean; yLog: boolean; line: boolean; onPick?: (p: Point) => void }) {
+export function Plot({ points, xLabel, yLabel, xLog, yLog, line, onPick }: { points: Point[]; xLabel: string; yLabel: string; xLog: boolean; yLog: boolean; line: boolean; onPick?: (p: Point) => void }) {
   const tr = useT();
   const [hover, setHover] = useState<Point | null>(null);
   const xs = points.map((p) => p.x);

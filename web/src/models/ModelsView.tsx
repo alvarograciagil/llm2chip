@@ -7,6 +7,11 @@ import { useT } from "../i18n";
 import { formatBytes, formatCount, formatRemaining, useModels, type Adaptation, type Details, type Job } from "./modelsStore";
 
 /** With `family`, only the architecture is known: the repository's config may refuse it later. */
+/** The lanes of each vector unit: the design counts them for the whole die. */
+function lanesPerUnit(params: Record<string, unknown>): number {
+  return Math.max(1, Math.round(Number(params.vector_lanes_per_die) / Math.max(1, Number(params.vector_units_per_die))));
+}
+
 function Tier({ adaptation, known = true, family = false }: { adaptation: Adaptation; known?: boolean; family?: boolean }) {
   const t = useT();
   const [label, tone] = !known ? ["No data", "none"] : adaptation.simulate ? [family ? "Runnable family" : "Runnable", "full"] : adaptation.design ? [adaptation.approximate ? "Approximate design" : "Design only", "part"] : ["Not adaptable", "none"];
@@ -47,13 +52,13 @@ function LocalList() {
     const dies = Math.max(1, Math.round(report?.dies ?? 1));
     // The gates share by tensor as rows of every matrix; the mixed split is not generated yet.
     const sharing = params.chip_split === "tensor" ? "rows" : params.chip_split === "mixed" ? { mixed: Number(params.tensor_group) } : "layers";
-    void startImage(m.path, Array.from({ length: dies }, (_, i) => i + 1), Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits), Number(params.vector_lanes_per_die), Number(params.vector_units_per_die), sharing);
+    void startImage(m.path, Array.from({ length: dies }, (_, i) => i + 1), Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits), lanesPerUnit(params), Number(params.vector_units_per_die), sharing);
   };
   const measureSpeed = useModels((s) => s.measureSpeed);
   const measuring = useModels((s) => s.measuring);
   const measure = (m: ServerModel) => {
     const { params } = useDesign.getState();
-    void measureSpeed(m.path, Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits), Number(params.vector_lanes_per_die), Number(params.vector_units_per_die));
+    void measureSpeed(m.path, Number(params.context_tokens), Number(params.macs_per_die), Number(params.activation_bits), lanesPerUnit(params), Number(params.vector_units_per_die));
   };
   const simulate = (m: ServerModel) => {
     setSimulator({ path: m.path });

@@ -132,7 +132,7 @@ The group size is a parameter, `SHARING=mixed:N` in the `frontier` and `memory` 
 | 32 | 8 | 258,684 | nothing |
 | 32 | 16 | 417,643 | attention |
 
-Past eight, each agreement between chips goes round more of the ring, one turn at a time beyond nine chips, so for this model eight is the largest group worth having; groups of 12 or 16 suit models whose heads divide by them.
+The `optimize` example and the application's Optimise view choose the group size together with everything else, for each model ([examples](examples.md)). Past eight, each agreement between chips goes round more of the ring, one turn at a time beyond nine chips, so for this model eight is the largest group worth having; groups of 12 or 16 suit models whose heads divide by them.
 
 Most of the gain over the first mixed frontier (1,468 tok/s on 13,578 mm²) came from the microprogram and the links (November 2026):
 - each chip of a group runs SiLU, sigmoid and element-wise products on its own slice, and DeltaNet's projection, convolution and SiLU on its own heads' channels, so a vector is gathered only where something reads it whole;

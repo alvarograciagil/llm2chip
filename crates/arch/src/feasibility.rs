@@ -384,7 +384,7 @@ pub fn advise(model: &ModelGraph, p: &ChipParams, search: bool) -> Result<Advice
                 .iter()
                 .filter(|c| fewest.changes.iter().all(|d| d.field != c.field))
                 // Not at any price: a large loss of quality is a choice for the person.
-                .filter(|c| !c.risk.as_deref().is_some_and(|r| r.contains("grande")))
+                .filter(|c| !c.risk.as_deref().is_some_and(|r| r.contains("large loss")))
                 .filter_map(|c| {
                     let mut changes = fewest.changes.clone();
                     changes.push(c.clone());

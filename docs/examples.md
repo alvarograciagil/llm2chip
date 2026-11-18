@@ -17,6 +17,16 @@ The second argument patches any field of `ChipParams` (see [parameters.md](param
 
 **Size a chip from the circuit.** Searches die shapes (cells, lanes, vector units, number of chips), generates each one's real microprogram, follows it to the last position of the context and keeps the smallest logic that gives the requested speed and time to first token.
 
+**Optimise automatically.** Says what to make best (`speed`, `area`, `efficiency` for the least silicon per tok/s, or `energy` per token) and the limits every design must meet; the search measures designs on their own circuits and prints the recommended one, its alternatives and the frontier of what it measured. The estimator first rules out numbers of chips whose dies cannot hold the model; each way of sharing that is left (layers, rows, groups of every size that divides the chips) gets the number of cells that suits the goal; the most promising then climb through the number of units, and every width of lane with `--thorough`. Measurements are kept in `~/.llm2chip/cache`, so asking again with another goal or other limits only measures what is new. The Optimise view of the application runs the same search. Energy and power are the estimator's at the measured speed; everything else is measured.
+
+```bash
+cargo run --release -p sim --example optimize -- <folder> --goal speed --max-chips 16
+cargo run --release -p sim --example optimize -- <folder> --goal area --min-tok-s 2000 --max-first-token-ms 200
+cargo run --release -p sim --example optimize -- <folder> --goal efficiency --chips 12,16 --sharing mixed:auto --thorough
+```
+
+On Qwen3.8-27B, `--goal speed --max-chips 16` measured 68 designs in about 8 minutes on a 12-core machine and found the fastest point of the full frontier (16 dies in groups of eight, 128 × 128 units, 65,536 cells, about 3,950 tok/s), held back by the reticle, with 16 dies of 64 × 128 units as the least silicon per tok/s; the full frontier over the same chips takes about 53 minutes.
+
 ```bash
 cargo run --release -p sim --example size -- <folder> 500 1000        # 500 tok/s, first token within 1 s
 cargo run --release -p sim --example frontier -- <folder>              # speed against logic, and where speed stops paying

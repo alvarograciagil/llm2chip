@@ -67,9 +67,10 @@ A web interface backed by a local engine (or a desktop app):
 - **Simulator:** type a prompt and run it on the chip, choosing how much of each block to simulate.
 - **Images:** draw a picture from a text, or retouch a marked region of one, with Show-o, optionally exactly as the chip would (its cells, its addressing and its firmware's sampling loop). Janus-Pro draws from the Simulator view.
 - **Explorer:** parameter sweeps, the Pareto frontier, format comparisons and calibration.
+- **Optimise:** say what matters most (speed, silicon, silicon per tok/s or energy per token) and the limits a design must meet, and the engine searches numbers of chips, ways of sharing (including the group size), units, lanes and cells, measuring each on its generated circuit, then recommends one with its alternatives and applies it to the designer.
 - **Numerics:** the chip's arithmetic against floating point, layer by layer and token by token.
 - **Models:** folders to search, search and download from Hugging Face, and building the chip's full image.
-- **New project assistant:** start from an FPGA board, a single chip, a base model or a fully custom design.
+- **New project assistant:** start from an FPGA board, a single chip, a base model or a fully custom design, and optionally go on to the automatic optimisation.
 
 The interface is in English, with a full Spanish translation; a test fails if a text on screen has no Spanish.
 

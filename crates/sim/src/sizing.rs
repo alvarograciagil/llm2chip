@@ -15,7 +15,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 /// One die the search tried.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize, PartialEq)]
 pub struct Candidate {
     /// Chips that share the layers, each one this die.
     pub chips: u32,
@@ -210,6 +210,18 @@ pub fn built(program: &Program, weights: &Weights, die: DieConfig, context: u32,
     Ok(Built { programs: codes, cell_bits, vector_words: vector, vector_kinds: kinds, microcode_bits })
 }
 
+/// TSMC N6 as `tech/n6.json` estimates it: an AND2 is 1.33 NAND2 equivalents, and wiring
+/// adds a fifth. The reticle is 26 by 33 mm.
+pub const N6: Process = Process { full_adder_ns: 0.04, gate_um2: 0.0875 / 1.33 * 1.2, sram_cell_um2: 0.027, sram_periphery_k: 5.0, reticle_mm2: 858.0 };
+
+/// The die the searches size: 8-bit weights against 16-bit activations into 36-bit sums,
+/// with `factor_steps` cycles for each cell to apply a group's scale and bias. Its cells,
+/// units and lanes are what `die_of` sets.
+pub fn reference_die(factor_steps: u32) -> DieConfig {
+    let cell = netlist::CellConfig { weight_bits: 8, activation_bits: 16, accumulator_bits: 36, mac_stages: 1, adder_stages: 1, addr_bits: 24, coding: Default::default(), exponent_bits: 0, multiplier: netlist::multiplier::MultiplierKind::Booth, fixed_weights: false, ecc: false, skip_zeros: false };
+    DieConfig { cells: 1, cell, scale_bits: 21, reg_bits: 16, index_bits: 24, microcode_bits: 24, broadcast_stages: 1, function_bits: 12, function_select_bits: 3, features: DieFeatures::default().with_factor_steps(factor_steps) }
+}
+
 /// Silicon of a process, for the area of what is generated.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Process {
@@ -300,9 +312,14 @@ pub fn die_of(base: DieConfig, context: u32, (cluster_bits, lane_bits, cell_bits
 }
 
 /// One set of chips, measured: its own microprograms, its clock and its silicon.
-fn evaluate(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs, target: &Target, sharing: Sharing, (chips, cluster_bits, lane_bits, cell_bits): (u32, u32, u32, u32)) -> Option<Candidate> {
+pub fn evaluate(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs, target: &Target, sharing: Sharing, shape: (u32, u32, u32, u32)) -> Option<Candidate> {
+    measure(program, weights, base, costs, target, sharing, shape).ok()
+}
+
+/// Like `evaluate`, saying why a set of chips cannot be built.
+pub fn measure(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs, target: &Target, sharing: Sharing, (chips, cluster_bits, lane_bits, cell_bits): (u32, u32, u32, u32)) -> Result<Candidate, String> {
     let die = die_of(base, target.context, (cluster_bits, lane_bits, cell_bits));
-    let Built { programs: codes, cell_bits: bits, vector_words, microcode_bits, .. } = built(program, weights, die, target.context, chips, sharing).ok()?;
+    let Built { programs: codes, cell_bits: bits, vector_words, microcode_bits, .. } = built(program, weights, die, target.context, chips, sharing)?;
     let timing = timing(&codes, die, target.context, target.prompt, 256, sharing);
     let clock = target.clock_hz.min(costs.clock_hz(cluster_bits, lane_bits, target.process.full_adder_ns));
     let cycles = timing.token_cycles;
@@ -314,13 +331,13 @@ fn evaluate(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs
     // The sequencer keeps the microprogram in a memory of its own.
     let parts_mm2 = [gates * target.process.gate_um2 / 1e6, target.process.memory_mm2(1 << cell_bits, bits), vectors, target.process.memory_mm2(1, microcode_bits)];
     let die_mm2 = parts_mm2.iter().sum::<f64>();
-    Some(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, clock_hz: clock, tokens_per_second: clock / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / clock, gates: chips as f64 * gates, area_mm2: chips as f64 * die_mm2, die_mm2, parts_mm2, sharing })
+    Ok(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, clock_hz: clock, tokens_per_second: clock / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / clock, gates: chips as f64 * gates, area_mm2: chips as f64 * die_mm2, die_mm2, parts_mm2, sharing })
 }
 
 /// For each number of chips, width of unit and number of units, the fewest cells that
 /// reach the target, least silicon first. Those that cannot reach it are left out.
 /// Each number of chips with each way of sharing that comes to something different there.
-fn sharings(target: &Target) -> Vec<(u32, Sharing)> {
+pub fn sharings(target: &Target) -> Vec<(u32, Sharing)> {
     let mut pairs: Vec<(u32, Sharing)> = Vec::new();
     for &chips in &target.chips {
         for sharing in &target.sharing {
@@ -331,6 +348,40 @@ fn sharings(target: &Target) -> Vec<(u32, Sharing)> {
         }
     }
     pairs
+}
+
+/// The ways of sharing a list names, `layers`, `rows` or `mixed:N` separated by commas:
+/// `mixed:auto` stands for groups of every size that divides one of `chips` and leaves more
+/// than one group.
+pub fn parse_sharings(text: &str, chips: &[u32]) -> Result<Vec<Sharing>, String> {
+    let mut all: Vec<Sharing> = Vec::new();
+    for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let found: Vec<Sharing> = match part.split_once(':') {
+            Some(("mixed", "auto")) => chips.iter().flat_map(|&n| (2..n).filter(move |g| n.is_multiple_of(*g))).map(Sharing::Mixed).collect(),
+            Some(("mixed", n)) => vec![Sharing::Mixed(n.parse().map_err(|_| format!("the size of the groups in {part}"))?)],
+            None if part == "rows" => vec![Sharing::Rows],
+            None if part == "layers" => vec![Sharing::Layers],
+            _ => return Err(format!("{part} is not layers, rows or mixed:N")),
+        };
+        for s in found {
+            if !all.contains(&s) {
+                all.push(s);
+            }
+        }
+    }
+    if all.is_empty() {
+        all.push(Sharing::Layers);
+    }
+    Ok(all)
+}
+
+/// How a way of sharing is written: `layers`, `rows` or `mixed:N`.
+pub fn sharing_name(sharing: Sharing) -> String {
+    match sharing {
+        Sharing::Layers => "layers".into(),
+        Sharing::Rows => "rows".into(),
+        Sharing::Mixed(n) => format!("mixed:{n}"),
+    }
 }
 
 pub fn search(program: &Program, weights: &Weights, base: DieConfig, costs: &Costs, target: &Target) -> Vec<Candidate> {

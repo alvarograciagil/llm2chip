@@ -1767,6 +1767,7 @@ dependencies = [
  "libm",
  "maskgit-rt",
  "memmap2",
+ "model-ir",
  "multiversion",
  "naga",
  "netlist",

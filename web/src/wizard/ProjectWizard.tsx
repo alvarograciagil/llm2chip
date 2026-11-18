@@ -5,6 +5,7 @@ import { formatNumber } from "../format";
 import { useDesign } from "../store";
 import { Segmented } from "../components/controls";
 import { useT } from "../i18n";
+import { useOptimize } from "../optimize/optimizeStore";
 import { buildable, chipParams, DEFAULT_ANSWERS, fpgaParams, makers, metric, modelParams, suggested, type Answers, type FpgaBoard, type Start } from "./plan";
 
 const STARTS: { id: Start; title: string; text: string }[] = [
@@ -340,6 +341,9 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
   const defaults = useDesign((s) => s.defaults);
   const boards = useMemo(() => fpgaBoards() as FpgaBoard[], []);
   const createProject = useDesign((s) => s.createProject);
+  const setView = useDesign((s) => s.setView);
+  const draft = useOptimize((s) => s.draft);
+  const setDraft = useOptimize((s) => s.setDraft);
   const [answers, setAnswers] = useState<Answers>({ ...DEFAULT_ANSWERS, model: models[0]?.id ?? "" });
   const [step, setStep] = useState(0);
   const [name, setName] = useState("");
@@ -395,6 +399,13 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
     createProject(name.trim() || `${model.name}${board ? ` on ${board}` : ""}`, model.id, params);
     onClose();
   };
+  // The project, then a search measured on the generated circuits with the wizard's goal.
+  const optimise = () => {
+    finish();
+    const goal = answers.goal === "fastest" ? "speed" : "area";
+    setDraft({ ...draft, goal, limits: { ...draft.limits, min_tok_s: answers.goal === "fastest" ? 0 : answers.target_tok_s }, context: answers.context_tokens });
+    setView("optimize");
+  };
 
   // Over the whole window: the toolbar's blur would otherwise hold it.
   return createPortal(
@@ -435,9 +446,16 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
           <span />
           {step > 0 && <button onClick={() => setStep(step - 1)}>{t("Back")}</button>}
           {current === "name" ? (
-            <button className="primary" disabled={!model} onClick={finish}>
-              {t("Create project")}
-            </button>
+            <>
+              {answers.start !== "fpga" && (
+                <button disabled={!model} onClick={optimise} title={t("Create the project and search for the best set of chips, measured on the generated circuits")}>
+                  {t("Create and optimise")}
+                </button>
+              )}
+              <button className="primary" disabled={!model} onClick={finish}>
+                {t("Create project")}
+              </button>
+            </>
           ) : (
             <button className="primary" disabled={!canGo} onClick={() => setStep(step + 1)}>
               {t("Next")}
