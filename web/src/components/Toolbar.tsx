@@ -14,6 +14,7 @@ const VIEWS: [View, string][] = [
   ["logic", "How it works"],
   ["schematic", "Schematic"],
   ["simulator", "Simulator"],
+  ["viewer", "Chip at work"],
   ["images", "Images"],
   ["explorer", "Explorer"],
   ["numeric", "Numerics"],

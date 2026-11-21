@@ -1,5 +1,5 @@
 import { LogicPanel, LogicView } from "./logic/LogicView";
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { FloorplanView } from "./components/FloorplanView";
 import { Inspector } from "./components/Inspector";
 import { Sidebar } from "./components/Sidebar";
@@ -16,6 +16,9 @@ import { ParamDocsView } from "./docs/ParamDocsView";
 import { OptimizePanel, OptimizeView } from "./optimize/OptimizeView";
 import { useCellSim } from "./schematic/simStore";
 import { useDesign } from "./store";
+
+// The 3D viewer brings Three.js, which only downloads when the view is opened.
+const ChipViewer = lazy(() => import("./viewer3d/ChipViewer"));
 
 export function App() {
   const undo = useDesign((s) => s.undo);
@@ -70,6 +73,11 @@ export function App() {
         {view === "models" && <ModelsView />}
         {view === "models" && <ModelsPanel />}
         {view === "parameters" && <ParamDocsView />}
+        {view === "viewer" && (
+          <Suspense fallback={<section className="stage" />}>
+            <ChipViewer />
+          </Suspense>
+        )}
       </main>
     </div>
   );

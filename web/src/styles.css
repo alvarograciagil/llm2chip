@@ -3794,3 +3794,141 @@ label:hover > .hint-icon {
   border-color: var(--label-3);
   background: transparent;
 }
+
+/* The 3D viewer of the chip at work */
+.viewer-stage {
+  display: block;
+}
+
+.viewer-canvas,
+.viewer-labels {
+  position: absolute;
+  inset: 0;
+}
+
+.viewer-labels {
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.viewer-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  max-width: 180px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: var(--group-solid);
+  border: 1px solid var(--separator);
+  color: var(--label);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viewer-label.stalled {
+  border-color: var(--red);
+  background: var(--red-bg);
+}
+
+.viewer-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  padding: 24px;
+  text-align: center;
+  color: var(--label-2);
+}
+
+.viewer-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  font-size: 12px;
+}
+
+.viewer-row input[type="range"] {
+  width: 100%;
+}
+
+.viewer-timeline {
+  position: relative;
+  height: 44px;
+  margin: 6px 0 10px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--group);
+}
+
+.viewer-timeline canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.viewer-cursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+}
+
+.viewer-dies {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.viewer-dies td {
+  padding: 4px 4px;
+  border-bottom: 1px solid var(--separator);
+  vertical-align: top;
+}
+
+.viewer-dies tr {
+  cursor: pointer;
+}
+
+.viewer-dies tr.on td {
+  background: var(--group);
+}
+
+.viewer-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+
+.viewer-strides .segmented {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  width: 100%;
+}
+
+.viewer-strides .segmented button {
+  padding-left: 2px;
+  padding-right: 2px;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

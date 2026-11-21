@@ -33,6 +33,13 @@ const ICONS = {
   // A logic gate.
   schematic: <path d="M4 5h5a5 5 0 0 1 0 10H4zM1.5 8H4M1.5 12H4M14 10h4.5" {...line} />,
   simulator: <path d="M6 4.5v11l9-5.5z" {...line} />,
+  // Dies in 3D: a slab seen from above at an angle, with its units.
+  viewer: (
+    <>
+      <path d="M10 3.5 17 7.5 10 11.5 3 7.5z" {...line} />
+      <path d="M3 7.5v5l7 4 7-4v-5M10 11.5v5" {...line} />
+    </>
+  ),
   // A framed picture: a mountain under the sun.
   images: (
     <>

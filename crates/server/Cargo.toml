@@ -6,6 +6,7 @@ edition.workspace = true
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
+chip-trace = { path = "../trace" }
 compiler = { path = "../compiler" }
 fs4 = "1"
 futures-util = "0.3"
