@@ -4026,3 +4026,40 @@ label:hover > .hint-icon {
 .viewer-compare td:first-child {
   text-align: left;
 }
+
+/* How busy a block was in the cycle on show, behind its symbol */
+.schematic .activity {
+  fill: var(--orange);
+  stroke: none;
+}
+
+/* Inside a die: its schematic over the 3D view, after the camera has flown down to it */
+.viewer-inside {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: var(--canvas);
+}
+
+.viewer-inside .stage.schematic {
+  position: absolute;
+  inset: 0;
+}
+
+.viewer-inside-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  pointer-events: auto;
+}
+
+.viewer-inside-error {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--red-bg);
+  color: var(--label);
+  font-size: 12px;
+}

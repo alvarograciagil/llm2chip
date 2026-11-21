@@ -178,3 +178,38 @@ fn a_design_traced_by_operations_follows_its_groups() {
     assert!(traced as f64 > 0.8 * sized as f64 && (traced as f64) < 1.3 * sized as f64, "traced {traced}, sized {sized}");
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// A run replayed from its saved states is the run recorded: at cycles on a saved state,
+/// between two and in the logits, each die's sequencer is where the trace says, asking
+/// again gives the same nets, and the blocks inside the die show what changed.
+#[test]
+fn a_replayed_cycle_is_the_recorded_one() {
+    use chip_trace::replay::Replay;
+    let dir = checkpoint(TinyModel::Plain, "replay");
+    let mut board = fresh(&dir, 4, Sharing::Mixed(2));
+    let trace = board.record_checked("replay", &[3], &dir).unwrap();
+    let started = std::time::Instant::now();
+    let mut replay = Replay::new(TinyModel::Plain, &dir, 4, Sharing::Mixed(2), &[3]).unwrap();
+    eprintln!("replay ready in {:.1} s", started.elapsed().as_secs_f64());
+    let logits = trace.steps[1].start;
+    for cycle in [0, 256, 300, trace.steps[0].cycles - 1, logits + 3] {
+        for die in 0..4 {
+            let frames = replay.frames(die, "", cycle, 2).unwrap();
+            assert_eq!(frames[0].cycle, cycle);
+            let pc = i32::from_str_radix(&frames[0].nets["pc"], 2).unwrap();
+            let recorded = trace.dies[die].pcs[cycle as usize];
+            // A halted die's sequencer stays where it stopped; the trace writes -1.
+            if recorded >= 0 {
+                assert_eq!(pc, recorded, "die {die}, cycle {cycle}");
+            }
+        }
+    }
+    let busy = (0..trace.steps[0].cycles).find(|c| trace.dies[0].pcs[*c as usize] >= 0 && !trace.dies[0].stalls.iter().any(|(s, l)| (*s..s + l).contains(c))).unwrap() + 40;
+    let once = replay.frames(0, "", busy, 8).unwrap();
+    let again = replay.frames(0, "", busy, 8).unwrap();
+    assert_eq!(once.len(), 8);
+    assert!(once.iter().zip(&again).all(|(a, b)| a.nets == b.nets));
+    assert!(!once[0].activity.is_empty() && once.iter().any(|f| f.activity.values().any(|a| *a > 0.0)), "{:?}", once[0].activity);
+    assert!(replay.frames(0, "/no_such_block", busy, 1).is_err());
+    std::fs::remove_dir_all(dir).ok();
+}

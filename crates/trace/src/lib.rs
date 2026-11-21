@@ -8,6 +8,7 @@ pub mod board;
 pub mod check;
 pub mod design;
 pub mod record;
+pub mod replay;
 pub mod tiny;
 
 use board::{lanes, loaded_die, Wire};

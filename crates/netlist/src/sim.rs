@@ -100,6 +100,14 @@ struct Memory {
     stuck: Vec<(usize, u32, bool)>,
 }
 
+/// What a simulation has reached: see `Simulator::save`.
+#[derive(Clone, Debug)]
+pub struct SimState {
+    values: Vec<u8>,
+    memories: Vec<Vec<u128>>,
+    cycle: u64,
+}
+
 /// A net's bits, found once by name: see `Simulator::probe`.
 #[derive(Clone, Debug)]
 pub struct Probe(Vec<usize>);
@@ -629,6 +637,45 @@ impl Simulator {
 
     pub fn cycle(&self) -> u64 {
         self.cycle
+    }
+
+    /// What changes as the simulation runs: every signal, every memory word and the cycle.
+    /// `restore` continues from it exactly; the circuit itself is not copied.
+    pub fn save(&self) -> SimState {
+        SimState { values: self.values.clone(), memories: self.memories.iter().map(|m| m.cells.clone()).collect(), cycle: self.cycle }
+    }
+
+    /// Goes back (or forward) to a state `save` took of this same simulator.
+    pub fn restore(&mut self, state: &SimState) {
+        self.values.clone_from(&state.values);
+        for (m, cells) in self.memories.iter_mut().zip(&state.memories) {
+            m.cells.clone_from(cells);
+        }
+        self.cycle = state.cycle;
+        // A state is saved settled: nothing waits to be propagated.
+        self.pending.iter_mut().for_each(|w| *w = 0);
+    }
+
+    /// The names of the module instances directly inside the one at `path`.
+    pub fn children(&self, path: &str) -> Vec<String> {
+        let prefix = format!("{path}/");
+        let mut names: Vec<String> = self.paths.keys().filter_map(|p| p.strip_prefix(&prefix)).filter(|rest| !rest.contains('/')).map(str::to_string).collect();
+        names.sort();
+        names
+    }
+
+    /// Every bit of every net of the instance at `path` and of everything inside it.
+    pub fn probe_under(&self, path: &str) -> Probe {
+        let prefix = format!("{path}/");
+        let mut bits: Vec<usize> = self.paths.iter().filter(|(p, _)| *p == path || p.starts_with(&prefix)).flat_map(|(_, nets)| nets.values().flatten().copied()).collect();
+        bits.sort_unstable();
+        bits.dedup();
+        Probe(bits)
+    }
+
+    /// The probed bits one by one, as 0 or 1.
+    pub fn read_bits(&self, probe: &Probe) -> Vec<u8> {
+        probe.0.iter().map(|b| self.values[*b]).collect()
     }
 
     /// The bits of net `name` of the module instance at `path` ("" for the top), to read

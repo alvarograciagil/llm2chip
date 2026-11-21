@@ -86,6 +86,7 @@ struct App {
     retouch: Arc<Mutex<Option<Arc<retouch::RetouchJob>>>>,
     optimize: Arc<Mutex<Option<Arc<optimizer::OptimizeJob>>>>,
     trace: Arc<Mutex<Option<Arc<trace_job::TraceJob>>>>,
+    replay: Arc<Mutex<Option<trace_job::Replayed>>>,
     painter: retouch::Painter,
     chip_painter: retouch::ChipPainter,
 }
@@ -435,6 +436,29 @@ async fn trace_start(State(app): State<App>, Json(start): Json<trace_job::TraceS
         *job.outcome.lock().unwrap() = Some(outcome);
     });
     StatusCode::ACCEPTED.into_response()
+}
+
+/// Looks inside a die of a recorded run: replays the run (once) and answers with `answer`.
+async fn trace_look(app: App, look: trace_job::Inspect, answer: fn(&mut Option<trace_job::Replayed>, &trace_job::Inspect, &std::path::Path) -> Result<serde_json::Value, String>) -> Response {
+    let scratch = std::env::temp_dir().join(format!("llm2chip-replay-{}", std::process::id()));
+    let done = tokio::task::spawn_blocking(move || {
+        let mut kept = app.replay.lock().unwrap();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| answer(&mut kept, &look, &scratch))).unwrap_or_else(|_| Err("the replay stopped with an internal error".into()))
+    })
+    .await;
+    match done {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(message)) => refused(message),
+        Err(_) => refused("the replay stopped with an internal error".into()),
+    }
+}
+
+async fn trace_design(State(app): State<App>, Json(look): Json<trace_job::Inspect>) -> Response {
+    trace_look(app, look, trace_job::design).await
+}
+
+async fn trace_inspect(State(app): State<App>, Json(look): Json<trace_job::Inspect>) -> Response {
+    trace_look(app, look, trace_job::inspect).await
 }
 
 async fn trace_status(State(app): State<App>) -> Response {
@@ -1274,7 +1298,7 @@ fn session_token() -> String {
 
 #[tokio::main]
 async fn main() {
-    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)), layout: Arc::new(Mutex::new(None)), retouch: Arc::new(Mutex::new(None)), optimize: Arc::new(Mutex::new(None)), trace: Arc::new(Mutex::new(None)), painter: Arc::new(Mutex::new(None)), chip_painter: Arc::new(Mutex::new(None)) };
+    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)), layout: Arc::new(Mutex::new(None)), retouch: Arc::new(Mutex::new(None)), optimize: Arc::new(Mutex::new(None)), trace: Arc::new(Mutex::new(None)), replay: Arc::new(Mutex::new(None)), painter: Arc::new(Mutex::new(None)), chip_painter: Arc::new(Mutex::new(None)) };
     let routes = Router::new()
         .route("/api/models", get(models))
         .route("/api/status", get(status))
@@ -1292,6 +1316,8 @@ async fn main() {
         .route("/api/optimize", get(optimize_status).post(optimize_start))
         .route("/api/optimize/cancel", post(optimize_cancel))
         .route("/api/trace", get(trace_status).post(trace_start))
+        .route("/api/trace/design", post(trace_design))
+        .route("/api/trace/inspect", post(trace_inspect))
         // A picture of 512 × 512 travels as some 3 MB of JSON, past the default limit.
         .route("/api/retouch", get(retouch_status).post(retouch_start).layer(axum::extract::DefaultBodyLimit::max(32 << 20)))
         .route("/api/retouch/cancel", post(retouch_cancel))

@@ -87,6 +87,8 @@ export interface Trace {
   kv: KvWrite[];
   /** Empty when nothing differs, or when the run was not checked. */
   divergences: Divergence[];
+  /** What the engine recorded it from, to replay it and look inside the dies. */
+  request?: unknown;
 }
 
 export const TRACE_VERSION = 1;

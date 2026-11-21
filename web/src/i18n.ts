@@ -8,6 +8,10 @@ export type Language = "es" | "en";
  * so translation can go part by part. */
 const ES: Record<string, string> = {
   // The 3D viewer of the chip at work
+  "Look inside, down to the gates": "Mirar dentro, hasta las puertas",
+  "Back to the chips": "Volver a los chips",
+  "Replaying the gates…": "Reproduciendo las puertas…",
+  "Only a run recorded on the gates by this engine can be looked into.": "Solo se puede mirar dentro de una ejecución grabada en puertas por este motor.",
   "The logits": "Los logits",
   "Idle": "Parado",
   "Waiting": "Esperando",

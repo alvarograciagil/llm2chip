@@ -5,6 +5,8 @@ import { Segmented } from "../components/controls";
 import { download } from "../download";
 import { ChipScene, readPalette } from "./scene";
 import { DEFAULT_RECORD, designRequest, useViewer, type RecordRequest } from "./viewerStore";
+import { InsideDie } from "./InsideDie";
+import { useInside } from "./inside";
 import { byOperations, compareTraces, cyclesByKind, dieAt, dieTotals, divergedAt, opKinds, useShare, stepAt, totalCycles, type Stride, type Trace, type WordClass } from "./trace";
 
 // The 3D viewer of the chip at work: loaded on demand, so Three.js only downloads when the
@@ -21,6 +23,12 @@ export default function ChipViewer() {
 
 /** The scene on show, for recording it. */
 let shownScene: ChipScene | null = null;
+
+/** Opens die `die` to its gates, once the camera has flown down onto it. */
+function lookInside(die: number) {
+  useViewer.getState().select(die);
+  useInside.getState().enter(die);
+}
 
 const CLASS_LABEL: Record<WordClass, string> = {
   cells: "Cells multiply and add",
@@ -78,6 +86,7 @@ function ChipStage() {
       scene.show(cycle, selected, playing ? Math.max(16, speed / 4) : 16, shares);
     });
     scene.onPick = (die) => useViewer.getState().select(die);
+    scene.onOpen = (die) => lookInside(die);
     scene.onFrame = (positions) => {
       const box = labels.current;
       if (!box) return;
@@ -97,6 +106,19 @@ function ChipStage() {
 
   const touring = useViewer((s) => s.touring);
   useEffect(() => sceneRef.current?.setTour(touring), [touring]);
+  // Looking inside a die flies the camera to it; leaving flies it back.
+  const inside = useInside((s) => s.die);
+  // The schematic comes once the camera has reached the die.
+  const [arrived, setArrived] = useState(false);
+  useEffect(() => {
+    sceneRef.current?.focus(inside);
+    setArrived(false);
+    if (inside === null) return;
+    const timer = setTimeout(() => setArrived(true), 650);
+    return () => clearTimeout(timer);
+  }, [inside]);
+  // A new trace closes whatever die was open.
+  useEffect(() => useInside.getState().reset(), [trace]);
 
   useEffect(() => {
     if (trace) sceneRef.current?.setTrace(trace);
@@ -118,6 +140,7 @@ function ChipStage() {
         {trace?.dies.map((_, i) => <DieLabel key={i} die={i} trace={trace} />)}
       </div>
       {touring && trace && <Caption trace={trace} />}
+      {inside !== null && arrived && trace && <InsideDie trace={trace} />}
       {failed && (
         <div className="viewer-empty">
           <p>{t("This browser cannot draw in 3D here.")}</p>
@@ -542,6 +565,11 @@ function DieDetail({ trace, die, cycle }: { trace: Trace; die: number; cycle: nu
         <div><dt>{t("Waiting on a link")}</dt><dd>{percent(totals.stalled)}</dd></div>
         <div><dt>{t("Finished, waiting for the others")}</dt><dd>{percent(totals.halted)}</dd></div>
       </dl>
+      {!byOperations(trace) && (
+        <div className="sim-actions">
+          <button className="pill" onClick={() => lookInside(die)}>{t("Look inside, down to the gates")}</button>
+        </div>
+      )}
       {state.word && (
         <>
           <p className="muted-text">{t(`Word ${state.pc} of the microprogram`)}</p>

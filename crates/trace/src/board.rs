@@ -146,6 +146,17 @@ pub fn run_joined(dies: &mut [(Simulator, Microprogram)], wires: &[(usize, usize
 /// the cycle (from 0), the dies and what each lane carries.
 pub fn run_observed(dies: &mut [(Simulator, Microprogram)], lanes: &[Wire], routine: usize, token: u32, position: u32, mut observe: impl FnMut(u64, &[(Simulator, Microprogram)], &[LinkSample])) -> u64 {
     start(dies, routine, token, position);
+    run_from(dies, lanes, 0, |cycle, dies, samples| {
+        observe(cycle, dies, samples);
+        true
+    })
+    .0
+}
+
+/// Runs the dies, already started, until all have halted or `observe` says to stop,
+/// counting cycles from `first` (a routine resumed from a saved state goes on from its
+/// cycle). Gives the cycle it stopped at and whether every die had halted.
+pub fn run_from(dies: &mut [(Simulator, Microprogram)], lanes: &[Wire], first: u64, mut observe: impl FnMut(u64, &[(Simulator, Microprogram)], &[LinkSample]) -> bool) -> (u64, bool) {
     let names: Vec<[String; 8]> = lanes
         .iter()
         .map(|w| {
@@ -154,7 +165,7 @@ pub fn run_observed(dies: &mut [(Simulator, Microprogram)], lanes: &[Wire], rout
         })
         .collect();
     let mut samples = vec![LinkSample::default(); lanes.len()];
-    let mut cycles = 0u64;
+    let mut cycles = first;
     while dies.iter().any(|(sim, _)| sim.get("halted").unwrap() == 0) {
         let outputs: Vec<_> = lanes
             .iter()
@@ -176,12 +187,14 @@ pub fn run_observed(dies: &mut [(Simulator, Microprogram)], lanes: &[Wire], rout
         for (sim, _) in dies.iter_mut() {
             sim.settle();
         }
-        observe(cycles, dies, &samples);
+        if !observe(cycles, dies, &samples) {
+            return (cycles, false);
+        }
         for (sim, _) in dies.iter_mut() {
             sim.tick();
         }
         cycles += 1;
-        assert!(cycles < 2_000_000, "routine {routine} at position {position}: the dies do not finish");
+        assert!(cycles < 2_000_000, "the dies do not finish");
     }
-    cycles
+    (cycles, true)
 }

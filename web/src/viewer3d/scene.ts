@@ -119,6 +119,12 @@ export class ChipScene {
   private resize: ResizeObserver;
   /** Called with the die under the pointer when the scene is clicked. */
   onPick: (die: number | null) => void = () => {};
+  /** Called with the die under the pointer when it is double-clicked. */
+  onOpen: (die: number) => void = () => {};
+  /** The camera's move under way: from where to where, and when it started. */
+  private flight: { from: [THREE.Vector3, THREE.Vector3]; to: [THREE.Vector3, THREE.Vector3]; start: number } | null = null;
+  /** Where the camera was before it flew to a die. */
+  private home: [THREE.Vector3, THREE.Vector3] | null = null;
   /** Called on every frame after drawing, with the screen position of each die's top. */
   onFrame: (positions: { x: number; y: number; visible: boolean }[]) => void = () => {};
   private tick: () => void = () => {};
@@ -139,10 +145,12 @@ export class ChipScene {
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(host);
     this.renderer.domElement.addEventListener("pointerup", this.pick);
+    this.renderer.domElement.addEventListener("dblclick", this.open);
     this.fit();
     const loop = () => {
       this.frame = requestAnimationFrame(loop);
       this.tick();
+      this.fly();
       this.controls.update();
       this.renderer.render(this.scene, this.camera);
       this.onFrame(this.screenPositions());
@@ -170,6 +178,7 @@ export class ChipScene {
     cancelAnimationFrame(this.frame);
     this.resize.disconnect();
     this.renderer.domElement.removeEventListener("pointerup", this.pick);
+    this.renderer.domElement.removeEventListener("dblclick", this.open);
     this.clear();
     this.controls.dispose();
     this.renderer.dispose();
@@ -335,11 +344,44 @@ export class ChipScene {
     });
   }
 
-  private pick = (event: PointerEvent) => {
+  private dieUnder(event: MouseEvent): number | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const pointer = new THREE.Vector2(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
     this.raycaster.setFromCamera(pointer, this.camera);
     const hit = this.raycaster.intersectObjects(this.dies.flatMap((d) => [d.slab, d.lanes]))[0];
-    this.onPick(hit ? (hit.object.userData.die as number) : null);
+    return hit ? (hit.object.userData.die as number) : null;
+  }
+
+  private pick = (event: PointerEvent) => this.onPick(this.dieUnder(event));
+
+  private open = (event: MouseEvent) => {
+    const die = this.dieUnder(event);
+    if (die !== null) this.onOpen(die);
   };
+
+  /** Flies the camera down onto die `die`, or back to where it was with `null`. */
+  focus(die: number | null) {
+    const from: [THREE.Vector3, THREE.Vector3] = [this.camera.position.clone(), this.controls.target.clone()];
+    if (die === null) {
+      if (!this.home) return;
+      this.flight = { from, to: this.home, start: performance.now() };
+      this.home = null;
+      return;
+    }
+    const d = this.layout?.dies[die];
+    if (!d) return;
+    this.home ??= from;
+    const target = new THREE.Vector3(d.center.x, 0, d.center.z);
+    const height = Math.max(d.width, d.depth) * 0.9;
+    this.flight = { from, to: [target.clone().add(new THREE.Vector3(0, height, height * 0.35)), target], start: performance.now() };
+  }
+
+  private fly() {
+    if (!this.flight) return;
+    const t = Math.min(1, (performance.now() - this.flight.start) / 700);
+    const ease = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+    this.camera.position.lerpVectors(this.flight.from[0], this.flight.to[0], ease);
+    this.controls.target.lerpVectors(this.flight.from[1], this.flight.to[1], ease);
+    if (t >= 1) this.flight = null;
+  }
 }

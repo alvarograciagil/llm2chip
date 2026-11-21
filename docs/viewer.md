@@ -84,6 +84,21 @@ result differs from the exact machine, an operation of a kind or a layer starts.
 also tells where each die's cycles go, colours the lanes by use so far, compares two traces,
 and for presentations turns the camera round the chips with captions and records a video.
 
+## Inside a die, down to the gates
+
+Double-click a die (or **Look inside, down to the gates** in its panel) and the camera flies
+down onto it; then its netlist opens as a schematic at the cycle on show, with the value of
+every wire. Double-click a block to go into it, down to the gates; Esc or the path at the
+top goes back up. Each block is shaded by how much of it changed since the cycle before, the
+busiest fully. Stepping or playing moves the values with the cycle.
+
+The engine does not keep every net of every cycle: it replays the recorded run (the same
+routines and the same checks between them) once, saving every die's state every 256 cycles,
+and answers each look from the last saved state before it, a window of 256 cycles at a time
+(`chip_trace::replay`, `/api/trace/design`, `/api/trace/inspect`). A test checks that a
+replayed cycle is the recorded one. Only gate traces recorded by the engine can be looked
+into; a design traced by operations has no gates.
+
 ## What a trace says, and what it does not
 
 - Gate traces are exact: every cycle of every die as the gates ran it. Units of a die run

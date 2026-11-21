@@ -4,13 +4,14 @@
 use chip_trace::design::{design_trace, Design};
 use chip_trace::{tiny_board, TinyDies, TinyModel, TINY_CONTEXT};
 use serde::Deserialize;
-use std::path::Path;
+use chip_trace::replay::Replay;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// The most dies a recording may join: each is simulated gate by gate.
 const MOST_CHIPS: usize = 8;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct TraceStart {
     /// "grouped" or "plain".
     #[serde(default)]
@@ -27,7 +28,7 @@ pub struct TraceStart {
 }
 
 /// The design to trace operation by operation: the model's folder and each die's shape.
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Deserialize, serde::Serialize, Clone)]
 pub struct DesignStart {
     pub path: String,
     /// log2 of the vector units, of the lanes of each and of the cells of each die.
@@ -122,5 +123,75 @@ pub fn run(start: &TraceStart, scratch: &Path) -> Result<serde_json::Value, Stri
         board.record_checked(&title, &tokens, scratch)
     });
     std::fs::remove_dir_all(scratch).ok();
-    serde_json::to_value(made?).map_err(|e| e.to_string())
+    let mut trace = serde_json::to_value(made?).map_err(|e| e.to_string())?;
+    // What made it, so the same run can be replayed to look inside the dies.
+    trace["request"] = serde_json::json!({ "model": start.model, "chips": start.chips, "sharing": start.sharing, "tokens": tokens });
+    Ok(trace)
+}
+
+/// A recorded run kept ready to be visited at any cycle, and what it was recorded from.
+pub struct Replayed {
+    key: String,
+    replay: Replay,
+    dir: PathBuf,
+}
+
+impl Drop for Replayed {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.dir).ok();
+    }
+}
+
+/// A look inside one die of a recorded run.
+#[derive(Deserialize)]
+pub struct Inspect {
+    pub request: TraceStart,
+    pub die: usize,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub cycle: u64,
+    #[serde(default = "one")]
+    pub window: u64,
+}
+
+fn one() -> u64 {
+    1
+}
+
+/// The most cycles one look brings back.
+const MOST_FRAMES: u64 = 512;
+
+/// The replay of `request`'s run, made again only when the run differs from the one kept.
+fn replay_of<'a>(kept: &'a mut Option<Replayed>, request: &TraceStart, scratch: &Path) -> Result<&'a mut Replay, String> {
+    check(request)?;
+    if request.design.is_some() {
+        return Err("a design traced by operations has no gates to look inside".into());
+    }
+    let key = format!("{}|{}|{}|{:?}", request.model, request.chips, request.sharing, request.tokens);
+    if kept.as_ref().is_none_or(|k| k.key != key) {
+        *kept = None;
+        let model = model_of(&request.model)?;
+        let sharing = *sim::sizing::parse_sharings(&request.sharing, &[request.chips as u32])?.first().ok_or("no way of sharing")?;
+        std::fs::create_dir_all(scratch).map_err(|e| e.to_string())?;
+        let replay = Replay::new(model, scratch, request.chips, sharing, &request.tokens)?;
+        *kept = Some(Replayed { key, replay, dir: scratch.to_path_buf() });
+    }
+    Ok(&mut kept.as_mut().expect("just kept").replay)
+}
+
+/// The netlist of one die of a recorded run.
+pub fn design(kept: &mut Option<Replayed>, look: &Inspect, scratch: &Path) -> Result<serde_json::Value, String> {
+    let replay = replay_of(kept, &look.request, scratch)?;
+    if look.die >= look.request.chips {
+        return Err(format!("there is no die {}", look.die));
+    }
+    serde_json::to_value(replay.design(look.die)).map_err(|e| e.to_string())
+}
+
+/// The nets of one instance of one die over a few cycles of a recorded run.
+pub fn inspect(kept: &mut Option<Replayed>, look: &Inspect, scratch: &Path) -> Result<serde_json::Value, String> {
+    let replay = replay_of(kept, &look.request, scratch)?;
+    let frames = replay.frames(look.die, &look.path, look.cycle, look.window.min(MOST_FRAMES))?;
+    Ok(serde_json::json!({ "frames": frames }))
 }
