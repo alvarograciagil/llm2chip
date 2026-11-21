@@ -3085,6 +3085,8 @@ pub struct DieProgram {
     /// The first cycle a step may read the accumulator in: products reach it a cycle
     /// after they are computed.
     acc_ready: usize,
+    /// The cycle each marked operation starts at, `(cycle, op)`.
+    marks: Vec<(usize, u32)>,
 }
 
 /// One index register the CPU sets before starting the die.
@@ -3181,6 +3183,9 @@ pub struct Microprogram {
     pub parameters: Vec<Parameter>,
     /// The group field its words read across, `(shift, bits)`: see `DieFeatures::group_bits`.
     pub group: (u32, u32),
+    /// The first word of each operation of the model, `(address, op)`, in address order:
+    /// what a viewer shows the die doing. Empty for hand-written microcode.
+    pub marks: Vec<(u32, u32)>,
 }
 
 const LANE_LATENCY: usize = 2;
@@ -3293,7 +3298,7 @@ impl DieProgram {
     pub fn new(config: DieConfig) -> Self {
         // The microcode read port takes one cycle to deliver the first word.
         let cycles = vec![ControlWord::default()];
-        Self { config, cycles, labels: BTreeSet::from([0]), entries: vec![0], parameters: Vec::new(), scoped: HashMap::new(), active: Vec::new(), in_use: BTreeSet::new(), cells_settle: 0, drain_pending: 0, load_at: None, drain_after: 0, tail: None, hoist: false, last_short: None, max_ready: 0, acc_ready: 0 }
+        Self { config, cycles, labels: BTreeSet::from([0]), entries: vec![0], parameters: Vec::new(), scoped: HashMap::new(), active: Vec::new(), in_use: BTreeSet::new(), cells_settle: 0, drain_pending: 0, load_at: None, drain_after: 0, tail: None, hoist: false, last_short: None, max_ready: 0, acc_ready: 0, marks: Vec::new() }
     }
 
     fn slot(&mut self, at: usize) -> &mut ControlWord {
@@ -3465,6 +3470,20 @@ impl DieProgram {
         self.scoped.remove(&Expr::var(variable));
         self.release(limit);
         self.release(counter);
+    }
+
+    /// Lays out steps as `assemble` does, noting the cycle each operation of `marks`
+    /// (`(step, op)`, as `Assembly::marks` gives them) starts at. The words are the same.
+    pub fn assemble_marked(&mut self, steps: &[Step], marks: &[(usize, u32)]) {
+        // Steps are laid out one at a time, so laying them out in pieces changes nothing.
+        let mut from = 0;
+        for &(step, op) in marks {
+            let to = step.clamp(from, steps.len());
+            self.assemble(&steps[from..to]);
+            from = to;
+            self.marks.push((self.end(), op));
+        }
+        self.assemble(&steps[from..]);
     }
 
     /// Lays out steps and loops, turning every variable index into an index register.
@@ -4328,7 +4347,13 @@ impl DieProgram {
                 parameter
             })
             .collect();
-        Microprogram { words, entries, parameters, group: (0, 0) }
+        // A mark on a cycle merged into the word before belongs to that word.
+        let marks = self
+            .marks
+            .iter()
+            .map(|&(cycle, op)| ((0..=cycle).rev().find_map(|c| address.get(&c).copied()).unwrap_or(0), op))
+            .collect();
+        Microprogram { words, entries, parameters, group: (0, 0), marks }
     }
 }
 

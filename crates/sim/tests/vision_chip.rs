@@ -264,7 +264,7 @@ fn the_firmware_drives_a_software_die_that_reads_the_picture() {
     let (mut engine, count) = open();
     let die = DieConfig { reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, ..chip.die };
     let parameter = |register, token, position| Parameter { register, token, position, constant: 0, window_length: 0, window_slot: 0, window: 0 };
-    let code = Microprogram { words: Vec::new(), entries: (0..ENTRY_VISION as u32 + 2).collect(), parameters: vec![parameter(1, 1, 0), parameter(2, 0, 1)], group: (0, 0) };
+    let code = Microprogram { words: Vec::new(), entries: (0..ENTRY_VISION as u32 + 2).collect(), parameters: vec![parameter(1, 1, 0), parameter(2, 0, 1)], group: (0, 0), marks: Vec::new() };
     let setup = GenerationSetup { max_new: NEW_TOKENS as u32, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     let mut info = chip_info(&die, &code, 1, chip.program.vocab as u32, &setup);
     add_vision(&mut info, &sim::vision_chip::software_vision_info(&chip.tower.config, count * merge * merge, FLOW_INDEX_BITS, FLOW_REGISTER_BITS));

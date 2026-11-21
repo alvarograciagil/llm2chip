@@ -1,0 +1,13 @@
+[package]
+name = "chip-trace"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+compiler = { path = "../compiler" }
+netlist = { path = "../netlist" }
+sim = { path = "../sim" }
+half = "2"
+serde.workspace = true
+serde_json.workspace = true

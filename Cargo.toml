@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/model-ir", "crates/arch", "crates/netlist", "crates/compiler", "crates/sim", "crates/server", "crates/wasm", "crates/tokenizer-rt", "crates/maskgit-rt"]
+members = ["crates/model-ir", "crates/arch", "crates/netlist", "crates/compiler", "crates/sim", "crates/server", "crates/wasm", "crates/tokenizer-rt", "crates/maskgit-rt", "crates/trace"]
 
 [workspace.package]
 license = "PolyForm-Noncommercial-1.0.0"

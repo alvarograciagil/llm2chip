@@ -40,6 +40,7 @@ name = "numeric"
 name = "mtp"
 
 [dev-dependencies]
+chip-trace = { path = "../trace" }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 half = "2"
 serde_json.workspace = true

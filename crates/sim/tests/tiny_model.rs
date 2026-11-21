@@ -9,6 +9,7 @@ use sim::{ExactEngine, Engine, Numeric, Weights};
 use std::path::Path;
 
 mod common;
+use chip_trace::board::{loaded_die, run_joined};
 use common::*;
 
 fn make_moe_checkpoint(dir: &Path) {
@@ -588,7 +589,7 @@ fn the_firmware_scores_the_draft_head_like_the_software() {
     let cell = die_config().cell;
     let die = DieConfig { reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, ..die_config() };
     let _ = cell;
-    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }], group: (0, 0) };
+    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }], group: (0, 0), marks: Vec::new() };
     let setup = GenerationSetup { max_new: count as u32 + 1, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: depth as u32, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: None, think_budget: u32::MAX };
     let info = chip_info(&die, &code, 1, 8, &setup);
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
@@ -658,7 +659,7 @@ fn the_firmware_closes_the_reasoning_when_its_budget_runs_out() {
 
     let firmware = FirmwareImage::from_elf(include_bytes!("../../../firmware/prebuilt/firmware.elf")).unwrap();
     let die = DieConfig { reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, ..die_config() };
-    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }], group: (0, 0) };
+    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }], group: (0, 0), marks: Vec::new() };
     let setup = GenerationSetup { max_new: count as u32, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: Some((6, close)), think_budget: budget };
     let info = chip_info(&die, &code, 1, 8, &setup);
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
@@ -695,7 +696,7 @@ fn the_cpu_profile_adds_up_and_tells_waiting_from_work() {
     let elf = include_bytes!("../../../firmware/prebuilt/firmware.elf");
     let firmware = FirmwareImage::from_elf(elf).unwrap();
     let die = DieConfig { reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, ..die_config() };
-    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }], group: (0, 0) };
+    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }], group: (0, 0), marks: Vec::new() };
     let setup = GenerationSetup { max_new: 4, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: None, think_budget: u32::MAX };
     let info = chip_info(&die, &code, 1, 8, &setup);
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
@@ -753,60 +754,6 @@ fn the_cpu_profile_adds_up_and_tells_waiting_from_work() {
     assert_eq!(counts.cycles_of(CpuTask::Tokenize), 0);
     eprintln!("{:?}", counts.entries());
     std::fs::remove_dir_all(dir).unwrap();
-}
-
-/// Three heads to each key head, in attention and in the delta rule: their units are laid
-/// out a power of two apart, with the units in between sitting out.
-const GROUPED: &str = r#"{
-  "model_type": "qwen3_5_text",
-  "hidden_size": 8, "intermediate_size": 16, "vocab_size": 8,
-  "num_attention_heads": 6, "num_key_value_heads": 2, "head_dim": 4,
-  "linear_num_key_heads": 2, "linear_key_head_dim": 4,
-  "linear_num_value_heads": 6, "linear_value_head_dim": 4,
-  "linear_conv_kernel_dim": 4, "partial_rotary_factor": 0.5,
-  "layer_types": ["linear_attention", "full_attention"],
-  "rope_parameters": { "rope_theta": 10000.0 }
-}"#;
-
-/// The grouped model with attention heads of `head_dim` elements.
-fn grouped_config(head_dim: usize) -> String {
-    GROUPED.replace(r#""num_key_value_heads": 2, "head_dim": 4"#, &format!(r#""num_key_value_heads": 2, "head_dim": {head_dim}"#))
-}
-
-fn grouped_checkpoint(dir: &Path, head_dim: usize) {
-    let mut rng = Rng(0x0F1E_2D3C_4B5A_6978);
-    let mut w = Writer::default();
-    w.matrix("model.embed_tokens", 8, 8, &mut rng);
-    w.matrix("lm_head", 8, 8, &mut rng);
-    w.floats("model.norm.weight", &[1.0; 8]);
-    for (layer, full) in [(0, false), (1, true)] {
-        let p = |s: &str| format!("model.layers.{layer}.{s}");
-        w.floats(&p("input_layernorm.weight"), &[1.0; 8]);
-        w.floats(&p("post_attention_layernorm.weight"), &[1.0; 8]);
-        w.matrix(&p("mlp.gate_proj"), 16, 8, &mut rng);
-        w.matrix(&p("mlp.up_proj"), 16, 8, &mut rng);
-        w.matrix(&p("mlp.down_proj"), 8, 16, &mut rng);
-        if full {
-            w.matrix(&p("self_attn.q_proj"), 12 * head_dim, 8, &mut rng);
-            w.matrix(&p("self_attn.k_proj"), 2 * head_dim, 8, &mut rng);
-            w.matrix(&p("self_attn.v_proj"), 2 * head_dim, 8, &mut rng);
-            w.matrix(&p("self_attn.o_proj"), 8, 6 * head_dim, &mut rng);
-            w.floats(&p("self_attn.q_norm.weight"), &vec![1.0; head_dim]);
-            w.floats(&p("self_attn.k_norm.weight"), &vec![1.0; head_dim]);
-        } else {
-            w.matrix(&p("linear_attn.in_proj_qkv"), 40, 8, &mut rng);
-            w.matrix(&p("linear_attn.in_proj_z"), 24, 8, &mut rng);
-            w.matrix(&p("linear_attn.in_proj_a"), 6, 8, &mut rng);
-            w.matrix(&p("linear_attn.in_proj_b"), 6, 8, &mut rng);
-            w.matrix(&p("linear_attn.out_proj"), 8, 24, &mut rng);
-            let taps: Vec<f32> = (0..160).map(|i| if i % 4 == 3 { 0.9 } else { 0.05 }).collect();
-            w.floats(&p("linear_attn.conv1d.weight"), &taps);
-            w.floats(&p("linear_attn.A_log"), &[-1.0, -0.5, -0.7, -0.3, -0.9, -0.6]);
-            w.floats(&p("linear_attn.dt_bias"), &[1.0; 6]);
-            w.floats(&p("linear_attn.norm.weight"), &[1.0; 4]);
-        }
-    }
-    w.write(&dir.join("model.safetensors"));
 }
 
 #[test]
@@ -928,44 +875,6 @@ fn the_hidden_state_an_image_head_reads_comes_from_the_chip_as_in_float() {
         assert!(error < 0.02 * scale, "{error} over {scale}: {got:?} {expected:?}");
     }
     std::fs::remove_dir_all(dir).ok();
-}
-
-/// A die of `c` with `layout`'s weights and `code` loaded, as the firmware would leave it.
-fn loaded_die(layout: &Layout, code: &Microprogram, weights: &Weights, c: DieConfig) -> Simulator {
-    let c = sim::chip::compact_die(c, layout);
-    let mut sim = Simulator::with_names(&die_design(c)).unwrap();
-    load_microprogram(&mut sim, &c, code);
-    load_register_table(&mut sim, &c, layout);
-    load_assembly(&mut sim, &c, &layout.setup().initial);
-    let data_mask = (1u64 << c.scale_bits.max(c.cell.weight_bits).max(c.cell.activation_bits)) - 1;
-    sim.set("load_fn", 1).unwrap();
-    for (address, value) in tables(&c).iter().enumerate() {
-        sim.set("fn_addr", address as u64).unwrap();
-        sim.set("cell_data", *value as u64 & mask(&c)).unwrap();
-        sim.tick();
-    }
-    sim.set("load_fn", 0).unwrap();
-    let put = |sim: &mut Simulator, address: u64, value: i64| {
-        sim.set("cell_addr", address).unwrap();
-        sim.set("cell_data", value as u64 & data_mask).unwrap();
-        sim.tick();
-    };
-    for cell in 0..c.cells {
-        let (codes, factors) = layout.cell_contents(weights, cell).unwrap();
-        sim.set("load_cell", 1 << cell).unwrap();
-        sim.set("load_scale", 0).unwrap();
-        for (address, code) in codes.iter().enumerate() {
-            put(&mut sim, address as u64, *code);
-        }
-        sim.set("load_scale", 1).unwrap();
-        for (group, (scale, bias)) in factors.iter().enumerate() {
-            put(&mut sim, 2 * group as u64, *scale);
-            put(&mut sim, 2 * group as u64 + 1, *bias);
-        }
-    }
-    sim.set("load_cell", 0).unwrap();
-    sim.set("load_scale", 0).unwrap();
-    sim
 }
 
 #[test]
@@ -1127,59 +1036,6 @@ fn a_real_model_s_token_on_the_die_matches_the_exact_machine() {
 }
 
 
-
-/// Runs `routine` with `token` at `position` on every die at once, joined by `wires`
-/// `(from, to, port)`, until all have halted. Gives the cycles it took.
-fn run_joined(dies: &mut [(Simulator, Microprogram)], wires: &[(usize, usize, &str)], routine: usize, token: u32, position: u32) -> u64 {
-    // A link a block wide has a wire of its own for every lane after the first.
-    let mut lanes: Vec<(usize, usize, String)> = Vec::new();
-    for (from, to, p) in wires {
-        lanes.push((*from, *to, p.to_string()));
-        let mut k = 1;
-        while dies[*from].0.get(&format!("{p}{k}_tx_valid")).is_some() {
-            lanes.push((*from, *to, format!("{p}{k}")));
-            k += 1;
-        }
-    }
-    let wires: Vec<(usize, usize, &str)> = lanes.iter().map(|(from, to, p)| (*from, *to, p.as_str())).collect();
-    let wires = wires.as_slice();
-    for (sim, code) in dies.iter_mut() {
-        sim.set("start", 0).unwrap();
-        sim.set("param_write", 1).unwrap();
-        for parameter in &code.parameters {
-            sim.set("param_index", parameter.register as u64).unwrap();
-            sim.set("param_data", parameter.value(token, position) as u64).unwrap();
-            sim.tick();
-        }
-        sim.set("param_write", 0).unwrap();
-        sim.set("entry", code.entries[routine] as u64).unwrap();
-        sim.set("start", 1).unwrap();
-        sim.tick();
-        sim.set("start", 0).unwrap();
-    }
-    let mut cycles = 0u64;
-    while dies.iter().any(|(sim, _)| sim.get("halted").unwrap() == 0) {
-        let outputs: Vec<_> = wires
-            .iter()
-            .map(|(from, to, p)| {
-                let (a, b) = (&dies[*from].0, &dies[*to].0);
-                (a.get(&format!("{p}_tx_valid")).unwrap(), a.get_wide(&format!("{p}_tx_bits")).unwrap(), b.get(&format!("{p}_rx_ready")).unwrap(), b.get(&format!("{p}_rx_ack")).unwrap())
-            })
-            .collect();
-        for ((from, to, p), (valid, bits, ready, ack)) in wires.iter().zip(outputs) {
-            dies[*to].0.set(&format!("{p}_rx_valid"), valid).unwrap();
-            dies[*to].0.set_wide(&format!("{p}_rx_bits"), bits).unwrap();
-            dies[*from].0.set(&format!("{p}_tx_ready"), ready).unwrap();
-            dies[*from].0.set(&format!("{p}_tx_ack"), ack).unwrap();
-        }
-        for (sim, _) in dies.iter_mut() {
-            sim.tick();
-        }
-        cycles += 1;
-        assert!(cycles < 2_000_000, "routine {routine} at position {position}: the dies do not finish");
-    }
-    cycles
-}
 
 /// Chips that share the products by rows share the attention's heads too: each keeps and
 /// attends with its own heads and the chips gather the attention's output. Over a few tokens,

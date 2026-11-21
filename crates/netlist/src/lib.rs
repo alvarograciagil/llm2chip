@@ -29,7 +29,7 @@ mod vhdl;
 
 pub use cell::{cell_design, shared_unit_design, CellConfig, MAX_MULTIPLES_BITS};
 pub use die::{cell_groups, die_design, package_design, word_bits, ControlWord, DieConfig, DieFeatures, DieProgram, Microprogram, Parameter};
-pub use sim::{SimError, Simulator};
+pub use sim::{Probe, SimError, Simulator};
 pub use verilog::{chip_testbench, to_verilog, to_verilog_for_fpga, verilog_testbench, verilog_testbench_with_rom, RomWord, TestStep};
 pub use vhdl::{to_vhdl, vhdl_testbench};
 

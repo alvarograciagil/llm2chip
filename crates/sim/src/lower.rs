@@ -1210,7 +1210,7 @@ impl Layout {
         match self.highest_register() {
             Some(r) if r >= self.next => Err(format!("registers are missing: the routines reach {r} and the die has {}", self.next)),
             _ => {
-                code.assemble(steps);
+                code.assemble_marked(steps, &asm.marks);
                 Ok(())
             }
         }
@@ -2003,13 +2003,22 @@ impl Layout {
                 None => self.load_rope(ops, program, position),
             }
         }
+        // Operations of the model itself are marked by their index in the program.
+        let size = std::mem::size_of::<Inst>().max(1);
+        let base = (list.as_ptr() as usize).checked_sub(program.ops.as_ptr() as usize).map(|bytes| bytes / size).filter(|start| start + list.len() <= program.ops.len());
         let mut i = 0;
         while i < list.len() {
+            if let Some(start) = base {
+                ops.mark((start + i) as u32);
+            }
             if let Some(next) = list.get(i + 1).filter(|next| self.gathers_with(program, &list[i].op, &next.op)) {
                 // Two operations on heads that chips share gather them together, the second
                 // with parts of its own past the first's, which wait to be gathered.
                 ops.hold_gathers();
                 self.lower_op(ops, program, &list[i].op, token, position)?;
+                if let Some(start) = base {
+                    ops.mark((start + i + 1) as u32);
+                }
                 self.part_base.set(PAIRED_PARTS);
                 let done = self.lower_op(ops, program, &next.op, token, position);
                 self.part_base.set(0);

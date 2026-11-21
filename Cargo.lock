@@ -230,6 +230,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "chip-trace"
+version = "0.1.0"
+dependencies = [
+ "compiler",
+ "half",
+ "netlist",
+ "serde",
+ "serde_json",
+ "sim",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1761,6 +1773,7 @@ version = "0.1.0"
 dependencies = [
  "arch",
  "ash",
+ "chip-trace",
  "compiler",
  "crc32fast",
  "half",

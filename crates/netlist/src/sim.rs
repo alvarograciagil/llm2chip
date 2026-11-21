@@ -100,6 +100,10 @@ struct Memory {
     stuck: Vec<(usize, u32, bool)>,
 }
 
+/// A net's bits, found once by name: see `Simulator::probe`.
+#[derive(Clone, Debug)]
+pub struct Probe(Vec<usize>);
+
 pub struct Simulator {
     values: Vec<u8>,
     gates: Vec<Gate>,
@@ -625,6 +629,17 @@ impl Simulator {
 
     pub fn cycle(&self) -> u64 {
         self.cycle
+    }
+
+    /// The bits of net `name` of the module instance at `path` ("" for the top), to read
+    /// it every cycle with `read` without the cost of a `snapshot`.
+    pub fn probe(&self, path: &str, name: &str) -> Option<Probe> {
+        self.paths.get(path).and_then(|nets| nets.get(name)).map(|bits| Probe(bits.clone()))
+    }
+
+    /// The value of a probed net, least significant bit first, up to 128 bits.
+    pub fn read(&self, probe: &Probe) -> u128 {
+        read(&self.values, &probe.0)
     }
 
     /// Every net of the module instance at `path`, as bit strings with the MSB first.

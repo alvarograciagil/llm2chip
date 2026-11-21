@@ -462,6 +462,10 @@ pub trait BlockOps: Sized {
     /// they gather from must not be written in the meantime.
     fn hold_gathers(&mut self) {}
 
+    /// Operation `op` of the program starts here. Only the assembly keeps it, to tell
+    /// which words belong to which operation.
+    fn mark(&mut self, _op: u32) {}
+
     /// Gathers what `hold_gathers` kept, together.
     fn release_gathers(&mut self) {}
 
@@ -1021,6 +1025,9 @@ fn alu(op: u32) -> Alu<Expr> {
 pub struct Assembly {
     pub steps: Vec<Step>,
     pub initial: HashMap<Place, i64>,
+    /// Where each operation of the model starts: the step it starts at and its index in
+    /// the program. Only for following the die at work; it changes no word.
+    pub marks: Vec<(usize, u32)>,
     /// The link to the next chip carries a block of lanes a cycle.
     wide_link: bool,
     bits: u32,
@@ -1445,7 +1452,7 @@ impl Assembly {
 
     pub fn new(c: &DieConfig) -> Self {
         let initial = constants(c.cell.activation_bits).iter().enumerate().map(|(i, v)| ((scratch_register(c), CONSTANT_FIRST + i as u32), *v)).collect();
-        Self { steps: Vec::new(), initial, wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, slabs_keep_shifts: false, held: None, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false, scans_writes: c.features.widths[crate::die::SCAN_WRITTEN_FIELD] > 0, widens: c.features.widths[crate::die::WIDE_LEFT_FIELD] > 0, aligns: c.features.widths[crate::die::ALIGN_SHIFT_FIELD] > 0 }
+        Self { steps: Vec::new(), initial, marks: Vec::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, slabs_keep_shifts: false, held: None, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false, scans_writes: c.features.widths[crate::die::SCAN_WRITTEN_FIELD] > 0, widens: c.features.widths[crate::die::WIDE_LEFT_FIELD] > 0, aligns: c.features.widths[crate::die::ALIGN_SHIFT_FIELD] > 0 }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -2201,6 +2208,10 @@ fn can_stream(variable: Var, step: &Alu<Expr>, unit: u32, per_block: bool) -> bo
 
 impl BlockOps for Assembly {
     type N = Expr;
+
+    fn mark(&mut self, op: u32) {
+        self.marks.push((self.steps.len(), op));
+    }
 
     fn window_length(&self, position: Expr, window: u32) -> Expr {
         assert_eq!(position, Expr::var(Var::Position), "the window is measured from the position");
