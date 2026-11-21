@@ -17,6 +17,8 @@ export interface Palette {
   cache: string;
   cacheEmpty: string;
   link: string;
+  heatLow: string;
+  heatHigh: string;
 }
 
 /** The scene's colours from the app's own tokens, so it follows light and dark. */
@@ -42,6 +44,8 @@ export function readPalette(el: Element): Palette {
     cache: v("--cat-vector", "#e5484d"),
     cacheEmpty: v("--neutral-fill", "#8e8e93"),
     link: v("--separator", "#c6c6c8"),
+    heatLow: v("--heat-low", "#d6e8ff"),
+    heatHigh: v("--heat-high", "#004ea8"),
   };
 }
 
@@ -144,6 +148,17 @@ export class ChipScene {
       this.onFrame(this.screenPositions());
     };
     loop();
+  }
+
+  /** Turns the camera slowly round the chips by itself, or stops. */
+  setTour(on: boolean) {
+    this.controls.autoRotate = on;
+    this.controls.autoRotateSpeed = 0.8;
+  }
+
+  /** The canvas the scene draws on, to record it. */
+  canvas(): HTMLCanvasElement {
+    return this.renderer.domElement;
   }
 
   /** Called before every frame: where the view moves time on. */
@@ -256,7 +271,7 @@ export class ChipScene {
 
   /** Draws the chips as they are at `cycle`; `selected` is the die picked, if any, and
    * `window` how many cycles back a link still shows the words that crossed it. */
-  show(cycle: number, selected: number | null, window = 16) {
+  show(cycle: number, selected: number | null, window = 16, heat: number[] | null = null) {
     const trace = this.trace;
     const layout = this.layout;
     if (!trace || !layout) return;
@@ -265,12 +280,13 @@ export class ChipScene {
     this.dies.forEach((d, i) => {
       const state = dieAt(trace, i, cycle);
       const lit = state.halted ? p.idle : state.stalled ? p.stall : p.classes[state.word?.class ?? "halt"];
-      this.color.set(lit);
+      if (heat) this.color.set(p.heatLow).lerp(new THREE.Color(p.heatHigh), heat[i] ?? 0);
+      else this.color.set(lit);
       for (let k = 0; k < d.lanes.count; k++) d.lanes.setColorAt(k, this.color);
       if (d.lanes.instanceColor) d.lanes.instanceColor.needsUpdate = true;
       const material = d.lanes.material as THREE.MeshStandardMaterial;
-      material.emissive.set(lit);
-      material.emissiveIntensity = state.halted ? 0 : state.stalled ? 0.5 : 0.25;
+      material.emissive.set(heat ? p.heatHigh : lit);
+      material.emissiveIntensity = heat ? 0 : state.halted ? 0 : state.stalled ? 0.5 : 0.25;
       this.color.set(state.word?.class === "cells" && !state.stalled ? p.classes.cells : p.idle);
       for (let k = 0; k < d.cells.count; k++) d.cells.setColorAt(k, this.color);
       if (d.cells.instanceColor) d.cells.instanceColor.needsUpdate = true;

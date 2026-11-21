@@ -48,6 +48,12 @@ interface ViewerState {
   recording: RecordState;
   error: string | null;
   breakpoints: Breakpoints;
+  /** Lanes lit by what each die runs now, or by how much it has worked so far. */
+  colouring: "now" | "heat";
+  /** A second trace to compare with. */
+  other: Trace | null;
+  /** The camera turns round the chips by itself and captions say what happens. */
+  touring: boolean;
   /** Why playback last stopped by itself. */
   stopped: string | null;
   load: (trace: Trace) => void;
@@ -61,6 +67,9 @@ interface ViewerState {
   step: (direction: 1 | -1) => void;
   select: (die: number | null) => void;
   setBreakpoints: (breakpoints: Breakpoints) => void;
+  setColouring: (colouring: "now" | "heat") => void;
+  openOther: (file: File | null) => Promise<void>;
+  setTouring: (touring: boolean) => void;
   /** Moves on to the next breakpoint, or to the end. */
   runToBreak: () => void;
 }
@@ -90,6 +99,9 @@ export const useViewer = create<ViewerState>((set, get) => ({
   error: null,
   breakpoints: NO_BREAKPOINTS,
   stopped: null,
+  colouring: "now",
+  other: null,
+  touring: false,
   load: (trace) => set({ trace, cycle: 0, playing: false, selected: null, error: null, stopped: null }),
   open: async (file) => {
     try {
@@ -139,6 +151,16 @@ export const useViewer = create<ViewerState>((set, get) => ({
   },
   select: (die) => set({ selected: die }),
   setBreakpoints: (breakpoints) => set({ breakpoints }),
+  setColouring: (colouring) => set({ colouring }),
+  openOther: async (file) => {
+    if (!file) return set({ other: null });
+    try {
+      set({ other: readTrace(JSON.parse(await file.text())), error: null });
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : String(e) });
+    }
+  },
+  setTouring: (touring) => set({ touring }),
   runToBreak: () => {
     const { trace, cycle, breakpoints } = get();
     if (!trace) return;

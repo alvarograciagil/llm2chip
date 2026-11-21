@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cacheAt, cacheHolders, dieAt, divergedAt, firstBreak, linkWordsIn, NO_BREAKPOINTS, dieTotals, linkAt, nextStop, readTrace, stepAt, totalCycles, type Trace } from "./trace";
+import { cacheAt, cacheHolders, compareTraces, cyclesByKind, dieAt, useShare, divergedAt, firstBreak, linkWordsIn, NO_BREAKPOINTS, dieTotals, linkAt, nextStop, readTrace, stepAt, totalCycles, type Trace } from "./trace";
 import { layoutScene, linkPoint } from "./layout3d";
 
 /** Two dies over ten cycles: the first works through two operations of layer 0 and waits a
@@ -158,6 +158,27 @@ describe("a trace by operations", () => {
 
   it("stops where an operation of a kind starts", () => {
     expect(firstBreak(byOps(), 0, 9, { ...NO_BREAKPOINTS, kind: "KvAppend" })).toEqual({ cycle: 3, reason: "Die 0 starts kv" });
+  });
+});
+
+describe("where the cycles go", () => {
+  it("counts each die's cycles by kind of operation, waiting and idle", () => {
+    const t = sample();
+    expect(Object.fromEntries(cyclesByKind(t, 0))).toEqual({ Matvec: 3, KvAppend: 4, waiting: 1, idle: 2 });
+    expect(Object.fromEntries(cyclesByKind(byOps(), 1))).toEqual({ KvAppend: 4, idle: 6 });
+    expect(Object.fromEntries(cyclesByKind(t, 0, 3))).toEqual({ Matvec: 3 });
+  });
+
+  it("gives each die's share of work so far", () => {
+    const [a, b] = useShare(sample(), 9);
+    expect(a).toBeCloseTo(0.7);
+    expect(b).toBeCloseTo(0.2);
+  });
+
+  it("sets two traces' routines and shares side by side", () => {
+    const c = compareTraces(sample(), byOps());
+    expect(c.steps.map((s) => [s.label, s.a, s.b])).toEqual([["token 0", 8, 8], ["logits 0", 2, 2]]);
+    expect(c.share.a[0] + c.share.a[1] + c.share.a[2]).toBeCloseTo(1);
   });
 });
 

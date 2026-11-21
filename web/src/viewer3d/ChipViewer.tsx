@@ -5,7 +5,7 @@ import { Segmented } from "../components/controls";
 import { download } from "../download";
 import { ChipScene, readPalette } from "./scene";
 import { DEFAULT_RECORD, designRequest, useViewer, type RecordRequest } from "./viewerStore";
-import { byOperations, dieAt, dieTotals, divergedAt, opKinds, stepAt, totalCycles, type Stride, type Trace, type WordClass } from "./trace";
+import { byOperations, compareTraces, cyclesByKind, dieAt, dieTotals, divergedAt, opKinds, useShare, stepAt, totalCycles, type Stride, type Trace, type WordClass } from "./trace";
 
 // The 3D viewer of the chip at work: loaded on demand, so Three.js only downloads when the
 // view opens. The stage shows the scene; the panel loads traces and drives playback.
@@ -18,6 +18,9 @@ export default function ChipViewer() {
     </>
   );
 }
+
+/** The scene on show, for recording it. */
+let shownScene: ChipScene | null = null;
 
 const CLASS_LABEL: Record<WordClass, string> = {
   cells: "Cells multiply and add",
@@ -56,15 +59,23 @@ function ChipStage() {
       return;
     }
     sceneRef.current = scene;
+    shownScene = scene;
     let last = performance.now();
+    // The heat map is worked out again only when the cycle on show changes.
+    let heat: { trace: Trace; cycle: number; shares: number[] } | null = null;
     scene.setTick(() => {
       const now = performance.now();
       const viewer = useViewer.getState();
       viewer.advance(Math.min((now - last) / 1000, 0.1));
       last = now;
-      const { cycle, selected, speed, playing } = useViewer.getState();
+      const { trace, cycle, selected, speed, playing, colouring } = useViewer.getState();
+      let shares: number[] | null = null;
+      if (trace && colouring === "heat") {
+        if (!heat || heat.trace !== trace || heat.cycle !== Math.floor(cycle)) heat = { trace, cycle: Math.floor(cycle), shares: useShare(trace, cycle) };
+        shares = heat.shares;
+      }
       // Words cross a link in a cycle: show those of the last few frames' worth of cycles.
-      scene.show(cycle, selected, playing ? Math.max(16, speed / 4) : 16);
+      scene.show(cycle, selected, playing ? Math.max(16, speed / 4) : 16, shares);
     });
     scene.onPick = (die) => useViewer.getState().select(die);
     scene.onFrame = (positions) => {
@@ -80,8 +91,12 @@ function ChipStage() {
     return () => {
       scene.dispose();
       sceneRef.current = null;
+      if (shownScene === scene) shownScene = null;
     };
   }, []);
+
+  const touring = useViewer((s) => s.touring);
+  useEffect(() => sceneRef.current?.setTour(touring), [touring]);
 
   useEffect(() => {
     if (trace) sceneRef.current?.setTrace(trace);
@@ -102,6 +117,7 @@ function ChipStage() {
       <div ref={labels} className="viewer-labels" aria-hidden="true">
         {trace?.dies.map((_, i) => <DieLabel key={i} die={i} trace={trace} />)}
       </div>
+      {touring && trace && <Caption trace={trace} />}
       {failed && (
         <div className="viewer-empty">
           <p>{t("This browser cannot draw in 3D here.")}</p>
@@ -114,6 +130,25 @@ function ChipStage() {
         </div>
       )}
     </section>
+  );
+}
+
+/** For a presentation: where the run is and what the dies are doing, in large type. */
+function Caption({ trace }: { trace: Trace }) {
+  const t = useT();
+  const cycle = useViewer((s) => Math.floor(s.cycle));
+  const step = trace.steps[stepAt(trace, cycle)];
+  const states = trace.dies.map((_, d) => dieAt(trace, d, cycle));
+  const working = states.filter((s) => !s.halted && !s.stalled);
+  const waiting = states.filter((s) => s.stalled).length;
+  const layers = [...new Set(working.map((s) => s.op?.layer).filter((l): l is number => l !== null && l !== undefined))];
+  const where = step.routine === "token" ? t(`Token ${step.token} at position ${step.position}`) : t("The logits");
+  return (
+    <div className="viewer-caption">
+      <strong>{where}</strong>
+      <span>{layers.length > 0 ? t(`${working.length} of ${trace.dies.length} dies working, on layer ${layers.join(", ")}`) : t(`${working.length} of ${trace.dies.length} dies working`)}</span>
+      {waiting > 0 && <span>{t(`${waiting} waiting`)}</span>}
+    </div>
   );
 }
 
@@ -214,6 +249,9 @@ function ChipPanel() {
 
           <Breaks trace={trace} />
           <Divergences trace={trace} />
+          <Uses trace={trace} />
+          <Compare trace={trace} />
+          <Presentation />
 
           <h3>{t("Each die")}</h3>
           <table className="viewer-dies">
@@ -234,6 +272,108 @@ function ChipPanel() {
         </>
       )}
     </aside>
+  );
+}
+
+function Uses({ trace }: { trace: Trace }) {
+  const t = useT();
+  const colouring = useViewer((s) => s.colouring);
+  const selected = useViewer((s) => s.selected);
+  const { setColouring } = useViewer.getState();
+  const die = selected ?? 0;
+  const by = [...cyclesByKind(trace, die).entries()].sort((a, b) => b[1] - a[1]);
+  const total = Math.max(1, by.reduce((sum, [, n]) => sum + n, 0));
+  const name = (kind: string) => (kind === "idle" ? t("Idle") : kind === "waiting" ? t("Waiting") : kind === "other" ? t("Between operations") : kind);
+  return (
+    <>
+      <h3>{t("Where the cycles go")}</h3>
+      <div className="scope">
+        <Segmented label={t("Colour the lanes by")} value={colouring} options={[["now", t("What they do now")], ["heat", t("Use so far")]]} onChange={setColouring} />
+      </div>
+      <p className="muted-text">{t(`Die ${die}, the whole run`)}</p>
+      <ul className="viewer-bars">
+        {by.slice(0, 10).map(([kind, n]) => (
+          <li key={kind}>
+            <span>{name(kind)}</span>
+            <span className="bar"><span style={{ width: `${(100 * n) / total}%` }} /></span>
+            <span className="muted-text">{Math.round((100 * n) / total)} %</span>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+function Compare({ trace }: { trace: Trace }) {
+  const t = useT();
+  const other = useViewer((s) => s.other);
+  const { openOther } = useViewer.getState();
+  const input = useRef<HTMLInputElement>(null);
+  const c = other ? compareTraces(trace, other) : null;
+  const percent = (v: number) => `${Math.round(100 * v)} %`;
+  return (
+    <>
+      <h3>{t("Compare")}</h3>
+      <div className="sim-actions">
+        <button className="pill" onClick={() => input.current?.click()}>{other ? t("Another trace") : t("Open a trace to compare")}</button>
+        {other && <button className="pill" onClick={() => void openOther(null)}>{t("Stop comparing")}</button>}
+        <input ref={input} type="file" accept=".json,application/json" hidden onChange={(e) => { void openOther(e.target.files?.[0] ?? null); e.target.value = ""; }} />
+      </div>
+      {other && c && (
+        <table className="viewer-compare">
+          <thead>
+            <tr><th /><th>{t("This one")}</th><th>{t(other.title)}</th></tr>
+          </thead>
+          <tbody>
+            {c.steps.map((s) => (
+              <tr key={s.label}><td>{t(s.label)}</td><td>{s.a?.toLocaleString() ?? "–"}</td><td>{s.b?.toLocaleString() ?? "–"}</td></tr>
+            ))}
+            <tr><td>{t("Working")}</td><td>{percent(c.share.a[0])}</td><td>{percent(c.share.b[0])}</td></tr>
+            <tr><td>{t("Waiting")}</td><td>{percent(c.share.a[1])}</td><td>{percent(c.share.b[1])}</td></tr>
+            <tr><td>{t("Idle")}</td><td>{percent(c.share.a[2])}</td><td>{percent(c.share.b[2])}</td></tr>
+          </tbody>
+        </table>
+      )}
+    </>
+  );
+}
+
+function Presentation() {
+  const t = useT();
+  const touring = useViewer((s) => s.touring);
+  const { setTouring } = useViewer.getState();
+  const [recorder, setRecorder] = useState<MediaRecorder | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const record = () => {
+    if (recorder) {
+      recorder.stop();
+      return;
+    }
+    const canvas = shownScene?.canvas();
+    if (!canvas || typeof MediaRecorder === "undefined") return setFailure(t("This browser cannot record the view."));
+    const type = ["video/webm;codecs=vp9", "video/webm", "video/mp4"].find((m) => MediaRecorder.isTypeSupported(m));
+    if (!type) return setFailure(t("This browser cannot record the view."));
+    const chunks: Blob[] = [];
+    const r = new MediaRecorder(canvas.captureStream(30), { mimeType: type });
+    r.ondataavailable = (e) => chunks.push(e.data);
+    r.onstop = () => {
+      download(new Blob(chunks, { type }), type.startsWith("video/mp4") ? "llm2chip-chip.mp4" : "llm2chip-chip.webm", type);
+      setRecorder(null);
+    };
+    r.start();
+    setFailure(null);
+    setRecorder(r);
+  };
+  return (
+    <>
+      <h3>{t("Presentation")}</h3>
+      <div className="sim-actions">
+        <button className={touring ? "pill primary-pill" : "pill"} onClick={() => setTouring(!touring)}>{touring ? t("End the tour") : t("Guided tour")}</button>
+        <button className={recorder ? "pill primary-pill" : "pill"} onClick={record}>{recorder ? t("Stop and save the video") : t("Record a video")}</button>
+      </div>
+      <p className="muted-text">{t("The tour turns the camera round the chips and says what they are doing; the video records the view as it plays.")}</p>
+      {failure && <Issue kind="error">{failure}</Issue>}
+    </>
   );
 }
 

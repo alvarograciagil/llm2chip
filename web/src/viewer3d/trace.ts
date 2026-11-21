@@ -360,3 +360,66 @@ export function firstBreak(trace: Trace, from: number, to: number, b: Breakpoint
 export function opKinds(trace: Trace): string[] {
   return [...new Set(trace.ops.map((o) => o.kind))].sort();
 }
+
+/** Cycles a die spent on each kind of operation, and waiting or idle, from the start up to
+ * `upTo` (the whole trace by default): where its time goes. */
+export function cyclesByKind(trace: Trace, die: number, upTo = totalCycles(trace)): Map<string, number> {
+  const d = trace.dies[die];
+  const out = new Map<string, number>();
+  const add = (kind: string, n: number) => n > 0 && out.set(kind, (out.get(kind) ?? 0) + n);
+  const end = Math.min(upTo, totalCycles(trace));
+  if (d.pcs.length > 0) {
+    for (let c = 0; c < end; c++) {
+      const pc = d.pcs[c];
+      const op = pc >= 0 ? d.words[pc]?.op : null;
+      add(op === null || op === undefined ? (pc < 0 ? "idle" : "other") : trace.ops[op].kind, 1);
+    }
+    // Waiting cycles were counted under the word that waits: move them out.
+    for (const [start, length] of d.stalls) {
+      for (let c = start; c < Math.min(start + length, end); c++) {
+        const pc = d.pcs[c];
+        const op = pc >= 0 ? d.words[pc]?.op : null;
+        const kind = op === null || op === undefined ? "other" : trace.ops[op].kind;
+        out.set(kind, (out.get(kind) ?? 0) - 1);
+        add("waiting", 1);
+      }
+    }
+  } else {
+    let busy = 0;
+    for (const [start, length, word] of d.spans) {
+      const n = Math.max(0, Math.min(start + length, end) - start);
+      const op = d.words[word]?.op;
+      add(op === null || op === undefined ? "other" : trace.ops[op].kind, n);
+      busy += n;
+    }
+    const waiting = d.stalls.reduce((sum, [start, length]) => sum + Math.max(0, Math.min(start + length, end) - start), 0);
+    add("waiting", waiting);
+    add("idle", end - busy - waiting);
+  }
+  for (const [k, v] of out) if (v <= 0) out.delete(k);
+  return out;
+}
+
+/** The share of `upTo` cycles each die spent working, for a heat map of use. */
+export function useShare(trace: Trace, upTo: number): number[] {
+  const n = Math.max(1, Math.floor(upTo) + 1);
+  return trace.dies.map((_, die) => {
+    const by = cyclesByKind(trace, die, n);
+    const idle = (by.get("idle") ?? 0) + (by.get("waiting") ?? 0);
+    return Math.max(0, 1 - idle / n);
+  });
+}
+
+/** Two traces side by side: their routines, and each one's work, waits and idle time. */
+export function compareTraces(a: Trace, b: Trace): { steps: { label: string; a: number | null; b: number | null }[]; share: { a: number[]; b: number[] } } {
+  const label = (s: StepInfo) => `${s.routine} ${s.position}`;
+  const labels = [...new Set([...a.steps.map(label), ...b.steps.map(label)])];
+  const cycles = (t: Trace, l: string) => t.steps.find((s) => label(s) === l)?.cycles ?? null;
+  const shares = (t: Trace) => {
+    const all = t.dies.map((_, d) => dieTotals(t, d));
+    const sum = all.reduce((x, y) => ({ work: x.work + y.work, stalled: x.stalled + y.stalled, halted: x.halted + y.halted }), { work: 0, stalled: 0, halted: 0 });
+    const total = Math.max(1, sum.work + sum.stalled + sum.halted);
+    return [sum.work / total, sum.stalled / total, sum.halted / total];
+  };
+  return { steps: labels.map((l) => ({ label: l, a: cycles(a, l), b: cycles(b, l) })), share: { a: shares(a), b: shares(b) } };
+}
