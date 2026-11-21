@@ -1,4 +1,4 @@
-# 3D chip viewer (plan)
+# 3D chip viewer
 
 A view of the chip at work, in three dimensions: the dies and their units, tokens going
 through the layers, the KV cache filling up, the links between chips and where the work
@@ -59,7 +59,44 @@ It stores changes and runs, not frames:
    disk, runs only in the engine, and its traces are cached under `~/.llm2chip/cache`;
    none is committed. Link latency is not modelled there, as in the sizing.
 
-## Phases
+## How to use it
+
+Open **Chip at work** in the toolbar. Its panel offers two sources:
+
+- **Small model, gates**: the engine builds 1 to 6 dies of a small Qwen3.5-shaped model
+  (by layers, by rows or in groups of two), runs three tokens and the logits gate by gate,
+  and checks every die against the exact machine after each routine. A few seconds.
+- **This design**: the model and dies of the sidebar (dies, split, group, vector units,
+  lanes, multipliers, context), operation by operation from each chip's own microprogram,
+  for a token at the start, the middle and the end of the context. The model must be in the
+  engine's known folders; Qwen3.8-27B on 16 dies takes about 25 s and is then cached.
+
+From the command line, the same traces go to a file the view opens (**Open a trace**):
+
+```
+cargo run --release -p chip-trace --example trace -- trace.json 4 mixed:2 grouped
+CHIPS=16 SHARING=mixed:8 cargo run --release -p chip-trace --example design -- MODEL_DIR design.json
+```
+
+Playback runs from 1 to 100,000 cycles a second and steps by cycle, word, operation, layer
+or token, forwards and back; it can stop by itself where a die starts waiting on a link, a
+result differs from the exact machine, an operation of a kind or a layer starts. The panel
+also tells where each die's cycles go, colours the lanes by use so far, compares two traces,
+and for presentations turns the camera round the chips with captions and records a video.
+
+## What a trace says, and what it does not
+
+- Gate traces are exact: every cycle of every die as the gates ran it. Units of a die run
+  the same word, so they light up together; which units sit out of a word (heads that do
+  not divide, slices) is not drawn yet.
+- Design traces are by operations: each operation's cycles come from the chip's own microcode,
+  the chips of a group wait for their slowest at every operation, and links take no time.
+  On Qwen3.8-27B, 16 dies in groups of 8, they come 2 % over the sizing's count.
+- Not there yet: the occupancy of the links' queues, the rounds of exponent agreement on the
+  ring, and power by block from the activity (the estimator has the power, the trace does not
+  carry what it needs).
+
+## Phases (all done on `chip-viewer`)
 
 1. **Recorder.** Operation marks; harness moved to `crates/trace`; trace format and
    recorder over the gates; an example that writes a trace to a file.
