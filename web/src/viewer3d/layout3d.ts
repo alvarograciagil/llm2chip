@@ -34,6 +34,21 @@ export interface SceneLayout {
 /** Size of one lane's cube and the gap around it. */
 export const LANE = 0.32;
 const GAP = 0.08;
+/** More lanes than this on a die are drawn a cube per unit. */
+const MOST_LANES = 1024;
+/** Cells and cache slots drawn at most: beyond, each stands for several. */
+export const MOST_CELLS = 64;
+export const MOST_SLOTS = 32;
+
+/** What a die's lanes and cells are drawn as: a cube per lane, or per unit on large dies. */
+export function drawnShape(units: number, lanes: number, cells: number): { lanes: number; cells: number } {
+  return { lanes: units * lanes > MOST_LANES ? 1 : lanes, cells: Math.min(cells, MOST_CELLS) };
+}
+
+/** Cache slots drawn for a context: one per token, up to `MOST_SLOTS`. */
+export function drawnSlots(context: number): number {
+  return Math.max(1, Math.min(context, MOST_SLOTS));
+}
 
 /** Columns and rows of a grid of `n` items, wider than deep. */
 function grid(n: number): [number, number] {
@@ -43,9 +58,11 @@ function grid(n: number): [number, number] {
 
 export function layoutScene(trace: Trace): SceneLayout {
   const caches = cacheOps(trace);
-  const sizes = trace.dies.map((d) => {
+  const slots = drawnSlots(trace.context);
+  const shapes = trace.dies.map((d) => drawnShape(d.units, d.lanes, d.cells));
+  const sizes = trace.dies.map((d, i) => {
     const [unitColumns, unitRows] = grid(d.units);
-    const [laneColumns, laneRows] = grid(d.lanes);
+    const [laneColumns, laneRows] = grid(shapes[i].lanes);
     const unitWidth = laneColumns * (LANE + GAP) + GAP * 2;
     const unitDepth = laneRows * (LANE + GAP) + GAP * 2;
     return { unitColumns, unitRows, laneColumns, laneRows, unitWidth, unitDepth, width: unitColumns * unitWidth + 1.2, depth: unitRows * unitDepth + 1.6 };
@@ -64,15 +81,16 @@ export function layoutScene(trace: Trace): SceneLayout {
     for (let u = 0; u < d.units; u++) {
       const ux = x0 + (u % s.unitColumns) * s.unitWidth + GAP * 2;
       const uz = z0 + Math.floor(u / s.unitColumns) * s.unitDepth + GAP * 2;
-      for (let l = 0; l < d.lanes; l++) {
+      for (let l = 0; l < shapes[i].lanes; l++) {
         lanes.push({ x: ux + (l % s.laneColumns) * (LANE + GAP) + LANE / 2, y: 0.25, z: uz + Math.floor(l / s.laneColumns) * (LANE + GAP) + LANE / 2 });
       }
     }
     // The cells in a row along the die's far edge.
-    const cellStep = Math.min(0.3, (s.width - 0.6) / Math.max(d.cells, 1));
-    const cells = Array.from({ length: d.cells }, (_, k) => ({ x: center.x - ((d.cells - 1) * cellStep) / 2 + k * cellStep, y: 0.18, z: center.z + s.depth / 2 - 0.35 }));
+    const shown = shapes[i].cells;
+    const cellStep = Math.min(0.3, (s.width - 0.6) / Math.max(shown, 1));
+    const cells = Array.from({ length: shown }, (_, k) => ({ x: center.x - ((shown - 1) * cellStep) / 2 + k * cellStep, y: 0.18, z: center.z + s.depth / 2 - 0.35 }));
     // The cache: a column per attention layer standing at the die's left, a slot per token.
-    const cache = caches.map((_, k) => Array.from({ length: trace.context }, (_, p) => ({ x: center.x - s.width / 2 - 0.35 - k * 0.4, y: 0.2 + p * 0.22, z: center.z })));
+    const cache = caches.map((_, k) => Array.from({ length: slots }, (_, p) => ({ x: center.x - s.width / 2 - 0.35 - k * 0.4, y: 0.2 + p * 0.22, z: center.z })));
     return { center, width: s.width, depth: s.depth, lanes, cells, cache };
   });
   return { dies, radius, lane: LANE };

@@ -972,6 +972,8 @@ export const ENGINE_TEXT: [string, string][] = [
   ["Differs from the exact machine since {s}", "Distinto de la máquina exacta desde {0}"],
   ["element {n}: {n} instead of {n}", "elemento {0}: {1} en vez de {2}"],
   ["token at position {n}", "token en la posición {0}"],
+  // After the small model's own title, which it would otherwise take.
+  ["{s} on {n} dies, {s}", "{0} en {1} dies, {2}"],
   ["Small model on {n} dies, {s}", "Modelo pequeño en {0} dies, {1}"],
   ["Tiny model on {n} dies, {s}", "Modelo pequeño en {0} dies, {1}"],
   ["in groups of {n}", "en grupos de {0}"],

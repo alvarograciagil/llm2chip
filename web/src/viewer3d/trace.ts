@@ -26,8 +26,11 @@ export interface DieInfo {
   entries: number[];
   /** The word running in every cycle, or -1 once the die has halted. */
   pcs: number[];
-  /** `[start, length]` of the cycles the sequencer waited on a link. */
+  /** `[start, length]` of the cycles the sequencer waited on a link (or, traced by
+   * operations, on the slowest chip of its group). */
   stalls: [number, number][];
+  /** Traced by operations, with no `pcs`: `[start, length, word]`, idle between them. */
+  spans: [number, number, number][];
 }
 
 /** 1: a word crosses; 2: a word waits because the receiver cannot take it. */
@@ -94,7 +97,8 @@ export function readTrace(raw: unknown): Trace {
   if (!t || typeof t !== "object") throw new Error("This is not a trace.");
   if (t.version !== TRACE_VERSION) throw new Error(`This trace is version ${String(t.version)}; this viewer reads version ${TRACE_VERSION}.`);
   if (!Array.isArray(t.dies) || !Array.isArray(t.steps) || !Array.isArray(t.ops)) throw new Error("This is not a trace.");
-  return { ...(t as Trace), links: t.links ?? [], kv: t.kv ?? [], divergences: t.divergences ?? [] };
+  const dies = t.dies.map((d) => ({ ...d, spans: d.spans ?? [] }));
+  return { ...(t as Trace), dies, links: t.links ?? [], kv: t.kv ?? [], divergences: t.divergences ?? [] };
 }
 
 export function totalCycles(trace: Trace): number {
@@ -130,14 +134,26 @@ export interface DieState {
   halted: boolean;
 }
 
+/** Whether a trace goes operation by operation rather than cycle by cycle. */
+export function byOperations(trace: Trace): boolean {
+  return trace.source === "timing";
+}
+
+/** The word a die runs at `cycle`, or -1 when it is idle or has halted. */
+function wordAt(d: DieInfo, cycle: number): number {
+  if (d.pcs.length > 0) return d.pcs[Math.min(Math.max(0, Math.floor(cycle)), d.pcs.length - 1)] ?? -1;
+  const s = lastStartingBy(d.spans, cycle, (x) => x[0]);
+  return s >= 0 && cycle < d.spans[s][0] + d.spans[s][1] ? d.spans[s][2] : -1;
+}
+
 export function dieAt(trace: Trace, die: number, cycle: number): DieState {
   const d = trace.dies[die];
-  const pc = d.pcs[Math.min(Math.max(0, Math.floor(cycle)), d.pcs.length - 1)] ?? -1;
+  const pc = wordAt(d, cycle);
   const word = pc >= 0 ? (d.words[pc] ?? null) : null;
   const op = word && word.op !== null ? (trace.ops[word.op] ?? null) : null;
   const s = lastStartingBy(d.stalls, cycle, (x) => x[0]);
   const stalled = s >= 0 && cycle < d.stalls[s][0] + d.stalls[s][1];
-  return { pc, word, op, stalled, halted: pc < 0 };
+  return { pc, word, op, stalled, halted: pc < 0 && !stalled };
 }
 
 export function linkAt(link: LinkInfo, cycle: number): LinkState {
@@ -224,6 +240,21 @@ export function nextStop(trace: Trace, cycle: number, stride: Stride, direction:
   }
   const dies = die === undefined ? trace.dies.map((_, i) => i) : [die];
   const start = dies.map((d) => key(trace, d, here, stride));
+  if (byOperations(trace)) {
+    // Only where an operation starts or ends can anything change.
+    const edges = [...new Set(dies.flatMap((d) => trace.dies[d].spans.flatMap(([s0, length]) => [s0, s0 + length])))].sort((a, b) => a - b);
+    const ordered = direction > 0 ? edges.filter((e) => e > here && e < total) : edges.filter((e) => e < here).reverse();
+    for (const e of ordered) {
+      if (dies.some((d, i) => key(trace, d, e, stride) !== start[i])) {
+        if (direction > 0) return e;
+        const before = dies.map((d) => key(trace, d, e, stride));
+        const earlier = edges.filter((x) => x < e).reverse().find((x) => dies.some((d, i) => key(trace, d, x, stride) !== before[i]));
+        const at = earlier === undefined ? 0 : edges.find((x) => x > earlier) ?? e;
+        return at;
+      }
+    }
+    return direction > 0 ? total - 1 : 0;
+  }
   for (let c = here + direction; c >= 0 && c < total; c += direction) {
     if (dies.some((d, i) => key(trace, d, c, stride) !== start[i])) {
       if (direction > 0) return c;
@@ -243,8 +274,12 @@ function clamp(v: number, lo: number, hi: number): number {
 /** How many cycles each die spent working, waiting on a link and halted. */
 export function dieTotals(trace: Trace, die: number): { work: number; stalled: number; halted: number } {
   const d = trace.dies[die];
-  const halted = d.pcs.filter((pc) => pc < 0).length;
   const stalled = d.stalls.reduce((sum, s) => sum + s[1], 0);
+  if (d.pcs.length === 0) {
+    const work = d.spans.reduce((sum, s) => sum + s[1], 0);
+    return { work, stalled, halted: totalCycles(trace) - work - stalled };
+  }
+  const halted = d.pcs.filter((pc) => pc < 0).length;
   return { work: d.pcs.length - halted - stalled, stalled, halted };
 }
 
@@ -285,7 +320,21 @@ export function firstBreak(trace: Trace, from: number, to: number, b: Breakpoint
   if (b.divergence) {
     for (const d of trace.divergences) consider(d.cycle, `Die ${d.die} parts from the exact machine`);
   }
-  if (b.kind !== null || b.layer !== null) {
+  if ((b.kind !== null || b.layer !== null) && byOperations(trace)) {
+    trace.dies.forEach((d, die) => {
+      let before: OpInfo | null = null;
+      for (const [start, , word] of d.spans) {
+        const op = d.words[word]?.op;
+        const info = op === null || op === undefined ? null : trace.ops[op];
+        if (start >= lo && start <= hi && info) {
+          if (b.kind !== null && info.kind === b.kind) consider(start, `Die ${die} starts ${info.name}`);
+          if (b.layer !== null && info.layer === b.layer && before?.layer !== b.layer) consider(start, `Die ${die} starts layer ${b.layer}`);
+        }
+        if (start > hi) break;
+        before = info;
+      }
+    });
+  } else if (b.kind !== null || b.layer !== null) {
     trace.dies.forEach((d, die) => {
       const opOf = (c: number) => {
         const pc = d.pcs[c];

@@ -8,6 +8,30 @@ export interface RecordRequest {
   chips: number;
   sharing: string;
   tokens: number[];
+  /** A whole design of a real model, traced by operations instead of on the gates. */
+  design?: DesignRequest;
+}
+
+export interface DesignRequest {
+  path: string;
+  cluster_bits: number;
+  lane_bits: number;
+  cell_bits: number;
+  context: number;
+}
+
+/** The design on the sidebar as a request to trace it, or why it cannot be traced. */
+export function designRequest(path: string | undefined, params: Record<string, unknown>): RecordRequest | string {
+  if (!path) return "Trace a design of a model in the known folders: the built-in ones have no weights.";
+  const chips = Number(params.dies) || 0;
+  if (chips < 1) return "Choose how many dies the design has.";
+  const split = String(params.chip_split ?? "layers");
+  const sharing = chips === 1 || split === "layers" ? "layers" : split === "tensor" ? "rows" : `mixed:${Number(params.tensor_group) || 2}`;
+  const log2 = (v: unknown) => Math.max(0, Math.round(Math.log2(Math.max(1, Number(v) || 1))));
+  const units = Math.max(1, Number(params.vector_units_per_die) || 1);
+  const lanes = Math.max(1, (Number(params.vector_lanes_per_die) || units) / units);
+  const design = { path, cluster_bits: log2(units), lane_bits: log2(lanes), cell_bits: log2(params.macs_per_die), context: Math.max(16, Number(params.context_tokens) || 8192) };
+  return { model: "plain", chips, sharing, tokens: [], design };
 }
 
 type RecordState = { state: "idle" } | { state: "running" } | { state: "error"; error: string };

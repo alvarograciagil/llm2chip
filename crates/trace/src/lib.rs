@@ -6,6 +6,7 @@
 
 pub mod board;
 pub mod check;
+pub mod design;
 pub mod record;
 pub mod tiny;
 

@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import { useT } from "../i18n";
 import { useDesign } from "../store";
 import { Segmented } from "../components/controls";
 import { download } from "../download";
 import { ChipScene, readPalette } from "./scene";
-import { DEFAULT_RECORD, useViewer, type RecordRequest } from "./viewerStore";
-import { dieAt, dieTotals, divergedAt, opKinds, stepAt, totalCycles, type Stride, type Trace, type WordClass } from "./trace";
+import { DEFAULT_RECORD, designRequest, useViewer, type RecordRequest } from "./viewerStore";
+import { byOperations, dieAt, dieTotals, divergedAt, opKinds, stepAt, totalCycles, type Stride, type Trace, type WordClass } from "./trace";
 
 // The 3D viewer of the chip at work: loaded on demand, so Three.js only downloads when the
 // view opens. The stage shows the scene; the panel loads traces and drives playback.
@@ -122,7 +122,7 @@ function DieLabel({ die, trace }: { die: number; trace: Trace }) {
   const cycle = useViewer((s) => Math.floor(s.cycle));
   const state = dieAt(trace, die, cycle);
   const group = trace.dies[die].group;
-  const what = state.halted ? t("Finished") : state.stalled ? t("Waiting on a link") : (state.op?.name ?? t("Between operations"));
+  const what = describe(trace, state, t);
   const diverged = divergedAt(trace, die, cycle);
   return (
     <div className={`viewer-label${state.stalled || diverged ? " stalled" : ""}`}>
@@ -132,6 +132,15 @@ function DieLabel({ die, trace }: { die: number; trace: Trace }) {
       {diverged && <div>{t(`Differs from the exact machine since ${trace.ops[diverged.op].name}`)}</div>}
     </div>
   );
+}
+
+/** What a die is doing, in a few words. Traced by operations, a die that does not run
+ * waits for its turn in the chain, and one that waits does so for its group's slowest. */
+function describe(trace: Trace, state: ReturnType<typeof dieAt>, t: (text: string) => string): string {
+  const timing = byOperations(trace);
+  if (state.halted) return timing ? t("Waiting for its turn") : t("Finished");
+  if (state.stalled) return timing ? t("Waiting for its group") : t("Waiting on a link");
+  return state.op?.name ?? t("Between operations");
 }
 
 const STRIDES: [Stride, string][] = [
@@ -175,7 +184,7 @@ function ChipPanel() {
         {trace && <button className="pill" onClick={() => saveTrace(trace)}>{t("Save the trace")}</button>}
         <input ref={fileInput} type="file" accept=".json,application/json" hidden onChange={onFile} />
       </div>
-      {error && <div className="issue error" role="status">{error}</div>}
+      {error && <Issue kind="error">{error}</Issue>}
 
       {trace && current && (
         <>
@@ -275,8 +284,10 @@ function Divergences({ trace }: { trace: Trace }) {
   return (
     <>
       <h3>{t("Against the exact machine")}</h3>
-      {trace.divergences.length === 0 ? (
-        <div className="issue ok" role="status">{t("Every die agrees with the exact machine, bit for bit.")}</div>
+      {byOperations(trace) ? (
+        <p className="muted-text">{t("Traced by operations, this run is not checked against the exact machine: record a small model on the gates for that.")}</p>
+      ) : trace.divergences.length === 0 ? (
+        <Issue kind="ok">{t("Every die agrees with the exact machine, bit for bit.")}</Issue>
       ) : (
         <ul className="viewer-divergences">
           {trace.divergences.map((d, i) => {
@@ -296,39 +307,64 @@ function Divergences({ trace }: { trace: Trace }) {
   );
 }
 
+type Source = "gates" | "design";
+
 function Recorder() {
   const t = useT();
   const recording = useViewer((s) => s.recording);
   const record = useViewer((s) => s.record);
+  const model = useDesign((s) => s.model);
+  const params = useDesign((s) => s.params);
+  const [source, setSource] = useState<Source>("gates");
   const [request, setRequest] = useState<RecordRequest>(DEFAULT_RECORD);
   const running = recording.state === "running";
+  const design = designRequest(model?.path, params);
   return (
     <div className="inset padded">
-      <label className="viewer-row">
-        <span>{t("Number of dies")}</span>
-        <select value={request.chips} onChange={(e) => setRequest({ ...request, chips: Number(e.target.value) })}>
-          {[1, 2, 4, 6].map((n) => <option key={n} value={n}>{n}</option>)}
-        </select>
-      </label>
-      <label className="viewer-row">
-        <span>{t("Split")}</span>
-        <select value={request.sharing} onChange={(e) => setRequest({ ...request, sharing: e.target.value })}>
-          <option value="layers">{t("By layers")}</option>
-          <option value="rows">{t("By rows")}</option>
-          <option value="mixed:2">{t("Groups of two")}</option>
-        </select>
-      </label>
-      <label className="viewer-row">
-        <span>{t("Model")}</span>
-        <select value={request.model} onChange={(e) => setRequest({ ...request, model: e.target.value as RecordRequest["model"] })}>
-          <option value="grouped">{t("Six heads on two key heads")}</option>
-          <option value="plain">{t("Two heads on one key head")}</option>
-        </select>
-      </label>
-      <div className="sim-actions">
-        <button className="pill primary-pill" disabled={running} onClick={() => void record(request)}>{running ? t("Recording…") : t("Record on the gates")}</button>
+      <div className="scope">
+        <Segmented label={t("What to trace")} value={source} options={[["gates", t("Small model, gates")], ["design", t("This design")]]} onChange={setSource} />
       </div>
-      {recording.state === "error" && <div className="issue error" role="status">{recording.error}</div>}
+      {source === "gates" ? (
+        <>
+          <label className="viewer-row">
+            <span>{t("Number of dies")}</span>
+            <select value={request.chips} onChange={(e) => setRequest({ ...request, chips: Number(e.target.value) })}>
+              {[1, 2, 4, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+          <label className="viewer-row">
+            <span>{t("Split")}</span>
+            <select value={request.sharing} onChange={(e) => setRequest({ ...request, sharing: e.target.value })}>
+              <option value="layers">{t("By layers")}</option>
+              <option value="rows">{t("By rows")}</option>
+              <option value="mixed:2">{t("Groups of two")}</option>
+            </select>
+          </label>
+          <label className="viewer-row">
+            <span>{t("Model")}</span>
+            <select value={request.model} onChange={(e) => setRequest({ ...request, model: e.target.value as RecordRequest["model"] })}>
+              <option value="grouped">{t("Six heads on two key heads")}</option>
+              <option value="plain">{t("Two heads on one key head")}</option>
+            </select>
+          </label>
+          <p className="muted-text">{t("Every cycle of every die, gate by gate, checked against the exact machine after each token.")}</p>
+          <div className="sim-actions">
+            <button className="pill primary-pill" disabled={running} onClick={() => void record(request)}>{running ? t("Recording…") : t("Record on the gates")}</button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="muted-text">{t("The model and dies of the sidebar, operation by operation from each chip's own microprogram: a token at the start, the middle and the end of the context. Links take no time here, as in the sizing. A large model takes a minute or so.")}</p>
+          {typeof design === "string" ? (
+            <Issue kind="error">{t(design)}</Issue>
+          ) : (
+            <div className="sim-actions">
+              <button className="pill primary-pill" disabled={running} onClick={() => void record(design)}>{running ? t("Tracing…") : t("Trace this design")}</button>
+            </div>
+          )}
+        </>
+      )}
+      {recording.state === "error" && <Issue kind="error">{recording.error}</Issue>}
     </div>
   );
 }
@@ -337,7 +373,7 @@ function DieRow({ trace, die, cycle, selected }: { trace: Trace; die: number; cy
   const t = useT();
   const state = dieAt(trace, die, cycle);
   const colour = state.halted ? "var(--neutral-fill)" : state.stalled ? "var(--red)" : CLASS_COLOR[state.word?.class ?? "halt"];
-  const what = state.halted ? t("Finished") : state.stalled ? t("Waiting on a link") : (state.op?.name ?? t("Between operations"));
+  const what = describe(trace, state, t);
   const layer = state.op?.layer;
   return (
     <tr className={selected ? "on" : ""} onClick={() => useViewer.getState().select(selected ? null : die)}>
@@ -401,9 +437,16 @@ function Timeline({ trace, cycle }: { trace: Trace; cycle: number }) {
       g.globalAlpha = 1;
       g.fillStyle = style.getPropertyValue("--neutral-fill").trim() || "#8e8e93";
       const pcs = trace.dies[die].pcs;
-      for (let x = 0; x < width; x++) {
-        const at = Math.floor((x / width) * total);
-        if (pcs[at] < 0) g.fillRect(x, die * row + 1, 1, row - 2);
+      if (pcs.length > 0) {
+        for (let x = 0; x < width; x++) {
+          const at = Math.floor((x / width) * total);
+          if (pcs[at] < 0) g.fillRect(x, die * row + 1, 1, row - 2);
+        }
+      } else {
+        // Traced by operations: idle except where it runs one.
+        g.fillRect(0, die * row + 1, width, row - 2);
+        g.fillStyle = style.getPropertyValue("--cat-compute").trim() || "#30a46c";
+        for (const [start, length] of trace.dies[die].spans) g.fillRect((start / total) * width, die * row + 1, Math.max(1, (length / total) * width), row - 2);
       }
       g.fillStyle = style.getPropertyValue("--red").trim() || "#ff3b30";
       for (const [start, length] of trace.dies[die].stalls) {
@@ -417,6 +460,15 @@ function Timeline({ trace, cycle }: { trace: Trace; cycle: number }) {
     <div className="viewer-timeline">
       <canvas ref={canvas} />
       <div className="viewer-cursor" style={{ left: `${(100 * cycle) / Math.max(total - 1, 1)}%` }} />
+    </div>
+  );
+}
+
+function Issue({ kind, children }: { kind: "ok" | "error"; children: ReactNode }) {
+  return (
+    <div className={`issue ${kind}`} role="status">
+      <span className="issue-icon" aria-hidden="true">{kind === "ok" ? "✓" : "!"}</span>
+      <span>{children}</span>
     </div>
   );
 }

@@ -8,6 +8,18 @@ export type Language = "es" | "en";
  * so translation can go part by part. */
 const ES: Record<string, string> = {
   // The 3D viewer of the chip at work
+  "Traced by operations, this run is not checked against the exact machine: record a small model on the gates for that.": "Al trazarse por operaciones, esta ejecución no se compara con la máquina exacta: para eso, graba un modelo pequeño en puertas.",
+  "Waiting for its turn": "Esperando su turno",
+  "Waiting for its group": "Esperando a su grupo",
+  "What to trace": "Qué trazar",
+  "Small model, gates": "Modelo pequeño, puertas",
+  "This design": "Este diseño",
+  "Every cycle of every die, gate by gate, checked against the exact machine after each token.": "Cada ciclo de cada die, puerta a puerta, comprobado frente a la máquina exacta tras cada token.",
+  "The model and dies of the sidebar, operation by operation from each chip's own microprogram: a token at the start, the middle and the end of the context. Links take no time here, as in the sizing. A large model takes a minute or so.": "El modelo y los dies de la barra lateral, operación a operación según el microprograma de cada chip: un token al principio, en medio y al final del contexto. Aquí los enlaces no tardan, como en el dimensionado. Un modelo grande tarda un minuto o así.",
+  "Tracing…": "Trazando…",
+  "Trace this design": "Trazar este diseño",
+  "Trace a design of a model in the known folders: the built-in ones have no weights.": "Traza el diseño de un modelo de las carpetas conocidas: los integrados no traen pesos.",
+  "Choose how many dies the design has.": "Elige cuántos dies tiene el diseño.",
   "Stop at": "Parar en",
   "A die starting to wait on a link": "Un die que empieza a esperar a un enlace",
   "A result that differs from the exact machine": "Un resultado distinto del de la máquina exacta",

@@ -414,11 +414,24 @@ async fn trace_start(State(app): State<App>, Json(start): Json<trace_job::TraceS
     if let Err(message) = trace_job::check(&start) {
         return refused(message);
     }
+    // A design's model must be one of the known folders, as for the optimiser.
+    let model_dir = match &start.design {
+        Some(design) => match app.catalog.find(&design.path) {
+            Some(entry) if entry.supported => Some(std::path::PathBuf::from(&design.path)),
+            Some(entry) => return refused(entry.adaptation.reason.unwrap_or_else(|| "this architecture cannot run yet".into())),
+            None => return refused("the model is not in the known folders".into()),
+        },
+        None => None,
+    };
     let job = Arc::new(trace_job::TraceJob::default());
     *app.trace.lock().unwrap() = Some(job.clone());
     tokio::task::spawn_blocking(move || {
         let scratch = std::env::temp_dir().join(format!("llm2chip-trace-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())));
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| trace_job::run(&start, &scratch))).unwrap_or_else(|_| Err("the recording stopped with an internal error".into()));
+        let run = || match (&start.design, &model_dir) {
+            (Some(design), Some(dir)) => trace_job::run_design(&start, design, dir, &home().join("cache")),
+            _ => trace_job::run(&start, &scratch),
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|_| Err("the recording stopped with an internal error".into()));
         *job.outcome.lock().unwrap() = Some(outcome);
     });
     StatusCode::ACCEPTED.into_response()

@@ -32,6 +32,7 @@ function sample(): Trace {
         entries: [0],
         pcs: [0, 1, 1, 2, 2, 3, 3, 4, -1, -1],
         stalls: [[6, 1]],
+        spans: [],
       },
       {
         units: 2,
@@ -45,6 +46,7 @@ function sample(): Trace {
         entries: [0],
         pcs: [0, 0, 0, 0, 0, 0, 0, 1, -1, -1],
         stalls: [[0, 6]],
+        spans: [],
       },
     ],
     links: [{ from: 0, to: 1, port: "link", spans: [[5, 1, 1], [6, 1, 2]] }],
@@ -124,6 +126,38 @@ describe("a trace read at a cycle", () => {
   it("refuses what is not a trace of this version", () => {
     expect(() => readTrace({ version: 99, dies: [], steps: [], ops: [] })).toThrow(/version 99/);
     expect(() => readTrace("nothing")).toThrow();
+  });
+});
+
+/** The same two dies traced by operations: the first runs op 0 then op 1, the second
+ * waits for its turn and then runs op 1, slower, so the first waits for it. */
+function byOps(): Trace {
+  const t = sample();
+  t.source = "timing";
+  t.dies[0] = { ...t.dies[0], pcs: [], words: [{ class: "cells", op: 0, text: "q" }, { class: "vector", op: 1, text: "kv" }], spans: [[0, 3, 0], [3, 2, 1]], stalls: [[5, 2]] };
+  t.dies[1] = { ...t.dies[1], pcs: [], words: [{ class: "cells", op: 0, text: "q" }, { class: "vector", op: 1, text: "kv" }], spans: [[3, 4, 1]], stalls: [] };
+  return t;
+}
+
+describe("a trace by operations", () => {
+  it("tells what each die runs, waits for or sits idle in", () => {
+    const t = byOps();
+    expect(dieAt(t, 0, 1)).toMatchObject({ op: { name: "q_proj" }, halted: false });
+    expect(dieAt(t, 0, 6)).toMatchObject({ stalled: true, halted: false });
+    expect(dieAt(t, 1, 1)).toMatchObject({ halted: true });
+    expect(dieAt(t, 0, 8).halted).toBe(true);
+    expect(dieTotals(t, 0)).toEqual({ work: 5, stalled: 2, halted: 3 });
+  });
+
+  it("steps from one operation to the next and back", () => {
+    const t = byOps();
+    expect(nextStop(t, 0, "op", 1)).toBe(3);
+    expect(nextStop(t, 3, "op", 1)).toBe(5);
+    expect(nextStop(t, 5, "op", -1)).toBe(3);
+  });
+
+  it("stops where an operation of a kind starts", () => {
+    expect(firstBreak(byOps(), 0, 9, { ...NO_BREAKPOINTS, kind: "KvAppend" })).toEqual({ cycle: 3, reason: "Die 0 starts kv" });
   });
 });
 

@@ -146,3 +146,35 @@ fn a_broken_operation_is_found_where_it_breaks() {
     assert!(trace.divergences.iter().filter(|d| d.die == 0).all(|d| trace.steps[d.step].routine == "logits"), "{:?}", trace.divergences);
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// A design traced operation by operation: the chips of a group start every operation
+/// together and wait for the slowest, groups take turns, the first group makes the
+/// logits, and a token comes to about what the sizing counts from the whole microprograms.
+#[test]
+fn a_design_traced_by_operations_follows_its_groups() {
+    use chip_trace::design::{design_trace, Design};
+    let dir = checkpoint(TinyModel::Plain, "design");
+    let program = compiler::compile_qwen3_5(&TinyModel::Plain.config()).unwrap();
+    let weights = Weights::open(&dir).unwrap();
+    let design = Design { chips: 4, sharing: Sharing::Mixed(2), cluster_bits: 1, lane_bits: 2, cell_bits: 3, context: 16, factor_steps: 1 };
+    let trace = design_trace("tiny", &program, &weights, design, &[0, 15]).unwrap();
+    assert_eq!(trace.source, "timing");
+    assert_eq!(trace.steps.iter().map(|s| s.routine.as_str()).collect::<Vec<_>>(), ["token", "logits", "token", "logits"]);
+    for pair in [(0, 1), (2, 3)] {
+        let starts = |d: usize| trace.dies[d].spans.iter().map(|s| (s.0, s.2)).collect::<Vec<_>>();
+        assert_eq!(starts(pair.0), starts(pair.1), "the members of a group start each operation together");
+    }
+    // The second group starts once the first is done, and makes no logits.
+    let first_end = trace.dies[0].spans.iter().filter(|s| s.0 < trace.steps[1].start).map(|s| s.0 + s.1).max().unwrap();
+    assert!(trace.dies[2].spans[0].0 >= first_end);
+    assert!(trace.dies[2].spans.iter().all(|s| (s.2 as usize) < program.logits_from));
+    assert!(trace.dies[0].spans.iter().any(|s| (s.2 as usize) >= program.logits_from));
+    // Against the sizing, which counts each chip's whole microprogram.
+    let die = sim::sizing::die_of(sim::sizing::reference_die(1), 16, (1, 2, 3));
+    let built = sim::sizing::built(&program, &weights, die, 16, 4, Sharing::Mixed(2)).unwrap();
+    let sized = sim::sizing::timing(&built.programs, die, 16, 1, 1, Sharing::Mixed(2)).token_cycles;
+    let traced = trace.steps[2].cycles + trace.steps[3].cycles;
+    eprintln!("traced {traced}, sized {sized}");
+    assert!(traced as f64 > 0.8 * sized as f64 && (traced as f64) < 1.3 * sized as f64, "traced {traced}, sized {sized}");
+    std::fs::remove_dir_all(dir).ok();
+}

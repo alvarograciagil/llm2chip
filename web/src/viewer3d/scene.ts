@@ -4,7 +4,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { cacheAt, cacheHolders, cacheOps, dieAt, divergedAt, linkWordsIn, type Trace, type WordClass } from "./trace";
-import { layoutScene, linkPoint, type DieLayout, type SceneLayout, type Vec3 } from "./layout3d";
+import { drawnSlots, layoutScene, linkPoint, type DieLayout, type SceneLayout, type Vec3 } from "./layout3d";
 
 export interface Palette {
   canvas: string;
@@ -219,8 +219,9 @@ export class ChipScene {
       const held = caches.filter((op) => holders.get(op)?.has(i));
       let cache: THREE.InstancedMesh | null = null;
       if (held.length > 0) {
-        cache = new THREE.InstancedMesh(SLOT_GEOMETRY, new THREE.MeshStandardMaterial({ roughness: 0.4 }), held.length * trace.context);
-        held.forEach((_, column) => d.cache[column].forEach((p, slot) => cache!.setMatrixAt(column * trace.context + slot, m.makeTranslation(p.x, p.y, p.z))));
+        const slots = drawnSlots(trace.context);
+        cache = new THREE.InstancedMesh(SLOT_GEOMETRY, new THREE.MeshStandardMaterial({ roughness: 0.4 }), held.length * slots);
+        held.forEach((_, column) => d.cache[column].forEach((p, slot) => cache!.setMatrixAt(column * slots + slot, m.makeTranslation(p.x, p.y, p.z))));
       }
       for (const mesh of [slab, outline, lanes, cells, cache]) if (mesh) this.scene.add(mesh);
       this.dies.push({ slab, lanes, cells, cache, outline, held });
@@ -245,8 +246,10 @@ export class ChipScene {
       this.scene.add(tube, packet);
       this.links.push({ tube, packet, curve });
     }
-    const span = Math.max(layout.radius * 2 + 6, 8);
-    this.camera.position.set(0, span * 0.75, span * 0.95);
+    // Far enough back to take in the whole ring and the dies on it.
+    const widest = Math.max(...layout.dies.map((d) => Math.max(d.width, d.depth)), 1);
+    const span = Math.max(layout.radius * 2 + widest * 1.6, 8);
+    this.camera.position.set(0, span * 0.85, span * 1.05);
     this.controls.target.set(0, 0, 0);
     this.controls.update();
   }
@@ -273,11 +276,14 @@ export class ChipScene {
       if (d.cells.instanceColor) d.cells.instanceColor.needsUpdate = true;
       if (d.cache) {
         const byOp = filled.get(i);
+        // Tokens go into the cache in order: it is full up to the last position written.
+        const slots = drawnSlots(trace.context);
         d.held.forEach((op, column) => {
           const positions = byOp?.get(op);
-          for (let slot = 0; slot < trace.context; slot++) {
-            this.color.set(positions?.has(slot) ? p.cache : p.cacheEmpty);
-            d.cache!.setColorAt(column * trace.context + slot, this.color);
+          const last = positions ? Math.max(...positions) : -1;
+          for (let slot = 0; slot < slots; slot++) {
+            this.color.set(last >= 0 && (slot * trace.context) / slots <= last ? p.cache : p.cacheEmpty);
+            d.cache!.setColorAt(column * slots + slot, this.color);
           }
         });
         if (d.cache.instanceColor) d.cache.instanceColor.needsUpdate = true;

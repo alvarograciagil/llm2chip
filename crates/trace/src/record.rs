@@ -17,7 +17,8 @@ pub const TRACE_VERSION: u32 = 1;
 pub struct Trace {
     pub version: u32,
     pub title: String,
-    /// "gates": every cycle simulated gate by gate.
+    /// "gates": every cycle simulated gate by gate; "timing": operation by operation, from
+    /// each chip's microprogram (see `design`).
     pub source: String,
     /// How the chips share the model: "layers", "rows" or "mixed:N".
     pub sharing: String,
@@ -88,6 +89,10 @@ pub struct DieInfo {
     pub pcs: Vec<i32>,
     /// Cycles the sequencer waited on a link, as `(start, length)`.
     pub stalls: Vec<(u64, u64)>,
+    /// In a trace by operations (no `pcs`): the word, here one per operation, the die runs
+    /// from each `(start, length, word)`; a die is idle between them.
+    #[serde(default)]
+    pub spans: Vec<(u64, u64, u32)>,
 }
 
 /// One lane of a link between two dies.
@@ -227,6 +232,7 @@ impl Recorder {
                 entries: code.entries.clone(),
                 pcs: Vec::new(),
                 stalls: Vec::new(),
+                spans: Vec::new(),
             });
         }
         let links = lanes.iter().map(|w| LinkInfo { from: w.from, to: w.to, port: w.port.clone(), spans: Vec::new() }).collect();
