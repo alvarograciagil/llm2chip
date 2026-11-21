@@ -1,3 +1,4 @@
+import { EngineMissing } from "../components/EngineMissing";
 import { useEffect, useRef, useState } from "react";
 import { formatNumber } from "../format";
 import { useDesign } from "../store";
@@ -160,13 +161,7 @@ export function ImagesPanel() {
       <p className="detail-sub">{t("Draw an image from a text, or retouch a region of another, with Show-o.")}</p>
 
       {s.online === false ? (
-        <div className="issue warning" role="status">
-          <span className="issue-icon" aria-hidden="true">i</span>
-          <div>
-            <strong>{t("The engine is not running.")}</strong>
-            <p>{t("Start it with this command in the project folder")}: scripts/dev.sh</p>
-          </div>
-        </div>
+        <EngineMissing />
       ) : (
         <>
           <h3>{t("Model")}</h3>

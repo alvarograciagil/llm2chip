@@ -1,3 +1,4 @@
+import { EngineMissing } from "../components/EngineMissing";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Segmented } from "../components/controls";
 import { Icon } from "../components/icons";
@@ -283,15 +284,9 @@ export function SimulatorPanel() {
 
   if (state.online === false) {
     return (
-      <aside className="inspector">
+      <aside className="inspector essential">
         <h2 className="detail-title">{t("Local engine")}</h2>
-        <div className="issue warning" role="status">
-          <span className="issue-icon" aria-hidden="true">i</span>
-          <div>
-            <strong>{t("The engine is not running.")}</strong>
-            <p>{t("Start it with this command in the project folder")}: scripts/dev.sh</p>
-          </div>
-        </div>
+        <EngineMissing />
       </aside>
     );
   }

@@ -137,6 +137,17 @@ On Windows, `scripts\dev.ps1 -Lan`. Vite then listens on every interface and pri
 
 Anyone with that address can load and run models on your machine: do not share it outside your network. Traffic is not encrypted, so type a Hugging Face token only on the machine itself.
 
+### The online demo, without the engine
+
+The interface also runs as static files, with no engine behind it: the estimator, the floorplan, how it works, the schematic simulated gate by gate, the explorer and the export to Verilog and VHDL all run in the browser on WebAssembly. The views that need a model's weights (Simulator, Images, Numerics, Optimise and Models) say they need the app installed instead of calling the engine.
+
+```bash
+scripts/build-wasm.sh
+cd web && VITE_DEMO=1 LLM2CHIP_BASE=/llm2chip/ npx vite build
+```
+
+`LLM2CHIP_BASE` is the path the files are served under (`/` by default). The workflow in `.github/workflows/demo.yml` builds it on every push and publishes it to GitHub Pages from `main`.
+
 ## Start-up options
 
 ### Scripts

@@ -88,6 +88,8 @@ function vouch(outgoing: { setHeader(name: string, value: string): void }, incom
 }
 
 export default defineConfig({
+  // GitHub Pages serves the online demo under /llm2chip/.
+  base: process.env.LLM2CHIP_BASE || "/",
   plugins: [react(), ...(LAN ? [lanAccess()] : [])],
   worker: { format: "es" },
   server: {

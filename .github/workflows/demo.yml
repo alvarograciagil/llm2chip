@@ -1,0 +1,66 @@
+# The online demo: the interface with its WebAssembly estimator, served by GitHub Pages.
+# Every push that touches it builds it; only main publishes it.
+name: Online demo
+
+on:
+  push:
+    paths:
+      - "web/**"
+      - "crates/**"
+      - "Cargo.*"
+      - ".github/workflows/demo.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the estimator
+        run: wasm-pack build crates/wasm --target web --out-dir ../../web/src/wasm --no-typescript --release
+      - name: Build the interface
+        working-directory: web
+        env:
+          VITE_DEMO: "1"
+          LLM2CHIP_BASE: /${{ github.event.repository.name }}/
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npx vitest run
+          npx vite build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -3794,3 +3794,51 @@ label:hover > .hint-icon {
   border-color: var(--label-3);
   background: transparent;
 }
+
+/* The online demo: views that need the engine explain where to get it. */
+.demo-stage {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  overflow: auto;
+}
+
+/* With no panel beside it, the notice takes the panel's column too. */
+@media (min-width: 1081px) {
+  .demo-stage {
+    grid-column: 2 / -1;
+  }
+}
+
+.demo-card {
+  max-width: 560px;
+  padding: 22px 24px;
+  border-radius: 12px;
+  background: var(--group);
+  box-shadow: 0 0 0 0.5px var(--separator);
+}
+
+.demo-card h2 {
+  margin: 0 0 8px;
+}
+
+.demo-card p {
+  margin: 0 0 10px;
+  line-height: 1.5;
+}
+
+.demo-links {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+a.pill {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+a.pill:not(.primary-pill) {
+  color: inherit;
+}
