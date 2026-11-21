@@ -25,7 +25,9 @@ fn main() {
     let weights = Weights::open(dir).expect("the weights");
     let started = std::time::Instant::now();
     let last = design.context - 1;
-    let trace = design_trace("design", &program, &weights, design, &[0, last / 2, last]).expect("the trace");
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("model");
+    let title = chip_trace::design_title(name, chips, sharing);
+    let trace = design_trace(&title, &program, &weights, design, &[0, last / 2, last]).expect("the trace");
     let json = serde_json::to_string(&trace).unwrap();
     std::fs::write(&file, &json).unwrap();
     for s in &trace.steps {

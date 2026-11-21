@@ -60,7 +60,7 @@ export interface KvWrite {
   position: number;
 }
 
-/** Where a die first parted from the exact machine in a routine. */
+/** Where a die first parted from the exact reference in a routine. */
 export interface Divergence {
   die: number;
   op: number;
@@ -302,7 +302,7 @@ export function divergedAt(trace: Trace, die: number, cycle: number): Divergence
 export interface Breakpoints {
   /** When a die starts waiting on a link. */
   stall: boolean;
-  /** When a die starts an operation whose result differs from the exact machine's. */
+  /** When a die starts an operation whose result differs from the exact reference's. */
   divergence: boolean;
   /** When a die starts an operation of this kind (`Matvec`, `AttnSum`…). */
   kind: string | null;
@@ -328,7 +328,7 @@ export function firstBreak(trace: Trace, from: number, to: number, b: Breakpoint
     });
   }
   if (b.divergence) {
-    for (const d of trace.divergences) consider(d.cycle, `Die ${d.die} parts from the exact machine`);
+    for (const d of trace.divergences) consider(d.cycle, `Die ${d.die} parts from the exact reference`);
   }
   if ((b.kind !== null || b.layer !== null) && byOperations(trace)) {
     trace.dies.forEach((d, die) => {

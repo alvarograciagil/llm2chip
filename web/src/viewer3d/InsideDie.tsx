@@ -49,15 +49,15 @@ export function InsideDie({ trace }: { trace: Trace }) {
           label={t(`Inside die ${die}`)}
           extra={
             <div className="viewer-inside-bar">
-              <button className="pill" onClick={leave}>{t("Back to the chips")}</button>
-              <span className="muted-text">{loading ? t("Replaying the gates…") : frame ? t(`Cycle ${frame.cycle}`) : ""}</span>
+              <button className="pill" onClick={leave}>{t("Back to the dies")}</button>
+              <span className="muted-text">{loading ? t("Replaying the simulation…") : frame ? t(`Cycle ${frame.cycle}`) : ""}</span>
             </div>
           }
         />
       ) : (
         <div className="viewer-empty">
-          <p>{loading ? t("Replaying the gates…") : (error ? t(error) : "")}</p>
-          <button className="pill" onClick={leave}>{t("Back to the chips")}</button>
+          <p>{loading ? t("Replaying the simulation…") : (error ? t(error) : "")}</p>
+          <button className="pill" onClick={leave}>{t("Back to the dies")}</button>
         </div>
       )}
       {design && error && <div className="viewer-inside-error">{t(error)}</div>}

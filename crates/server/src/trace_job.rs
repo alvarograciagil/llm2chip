@@ -101,7 +101,7 @@ pub fn run_design(start: &TraceStart, design: &DesignStart, dir: &Path, cache: &
     let weights = sim::Weights::open(dir)?;
     let shape = Design { chips: start.chips as u32, sharing, cluster_bits: design.cluster_bits, lane_bits: design.lane_bits, cell_bits: design.cell_bits, context: design.context, factor_steps: 8 };
     let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("model");
-    let title = format!("{name} on {} dies, {}", start.chips, chip_trace::sharing_label(sharing.for_chips(start.chips)));
+    let title = chip_trace::design_title(name, start.chips as u32, sharing);
     let last = design.context - 1;
     let trace = serde_json::to_value(design_trace(&title, &program, &weights, shape, &[0, last / 2, last])?).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(cache).ok();

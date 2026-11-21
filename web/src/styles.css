@@ -3921,7 +3921,8 @@ label:hover > .hint-icon {
 
 .viewer-strides .segmented {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  /* Each option as wide as its word, the spare room shared: «Operación» fits whole. */
+  grid-template-columns: repeat(5, minmax(min-content, auto));
   width: 100%;
 }
 
@@ -3985,15 +3986,14 @@ label:hover > .hint-icon {
 
 .viewer-bars li {
   display: grid;
-  grid-template-columns: 96px minmax(0, 1fr) 38px;
+  grid-template-columns: minmax(0, 9.5em) minmax(48px, 1fr) 38px;
   align-items: center;
   gap: 6px;
 }
 
 .viewer-bars li > span:first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .viewer-bars .bar {

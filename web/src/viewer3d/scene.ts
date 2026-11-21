@@ -313,7 +313,7 @@ export class ChipScene {
         });
         if (d.cache.instanceColor) d.cache.instanceColor.needsUpdate = true;
       }
-      // A die that has parted from the exact machine keeps a red outline from then on.
+      // A die that has parted from the exact reference keeps a red outline from then on.
       const diverged = divergedAt(trace, i, cycle) !== null;
       (d.outline.material as THREE.LineBasicMaterial).color.set(diverged ? p.stall : selected === i ? p.label : p.separator);
       d.slab.position.y = selected === i ? 0.04 : 0;

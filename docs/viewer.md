@@ -63,9 +63,9 @@ It stores changes and runs, not frames:
 
 Open **Chip at work** in the toolbar. Its panel offers two sources:
 
-- **Small model, gates**: the engine builds 1 to 6 dies of a small Qwen3.5-shaped model
+- **Small model**: the engine builds 1 to 6 dies of a small Qwen3.5-shaped model
   (by layers, by rows or in groups of two), runs three tokens and the logits gate by gate,
-  and checks every die against the exact machine after each routine. A few seconds.
+  and checks every die against the exact reference after each routine. A few seconds.
 - **This design**: the model and dies of the sidebar (dies, split, group, vector units,
   lanes, multipliers, context), operation by operation from each chip's own microprogram,
   for a token at the start, the middle and the end of the context. The model must be in the
@@ -80,13 +80,13 @@ CHIPS=16 SHARING=mixed:8 cargo run --release -p chip-trace --example design -- M
 
 Playback runs from 1 to 100,000 cycles a second and steps by cycle, word, operation, layer
 or token, forwards and back; it can stop by itself where a die starts waiting on a link, a
-result differs from the exact machine, an operation of a kind or a layer starts. The panel
+result differs from the exact reference, an operation of a kind or a layer starts. The panel
 also tells where each die's cycles go, colours the lanes by use so far, compares two traces,
 and for presentations turns the camera round the chips with captions and records a video.
 
 ## Inside a die, down to the gates
 
-Double-click a die (or **Look inside, down to the gates** in its panel) and the camera flies
+Double-click a die (or **Look inside, down to the logic gates** in its panel) and the camera flies
 down onto it; then its netlist opens as a schematic at the cycle on show, with the value of
 every wire. Double-click a block to go into it, down to the gates; Esc or the path at the
 top goes back up. Each block is shaded by how much of it changed since the cycle before, the
@@ -116,7 +116,7 @@ into; a design traced by operations has no gates.
 1. **Recorder.** Operation marks; harness moved to `crates/trace`; trace format and
    recorder over the gates; an example that writes a trace to a file.
    Done when a test shows the trace's cycles per routine equal what the joined run takes,
-   and the final registers match the exact machine.
+   and the final registers match the exact reference.
 2. **3D view.** `three` pinned to an exact version. The dies, units and lanes as a grid,
    the ring of links, the KV cache as columns that fill up; playback with speed (real time
    to one word at a time), steps by word, operation, layer and token, a timeline to scrub,

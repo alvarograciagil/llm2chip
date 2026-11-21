@@ -7,6 +7,7 @@ import { ChipScene, readPalette } from "./scene";
 import { DEFAULT_RECORD, designRequest, useViewer, type RecordRequest } from "./viewerStore";
 import { InsideDie } from "./InsideDie";
 import { useInside } from "./inside";
+import { operationName } from "../operations";
 import { byOperations, compareTraces, cyclesByKind, dieAt, dieShares, divergedAt, opKinds, useShare, stepAt, totalCycles, type Stride, type Trace, type WordClass } from "./trace";
 
 // The 3D viewer of the chip at work: loaded on demand, so Three.js only downloads when the
@@ -34,8 +35,8 @@ const CLASS_LABEL: Record<WordClass, string> = {
   cells: "Cells multiply and add",
   vector: "Every lane computes",
   scalar: "One element at a time",
-  send: "Sends to the next chip",
-  take: "Takes from the previous chip",
+  send: "Sends to the next die",
+  take: "Takes from the previous die",
   halt: "Finished",
 };
 
@@ -165,7 +166,9 @@ function Caption({ trace }: { trace: Trace }) {
   const working = states.filter((s) => !s.halted && !s.stalled);
   const waiting = states.filter((s) => s.stalled).length;
   const layers = [...new Set(working.map((s) => s.op?.layer).filter((l): l is number => l !== null && l !== undefined))];
-  const where = step.routine === "token" ? t(`Token ${step.token} at position ${step.position}`) : t("The logits");
+  // Traced by operations, no real token goes through: only where in the context it is.
+  const token = byOperations(trace) ? t(`Token at position ${step.position}`) : t(`Token ${step.token} at position ${step.position}`);
+  const where = step.routine === "token" ? token : t("The logits");
   return (
     <div className="viewer-caption">
       <strong>{where}</strong>
@@ -187,7 +190,7 @@ function DieLabel({ die, trace }: { die: number; trace: Trace }) {
       <strong>{t(`Die ${die}`)}</strong>
       {group && <span className="muted-text"> · {t(`group ${group[0]}`)}</span>}
       <div>{what}</div>
-      {diverged && <div>{t(`Differs from the exact machine since ${trace.ops[diverged.op].name}`)}</div>}
+      {diverged && <div>{t(`Differs from the exact reference since ${trace.ops[diverged.op].name}`)}</div>}
     </div>
   );
 }
@@ -198,7 +201,7 @@ function describe(trace: Trace, state: ReturnType<typeof dieAt>, t: (text: strin
   const timing = byOperations(trace);
   if (state.halted) return timing ? t("Waiting for its turn") : t("Finished");
   if (state.stalled) return timing ? t("Waiting for its group") : t("Waiting on a link");
-  return state.op?.name ?? t("Between operations");
+  return state.op ? t(state.op.name) : t("Between operations");
 }
 
 const STRIDES: [Stride, string][] = [
@@ -234,7 +237,7 @@ function ChipPanel() {
   return (
     <aside className="inspector essential">
       <h2 className="detail-title">{t("The chip at work")}</h2>
-      <p className="detail-sub">{trace ? t(trace.title) : t("Every cycle comes from the gates of the dies, as they ran.")}</p>
+      <p className="detail-sub">{trace ? t(trace.title) : t("Every cycle comes from the logic gates of the dies, as they ran.")}</p>
 
       <Recorder />
       <div className="sim-actions">
@@ -242,7 +245,7 @@ function ChipPanel() {
         {trace && <button className="pill" onClick={() => saveTrace(trace)}>{t("Save the trace")}</button>}
         <input ref={fileInput} type="file" accept=".json,application/json" hidden onChange={onFile} />
       </div>
-      {error && <Issue kind="error">{error}</Issue>}
+      {error && <Issue kind="error">{t(error)}</Issue>}
 
       {trace && current && (
         <>
@@ -267,7 +270,7 @@ function ChipPanel() {
           <Timeline trace={trace} cycle={cycle} />
           <dl className="inset metrics">
             <div><dt>{t("Cycle")}</dt><dd>{cycle.toLocaleString()} / {total.toLocaleString()}</dd></div>
-            <div><dt>{current.routine === "token" ? t("Token") : t("Logits of the token")}</dt><dd>{t(`${current.token} at position ${current.position}`)}</dd></div>
+            <div><dt>{current.routine === "token" ? t("Token") : t("Logits of the token")}</dt><dd>{byOperations(trace) ? t(`Position ${current.position}`) : t(`${current.token} at position ${current.position}`)}</dd></div>
           </dl>
 
           <Breaks trace={trace} />
@@ -306,7 +309,7 @@ function Uses({ trace }: { trace: Trace }) {
   const die = selected ?? 0;
   const by = [...cyclesByKind(trace, die).entries()].sort((a, b) => b[1] - a[1]);
   const total = Math.max(1, by.reduce((sum, [, n]) => sum + n, 0));
-  const name = (kind: string) => (kind === "idle" ? t("Idle") : kind === "waiting" ? t("Waiting") : kind === "other" ? t("Between operations") : kind);
+  const name = (kind: string) => (kind === "idle" ? t("Idle") : kind === "waiting" ? t("Waiting") : kind === "other" ? t("Between operations") : t(operationName(kind)));
   return (
     <>
       <h3>{t("Where the cycles go")}</h3>
@@ -327,6 +330,12 @@ function Uses({ trace }: { trace: Trace }) {
   );
 }
 
+/** A routine of a trace, for a person: the token or the logits, and where in the context. */
+function stepLabel(label: string, t: (text: string) => string): string {
+  const [routine, position] = label.split(" ");
+  return routine === "token" ? t(`Token at position ${position}`) : t(`Logits at position ${position}`);
+}
+
 function Compare({ trace }: { trace: Trace }) {
   const t = useT();
   const other = useViewer((s) => s.other);
@@ -345,13 +354,13 @@ function Compare({ trace }: { trace: Trace }) {
       {other && c && (
         <table className="viewer-compare">
           <thead>
-            <tr><th /><th>{t("This one")}</th><th>{t(other.title)}</th></tr>
+            <tr><th /><th>{t("This trace")}</th><th>{t(other.title)}</th></tr>
           </thead>
           <tbody>
             {c.steps.map((s) => (
-              <tr key={s.label}><td>{t(s.label)}</td><td>{s.a?.toLocaleString() ?? "–"}</td><td>{s.b?.toLocaleString() ?? "–"}</td></tr>
+              <tr key={s.label}><td>{stepLabel(s.label, t)}</td><td>{s.a?.toLocaleString() ?? "–"}</td><td>{s.b?.toLocaleString() ?? "–"}</td></tr>
             ))}
-            <tr><td>{t("Working")}</td><td>{percent(c.share.a[0])}</td><td>{percent(c.share.b[0])}</td></tr>
+            <tr><td>{t("Busy")}</td><td>{percent(c.share.a[0])}</td><td>{percent(c.share.b[0])}</td></tr>
             <tr><td>{t("Waiting")}</td><td>{percent(c.share.a[1])}</td><td>{percent(c.share.b[1])}</td></tr>
             <tr><td>{t("Idle")}</td><td>{percent(c.share.a[2])}</td><td>{percent(c.share.b[2])}</td></tr>
           </tbody>
@@ -394,7 +403,7 @@ function Presentation() {
         <button className={touring ? "pill primary-pill" : "pill"} onClick={() => setTouring(!touring)}>{touring ? t("End the tour") : t("Guided tour")}</button>
         <button className={recorder ? "pill primary-pill" : "pill"} onClick={record}>{recorder ? t("Stop and save the video") : t("Record a video")}</button>
       </div>
-      <p className="muted-text">{t("The tour turns the camera round the chips and says what they are doing; the video records the view as it plays.")}</p>
+      <p className="muted-text">{t("The tour turns the camera round the dies and says what each is doing; the video records the view as it plays.")}</p>
       {failure && <Issue kind="error">{failure}</Issue>}
     </>
   );
@@ -408,27 +417,27 @@ function Breaks({ trace }: { trace: Trace }) {
   const layers = Array.from({ length: trace.layers }, (_, i) => i);
   return (
     <>
-      <h3>{t("Stop at")}</h3>
+      <h3>{t("Stop when")}</h3>
       <div className="inset padded">
         <label className="viewer-check">
           <input type="checkbox" checked={breakpoints.stall} onChange={(e) => setBreakpoints({ ...breakpoints, stall: e.target.checked })} />
-          {t("A die starting to wait on a link")}
+          {t("A die starts waiting on a link")}
         </label>
         <label className="viewer-check">
           <input type="checkbox" checked={breakpoints.divergence} onChange={(e) => setBreakpoints({ ...breakpoints, divergence: e.target.checked })} />
-          {t("A result that differs from the exact machine")}
+          {t("A result differs from the exact reference")}
         </label>
         <label className="viewer-row">
-          <span>{t("Operation")}</span>
+          <span>{t("An operation starts")}</span>
           <select value={breakpoints.kind ?? ""} onChange={(e) => setBreakpoints({ ...breakpoints, kind: e.target.value || null })}>
-            <option value="">{t("Any")}</option>
-            {opKinds(trace).map((k) => <option key={k} value={k}>{k}</option>)}
+            <option value="">{t("Don't stop")}</option>
+            {opKinds(trace).map((k) => <option key={k} value={k}>{t(operationName(k))}</option>)}
           </select>
         </label>
         <label className="viewer-row">
-          <span>{t("Layer")}</span>
+          <span>{t("A layer starts")}</span>
           <select value={breakpoints.layer ?? ""} onChange={(e) => setBreakpoints({ ...breakpoints, layer: e.target.value === "" ? null : Number(e.target.value) })}>
-            <option value="">{t("Any")}</option>
+            <option value="">{t("Don't stop")}</option>
             {layers.map((l) => <option key={l} value={l}>{l}</option>)}
           </select>
         </label>
@@ -446,11 +455,11 @@ function Divergences({ trace }: { trace: Trace }) {
   const { setCycle, select } = useViewer.getState();
   return (
     <>
-      <h3>{t("Against the exact machine")}</h3>
+      <h3>{t("Against the exact reference")}</h3>
       {byOperations(trace) ? (
-        <p className="muted-text">{t("Traced by operations, this run is not checked against the exact machine: record a small model on the gates for that.")}</p>
+        <p className="muted-text">{t("A trace by operations is not checked against the exact reference: for that, simulate the small model on its logic gates.")}</p>
       ) : trace.divergences.length === 0 ? (
-        <Issue kind="ok">{t("Every die agrees with the exact machine, bit for bit.")}</Issue>
+        <Issue kind="ok">{t("Every die agrees bit for bit with the exact reference.")}</Issue>
       ) : (
         <ul className="viewer-divergences">
           {trace.divergences.map((d, i) => {
@@ -485,7 +494,7 @@ function Recorder() {
   return (
     <div className="inset padded">
       <div className="scope">
-        <Segmented label={t("What to trace")} value={source} options={[["gates", t("Small model, gates")], ["design", t("This design")]]} onChange={setSource} />
+        <Segmented label={t("What to trace")} value={source} options={[["gates", t("Small model")], ["design", t("This design")]]} onChange={setSource} />
       </div>
       {source === "gates" ? (
         <>
@@ -504,15 +513,15 @@ function Recorder() {
             </select>
           </label>
           <label className="viewer-row">
-            <span>{t("Model")}</span>
+            <span>{t("Query and key heads")}</span>
             <select value={request.model} onChange={(e) => setRequest({ ...request, model: e.target.value as RecordRequest["model"] })}>
-              <option value="grouped">{t("Six heads on two key heads")}</option>
-              <option value="plain">{t("Two heads on one key head")}</option>
+              <option value="grouped">{t("6 and 2")}</option>
+              <option value="plain">{t("2 and 1")}</option>
             </select>
           </label>
-          <p className="muted-text">{t("Every cycle of every die, gate by gate, checked against the exact machine after each token.")}</p>
+          <p className="muted-text">{t("Every cycle of every die, simulated on its logic gates and checked against the exact reference after each token.")}</p>
           <div className="sim-actions">
-            <button className="pill primary-pill" disabled={running} onClick={() => void record(request)}>{running ? t("Recording…") : t("Record on the gates")}</button>
+            <button className="pill primary-pill" disabled={running} onClick={() => void record(request)}>{running ? t("Simulating…") : t("Simulate and record")}</button>
           </div>
         </>
       ) : (
@@ -527,7 +536,7 @@ function Recorder() {
           )}
         </>
       )}
-      {recording.state === "error" && <Issue kind="error">{recording.error}</Issue>}
+      {recording.state === "error" && <Issue kind="error">{t(recording.error)}</Issue>}
     </div>
   );
 }
@@ -558,23 +567,29 @@ function DieDetail({ trace, die, cycle }: { trace: Trace; die: number; cycle: nu
     <div className="inset padded">
       <h3>{t(`Die ${die}`)}</h3>
       <dl className="metrics">
-        <div><dt>{t("Units")}</dt><dd>{t(`${d.units} of ${d.lanes} lanes`)}</dd></div>
+        <div><dt>{t("Vector units")}</dt><dd>{t(`${d.units} of ${d.lanes} lanes each`)}</dd></div>
         <div><dt>{t("Cells")}</dt><dd>{d.cells}</dd></div>
-        <div><dt>{t("Working")}</dt><dd>{percent(shares.work)}</dd></div>
-        <div><dt>{t("Waiting on a link")}</dt><dd>{percent(shares.stalled)}</dd></div>
-        <div><dt>{t("Finished, waiting for the others")}</dt><dd>{percent(shares.halted)}</dd></div>
+        <div><dt>{t("Busy")}</dt><dd>{percent(shares.work)}</dd></div>
+        <div><dt>{byOperations(trace) ? t("Waiting for its group") : t("Waiting on a link")}</dt><dd>{percent(shares.stalled)}</dd></div>
+        <div><dt>{byOperations(trace) ? t("Waiting for its turn") : t("Finished, waiting for the others")}</dt><dd>{percent(shares.halted)}</dd></div>
       </dl>
       {!byOperations(trace) && (
         <div className="sim-actions">
-          <button className="pill" onClick={() => lookInside(die)}>{t("Look inside, down to the gates")}</button>
+          <button className="pill" onClick={() => lookInside(die)}>{t("Look inside, down to the logic gates")}</button>
         </div>
       )}
-      {state.word && (
+      {state.word && (byOperations(trace) && state.op ? (
+        // Traced by operations, each "word" is a whole operation of the program.
+        <>
+          <p className="muted-text">{t(`Operation ${state.pc} of the program`)}</p>
+          <p>{t(state.op.name)} ({t(operationName(state.op.kind))})</p>
+        </>
+      ) : (
         <>
           <p className="muted-text">{t(`Word ${state.pc} of the microprogram`)}</p>
           <p>{t(state.word.text)}</p>
         </>
-      )}
+      ))}
     </div>
   );
 }

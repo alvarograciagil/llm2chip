@@ -107,7 +107,7 @@ describe("a trace read at a cycle", () => {
     expect(dieShares(sample(), 1)).toEqual({ work: 0.2, stalled: 0.6, halted: 0.2 });
   });
 
-  it("marks a die from the cycle it starts the operation that parts from the exact machine", () => {
+  it("marks a die from the cycle it starts the operation that parts from the exact reference", () => {
     const trace = sample();
     expect(divergedAt(trace, 0, 2)).toBeNull();
     expect(divergedAt(trace, 0, 3)?.op).toBe(1);

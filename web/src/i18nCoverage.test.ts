@@ -20,7 +20,7 @@ function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
     const path = join(dir, name);
     if (statSync(path).isDirectory()) return name === "wasm" ? [] : sources(path);
-    return /\.(ts|tsx)$/.test(name) && !/\.test\.tsx?$/.test(name) && !["i18n.ts", "engineText.ts", "paramHelpEs.ts"].includes(name) ? [path] : [];
+    return /\.(ts|tsx)$/.test(name) && !/\.test\.tsx?$/.test(name) && !["i18n.ts", "engineText.ts", "paramHelpEs.ts", "wordText.ts"].includes(name) ? [path] : [];
   });
 }
 

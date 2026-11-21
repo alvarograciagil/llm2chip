@@ -91,7 +91,7 @@ export const useInside = create<InsideState>((set, get) => ({
     const { die, path, designs, frames } = get();
     if (die === null || pending) return;
     if (!trace.request) {
-      set({ error: "Only a run recorded on the gates by this engine can be looked into." });
+      set({ error: "Only a run this engine simulated on the logic gates can be looked into." });
       return;
     }
     const at = Math.floor(cycle);

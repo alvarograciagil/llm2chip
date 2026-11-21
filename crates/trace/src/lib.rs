@@ -114,6 +114,11 @@ pub fn sharing_label(sharing: Sharing) -> String {
     }
 }
 
+/// The title of a design's trace: its model, its dies and how they share the work.
+pub fn design_title(model: &str, chips: u32, sharing: Sharing) -> String {
+    format!("{model} on {chips} dies, {}", sharing_label(sharing.for_chips(chips as usize)))
+}
+
 /// Builds `chips` dies of shape `shape` running `model`, whose checkpoint is in `dir`.
 pub fn tiny_board(model: TinyModel, dir: &Path, chips: usize, sharing: Sharing, shape: TinyDies) -> Result<TinyBoard, String> {
     let program = compiler::compile_qwen3_5(&model.config())?;

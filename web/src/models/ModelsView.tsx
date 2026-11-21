@@ -5,6 +5,7 @@ import { formatNumber, locale } from "../format";
 import { useDesign } from "../store";
 import { useT } from "../i18n";
 import { formatBytes, formatCount, formatRemaining, useModels, type Adaptation, type Details, type Job } from "./modelsStore";
+import { operationName } from "../operations";
 
 /** With `family`, only the architecture is known: the repository's config may refuse it later. */
 /** The units of the die and the lanes of each: the design counts the lanes for the whole
@@ -403,21 +404,6 @@ export function ModelsPanel() {
   );
 }
 
-const OPERATION_NAMES: Record<string, string> = {
-  AttnSum: "Attention",
-  DeltaStep: "DeltaNet",
-  Dconv: "Convolution",
-  Matvec: "Matrices",
-  RmsGated: "Gated normalization",
-  RmsNorm: "Normalization",
-  Rope: "RoPE",
-  Silu: "SiLU",
-  Gelu: "GELU",
-  Moe: "Experts",
-  SigmoidMoe: "Experts",
-  Mla: "Latent attention",
-};
-
 /** The tokens per second of the generated circuit, counted cycle by cycle, against the target. */
 function SpeedPanel() {
   const t = useT();
@@ -444,7 +430,7 @@ function SpeedPanel() {
         <div className="lab-bars" role="table" aria-label={t("Cycles per operation")}>
           {speed.ops.slice(0, 8).map((o) => (
             <div className="lab-row" role="row" key={o.name} title={t(`${o.name}: ${o.count} times`)}>
-              <span role="cell" className="lab-label">{t(OPERATION_NAMES[o.name] ?? o.name)}</span>
+              <span role="cell" className="lab-label">{t(operationName(o.name))}</span>
               <span role="cell" className="lab-track"><i style={{ width: `${(100 * o.cycles) / top}%` }} /></span>
               <span role="cell" className="lab-value">{(o.cycles / 1e6).toLocaleString(locale(), { maximumFractionDigits: 1 })} M</span>
             </div>
