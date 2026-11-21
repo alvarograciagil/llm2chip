@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { nextStop, readTrace, totalCycles, type Stride, type Trace } from "./trace";
+import { firstBreak, nextStop, NO_BREAKPOINTS, readTrace, totalCycles, type Breakpoints, type Stride, type Trace } from "./trace";
 
 export type TinyModelName = "grouped" | "plain";
 
@@ -23,6 +23,9 @@ interface ViewerState {
   selected: number | null;
   recording: RecordState;
   error: string | null;
+  breakpoints: Breakpoints;
+  /** Why playback last stopped by itself. */
+  stopped: string | null;
   load: (trace: Trace) => void;
   open: (file: File) => Promise<void>;
   record: (request: RecordRequest) => Promise<void>;
@@ -33,6 +36,9 @@ interface ViewerState {
   setStride: (stride: Stride) => void;
   step: (direction: 1 | -1) => void;
   select: (die: number | null) => void;
+  setBreakpoints: (breakpoints: Breakpoints) => void;
+  /** Moves on to the next breakpoint, or to the end. */
+  runToBreak: () => void;
 }
 
 export const DEFAULT_RECORD: RecordRequest = { model: "grouped", chips: 4, sharing: "mixed:2", tokens: [3, 5, 1] };
@@ -58,7 +64,9 @@ export const useViewer = create<ViewerState>((set, get) => ({
   selected: null,
   recording: { state: "idle" },
   error: null,
-  load: (trace) => set({ trace, cycle: 0, playing: false, selected: null, error: null }),
+  breakpoints: NO_BREAKPOINTS,
+  stopped: null,
+  load: (trace) => set({ trace, cycle: 0, playing: false, selected: null, error: null, stopped: null }),
   open: async (file) => {
     try {
       get().load(readTrace(JSON.parse(await file.text())));
@@ -84,17 +92,19 @@ export const useViewer = create<ViewerState>((set, get) => ({
     set({ cycle: Math.min(Math.max(0, cycle), totalCycles(trace) - 1) });
   },
   advance: (seconds) => {
-    const { trace, cycle, speed, playing } = get();
+    const { trace, cycle, speed, playing, breakpoints } = get();
     if (!trace || !playing) return;
     const end = totalCycles(trace) - 1;
-    const next = cycle + speed * seconds;
-    set(next >= end ? { cycle: end, playing: false } : { cycle: next });
+    const next = Math.min(cycle + speed * seconds, end);
+    const hit = firstBreak(trace, cycle, next, breakpoints);
+    if (hit) set({ cycle: hit.cycle, playing: false, stopped: hit.reason });
+    else set(next >= end ? { cycle: end, playing: false } : { cycle: next });
   },
   setPlaying: (playing) => {
     const { trace, cycle } = get();
     // Playing from the end starts again.
     if (playing && trace && cycle >= totalCycles(trace) - 1) set({ cycle: 0 });
-    set({ playing });
+    set({ playing, stopped: playing ? null : get().stopped });
   },
   setSpeed: (speed) => set({ speed }),
   setStride: (stride) => set({ stride }),
@@ -104,4 +114,12 @@ export const useViewer = create<ViewerState>((set, get) => ({
     set({ playing: false, cycle: nextStop(trace, cycle, stride, direction, selected ?? undefined) });
   },
   select: (die) => set({ selected: die }),
+  setBreakpoints: (breakpoints) => set({ breakpoints }),
+  runToBreak: () => {
+    const { trace, cycle, breakpoints } = get();
+    if (!trace) return;
+    const end = totalCycles(trace) - 1;
+    const hit = firstBreak(trace, cycle, end, breakpoints);
+    set(hit ? { cycle: hit.cycle, playing: false, stopped: hit.reason } : { cycle: end, playing: false, stopped: null });
+  },
 }));

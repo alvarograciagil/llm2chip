@@ -88,3 +88,61 @@ fn a_trace_records_the_dies_without_changing_them() {
     assert_eq!(serde_json::from_str::<chip_trace::record::Trace>(&json).unwrap(), trace);
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Dies that compute what they should part from the exact machine nowhere, however they
+/// share the model.
+#[test]
+#[ignore = "slow: four boards gate by gate, each checked against the exact machine"]
+fn dies_that_work_do_not_diverge() {
+    let dir = checkpoint(TinyModel::Plain, "agree");
+    for (chips, sharing) in [(1, Sharing::Layers), (2, Sharing::Layers), (2, Sharing::Rows), (4, Sharing::Mixed(2))] {
+        let mut board = fresh(&dir, chips, sharing);
+        let trace = board.record_checked("checked", &[3], &dir).unwrap();
+        assert_eq!(trace.divergences, vec![], "{chips} chips, {sharing:?}");
+        // Checking reads the registers between routines without changing what comes after.
+        if chips == 4 {
+            let mut plain = fresh(&dir, chips, sharing);
+            plain.record("plain", &[3]).unwrap();
+            assert_eq!(board.logits(), plain.logits(), "{chips} chips, {sharing:?}");
+        }
+    }
+    std::fs::remove_dir_all(dir).ok();
+    // Chips that share the attention's heads each make only their heads' slice of some
+    // buffers: that slice is what is checked.
+    let dir = checkpoint(TinyModel::Grouped, "agree-heads");
+    let mut board = tiny_board(TinyModel::Grouped, &dir, 4, Sharing::Mixed(2), TinyDies::default()).unwrap();
+    let trace = board.record_checked("heads", &[3], &dir).unwrap();
+    assert_eq!(trace.divergences, vec![]);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// A die that forgets to store one operation's result is caught at that operation,
+/// on that die, in the first routine it runs it, from the cycle it started it; the die
+/// before it agrees until what the broken one sends it reaches the logits.
+#[test]
+fn a_broken_operation_is_found_where_it_breaks() {
+    let dir = checkpoint(TinyModel::Plain, "broken");
+    let mut board = fresh(&dir, 2, Sharing::Layers);
+    // The last operation of its part that the second die keeps the result of whole and
+    // writes with words of its own.
+    let program = board.program.clone();
+    let op = chip_trace::check::checked(&board, 1, 0..program.logits_from)
+        .into_iter()
+        .map(|(op, _)| op as u32)
+        .rev()
+        .find(|op| {
+            let (from, to) = chip_trace::op_words(&board.dies[1].1, *op);
+            board.dies[1].1.words[from..to].iter().any(|w| w.write_en)
+        })
+        .expect("an operation to break");
+    board.break_op(1, op);
+    let trace = board.record_checked("broken", &[3, 5], &dir).unwrap();
+    let first = trace.divergences.first().expect("the fault is found");
+    assert_eq!((first.die, first.op, first.step), (1, op, 0), "{:?}", trace.divergences);
+    let start = trace.dies[1].pcs[first.cycle as usize];
+    assert_eq!(trace.dies[1].words[start as usize].op, Some(op));
+    // The first die agrees on its own layers; only the logits it makes from the broken
+    // die's hidden state differ.
+    assert!(trace.divergences.iter().filter(|d| d.die == 0).all(|d| trace.steps[d.step].routine == "logits"), "{:?}", trace.divergences);
+    std::fs::remove_dir_all(dir).ok();
+}

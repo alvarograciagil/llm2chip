@@ -5,7 +5,7 @@ import { Segmented } from "../components/controls";
 import { download } from "../download";
 import { ChipScene, readPalette } from "./scene";
 import { DEFAULT_RECORD, useViewer, type RecordRequest } from "./viewerStore";
-import { dieAt, dieTotals, stepAt, totalCycles, type Stride, type Trace, type WordClass } from "./trace";
+import { dieAt, dieTotals, divergedAt, opKinds, stepAt, totalCycles, type Stride, type Trace, type WordClass } from "./trace";
 
 // The 3D viewer of the chip at work: loaded on demand, so Three.js only downloads when the
 // view opens. The stage shows the scene; the panel loads traces and drives playback.
@@ -123,11 +123,13 @@ function DieLabel({ die, trace }: { die: number; trace: Trace }) {
   const state = dieAt(trace, die, cycle);
   const group = trace.dies[die].group;
   const what = state.halted ? t("Finished") : state.stalled ? t("Waiting on a link") : (state.op?.name ?? t("Between operations"));
+  const diverged = divergedAt(trace, die, cycle);
   return (
-    <div className={`viewer-label${state.stalled ? " stalled" : ""}`}>
+    <div className={`viewer-label${state.stalled || diverged ? " stalled" : ""}`}>
       <strong>{t(`Die ${die}`)}</strong>
       {group && <span className="muted-text"> · {t(`group ${group[0]}`)}</span>}
       <div>{what}</div>
+      {diverged && <div>{t(`Differs from the exact machine since ${trace.ops[diverged.op].name}`)}</div>}
     </div>
   );
 }
@@ -201,6 +203,9 @@ function ChipPanel() {
             <div><dt>{current.routine === "token" ? t("Token") : t("Logits of the token")}</dt><dd>{t(`${current.token} at position ${current.position}`)}</dd></div>
           </dl>
 
+          <Breaks trace={trace} />
+          <Divergences trace={trace} />
+
           <h3>{t("Each die")}</h3>
           <table className="viewer-dies">
             <tbody>
@@ -220,6 +225,74 @@ function ChipPanel() {
         </>
       )}
     </aside>
+  );
+}
+
+function Breaks({ trace }: { trace: Trace }) {
+  const t = useT();
+  const breakpoints = useViewer((s) => s.breakpoints);
+  const stopped = useViewer((s) => s.stopped);
+  const { setBreakpoints, runToBreak } = useViewer.getState();
+  const layers = Array.from({ length: trace.layers }, (_, i) => i);
+  return (
+    <>
+      <h3>{t("Stop at")}</h3>
+      <div className="inset padded">
+        <label className="viewer-check">
+          <input type="checkbox" checked={breakpoints.stall} onChange={(e) => setBreakpoints({ ...breakpoints, stall: e.target.checked })} />
+          {t("A die starting to wait on a link")}
+        </label>
+        <label className="viewer-check">
+          <input type="checkbox" checked={breakpoints.divergence} onChange={(e) => setBreakpoints({ ...breakpoints, divergence: e.target.checked })} />
+          {t("A result that differs from the exact machine")}
+        </label>
+        <label className="viewer-row">
+          <span>{t("Operation")}</span>
+          <select value={breakpoints.kind ?? ""} onChange={(e) => setBreakpoints({ ...breakpoints, kind: e.target.value || null })}>
+            <option value="">{t("Any")}</option>
+            {opKinds(trace).map((k) => <option key={k} value={k}>{k}</option>)}
+          </select>
+        </label>
+        <label className="viewer-row">
+          <span>{t("Layer")}</span>
+          <select value={breakpoints.layer ?? ""} onChange={(e) => setBreakpoints({ ...breakpoints, layer: e.target.value === "" ? null : Number(e.target.value) })}>
+            <option value="">{t("Any")}</option>
+            {layers.map((l) => <option key={l} value={l}>{l}</option>)}
+          </select>
+        </label>
+        <div className="sim-actions">
+          <button className="pill" onClick={runToBreak}>{t("Run to the next stop")}</button>
+        </div>
+        {stopped && <p className="muted-text">{t(stopped)}</p>}
+      </div>
+    </>
+  );
+}
+
+function Divergences({ trace }: { trace: Trace }) {
+  const t = useT();
+  const { setCycle, select } = useViewer.getState();
+  return (
+    <>
+      <h3>{t("Against the exact machine")}</h3>
+      {trace.divergences.length === 0 ? (
+        <div className="issue ok" role="status">{t("Every die agrees with the exact machine, bit for bit.")}</div>
+      ) : (
+        <ul className="viewer-divergences">
+          {trace.divergences.map((d, i) => {
+            const step = trace.steps[d.step];
+            return (
+              <li key={i}>
+                <button className="link" onClick={() => { setCycle(d.cycle); select(d.die); }}>
+                  {t(`Die ${d.die}: ${trace.ops[d.op].name}`)}
+                </button>
+                <span className="muted-text"> · {t(`element ${d.index}: ${d.got} instead of ${d.want}`)} · {step.routine === "token" ? t(`token at position ${step.position}`) : t("the logits")}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </>
   );
 }
 

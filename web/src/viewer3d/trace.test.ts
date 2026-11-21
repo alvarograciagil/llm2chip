@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cacheAt, cacheHolders, dieAt, linkWordsIn, dieTotals, linkAt, nextStop, readTrace, stepAt, totalCycles, type Trace } from "./trace";
+import { cacheAt, cacheHolders, dieAt, divergedAt, firstBreak, linkWordsIn, NO_BREAKPOINTS, dieTotals, linkAt, nextStop, readTrace, stepAt, totalCycles, type Trace } from "./trace";
 import { layoutScene, linkPoint } from "./layout3d";
 
 /** Two dies over ten cycles: the first works through two operations of layer 0 and waits a
@@ -53,6 +53,7 @@ function sample(): Trace {
       { routine: "logits", token: 3, position: 0, start: 8, cycles: 2 },
     ],
     kv: [{ cycle: 3, die: 0, op: 1, slot: 0, position: 0 }],
+    divergences: [{ die: 0, op: 1, buffer: 2, index: 0, got: 1, want: 2, step: 0, cycle: 3 }],
   };
 }
 
@@ -101,6 +102,23 @@ describe("a trace read at a cycle", () => {
 
   it("counts the cycles each die worked, waited and sat finished", () => {
     expect(dieTotals(sample(), 1)).toEqual({ work: 2, stalled: 6, halted: 2 });
+  });
+
+  it("marks a die from the cycle it starts the operation that parts from the exact machine", () => {
+    const trace = sample();
+    expect(divergedAt(trace, 0, 2)).toBeNull();
+    expect(divergedAt(trace, 0, 3)?.op).toBe(1);
+    expect(divergedAt(trace, 1, 9)).toBeNull();
+  });
+
+  it("stops playback at the first breakpoint it passes", () => {
+    const trace = sample();
+    expect(firstBreak(trace, 0, 9, NO_BREAKPOINTS)).toBeNull();
+    expect(firstBreak(trace, 0, 9, { ...NO_BREAKPOINTS, stall: true })).toEqual({ cycle: 6, reason: "Die 0 waits on a link" });
+    expect(firstBreak(trace, 0, 9, { ...NO_BREAKPOINTS, divergence: true })?.cycle).toBe(3);
+    expect(firstBreak(trace, 0, 9, { ...NO_BREAKPOINTS, kind: "KvAppend" })).toEqual({ cycle: 3, reason: "Die 0 starts kv" });
+    expect(firstBreak(trace, 3, 9, { ...NO_BREAKPOINTS, kind: "KvAppend" })).toBeNull();
+    expect(firstBreak(trace, -1, 9, { ...NO_BREAKPOINTS, layer: 0 })?.cycle).toBe(0);
   });
 
   it("refuses what is not a trace of this version", () => {

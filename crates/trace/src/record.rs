@@ -30,6 +30,9 @@ pub struct Trace {
     pub steps: Vec<StepInfo>,
     /// Slots of the cache written, in the order they were.
     pub kv: Vec<KvWrite>,
+    /// Where each die first parted from the exact machine, if it did and it was checked.
+    #[serde(default)]
+    pub divergences: Vec<Divergence>,
 }
 
 /// One operation of the model.
@@ -118,6 +121,25 @@ pub struct KvWrite {
     pub op: u32,
     pub slot: usize,
     pub position: u32,
+}
+
+/// A value a die computed that the exact machine computes otherwise: the first, in the
+/// program's order, of a routine.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Divergence {
+    pub die: usize,
+    /// The operation that wrote it.
+    pub op: u32,
+    pub buffer: usize,
+    /// Its first element that differs.
+    pub index: u32,
+    /// The mantissas the die and the exact machine hold.
+    pub got: i64,
+    pub want: i64,
+    /// The routine it was found after, an index into `Trace::steps`, and the cycle the die
+    /// started that operation in it.
+    pub step: usize,
+    pub cycle: u64,
 }
 
 /// The operations of `program`, as a trace lists them.
@@ -209,7 +231,7 @@ impl Recorder {
         }
         let links = lanes.iter().map(|w| LinkInfo { from: w.from, to: w.to, port: w.port.clone(), spans: Vec::new() }).collect();
         let layers = program.ops.iter().filter_map(|i| i.layer).max().map_or(0, |l| l as usize + 1);
-        let trace = Trace { version: TRACE_VERSION, title: title.to_string(), source: "gates".into(), sharing: sharing.to_string(), context, ops: op_infos(program), layers, dies: infos, links, steps: Vec::new(), kv: Vec::new() };
+        let trace = Trace { version: TRACE_VERSION, title: title.to_string(), source: "gates".into(), sharing: sharing.to_string(), context, ops: op_infos(program), layers, dies: infos, links, steps: Vec::new(), kv: Vec::new(), divergences: Vec::new() };
         Ok(Self { trace, probes, now: 0 })
     }
 
@@ -260,6 +282,21 @@ impl Recorder {
         self.trace.steps.push(StepInfo { routine: routine_name.into(), token, position, start, cycles });
         self.now += cycles;
         cycles
+    }
+
+    /// Notes what a check after the last routine found: each divergence gets that routine
+    /// and the cycle its die started the operation in it.
+    pub fn diverged(&mut self, found: Vec<Divergence>) {
+        let step = self.trace.steps.len().saturating_sub(1);
+        let Some(info) = self.trace.steps.get(step) else { return };
+        let (start, end) = (info.start, info.start + info.cycles);
+        for mut d in found {
+            let die = &self.trace.dies[d.die];
+            let runs = |pc: &i32| usize::try_from(*pc).ok().and_then(|pc| die.words.get(pc)).is_some_and(|w| w.op == Some(d.op));
+            d.cycle = (start..end).find(|c| die.pcs.get(*c as usize).is_some_and(runs)).unwrap_or(start);
+            d.step = step;
+            self.trace.divergences.push(d);
+        }
     }
 
     pub fn trace(&self) -> &Trace {

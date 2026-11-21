@@ -3932,3 +3932,21 @@ label:hover > .hint-icon {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+.viewer-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+  font-size: 12px;
+}
+
+.viewer-divergences {
+  margin: 0;
+  padding: 0 0 0 16px;
+  font-size: 12px;
+}
+
+.viewer-divergences li {
+  margin: 3px 0;
+}

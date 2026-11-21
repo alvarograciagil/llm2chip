@@ -57,6 +57,19 @@ export interface KvWrite {
   position: number;
 }
 
+/** Where a die first parted from the exact machine in a routine. */
+export interface Divergence {
+  die: number;
+  op: number;
+  buffer: number;
+  index: number;
+  got: number;
+  want: number;
+  step: number;
+  /** The cycle the die started the operation whose result differs. */
+  cycle: number;
+}
+
 export interface Trace {
   version: number;
   title: string;
@@ -69,6 +82,8 @@ export interface Trace {
   links: LinkInfo[];
   steps: StepInfo[];
   kv: KvWrite[];
+  /** Empty when nothing differs, or when the run was not checked. */
+  divergences: Divergence[];
 }
 
 export const TRACE_VERSION = 1;
@@ -79,7 +94,7 @@ export function readTrace(raw: unknown): Trace {
   if (!t || typeof t !== "object") throw new Error("This is not a trace.");
   if (t.version !== TRACE_VERSION) throw new Error(`This trace is version ${String(t.version)}; this viewer reads version ${TRACE_VERSION}.`);
   if (!Array.isArray(t.dies) || !Array.isArray(t.steps) || !Array.isArray(t.ops)) throw new Error("This is not a trace.");
-  return { ...(t as Trace), links: t.links ?? [], kv: t.kv ?? [] };
+  return { ...(t as Trace), links: t.links ?? [], kv: t.kv ?? [], divergences: t.divergences ?? [] };
 }
 
 export function totalCycles(trace: Trace): number {
@@ -231,4 +246,68 @@ export function dieTotals(trace: Trace, die: number): { work: number; stalled: n
   const halted = d.pcs.filter((pc) => pc < 0).length;
   const stalled = d.stalls.reduce((sum, s) => sum + s[1], 0);
   return { work: d.pcs.length - halted - stalled, stalled, halted };
+}
+
+/** The first divergence of `die` found by `cycle`, if any. */
+export function divergedAt(trace: Trace, die: number, cycle: number): Divergence | null {
+  return trace.divergences.find((d) => d.die === die && d.cycle <= cycle) ?? null;
+}
+
+/** Where playback stops by itself. */
+export interface Breakpoints {
+  /** When a die starts waiting on a link. */
+  stall: boolean;
+  /** When a die starts an operation whose result differs from the exact machine's. */
+  divergence: boolean;
+  /** When a die starts an operation of this kind (`Matvec`, `AttnSum`…). */
+  kind: string | null;
+  /** When a die starts working on this layer. */
+  layer: number | null;
+}
+
+export const NO_BREAKPOINTS: Breakpoints = { stall: false, divergence: false, kind: null, layer: null };
+
+/** The first cycle in `(from, to]` where a breakpoint stops playback, with what stopped it. */
+export function firstBreak(trace: Trace, from: number, to: number, b: Breakpoints): { cycle: number; reason: string } | null {
+  const lo = Math.floor(from) + 1;
+  const hi = Math.min(Math.floor(to), totalCycles(trace) - 1);
+  if (hi < lo) return null;
+  let best: { cycle: number; reason: string } | null = null;
+  const consider = (cycle: number, reason: string) => {
+    if (cycle >= lo && cycle <= hi && (!best || cycle < best.cycle)) best = { cycle, reason };
+  };
+  if (b.stall) {
+    trace.dies.forEach((d, die) => {
+      const s = d.stalls.find((x) => x[0] >= lo);
+      if (s) consider(s[0], `Die ${die} waits on a link`);
+    });
+  }
+  if (b.divergence) {
+    for (const d of trace.divergences) consider(d.cycle, `Die ${d.die} parts from the exact machine`);
+  }
+  if (b.kind !== null || b.layer !== null) {
+    trace.dies.forEach((d, die) => {
+      const opOf = (c: number) => {
+        const pc = d.pcs[c];
+        return pc >= 0 ? (d.words[pc]?.op ?? null) : null;
+      };
+      let last = opOf(lo - 1);
+      for (let c = lo; c <= hi && (!best || c < best.cycle); c++) {
+        const op = opOf(c);
+        if (op !== last && op !== null) {
+          const info = trace.ops[op];
+          const before = last !== null ? trace.ops[last] : null;
+          if (b.kind !== null && info.kind === b.kind) consider(c, `Die ${die} starts ${info.name}`);
+          if (b.layer !== null && info.layer === b.layer && before?.layer !== b.layer) consider(c, `Die ${die} starts layer ${b.layer}`);
+        }
+        last = op;
+      }
+    });
+  }
+  return best;
+}
+
+/** The kinds of operation a trace runs, for choosing where to stop. */
+export function opKinds(trace: Trace): string[] {
+  return [...new Set(trace.ops.map((o) => o.kind))].sort();
 }

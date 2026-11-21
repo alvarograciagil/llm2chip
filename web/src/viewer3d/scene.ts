@@ -3,7 +3,7 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { cacheAt, cacheHolders, cacheOps, dieAt, linkWordsIn, type Trace, type WordClass } from "./trace";
+import { cacheAt, cacheHolders, cacheOps, dieAt, divergedAt, linkWordsIn, type Trace, type WordClass } from "./trace";
 import { layoutScene, linkPoint, type DieLayout, type SceneLayout, type Vec3 } from "./layout3d";
 
 export interface Palette {
@@ -282,7 +282,9 @@ export class ChipScene {
         });
         if (d.cache.instanceColor) d.cache.instanceColor.needsUpdate = true;
       }
-      (d.outline.material as THREE.LineBasicMaterial).color.set(selected === i ? p.label : p.separator);
+      // A die that has parted from the exact machine keeps a red outline from then on.
+      const diverged = divergedAt(trace, i, cycle) !== null;
+      (d.outline.material as THREE.LineBasicMaterial).color.set(diverged ? p.stall : selected === i ? p.label : p.separator);
       d.slab.position.y = selected === i ? 0.04 : 0;
     });
     const from = Math.max(0, Math.floor(cycle - window));

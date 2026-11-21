@@ -1,5 +1,5 @@
 //! Records a tiny model running on joined dies, gate by gate, into a trace for the 3D
-//! viewer.
+//! viewer, checking every routine against the exact machine.
 //!
 //!   cargo run --release -p chip-trace --example trace -- [file] [chips] [sharing] [model]
 //!
@@ -24,11 +24,11 @@ fn main() {
     let mut board = tiny_board(model, &dir, chips, sharing, TinyDies::default()).expect("the board");
     let title = format!("Tiny model on {chips} dies, {}", sharing_label(board.sharing));
     let started = std::time::Instant::now();
-    let trace = board.record(&title, &[3, 5, 1]).expect("the trace");
+    let trace = board.record_checked(&title, &[3, 5, 1], &dir).expect("the trace");
     std::fs::remove_dir_all(&dir).ok();
     let cycles: u64 = trace.steps.iter().map(|s| s.cycles).sum();
     let stalled: Vec<u64> = trace.dies.iter().map(|d| d.stalls.iter().map(|s| s.1).sum()).collect();
     let json = serde_json::to_string(&trace).unwrap();
     std::fs::write(&file, &json).unwrap();
-    println!("{file}: {cycles} cycles, {} steps, stalled per die {stalled:?}, {} KB, {:.1} s", trace.steps.len(), json.len() / 1024, started.elapsed().as_secs_f64());
+    println!("{file}: {cycles} cycles, {} steps, stalled per die {stalled:?}, {} divergences, {} KB, {:.1} s", trace.steps.len(), trace.divergences.len(), json.len() / 1024, started.elapsed().as_secs_f64());
 }

@@ -1,4 +1,5 @@
-//! Recording a small model on dies joined by their links, gate by gate, for the 3D viewer.
+//! Recording a small model on dies joined by their links, gate by gate, for the 3D viewer,
+//! each routine checked against the exact machine.
 
 use chip_trace::{tiny_board, TinyDies, TinyModel, TINY_CONTEXT};
 use serde::Deserialize;
@@ -64,7 +65,7 @@ pub fn run(start: &TraceStart, scratch: &Path) -> Result<serde_json::Value, Stri
     let tokens: Vec<u32> = start.tokens.iter().map(|t| t % vocab).collect();
     let made = tiny_board(model, scratch, start.chips, sharing, TinyDies::default()).and_then(|mut board| {
         let title = format!("Small model on {} dies, {}", start.chips, chip_trace::sharing_label(board.sharing));
-        board.record(&title, &tokens)
+        board.record_checked(&title, &tokens, scratch)
     });
     std::fs::remove_dir_all(scratch).ok();
     serde_json::to_value(made?).map_err(|e| e.to_string())

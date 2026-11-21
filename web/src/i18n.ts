@@ -8,6 +8,14 @@ export type Language = "es" | "en";
  * so translation can go part by part. */
 const ES: Record<string, string> = {
   // The 3D viewer of the chip at work
+  "Stop at": "Parar en",
+  "A die starting to wait on a link": "Un die que empieza a esperar a un enlace",
+  "A result that differs from the exact machine": "Un resultado distinto del de la máquina exacta",
+  "Any": "Cualquiera",
+  "Run to the next stop": "Ir a la siguiente parada",
+  "Against the exact machine": "Frente a la máquina exacta",
+  "Every die agrees with the exact machine, bit for bit.": "Todos los dies coinciden con la máquina exacta, bit a bit.",
+  "the logits": "los logits",
   "Chip at work": "Chip en marcha",
   "The chip at work": "El chip en marcha",
   "This browser cannot draw in 3D here.": "Este navegador no puede dibujar en 3D aquí.",

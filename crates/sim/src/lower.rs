@@ -1768,7 +1768,7 @@ impl Layout {
 
     /// The elements of `buffer` this chip makes, `(first, count)`: all of them unless the
     /// chips share the heads and `buffer` is a slice of them.
-    fn slice_of(&self, program: &Program, buffer: usize) -> (u32, u32) {
+    pub fn slice_of(&self, program: &Program, buffer: usize) -> (u32, u32) {
         let len = program.buffers[buffer] as u32;
         match self.heads_shard {
             Some((index, chips)) if self.local.contains(&buffer) => {

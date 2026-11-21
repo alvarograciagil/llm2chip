@@ -5,6 +5,7 @@
 //! links (`board`), and the recorder that turns a run into a `Trace` (`record`).
 
 pub mod board;
+pub mod check;
 pub mod record;
 pub mod tiny;
 
@@ -73,6 +74,17 @@ pub struct TinyBoard {
     pub configs: Vec<DieConfig>,
     pub lanes: Vec<Wire>,
     pub sharing: Sharing,
+}
+
+/// The words of operation `op` in `code`, from its mark to the next one or to the end of
+/// its routine.
+pub fn op_words(code: &Microprogram, op: u32) -> (usize, usize) {
+    let at = code.marks.iter().position(|(_, o)| *o == op).expect("the operation runs on this die");
+    let from = code.marks[at].0 as usize;
+    let next_mark = code.marks.get(at + 1).map(|m| m.0 as usize);
+    let next_entry = code.entries.iter().map(|e| *e as usize).filter(|e| *e > from).min();
+    let to = [next_mark, next_entry, Some(code.words.len())].into_iter().flatten().min().unwrap();
+    (from, to)
 }
 
 /// The links of `chips` chips sharing a model as `sharing` says: a ring through all of
@@ -151,6 +163,38 @@ impl TinyBoard {
             recorder.run(&mut self.dies, &self.lanes, ENTRY_LOGITS, *last, tokens.len() as u32 - 1);
         }
         Ok(recorder.finish())
+    }
+
+    /// Like `record`, checking after every routine each die against the exact machine of the
+    /// model whose checkpoint is in `dir` (see `check::compare`).
+    pub fn record_checked(&mut self, title: &str, tokens: &[u32], dir: &Path) -> Result<Trace, String> {
+        let sharing = sharing_name(self.sharing);
+        let subject = Subject { title, sharing: &sharing, program: &self.program, context: TINY_CONTEXT };
+        let mut recorder = Recorder::new(subject, &self.dies, &self.configs, &self.groups(), &self.lanes)?;
+        let mut exact = sim::ExactEngine::new(self.program.clone(), Weights::open(dir)?, self.configs[0].cell.activation_bits)?;
+        let logits_from = self.program.logits_from;
+        for (position, token) in tokens.iter().enumerate() {
+            let last = position + 1 == tokens.len();
+            recorder.run(&mut self.dies, &self.lanes, ENTRY_TOKEN, *token, position as u32);
+            exact.step(*token, last)?;
+            recorder.diverged(check::compare(self, &exact, 0..logits_from));
+            if last {
+                recorder.run(&mut self.dies, &self.lanes, ENTRY_LOGITS, *token, position as u32);
+                recorder.diverged(check::compare(self, &exact, logits_from..self.program.ops.len()));
+            }
+        }
+        Ok(recorder.finish())
+    }
+
+    /// Makes die `die` forget to store what operation `op` computes: none of its words
+    /// writes to the registers. A fault to show the check finding it.
+    pub fn break_op(&mut self, die: usize, op: u32) {
+        let (sim, code) = &mut self.dies[die];
+        let (from, to) = op_words(code, op);
+        for word in &mut code.words[from..to] {
+            word.write_en = false;
+        }
+        board::load_microprogram(sim, &self.configs[die], code);
     }
 
     /// The logits the first chip holds, as mantissas.
