@@ -7,7 +7,7 @@ import { ChipScene, readPalette } from "./scene";
 import { DEFAULT_RECORD, designRequest, useViewer, type RecordRequest } from "./viewerStore";
 import { InsideDie } from "./InsideDie";
 import { useInside } from "./inside";
-import { byOperations, compareTraces, cyclesByKind, dieAt, dieTotals, divergedAt, opKinds, useShare, stepAt, totalCycles, type Stride, type Trace, type WordClass } from "./trace";
+import { byOperations, compareTraces, cyclesByKind, dieAt, dieShares, divergedAt, opKinds, useShare, stepAt, totalCycles, type Stride, type Trace, type WordClass } from "./trace";
 
 // The 3D viewer of the chip at work: loaded on demand, so Three.js only downloads when the
 // view opens. The stage shows the scene; the panel loads traces and drives playback.
@@ -552,18 +552,17 @@ function DieDetail({ trace, die, cycle }: { trace: Trace; die: number; cycle: nu
   const t = useT();
   const state = dieAt(trace, die, cycle);
   const d = trace.dies[die];
-  const totals = dieTotals(trace, die);
-  const all = Math.max(d.pcs.length, 1);
-  const percent = (n: number) => `${Math.round((100 * n) / all)} %`;
+  const shares = dieShares(trace, die);
+  const percent = (n: number) => `${Math.round(100 * n)} %`;
   return (
     <div className="inset padded">
       <h3>{t(`Die ${die}`)}</h3>
       <dl className="metrics">
         <div><dt>{t("Units")}</dt><dd>{t(`${d.units} of ${d.lanes} lanes`)}</dd></div>
         <div><dt>{t("Cells")}</dt><dd>{d.cells}</dd></div>
-        <div><dt>{t("Working")}</dt><dd>{percent(totals.work)}</dd></div>
-        <div><dt>{t("Waiting on a link")}</dt><dd>{percent(totals.stalled)}</dd></div>
-        <div><dt>{t("Finished, waiting for the others")}</dt><dd>{percent(totals.halted)}</dd></div>
+        <div><dt>{t("Working")}</dt><dd>{percent(shares.work)}</dd></div>
+        <div><dt>{t("Waiting on a link")}</dt><dd>{percent(shares.stalled)}</dd></div>
+        <div><dt>{t("Finished, waiting for the others")}</dt><dd>{percent(shares.halted)}</dd></div>
       </dl>
       {!byOperations(trace) && (
         <div className="sim-actions">

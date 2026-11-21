@@ -285,6 +285,14 @@ export function dieTotals(trace: Trace, die: number): { work: number; stalled: n
   return { work: d.pcs.length - halted - stalled, stalled, halted };
 }
 
+/** The share of the whole run each die worked, waited and sat finished, from 0 to 1. */
+export function dieShares(trace: Trace, die: number): { work: number; stalled: number; halted: number } {
+  const { work, stalled, halted } = dieTotals(trace, die);
+  // A trace by operations keeps no cycle-by-cycle record, so the run is what the three add up to.
+  const all = Math.max(work + stalled + halted, 1);
+  return { work: work / all, stalled: stalled / all, halted: halted / all };
+}
+
 /** The first divergence of `die` found by `cycle`, if any. */
 export function divergedAt(trace: Trace, die: number, cycle: number): Divergence | null {
   return trace.divergences.find((d) => d.die === die && d.cycle <= cycle) ?? null;

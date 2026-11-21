@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cacheAt, cacheHolders, compareTraces, cyclesByKind, dieAt, useShare, divergedAt, firstBreak, linkWordsIn, NO_BREAKPOINTS, dieTotals, linkAt, nextStop, readTrace, stepAt, totalCycles, type Trace } from "./trace";
+import { cacheAt, cacheHolders, compareTraces, cyclesByKind, dieAt, useShare, divergedAt, firstBreak, linkWordsIn, NO_BREAKPOINTS, dieShares, dieTotals, linkAt, nextStop, readTrace, stepAt, totalCycles, type Trace } from "./trace";
 import { layoutScene, linkPoint } from "./layout3d";
 
 /** Two dies over ten cycles: the first works through two operations of layer 0 and waits a
@@ -104,6 +104,7 @@ describe("a trace read at a cycle", () => {
 
   it("counts the cycles each die worked, waited and sat finished", () => {
     expect(dieTotals(sample(), 1)).toEqual({ work: 2, stalled: 6, halted: 2 });
+    expect(dieShares(sample(), 1)).toEqual({ work: 0.2, stalled: 0.6, halted: 0.2 });
   });
 
   it("marks a die from the cycle it starts the operation that parts from the exact machine", () => {
@@ -147,6 +148,8 @@ describe("a trace by operations", () => {
     expect(dieAt(t, 1, 1)).toMatchObject({ halted: true });
     expect(dieAt(t, 0, 8).halted).toBe(true);
     expect(dieTotals(t, 0)).toEqual({ work: 5, stalled: 2, halted: 3 });
+    // No cycle-by-cycle record here: the shares are still of the whole run.
+    expect(dieShares(t, 0)).toEqual({ work: 0.5, stalled: 0.2, halted: 0.3 });
   });
 
   it("steps from one operation to the next and back", () => {
