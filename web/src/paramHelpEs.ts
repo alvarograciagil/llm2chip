@@ -44,7 +44,7 @@ export const PARAM_HELP_ES: Record<string, string> = {
   factor_steps: "Cada celda aplica la escala y el sesgo de un grupo en tantos ciclos, unos pocos bits por ciclo, mientras ya suma el grupo siguiente. Con 1 hace falta un multiplicador entero por celda; con 8 basta uno ocho veces menor, sin perder velocidad si el grupo tiene al menos 8 pesos.",
   adder_stages: "Registros dentro del árbol que suma los productos de las celdas. Más etapas permiten más frecuencia a cambio de latencia y biestables.",
   noc_stages: "Registros en la red que reparte cada activación a todas las celdas. En dies grandes los cables son largos: más etapas evitan que limiten el reloj.",
-  vector_lanes_per_die: "Carriles de las unidades vectoriales, que multiplican activación por activación: atención Q·K, regla delta, puertas y normas. Pocos carriles alargan las partes que no son producto de matriz.",
+  vector_lanes_per_die: "Carriles de las unidades vectoriales, que multiplican activación por activación: atención Q·K, regla delta, compuertas y normas. Pocos carriles alargan las partes que no son producto de matriz.",
   vector_units_per_die: "Copias de la unidad vector: cada una calcula una cabeza de atención o DeltaNet a la vez.",
   sampler_lanes: "Cuántos logits compara a la vez la unidad de muestreo. Si son pocos, elegir el token retrasa al chip.",
   sampler_entries: "Cuántos de los mejores tokens guarda la unidad de muestreo: el mayor top-k que admite. Cada candidato cuesta registros y ciclos al elegir.",

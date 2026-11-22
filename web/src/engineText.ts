@@ -297,7 +297,7 @@ export const ENGINE_TEXT: [string, string][] = [
   ["the “{s}” architecture is not supported yet", "la arquitectura «{0}» todavía no está soportada"],
   ["the numeric field “{s}” is missing from the config", "falta el campo numérico «{0}» en el config"],
   ["Gemma shares the embedding and the output unless the config says otherwise", "Gemma comparte embedding y salida salvo que el config diga otra cosa"],
-  ["Gate × up", "Puerta × up"],
+  ["Gate × up", "Compuerta × subida"],
   ["Normalize latent Q", "Normalizar Q latente"],
   ["Normalize latent", "Normalizar latente"],
   ["Normalize embedding", "Normalizar embedding"],
