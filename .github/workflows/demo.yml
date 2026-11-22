@@ -112,5 +112,4 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SPACE: ${{ vars.HF_SPACE }}
         run: |
-          pip install --quiet "huggingface_hub>=0.34,<2"
-          hf upload "$SPACE" web/dist . --repo-type space --delete "assets/*" --commit-message "Online demo from ${GITHUB_SHA::7}"
+          pipx run --spec "huggingface_hub>=0.34,<2" hf upload "$SPACE" web/dist . --repo-type space --delete "assets/*" --commit-message "Online demo from ${GITHUB_SHA::7}"
