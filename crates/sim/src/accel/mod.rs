@@ -5,6 +5,7 @@
 mod metal;
 // Compiled everywhere so that it keeps building, but only selected outside macOS.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg(not(target_arch = "wasm32"))]
 mod vulkan;
 
 /// A tensor in MLX affine form: `w = q · scale + bias`, with one scale and bias per group.
@@ -39,7 +40,12 @@ pub fn open(files: &[&[u8]]) -> Option<Box<dyn Accelerator>> {
     {
         metal::MetalAccelerator::new(files).map(|a| Box::new(a) as Box<dyn Accelerator>)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = files;
+        None
+    }
+    #[cfg(not(any(target_os = "macos", target_arch = "wasm32")))]
     {
         let _ = files;
         vulkan::VulkanAccelerator::new().map(|a| Box::new(a) as Box<dyn Accelerator>)

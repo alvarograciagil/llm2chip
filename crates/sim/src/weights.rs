@@ -13,6 +13,23 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// A checkpoint file: mapped from disk, or held in memory where there is no disk to map,
+/// as in a browser.
+enum Storage {
+    Mapped(Mmap),
+    Owned(Box<[u8]>),
+}
+
+impl std::ops::Deref for Storage {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Storage::Mapped(map) => map,
+            Storage::Owned(bytes) => bytes,
+        }
+    }
+}
+
 struct TensorRef {
     file: usize,
     start: usize,
@@ -27,7 +44,7 @@ pub type Tensor = (String, Vec<usize>, Vec<f32>);
 pub struct Weights {
     // The GPU's buffers point into `files`, so it must be dropped first.
     accelerator: Option<Box<dyn Accelerator>>,
-    files: Vec<Mmap>,
+    files: Vec<Storage>,
     tensors: HashMap<String, TensorRef>,
     /// The chip's format, when weights must be rewritten to match it.
     format: Option<WeightFormat>,
@@ -43,9 +60,41 @@ pub struct Weights {
 const GPU_MIN_WEIGHTS: usize = 1 << 20;
 
 /// Rewritten weights may take half of the machine's memory.
+#[cfg(not(target_arch = "wasm32"))]
 fn default_recode_budget() -> usize {
     let system = sysinfo::System::new_with_specifics(sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::nothing().with_ram()));
     (system.total_memory() / 2) as usize
+}
+
+/// A browser cannot say how much memory it has: rewritten weights may take 512 MB, a quarter
+/// of what a page can address.
+#[cfg(target_arch = "wasm32")]
+fn default_recode_budget() -> usize {
+    512 << 20
+}
+
+/// Reads one safetensors file's header into `tensors`, as file `index`.
+fn read_header(bytes: &[u8], index: usize, tensors: &mut HashMap<String, TensorRef>) -> Result<(), String> {
+    if bytes.len() < 8 {
+        return Err("truncated safetensors file".into());
+    }
+    let size = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+    let header = bytes.get(8..8usize.saturating_add(size)).ok_or("truncated safetensors file")?;
+    let header: Value = serde_json::from_slice(header).map_err(|e| e.to_string())?;
+    for (name, info) in header.as_object().ok_or("invalid header")? {
+        if name == "__metadata__" {
+            continue;
+        }
+        let offsets = info["data_offsets"].as_array().ok_or("tensor without offsets")?;
+        let start = 8 + size + offsets[0].as_u64().unwrap_or(0) as usize;
+        let end = 8 + size + offsets.get(1).and_then(Value::as_u64).unwrap_or(0) as usize;
+        if start > end || end > bytes.len() {
+            return Err(format!("{name}: its data lies outside the file"));
+        }
+        let shape = info["shape"].as_array().ok_or("tensor without a shape")?.iter().map(|v| v.as_u64().unwrap_or(0) as usize).collect();
+        tensors.insert(canonical_name(name), TensorRef { file: index, start, end, dtype: info["dtype"].as_str().unwrap_or("").to_string(), shape });
+    }
+    Ok(())
 }
 
 /// Tensors that real mixed checkpoints keep at 8 bits.
@@ -103,27 +152,26 @@ impl Weights {
         }
 
         let mut files = Vec::new();
-        let mut tensors = HashMap::new();
-        for (index, path) in paths.iter().enumerate() {
+        for path in &paths {
             let file = File::open(path).map_err(|e| e.to_string())?;
             // SAFETY: checkpoints are treated as read-only for the life of the engine.
-            let map = unsafe { Mmap::map(&file) }.map_err(|e| e.to_string())?;
-            if map.len() < 8 {
-                return Err("truncated safetensors file".into());
-            }
-            let size = u64::from_le_bytes(map[..8].try_into().unwrap()) as usize;
-            let header: Value = serde_json::from_slice(&map[8..8 + size]).map_err(|e| e.to_string())?;
-            for (name, info) in header.as_object().ok_or("invalid header")? {
-                if name == "__metadata__" {
-                    continue;
-                }
-                let offsets = info["data_offsets"].as_array().ok_or("tensor without offsets")?;
-                let start = 8 + size + offsets[0].as_u64().unwrap_or(0) as usize;
-                let end = 8 + size + offsets[1].as_u64().unwrap_or(0) as usize;
-                let shape = info["shape"].as_array().ok_or("tensor without a shape")?.iter().map(|v| v.as_u64().unwrap_or(0) as usize).collect();
-                tensors.insert(canonical_name(name), TensorRef { file: index, start, end, dtype: info["dtype"].as_str().unwrap_or("").to_string(), shape });
-            }
-            files.push(map);
+            files.push(Storage::Mapped(unsafe { Mmap::map(&file) }.map_err(|e| e.to_string())?));
+        }
+        Self::from_storage(files)
+    }
+
+    /// The weights of safetensors files already in memory, in the order of their names.
+    pub fn from_buffers(files: Vec<Box<[u8]>>) -> Result<Self, String> {
+        if files.is_empty() {
+            return Err("there are no safetensors weights".into());
+        }
+        Self::from_storage(files.into_iter().map(Storage::Owned).collect())
+    }
+
+    fn from_storage(files: Vec<Storage>) -> Result<Self, String> {
+        let mut tensors = HashMap::new();
+        for (index, file) in files.iter().enumerate() {
+            read_header(file, index, &mut tensors)?;
         }
         Ok(Self { accelerator: None, files, tensors, format: None, references: Mutex::new(HashMap::new()), recoded: Mutex::new(HashMap::new()), recode_budget: AtomicUsize::new(default_recode_budget()), gpu_products: AtomicUsize::new(0), largest: Mutex::new(HashMap::new()) })
     }
@@ -136,10 +184,9 @@ impl Weights {
                 return Err(format!("{name}: the shape does not match the values"));
             }
             let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-            let mut map = memmap2::MmapMut::map_anon(bytes.len().max(1)).map_err(|e| e.to_string())?;
-            map[..bytes.len()].copy_from_slice(&bytes);
-            self.files.push(map.make_read_only().map_err(|e| e.to_string())?);
-            self.tensors.insert(name, TensorRef { file: self.files.len() - 1, start: 0, end: bytes.len(), dtype: "F32".into(), shape });
+            let end = bytes.len();
+            self.files.push(Storage::Owned(bytes.into_boxed_slice()));
+            self.tensors.insert(name, TensorRef { file: self.files.len() - 1, start: 0, end, dtype: "F32".into(), shape });
         }
         Ok(self)
     }

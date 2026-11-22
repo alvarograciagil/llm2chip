@@ -35,8 +35,24 @@ jobs:
           node-version: lts/*
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: Build the estimator
-        run: wasm-pack build crates/wasm --target web --out-dir ../../web/src/wasm --no-typescript --release
+      - name: Build the estimator and the simulator
+        run: |
+          wasm-pack build crates/wasm --target web --out-dir ../../web/src/wasm --no-typescript --release
+          wasm-pack build crates/wasm-sim --target web --out-dir ../../web/src/wasm-sim --no-typescript --release
+      # A model small enough to load at once, served with the demo: Andrej Karpathy's
+      # stories260K (llama2.c, MIT), converted at build time, so no weights live in the repository.
+      - name: Convert stories260K
+        env:
+          SOURCE: https://huggingface.co/karpathy/tinyllamas/resolve/0bd21da7698eaf29a0d7de3992de8a46ef624add/stories260K
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o stories260K.bin "$SOURCE/stories260K.bin"
+          curl -fsSL -o tok512.bin "$SOURCE/tok512.bin"
+          sha256sum -c - <<'SUMS'
+          b0a507e7ad0f626624f17112325e66691f9076d622e1d3274d103d00299f2696  stories260K.bin
+          037cb335abb25d1fa9e8ecae30ed2a3a8ace9302862ebcdc05d51a6bbb10c312  tok512.bin
+          SUMS
+          python3 -I "$GITHUB_WORKSPACE/tools/convert/llama2c.py" stories260K.bin tok512.bin "$GITHUB_WORKSPACE/web/public/models/stories260K"
       - name: Build the interface
         working-directory: web
         env:

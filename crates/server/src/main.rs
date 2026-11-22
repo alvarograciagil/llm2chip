@@ -34,7 +34,7 @@ use sim::image::{fitted_die, load_or_build, verify, write_chip_image, ImageReque
 use sim::lower::Layout;
 use sim::tokenizer::TokenizerTables;
 use sim::chip::{ImageTokens, Placement};
-use sim::{Engine, ExactEngine, Numeric, Runner, Weights};
+use sim::{sample, Engine, ExactEngine, Numeric, Runner, Weights};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -208,7 +208,7 @@ fn run_lab(catalog: &Catalog, request: LabRequest) -> Result<serde_json::Value, 
     }
     let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| e.to_string())?;
     let program = compile_model(&entry.config)?;
-    let prompt = PromptStyle::read(&dir, &program.family, &tokenizer);
+    let prompt = prompt::read(&dir, &program.family, &tokenizer);
     let (text, add_special) = prompt.render(&request.prompt, false)?;
     let mut tokens = tokenizer.encode(text.as_str(), add_special).map_err(|e| e.to_string())?.get_ids().to_vec();
     let prompt_tokens = tokens.len();
@@ -493,7 +493,7 @@ async fn image_start(State(app): State<App>, Json(request): Json<ImageStart>) ->
         let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json"));
         let outcome = tokenizer.map_err(|e| e.to_string()).and_then(|tokenizer| {
             let family = compile_model(&entry.config)?.family;
-            let prompt = PromptStyle::read(&dir, &family, &tokenizer);
+            let prompt = prompt::read(&dir, &family, &tokenizer);
             let firmware = FirmwareImage::from_elf(FIRMWARE)?;
             let out = home().join(".llm2chip/images").join(format!("{}.chipimg", entry.name.replace('/', "--")));
             // A chip's image has one framing of the text: with its template, nothing is added.
@@ -570,7 +570,7 @@ fn load_model(catalog: &Catalog, request: LoadRequest) -> Result<Loaded, String>
     };
     let program = compile_model(&config)?;
     let program = if carries_encoder { compiler::attach_vision(program, &config, CHIP_IMAGE_PATCHES)? } else { program };
-    let prompt = PromptStyle::read(dir, &program.family, &tokenizer);
+    let prompt = prompt::read(dir, &program.family, &tokenizer);
     let engine: Box<dyn Runner> = match exact_bits {
         Some(bits) => Box::new(ExactEngine::new(program, weights, bits)?),
         None => Box::new(Engine::new(program, weights, mode)?),
@@ -686,30 +686,6 @@ async fn handle_socket(mut socket: WebSocket, app: App) {
     }
     cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = worker.await;
-}
-
-fn sample(logits: &[f32], temperature: f32, top_k: usize, seed: &mut u64) -> u32 {
-    if temperature <= 0.0 {
-        return logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(i, _)| i as u32);
-    }
-    let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
-    let k = top_k.clamp(1, indexed.len());
-    indexed.select_nth_unstable_by(k - 1, |a, b| b.1.total_cmp(&a.1));
-    indexed.truncate(k);
-    let top = indexed.iter().map(|(_, v)| *v).fold(f32::MIN, f32::max);
-    let weights: Vec<f64> = indexed.iter().map(|(_, v)| (((v - top) / temperature) as f64).exp()).collect();
-    let total: f64 = weights.iter().sum();
-    *seed ^= *seed << 13;
-    *seed ^= *seed >> 7;
-    *seed ^= *seed << 17;
-    let mut point = (*seed as f64 / u64::MAX as f64) * total;
-    for ((i, _), w) in indexed.iter().zip(&weights) {
-        point -= w;
-        if point <= 0.0 {
-            return *i as u32;
-        }
-    }
-    indexed[0].0 as u32
 }
 
 const SAMPLER_ENTRIES: u32 = 64;

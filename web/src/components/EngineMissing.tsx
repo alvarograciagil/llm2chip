@@ -52,7 +52,7 @@ export function DemoStage({ view }: { view: View }) {
       <div className="demo-card">
         <h2>{title}</h2>
         <p>{what}</p>
-        <p className="muted-text">{t("It needs llm2chip's engine on your computer, because it works with the model's weights. This online demo runs only what fits in the browser: the floorplan, how it works, the schematic simulated gate by gate, the explorer and the export to Verilog and VHDL.")}</p>
+        <p className="muted-text">{t("It needs llm2chip's engine on your computer, because it works with the model's weights. This online demo runs only what fits in the browser: the floorplan, how it works, the schematic simulated gate by gate, the explorer, the export to Verilog and VHDL, and the simulator with small models.")}</p>
         <div className="demo-links">
           <a className="pill primary-pill" href={INSTALL_GUIDE} target="_blank" rel="noreferrer">{t("How to install it")}</a>
           <a className="pill" href={REPOSITORY} target="_blank" rel="noreferrer">{t("Source on GitHub")}</a>

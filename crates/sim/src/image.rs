@@ -81,7 +81,7 @@ pub fn build_manifest(weights: &Weights) -> Manifest {
 
 /// Walks every segment as the controller would. `flip_first` damages the first segment.
 pub fn verify(weights: &Weights, manifest: &Manifest, flip_first: bool) -> LoadReport {
-    let start = std::time::Instant::now();
+    let start = web_time::Instant::now();
     let tensors = weights.raw_tensors();
     let results: Vec<Option<u32>> = manifest
         .segments
@@ -248,7 +248,7 @@ fn rows_of_cell(rows: u64, cells: u64, cell: u64) -> u64 {
 /// for each chip count, then the weights in the order the cells take them. The file
 /// appears under its final name only once it is complete.
 pub fn write_chip_image(dir: &Path, firmware: &FirmwareImage, request: &ImageRequest, out: &Path, done: &AtomicU64, total: &AtomicU64, cancel: &AtomicBool) -> Result<ImageReport, String> {
-    let started = std::time::Instant::now();
+    let started = web_time::Instant::now();
     if request.chips.is_empty() || request.cells == 0 {
         return Err("the image needs at least one number of chips and one cell".into());
     }

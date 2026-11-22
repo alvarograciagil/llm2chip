@@ -8,7 +8,7 @@ The idea is to take specialization all the way: instead of a general accelerator
 
 > **Status.** llm2chip is a research project. Everything below runs in simulation: the generated netlists are simulated gate by gate and checked against the software models, but nothing has been built on an FPGA board or in silicon yet. Area, power and cost figures for modern nodes are estimates. See [What is verified](#what-is-verified) and [Limits](#limits).
 
-**[Try it in the browser](https://alvarograciagil.github.io/llm2chip/):** size a chip for a model, look at its floorplan, follow a token through it and simulate its circuit gate by gate, with nothing to install. Running real models with their weights needs the application on your computer: see [Installing](docs/install.md).
+**[Try it in the browser](https://alvarograciagil.github.io/llm2chip/):** size a chip for a model, look at its floorplan, follow a token through it, simulate its circuit gate by gate, and run small models on its arithmetic in the browser, with nothing to install. Larger models, the chip's firmware and the rest need the application on your computer: see [Installing](docs/install.md).
 
 ## What it is for
 

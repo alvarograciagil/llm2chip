@@ -1,0 +1,22 @@
+[package]
+name = "llm2chip-wasm-sim"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+# The chip simulator for the browser: kept apart from the estimator's bundle, so the page
+# loads it only when someone runs a model.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+compiler = { path = "../compiler" }
+netlist = { path = "../netlist" }
+sim = { path = "../sim" }
+tokenizer-rt = { path = "../tokenizer-rt" }
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }

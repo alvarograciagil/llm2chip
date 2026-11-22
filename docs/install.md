@@ -139,12 +139,17 @@ Anyone with that address can load and run models on your machine: do not share i
 
 ### The online demo, without the engine
 
-The interface also runs as static files, with no engine behind it: the estimator, the floorplan, how it works, the schematic simulated gate by gate, the explorer and the export to Verilog and VHDL all run in the browser on WebAssembly. The views that need a model's weights (Simulator, Images, Numerics, Optimise and Models) say they need the app installed instead of calling the engine.
+The interface also runs as static files, with no engine behind it: the estimator, the floorplan, how it works, the schematic simulated gate by gate, the explorer and the export to Verilog and VHDL all run in the browser on WebAssembly. The views that need the engine (Images, Numerics, Optimise and Models) say they need the app installed instead of calling it.
+
+The Simulator runs there too, on a WebAssembly build of the same simulator (`crates/wasm-sim`): it downloads a model into the browser and runs it on the design's integer arithmetic, on one thread and without a GPU, with the engine's framing, sampling and stops. It offers stories260K, served with the demo, and SmolLM2-135M-Instruct from Hugging Face, and takes any public model of a supported architecture up to 300 MB (`DOWNLOAD_LIMIT` in `web/src/simulator/browserModels.ts`); a model takes about three times its size in memory. Downloads stay in the browser's private storage (OPFS), so a model loads again without the network. The chip's CPU, its firmware and the image load need the app.
 
 ```bash
 scripts/build-wasm.sh
+python3 tools/convert/llama2c.py stories260K.bin tok512.bin web/public/models/stories260K
 cd web && VITE_DEMO=1 LLM2CHIP_BASE=/llm2chip/ npx vite build
 ```
+
+`stories260K.bin` and `tok512.bin` come from [karpathy/tinyllamas](https://huggingface.co/karpathy/tinyllamas/tree/main/stories260K); without them the demo offers only the models on Hugging Face.
 
 `LLM2CHIP_BASE` is the path the files are served under (`/` by default). The workflow in `.github/workflows/demo.yml` builds it on every push and publishes it to GitHub Pages from `main`.
 
