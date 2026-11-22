@@ -12,7 +12,7 @@ const report = (lines: string[]) => {
 
 /** Texts that read the same in Spanish: names, units and symbols. */
 const SAME = new Set([
-  "DeltaNet", "RoPE", "SiLU", "GELU", "Show-o", "Hugging Face", "ECC", "SRAM", "ROM", "HBM4", "tok/s", "Top-k", "top-k", "MTP", "CPU", "GPU", "FPGA", "UCIe", "Verilog", "VHDL", "MLX", "GGUF",
+  "DeltaNet", "RoPE", "SiLU", "GELU", "Show-o", "Hugging Face", "GitHub", "ECC", "SRAM", "ROM", "HBM4", "tok/s", "Top-k", "top-k", "MTP", "CPU", "GPU", "FPGA", "UCIe", "Verilog", "VHDL", "MLX", "GGUF",
   "Posit", "Error", "Total", "Booth", "Wallace", "Janus-Pro", "MAGVIT-v2", "Qwen", "ok", "PDK", "OpenROAD", "Yosys", "JTAG", "BIST", "KV", "Q·K", "lm_head", "RISC-V", "UART", "NVMe", "PCIe", "English", "Español", "llm2chip", "Bits", "Top-1", "MUX", "MLP",
 ]);
 
@@ -31,7 +31,7 @@ const sample = (template: string) => template.replace(/\$\{(?:[^{}]|\{[^{}]*\})*
 const SAME_WORDS = new Set(["chip", "chips", "bits", "Bits", "MLX", "Booth", "radix", "Die", "die", "dies", "Token", "token", "tokens", "Mbit", "DSP", "mult", "tok", "Bus", "Panel", "Prompt", "instr", "real", "Chips"]);
 
 /** Texts given to the model as they are, not interface: the sample questions. */
-const INPUTS = new Set(["What is the capital of France? Answer in one sentence.", "The capital of France is"]);
+const INPUTS = new Set(["What is the capital of France? Answer in one sentence.", "The capital of France is", "Once upon a time, there was a little robot"]);
 
 /** Whether `text` needs no translation: no words, or only names, units and shared words. */
 function neutral(text: string): boolean {

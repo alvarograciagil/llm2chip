@@ -3,6 +3,9 @@ app/src-tauri/gen/
 node_modules/
 web/dist/
 web/src/wasm/
+web/src/wasm-sim/
+web/src/wasm-sim-threads/
+web/public/models/
 *.chipimg
 .DS_Store
 .venv/

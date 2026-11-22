@@ -28,7 +28,7 @@ export const PARAM_HELP_ES: Record<string, string> = {
   weight_coding: "Cómo se convierte cada código guardado en un número. Cada familia genera su propio decodificador.",
   weight_bits: "Bits guardados por peso, de 2 a 32. Fija la memoria de pesos, que domina el área, y el tamaño del multiplicador de cada celda. Con menos bits cabe más modelo pero se pierde precisión.",
   weight_exponent_bits: "En coma flotante, los bits de exponente. En posit, «es». En logarítmico, los bits de fracción.",
-  use_model_mix: "Reproduce la mezcla de los pesos reales de Qwen en MLX: la mayoría a 4 bits y embed_tokens, lm_head, out_proj y la MLP de las últimas capas a 8. Las celdas guardan dos códigos de 4 bits en cada palabra de 8.",
+  use_model_mix: "Guarda a 8 bits los embeddings y la cabeza de salida y el resto a 4. Con Qwen reproduce la mezcla de sus pesos publicados, que también deja a 8 out_proj y la MLP de las últimas capas. Las celdas guardan dos códigos de 4 bits en cada palabra de 8.",
   weight_bias: "Si cada grupo guarda también un sesgo (peso = código · escala + sesgo). MLX y Q4_1 lo hacen; Q4_0 solo guarda escala. El sesgo cuesta memoria y una suma por grupo.",
   weight_fine_scale: "Una escala en coma flotante como NVFP4 necesita un multiplicador. Una potencia de dos como MXFP4 solo un desplazador, pero pierde precisión.",
   group_size: "Pesos consecutivos que comparten escala y sesgo (32 en el Qwen de MLX). Grupos pequeños dan más precisión pero más factores que guardar y aplicar. Con 0 no hay grupos.",

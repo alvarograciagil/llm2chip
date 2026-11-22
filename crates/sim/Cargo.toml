@@ -9,21 +9,27 @@ arch = { path = "../arch" }
 compiler = { path = "../compiler" }
 model-ir = { path = "../model-ir" }
 netlist = { path = "../netlist" }
-ash = "0.38"
 half = "2"
 memmap2 = "0.9"
 multiversion = "0.8"
-naga = { version = "30", features = ["wgsl-in", "spv-out"] }
 rayon = "1"
 libm = "0.2"
+minijinja = "2"
+minijinja-contrib = { version = "2", features = ["pycompat"] }
 serde.workspace = true
 serde_json.workspace = true
 regex-syntax = "0.8"
 crc32fast = "1"
 tokenizer-rt = { path = "../tokenizer-rt" }
 maskgit-rt = { path = "../maskgit-rt" }
-sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 unicode-normalization-alignments = "0.1"
+web-time = "1"
+
+# No Vulkan and no system probe in a browser: there the CPU path runs on WebAssembly.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ash = "0.38"
+naga = { version = "30", features = ["wgsl-in", "spv-out"] }
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

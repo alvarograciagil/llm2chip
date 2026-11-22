@@ -1,3 +1,4 @@
+import { DEMO, REPOSITORY } from "../demo";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useDesign, type Appearance } from "../store";
 import { datasheet } from "../datasheet";
@@ -195,6 +196,11 @@ export function Toolbar() {
         </IconButton>
         <AppearanceMenu />
         <LanguageMenu />
+        {DEMO && (
+          <a className="pill" href={REPOSITORY} target="_blank" rel="noreferrer" title={t("The source, and the app that runs real models on your computer")}>
+            {t("GitHub")}
+          </a>
+        )}
         <button className={baseline ? "pill on" : "pill"} onClick={baseline ? clearBaseline : pinBaseline}>
           {t(baseline ? "Remove" : "Pin")}<span className="wide-label">{t(baseline ? " baseline" : " as baseline")}</span>
         </button>

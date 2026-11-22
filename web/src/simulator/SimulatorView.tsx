@@ -1,3 +1,6 @@
+import { EngineMissing } from "../components/EngineMissing";
+import { DEMO } from "../demo";
+import { ModelPicker } from "./ModelPicker";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Segmented } from "../components/controls";
 import { Icon } from "../components/icons";
@@ -180,7 +183,7 @@ export function SimulatorView() {
         {error && (
           <div className="issue error" role="alert">
             <span className="issue-icon" aria-hidden="true">!</span>
-            <div><strong>{error}</strong></div>
+            <div><strong>{t(error)}</strong></div>
           </div>
         )}
         {image && (
@@ -283,15 +286,9 @@ export function SimulatorPanel() {
 
   if (state.online === false) {
     return (
-      <aside className="inspector">
+      <aside className="inspector essential">
         <h2 className="detail-title">{t("Local engine")}</h2>
-        <div className="issue warning" role="status">
-          <span className="issue-icon" aria-hidden="true">i</span>
-          <div>
-            <strong>{t("The engine is not running.")}</strong>
-            <p>{t("Start it with this command in the project folder")}: scripts/dev.sh</p>
-          </div>
-        </div>
+        <EngineMissing />
       </aside>
     );
   }
@@ -307,8 +304,9 @@ export function SimulatorPanel() {
           <strong>{design?.name ?? t("No model")}</strong>
           <span className="muted-text">{t(`The design's model, with its arithmetic: ${String(params.activation_bits)}-bit integers and weights ${t(formatLabel)}.`)}</span>
         </p>
+        {DEMO && <ModelPicker />}
         {candidates.length === 0 ? (
-          <>
+          DEMO ? null : <>
             <p className="muted-text">{t("There are no weights of this model on this machine, so the chip cannot be simulated yet.")}</p>
             <button className="link-button" onClick={() => setView("models")}>
               {t("Download its weights…")}
@@ -334,30 +332,33 @@ export function SimulatorPanel() {
                 {selected.name} · {selected.architecture} · {formatNumber(selected.size_gb)} GB
               </p>
             )}
-            <label className="check">
-              <input type="checkbox" checked={state.useGpu} onChange={(e) => set({ useGpu: e.target.checked })} />
-              {t("Use the GPU")}
-            </label>
+            {!DEMO && (
+              <label className="check">
+                <input type="checkbox" checked={state.useGpu} onChange={(e) => set({ useGpu: e.target.checked })} />
+                {t("Use the GPU")}
+              </label>
+            )}
             <button className="pill primary-pill" disabled={state.loading || !selected?.supported} onClick={() => void load()}>
-              {t(state.loading ? "Loading…" : state.loaded ? "Reload" : "Load the chip")}
+              {state.download ? `${t(state.download.phase)}… ${formatNumber(Math.floor((state.download.done / Math.max(state.download.total, 1)) * 100))} %` : t(state.loading ? "Loading…" : state.loaded ? "Reload" : "Load the chip")}
             </button>
             {stale && <p className="note-warning">{t("The design changed since it was loaded: reload to simulate the current chip.")}</p>}
-            {state.loaded && <p className="muted-text">{t("Loaded")}: {state.loaded} · {state.accelerator ?? "CPU"}</p>}
+            {state.loaded && <p className="muted-text">{t("Loaded")}: {state.loaded} · {t(state.accelerator ?? "CPU")}</p>}
           </>
         )}
       </div>
 
       <h3>{t("What is simulated")}</h3>
       <div className="inset padded form">
-        <Segmented
+        {!DEMO && <Segmented
           label={t("Profile")}
           value={profileOf(state)}
           options={[["die", t("The die")], ["chip", t("The whole chip")], ["custom", t("Custom")]]}
           onChange={(profile) => {
             if (profile !== "custom") set(PROFILES[profile]);
           }}
-        />
-        {(
+        />}
+        {DEMO && <p className="muted-text">{t("In the online demo the die runs alone, on WebAssembly: the chip's CPU, its firmware and the image load need the app.")}</p>}
+        {!DEMO && (
           [
             ["firmware", "Chip CPU and firmware", "The real firmware runs instruction by instruction and drives the die through its registers.", state.firmware, false],
             ["samplerUnit", "Chip sampling unit", "Picks each token with the same logic as the circuit, top-k included. Always used with the CPU.", state.samplerUnit || state.firmware, state.firmware],

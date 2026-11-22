@@ -4,7 +4,7 @@ use crate::weights::Weights;
 use compiler::{Op, Program};
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::time::Instant;
+use web_time::Instant;
 
 const EPS: f32 = 1e-6;
 

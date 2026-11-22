@@ -16,6 +16,8 @@ import { ParamDocsView } from "./docs/ParamDocsView";
 import { OptimizePanel, OptimizeView } from "./optimize/OptimizeView";
 import { useCellSim } from "./schematic/simStore";
 import { useDesign } from "./store";
+import { DEMO } from "./demo";
+import { DemoStage, ENGINE_VIEWS } from "./components/EngineMissing";
 
 // The 3D viewer brings Three.js, which only downloads when the view is opened.
 const ChipViewer = lazy(() => import("./viewer3d/ChipViewer"));
@@ -54,6 +56,16 @@ export function App() {
       <main className="split">
         <ColumnResizers />
         <Sidebar />
+        {DEMO && ENGINE_VIEWS.has(view) ? <DemoStage view={view} /> : <Views />}
+      </main>
+    </div>
+  );
+}
+
+function Views() {
+  const view = useDesign((s) => s.view);
+  return (
+    <>
         {view === "floorplan" && <FloorplanView />}
         {view === "floorplan" && <Inspector />}
         {view === "logic" && <LogicView />}
@@ -78,7 +90,6 @@ export function App() {
             <ChipViewer />
           </Suspense>
         )}
-      </main>
-    </div>
+    </>
   );
 }

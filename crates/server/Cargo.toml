@@ -10,8 +10,6 @@ chip-trace = { path = "../trace" }
 compiler = { path = "../compiler" }
 fs4 = "1"
 futures-util = "0.3"
-minijinja = "2"
-minijinja-contrib = { version = "2", features = ["pycompat"] }
 model-ir = { path = "../model-ir" }
 netlist = { path = "../netlist" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }

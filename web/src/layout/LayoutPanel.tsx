@@ -1,3 +1,4 @@
+import { DEMO } from "../demo";
 import type { Report } from "../engine";
 import { formatNumber } from "../format";
 import { useT } from "../i18n";
@@ -53,9 +54,9 @@ export function LayoutPanel({ report, allowed }: { report: Report; allowed: bool
           <>
             <p className="muted-text">{t("The cell the die repeats thousands of times, with the circuit chosen for this design, placed and routed with OpenROAD on")} {open}.</p>
             {allowed === false && <p className="note-warning">{t("The design cannot be built on this process as it stands: adjust it under “Feasibility” before laying it out.")}</p>}
-            <button className="pill primary-pill" disabled={layout.state === "running" || !request || allowed !== true} onClick={() => request && void layout.start(request)}>
+            {DEMO ? <p className="muted-text">{t("Laying it out needs the app on your computer, with Docker.")}</p> : <button className="pill primary-pill" disabled={layout.state === "running" || !request || allowed !== true} onClick={() => request && void layout.start(request)}>
               {layout.state === "running" ? `${t(layout.phase)}… ${layout.seconds} s` : result ? t("Lay it out again") : t("Lay it out")}
-            </button>
+            </button>}
             {layout.state === "error" && <p className="note-warning">{layout.error}</p>}
             {stale && result && <p className="muted-text">{t("The circuit changed since this layout.")}</p>}
           </>

@@ -9,6 +9,7 @@ pub mod janus;
 pub mod lower;
 pub mod magvit_chip;
 pub mod optimize;
+pub mod prompt;
 pub mod showo;
 pub mod showo_chip;
 pub mod sizing;
@@ -113,7 +114,7 @@ impl Runner for ExactEngine {
         ExactEngine::vocabulary(self)
     }
     fn step(&mut self, token: u32, want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
-        let started = std::time::Instant::now();
+        let started = web_time::Instant::now();
         self.logits = ExactEngine::step(self, token, want_logits)?.unwrap_or_default();
         let stats = StepStats { seconds: started.elapsed().as_secs_f64(), saturated: 0 };
         Ok((want_logits.then_some(self.logits.as_slice()), stats))
@@ -147,15 +148,41 @@ impl Runner for ExactEngine {
         ExactEngine::image_patches(self)
     }
     fn step_image(&mut self, index: u32, positions: [u64; 3], want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
-        let started = std::time::Instant::now();
+        let started = web_time::Instant::now();
         self.logits = ExactEngine::step_image(self, index, positions, want_logits)?.unwrap_or_default();
         let stats = StepStats { seconds: started.elapsed().as_secs_f64(), saturated: 0 };
         Ok((want_logits.then_some(self.logits.as_slice()), stats))
     }
     fn step_embedding(&mut self, embedding: &[f32], positions: [u64; 3], want_logits: bool) -> Result<(Option<&[f32]>, StepStats), String> {
-        let started = std::time::Instant::now();
+        let started = web_time::Instant::now();
         self.logits = ExactEngine::step_embedding(self, embedding, positions, want_logits)?.unwrap_or_default();
         let stats = StepStats { seconds: started.elapsed().as_secs_f64(), saturated: 0 };
         Ok((want_logits.then_some(self.logits.as_slice()), stats))
     }
+}
+
+/// Picks the next token: the likeliest at temperature 0, otherwise one of the `top_k`
+/// likeliest by their softmax at `temperature`, drawn with `seed` (xorshift).
+pub fn sample(logits: &[f32], temperature: f32, top_k: usize, seed: &mut u64) -> u32 {
+    if temperature <= 0.0 {
+        return logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(i, _)| i as u32);
+    }
+    let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    let k = top_k.clamp(1, indexed.len());
+    indexed.select_nth_unstable_by(k - 1, |a, b| b.1.total_cmp(&a.1));
+    indexed.truncate(k);
+    let top = indexed.iter().map(|(_, v)| *v).fold(f32::MIN, f32::max);
+    let weights: Vec<f64> = indexed.iter().map(|(_, v)| (((v - top) / temperature) as f64).exp()).collect();
+    let total: f64 = weights.iter().sum();
+    *seed ^= *seed << 13;
+    *seed ^= *seed >> 7;
+    *seed ^= *seed << 17;
+    let mut point = (*seed as f64 / u64::MAX as f64) * total;
+    for ((i, _), w) in indexed.iter().zip(&weights) {
+        point -= w;
+        if point <= 0.0 {
+            return *i as u32;
+        }
+    }
+    indexed[0].0 as u32
 }

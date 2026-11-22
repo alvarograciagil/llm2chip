@@ -1,0 +1,115 @@
+# The online demo: the interface with its WebAssembly estimator and simulator, served by
+# GitHub Pages on one thread and, once the repository has an HF_TOKEN secret and an HF_SPACE
+# variable (owner/name of a static Space), by a Hugging Face Space on several.
+# Every push that touches it builds it; only main publishes it.
+name: Online demo
+
+on:
+  push:
+    paths:
+      - "web/**"
+      - "crates/**"
+      - "Cargo.*"
+      - "scripts/build-wasm.sh"
+      - "scripts/demo-models.sh"
+      - "space/**"
+      - ".github/workflows/demo.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the estimator and the simulator
+        run: |
+          wasm-pack build crates/wasm --target web --out-dir ../../web/src/wasm --no-typescript --release
+          wasm-pack build crates/wasm-sim --target web --out-dir ../../web/src/wasm-sim --no-typescript --release
+      # A model small enough to load at once, served with the demo, converted at build time.
+      - name: Convert stories260K
+        run: scripts/demo-models.sh
+      - name: Build the interface
+        working-directory: web
+        env:
+          VITE_DEMO: "1"
+          LLM2CHIP_BASE: /${{ github.event.repository.name }}/
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npx vitest run
+          npx vite build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  # The same demo on a Hugging Face Space, whose headers isolate the page so the simulator
+  # can share its memory with workers: models of 32 MB or more run on several threads.
+  space:
+    if: github.ref == 'refs/heads/main' && vars.HF_SPACE != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the estimator and both simulators
+        run: scripts/build-wasm.sh --threads
+      - name: Convert stories260K
+        run: scripts/demo-models.sh
+      - name: Build the interface
+        working-directory: web
+        env:
+          VITE_DEMO: "1"
+          LLM2CHIP_BASE: /
+        run: |
+          npm ci
+          npx vite build
+          cp ../space/README.md dist/README.md
+      - name: Publish to the Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SPACE: ${{ vars.HF_SPACE }}
+        run: |
+          pipx run --spec "huggingface_hub>=0.34,<2" hf upload "$SPACE" web/dist . --repo-type space --delete "assets/*" --commit-message "Online demo from ${GITHUB_SHA::7}"
