@@ -666,7 +666,7 @@ fn compile_deepseek(config: &Value) -> Result<Program, String> {
             Some(rank) => {
                 let compact = with_bias(&mut e, "Latent Q projection", p("q_a_proj"), normed, rank, bias);
                 let compact = e.norm("Normalize latent Q", compact, p("q_a_layernorm"), rank, rank);
-                e.matvec("Expandir Q", p("q_b_proj"), compact, heads * q_head)
+                e.matvec("Q expansion", p("q_b_proj"), compact, heads * q_head)
             }
             None => e.matvec("Q projection", p("q_proj"), normed, heads * q_head),
         };
