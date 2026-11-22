@@ -8,6 +8,7 @@ import { DEFAULT_RECORD, designRequest, useViewer, type RecordRequest } from "./
 import { InsideDie } from "./InsideDie";
 import { useInside } from "./inside";
 import { operationName } from "../operations";
+import { placeLabels } from "./labels";
 import { byOperations, compareTraces, cyclesByKind, dieAt, dieShares, divergedAt, opKinds, useShare, stepAt, totalCycles, type Stride, type Trace, type WordClass } from "./trace";
 
 // The 3D viewer of the chip at work: loaded on demand, so Three.js only downloads when the
@@ -88,14 +89,24 @@ function ChipStage() {
     });
     scene.onPick = (die) => useViewer.getState().select(die);
     scene.onOpen = (die) => lookInside(die);
+    // Each label's size in full and with only its name, as last measured in each form.
+    const sizes: { full: Size; short: Size }[] = [];
     scene.onFrame = (positions) => {
       const box = labels.current;
       if (!box) return;
-      positions.forEach((p, i) => {
-        const label = box.children[i] as HTMLElement | undefined;
+      const items = positions.map((_, i) => box.children[i] as HTMLElement | undefined);
+      items.forEach((label, i) => {
         if (!label) return;
+        const size = (sizes[i] ??= { full: { w: 0, h: 0 }, short: { w: 0, h: 0 } });
+        size[label.dataset.form === "short" ? "short" : "full"] = { w: label.offsetWidth, h: label.offsetHeight };
+      });
+      const forms = placeLabels(positions.map((p, i) => ({ ...p, ...(sizes[i] ?? { full: { w: 0, h: 0 }, short: { w: 0, h: 0 } }) })), useViewer.getState().selected);
+      items.forEach((label, i) => {
+        if (!label) return;
+        const p = positions[i];
         label.style.transform = `translate(${p.x}px, ${p.y}px) translate(-50%, -100%)`;
-        label.style.visibility = p.visible ? "visible" : "hidden";
+        label.style.visibility = forms[i] === "hidden" ? "hidden" : "visible";
+        label.dataset.form = forms[i];
       });
     };
     return () => {
@@ -211,6 +222,8 @@ const STRIDES: [Stride, string][] = [
   ["layer", "Layer"],
   ["step", "Token"],
 ];
+
+type Size = { w: number; h: number };
 
 const SPEEDS = [1, 10, 100, 1_000, 10_000, 100_000];
 

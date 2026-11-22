@@ -3850,6 +3850,11 @@ label:hover > .hint-icon {
   text-overflow: ellipsis;
 }
 
+/* Where it would cover a nearer label, a label shows only the die's name. */
+.viewer-label[data-form="short"] > :not(strong) {
+  display: none;
+}
+
 .viewer-label.stalled {
   border-color: var(--red);
   background: var(--red-bg);

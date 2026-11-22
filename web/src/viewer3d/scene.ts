@@ -126,7 +126,7 @@ export class ChipScene {
   /** Where the camera was before it flew to a die. */
   private home: [THREE.Vector3, THREE.Vector3] | null = null;
   /** Called on every frame after drawing, with the screen position of each die's top. */
-  onFrame: (positions: { x: number; y: number; visible: boolean }[]) => void = () => {};
+  onFrame: (positions: { x: number; y: number; depth: number; visible: boolean }[]) => void = () => {};
   private tick: () => void = () => {};
 
   constructor(private host: HTMLElement) {
@@ -340,7 +340,7 @@ export class ChipScene {
     const { clientWidth: w, clientHeight: h } = this.host;
     return this.layout.dies.map((d) => {
       const v = new THREE.Vector3(d.center.x, 0.9, d.center.z - d.depth / 2).project(this.camera);
-      return { x: ((v.x + 1) / 2) * w, y: ((1 - v.y) / 2) * h, visible: v.z < 1 };
+      return { x: ((v.x + 1) / 2) * w, y: ((1 - v.y) / 2) * h, depth: v.z, visible: v.z < 1 };
     });
   }
 
