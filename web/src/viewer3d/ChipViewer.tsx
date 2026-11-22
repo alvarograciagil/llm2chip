@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type CSSProperties, type ReactNode } from "react";
 import { useT } from "../i18n";
 import { useDesign } from "../store";
 import { Segmented } from "../components/controls";
@@ -220,6 +220,7 @@ function ChipPanel() {
   const cycle = useViewer((s) => Math.floor(s.cycle));
   const playing = useViewer((s) => s.playing);
   const speed = useViewer((s) => s.speed);
+  const speedAt = Math.max(0, SPEEDS.findIndex((s) => s >= speed));
   const stride = useViewer((s) => s.stride);
   const selected = useViewer((s) => s.selected);
   const error = useViewer((s) => s.error);
@@ -260,12 +261,12 @@ function ChipPanel() {
           </div>
           <label className="viewer-row">
             <span>{t("Speed")}</span>
-            <input type="range" min={0} max={SPEEDS.length - 1} step={1} value={Math.max(0, SPEEDS.findIndex((s) => s >= speed))} onChange={(e) => setSpeed(SPEEDS[Number(e.target.value)])} />
+            <input type="range" min={0} max={SPEEDS.length - 1} step={1} value={speedAt} style={fillTo(speedAt, SPEEDS.length - 1)} onChange={(e) => setSpeed(SPEEDS[Number(e.target.value)])} />
             <span className="muted-text">{t(`${speed.toLocaleString()} cycles a second`)}</span>
           </label>
           <label className="viewer-row">
             <span>{t("Cycle")}</span>
-            <input type="range" min={0} max={total - 1} value={cycle} onChange={(e) => setCycle(Number(e.target.value))} />
+            <input type="range" min={0} max={total - 1} value={cycle} style={fillTo(cycle, total - 1)} onChange={(e) => setCycle(Number(e.target.value))} />
           </label>
           <Timeline trace={trace} cycle={cycle} />
           <dl className="inset metrics">
@@ -331,6 +332,11 @@ function Uses({ trace }: { trace: Trace }) {
 }
 
 /** A routine of a trace, for a person: the token or the logits, and where in the context. */
+/** How far along its track a slider from 0 to `max` is, for the track's colour. */
+function fillTo(value: number, max: number): CSSProperties {
+  return { ["--fill" as string]: `${max > 0 ? Math.min(1, Math.max(0, value / max)) * 100 : 0}%` };
+}
+
 function stepLabel(label: string, t: (text: string) => string): string {
   const [routine, position] = label.split(" ");
   return routine === "token" ? t(`Token at position ${position}`) : t(`Logits at position ${position}`);
