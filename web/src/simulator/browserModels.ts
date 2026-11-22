@@ -32,4 +32,21 @@ export const SUGGESTED: BrowserSource[] = [
   { repo: "HuggingFaceTB/SmolLM2-135M-Instruct" },
 ];
 
+/** What to ask a model that only continues text, instead of the question the simulator starts with. */
+export const PROMPTS: Record<string, string> = { "site:stories260K": "Once upon a time, there was a little robot" };
+
+/** A link loads and runs a model on its own only up to this size; a larger one waits for a click. */
+export const LINK_LOAD_LIMIT = 16 * 2 ** 20;
+
+/** Why a model may not run on this device: it takes about three times its download in
+ * memory. Browsers that say how much the device has are told apart; phones and tablets that
+ * do not are warned above half a gigabyte. */
+export function memoryWarning(bytes: number): string | null {
+  const needed = Math.round((3 * bytes) / 2 ** 20);
+  const device = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
+  if (device) return 3 * bytes > (device * 2 ** 30) / 4 ? `It needs about ${needed} MB of memory, and this device has ${device} GB: the page may close.` : null;
+  const touch = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+  return touch && 3 * bytes > 2 ** 29 ? `It needs about ${needed} MB of memory: on a phone or tablet the page may close.` : null;
+}
+
 export const sourceId = (source: BrowserSource) => ("site" in source ? `site:${source.site}` : `hf:${source.repo}`);

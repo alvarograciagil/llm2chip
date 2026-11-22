@@ -3,8 +3,9 @@ import type { Adaptation } from "../models/modelsStore";
 import { useDesign } from "../store";
 import { addActivity, EMPTY_ACTIVITY, readActivity, readCpuInfo, type ChipStep, type CpuInfo, type StepActivity } from "./activity";
 import { DEMO } from "../demo";
-import { describeModel, loadModel, runModel, stopModel } from "./browserChip";
-import { SUGGESTED, type BrowserModel, type BrowserSource } from "./browserModels";
+import { describeModel, forgetModel, keptModels, loadModel, runModel, stopModel } from "./browserChip";
+import { LINK_LOAD_LIMIT, PROMPTS, SUGGESTED, type BrowserModel, type BrowserSource } from "./browserModels";
+import { LINK } from "../link";
 
 /** Steps kept for the list: the oldest go once there are more. */
 const MAX_STEPS = 2000;
@@ -130,18 +131,32 @@ interface SimulatorState {
   download: { phase: string; done: number; total: number } | null;
   /** In the online demo: why a model asked for cannot run here. */
   browserRefusal: string | null;
+  /** In the online demo: the bytes of each model the browser keeps, and of everything kept. */
+  kept: Record<string, number>;
+  keptTotal: number;
+  /** In the online demo: the last load had no room to keep a copy. */
+  noRoom: boolean;
 
   connect: () => Promise<void>;
   /** In the online demo: adds a model from Hugging Face if the browser can run it. */
   addBrowserModel: (source: BrowserSource) => Promise<BrowserModel | null>;
+  /** In the online demo: makes a model the one simulated, and the design's model. */
+  chooseBrowserModel: (model: BrowserModel) => void;
+  /** In the online demo: follows a link to the simulator opened in the page already. */
+  openLink: (model: string | null) => Promise<void>;
+  /** In the online demo: deletes the browser's copy of a model. */
+  forgetBrowserModel: (model: BrowserModel | null) => Promise<void>;
   set: (patch: Partial<SimulatorState>) => void;
   load: () => Promise<void>;
   generate: () => void;
   stop: () => void;
 }
 
+/** The question the simulator starts with. */
+const QUESTION = "What is the capital of France? Answer in one sentence.";
+
 let socket: WebSocket | null = null;
-let described = false;
+let described: Promise<void> | null = null;
 
 /** A model the browser runs, as the list of the engine's models shows one. */
 function asServerModel(model: BrowserModel): ServerModel {
@@ -217,10 +232,20 @@ async function loadInBrowser(get: Getter, set: Setter) {
   set({ loading: true, error: null, download: null });
   try {
     const setup = { activation_bits: chipNumeric(params).activation_bits, format: chipFormat(params), context_tokens: Number(params.context_tokens) || 0 };
-    await loadModel(model, setup, (phase, done, total) => set({ download: { phase, done, total } }));
-    set({ loaded: model.name, accelerator: "WebAssembly", loadReport: null, loading: false, download: null, numericLoaded: "exact", loadedSignature: signature });
+    const { kept } = await loadModel(model, setup, (phase, done, total) => set({ download: { phase, done, total } }));
+    await refreshKept(get, set);
+    set({ noRoom: !kept, loaded: model.name, accelerator: "WebAssembly", loadReport: null, loading: false, download: null, numericLoaded: "exact", loadedSignature: signature });
   } catch (e) {
     set({ error: e instanceof Error ? e.message : String(e), loading: false, download: null });
+  }
+}
+
+async function refreshKept(get: Getter, set: Setter) {
+  try {
+    const { models, total } = await keptModels(get().browserModels);
+    set({ kept: models, keptTotal: total });
+  } catch {
+    set({ kept: {}, keptTotal: 0 });
   }
 }
 
@@ -229,6 +254,21 @@ function generateInBrowser(get: Getter, set: Setter) {
   const budget = thinkBudget.trim() === "" ? null : Math.max(0, Math.floor(Number(thinkBudget) || 0));
   set({ ...FRESH_RUN, image: null, draw: false });
   runModel({ prompt, max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, seed: Math.floor(Math.random() * 2 ** 32) }, (event) => handleEvent(set, event, () => undefined));
+}
+
+/** A link to the simulator: chooses its model, stories260K if it names none, and runs it if
+ * it is small enough to download without asking. */
+async function followLink(name: string | null, get: Getter) {
+  const wanted = name ?? "stories260K";
+  const { browserModels, addBrowserModel } = get();
+  const model = browserModels.find((m) => m.name === wanted || m.id === `hf:${wanted}`) ?? (wanted.includes("/") ? await addBrowserModel({ repo: wanted }) : null);
+  if (!model) return;
+  // A link followed during a run ends it first; the engine is rebuilt only for another model.
+  if (get().running) get().stop();
+  get().chooseBrowserModel(model);
+  if (model.bytes > LINK_LOAD_LIMIT) return;
+  if (get().loaded !== model.name) await get().load();
+  if (get().loaded === model.name && !get().error) get().generate();
 }
 
 export const useSimulator = create<SimulatorState>((set, get) => ({
@@ -257,7 +297,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   loadReport: null,
   chip: null,
   acceptance: { hits: [], tries: [] },
-  prompt: "What is the capital of France? Answer in one sentence.",
+  prompt: QUESTION,
   image: null,
   imageReport: null,
   draw: false,
@@ -283,16 +323,22 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   browserModels: [],
   download: null,
   browserRefusal: null,
+  kept: {},
+  keptTotal: 0,
+  noRoom: false,
 
   async connect() {
     if (DEMO) {
       // The browser is the engine: it only has to find out what it can run, once.
-      if (described) return;
-      described = true;
-      set({ online: true });
-      await Promise.all(SUGGESTED.map((source) => get().addBrowserModel(source)));
-      set({ browserRefusal: null });
-      return;
+      if (described) return described;
+      described = (async () => {
+        set({ online: true });
+        await Promise.all(SUGGESTED.map((source) => get().addBrowserModel(source)));
+        set({ browserRefusal: null });
+        await refreshKept(get, set);
+        if (LINK?.view === "simulator") await followLink(LINK.model, get);
+      })();
+      return described;
     }
     try {
       const [models, status] = await Promise.all([fetch("/api/models"), fetch("/api/status")]);
@@ -314,11 +360,30 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
       const model = await describeModel(source);
       const others = get().browserModels.filter((m) => m.id !== model.id);
       set({ browserModels: [...others, model], models: [...get().models.filter((m) => m.path !== model.id), asServerModel(model)] });
+      if (described) void refreshKept(get, set);
       return model;
     } catch (e) {
       set({ browserRefusal: e instanceof Error ? e.message : String(e) });
       return null;
     }
+  },
+
+  chooseBrowserModel(model) {
+    useDesign.getState().addModel(model.name, model.config, model.id);
+    // A model that only continues text gets a beginning to continue, unless the prompt is one's own.
+    const { prompt } = get();
+    const ours = prompt === QUESTION || Object.values(PROMPTS).includes(prompt);
+    set({ path: model.id, ...(ours ? { prompt: PROMPTS[model.id] ?? QUESTION } : {}) });
+  },
+
+  async openLink(model) {
+    await get().connect();
+    await followLink(model, get);
+  },
+
+  async forgetBrowserModel(model) {
+    await forgetModel(model).catch(() => undefined);
+    await refreshKept(get, set);
   },
 
   async load() {

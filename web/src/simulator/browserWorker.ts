@@ -7,7 +7,9 @@ export type WorkerRequest =
   | { type: "describe"; source: BrowserSource }
   | { type: "load"; model: BrowserModel; setup: { activation_bits: number; format: unknown; context_tokens: number } }
   | { type: "generate"; request: Record<string, unknown> }
-  | { type: "stop" };
+  | { type: "stop" }
+  | { type: "kept"; id: number; models: BrowserModel[] }
+  | { type: "forget"; id: number; model: BrowserModel | null };
 
 const ready = init();
 const MB = 2 ** 20;
@@ -77,6 +79,62 @@ async function readAll(stream: ReadableStream<Uint8Array>, take: (part: Uint8Arr
   }
 }
 
+const filesOf = (model: BrowserModel) => [...model.texts, ...model.weights.map((w) => w.name)].map((name) => storedName(model.base + name));
+
+/** How many bytes of a model the browser keeps complete. */
+async function keptBytes(folder: FileSystemDirectoryHandle, model: BrowserModel): Promise<number> {
+  let bytes = 0;
+  for (const name of filesOf(model)) {
+    try {
+      await folder.getFileHandle(`${name}.done`);
+      bytes += (await (await folder.getFileHandle(name)).getFile()).size;
+    } catch {
+      // Not kept, or kept only in part.
+    }
+  }
+  return bytes;
+}
+
+/** The bytes of each model the browser keeps, and of everything kept: copies of models no
+ * longer offered, or of another commit, count too. */
+async function kept(models: BrowserModel[]): Promise<{ models: Record<string, number>; total: number }> {
+  const folder = await storeFolder();
+  const out: Record<string, number> = {};
+  let total = 0;
+  if (folder) {
+    for (const model of models) out[model.id] = await keptBytes(folder, model);
+    for await (const handle of (folder as FileSystemDirectoryHandle & { values(): AsyncIterable<FileSystemHandle> }).values()) {
+      if (handle.kind === "file") total += (await (handle as FileSystemFileHandle).getFile()).size;
+    }
+  }
+  return { models: out, total };
+}
+
+/** Deletes a model's copy, or with none, everything kept. */
+async function forget(model: BrowserModel | null) {
+  if (!model) {
+    await (await navigator.storage.getDirectory()).removeEntry(STORE, { recursive: true }).catch(() => undefined);
+    return;
+  }
+  const folder = await storeFolder();
+  for (const name of folder ? filesOf(model) : []) {
+    // The marker first: a file without it is never read.
+    for (const entry of [`${name}.done`, name]) await folder?.removeEntry(entry).catch(() => undefined);
+  }
+}
+
+/** Whether the browser has room to keep a copy of `bytes` more: without it, the model runs
+ * all the same and downloads again next time, instead of filling the disk to fail halfway. */
+let room = true;
+async function checkRoom(bytes: number) {
+  try {
+    const { quota, usage } = await navigator.storage.estimate();
+    room = quota === undefined || usage === undefined || quota - usage > bytes + 64 * MB;
+  } catch {
+    room = true;
+  }
+}
+
 /** A file's bytes, given to `take` as they come: from the browser's private storage when a
  * complete copy is there, otherwise from the network, keeping a copy as it arrives. Models
  * come at a fixed commit, so a copy never goes stale. Returns how many bytes there were. */
@@ -96,6 +154,7 @@ async function download(url: string, take: (part: Uint8Array) => void): Promise<
   if (!response.ok || !response.body) throw new Error(`${url}: ${response.status}`);
   let copy: SyncHandle | null = null;
   try {
+    if (!room) throw new Error("No room to keep it.");
     const handle = (await folder?.getFileHandle(name, { create: true })) as (FileSystemFileHandle & { createSyncAccessHandle(): Promise<SyncHandle> }) | undefined;
     copy = (await handle?.createSyncAccessHandle()) ?? null;
     copy?.truncate(0);
@@ -141,6 +200,8 @@ async function load(model: BrowserModel, setup: unknown) {
   chip = null;
   const checkpoint = new Checkpoint();
   try {
+    const folder = await storeFolder();
+    await checkRoom(model.bytes - (folder ? await keptBytes(folder, model) : 0));
     for (const name of model.texts) checkpoint.add_text(name, await downloadText(model.base + name));
     const total = model.weights.reduce((sum, w) => sum + w.size, 0);
     let done = 0;
@@ -163,7 +224,7 @@ async function load(model: BrowserModel, setup: unknown) {
     postMessage({ type: "progress", phase: "Building the chip", done: total, total });
     const started = performance.now();
     chip = new BrowserChip(checkpoint, JSON.stringify(setup));
-    postMessage({ type: "loaded", seconds: (performance.now() - started) / 1000 });
+    postMessage({ type: "loaded", seconds: (performance.now() - started) / 1000, kept: room });
   } catch (e) {
     checkpoint.free();
     throw e;
@@ -191,9 +252,12 @@ onmessage = async (event: MessageEvent<WorkerRequest>) => {
     if (message.type === "load") await load(message.model, message.setup);
     if (message.type === "generate") await generate(message.request);
     if (message.type === "stop") running++;
+    if (message.type === "kept") postMessage({ type: "reply", id: message.id, value: await kept(message.models) });
+    if (message.type === "forget") postMessage({ type: "reply", id: message.id, value: await forget(message.model) });
   } catch (e) {
     // A panic leaves the engine unusable: it must be loaded again.
     if (e instanceof WebAssembly.RuntimeError) chip = null;
-    postMessage({ type: "error", during: message.type, source: message.type === "describe" ? message.source : undefined, message: e instanceof Error ? e.message : String(e) });
+    if ("id" in message) postMessage({ type: "reply", id: message.id, error: e instanceof Error ? e.message : String(e) });
+    else postMessage({ type: "error", during: message.type, source: message.type === "describe" ? message.source : undefined, message: e instanceof Error ? e.message : String(e) });
   }
 };

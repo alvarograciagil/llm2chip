@@ -1,0 +1,21 @@
+// What a link to the app asks for in its address: a view (`#simulator`), and for the
+// simulator a model (`#simulator/stories260K`, `#simulator/owner/name`). Read once, at
+// start, because the address then carries the design (`#d=…`).
+import type { View } from "./store";
+
+const VIEWS: View[] = ["floorplan", "logic", "schematic", "simulator", "images", "explorer", "optimize", "models", "numeric", "parameters"];
+
+export interface Link {
+  view: View;
+  /** The simulator's model: a name the demo offers, or a repository on Hugging Face. */
+  model: string | null;
+}
+
+export function readLink(hash: string): Link | null {
+  const [view, ...rest] = decodeURIComponent(hash.replace(/^#/, "")).split("/");
+  if (!VIEWS.includes(view as View)) return null;
+  const model = rest.join("/").trim();
+  return { view: view as View, model: view === "simulator" && model ? model : null };
+}
+
+export const LINK = typeof location === "undefined" ? null : readLink(location.hash);

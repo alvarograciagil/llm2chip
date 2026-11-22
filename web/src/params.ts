@@ -45,7 +45,7 @@ export const WEIGHT_PRESETS: PresetSection[] = [
   {
     title: "Grouped affine (MLX)",
     presets: [
-      { label: "Mix of 4 and 8 bits (real Qwen)", values: { weight_coding: "affine", weight_bits: 4, use_model_mix: true, group_size: 32, weight_bias: true } },
+      { label: "Mix of 4 and 8 bits", values: { weight_coding: "affine", weight_bits: 4, use_model_mix: true, group_size: 32, weight_bias: true } },
       ...range(2, 8).map((bits) => ({ label: `MLX ${bits} bits`, values: affine(bits, bits <= 5 ? 32 : 64, true) })),
     ],
   },
@@ -170,7 +170,7 @@ export const PARAM_GROUPS: Group[] = [
       { kind: "select", key: "weight_coding", label: "Coding", options: [["affine", "Grouped affine"], ["fixed", "Fixed point"], ["float", "Floating point"], ["posit", "Posit"], ["log", "Logarithmic"], ["codebook", "Codebook"]], help: "How each stored code is turned into a number. Each family generates its own decoder." },
       { kind: "range", key: "weight_bits", label: "Weight bits", min: 2, max: 32, step: 1, integer: true, help: "Bits stored per weight, from 2 to 32. Sets the weight memory, which dominates the area, and the size of each cell's multiplier. With fewer bits more model fits but precision is lost." },
       { kind: "range", key: "weight_exponent_bits", label: "Exponent bits", min: 1, max: 15, step: 1, integer: true, help: "In floating point, the exponent bits. In posit, “es”. In logarithmic, the fraction bits.", when: (p) => ["float", "posit", "log"].includes(String(p.weight_coding)) },
-      { kind: "toggle", key: "use_model_mix", label: "Keep 8-bit tensors", help: "Reproduces the mix of Qwen's real weights in MLX: most at 4 bits, and embed_tokens, lm_head, out_proj and the MLP of the last layers at 8. The cells keep two 4-bit codes in each 8-bit word.", when: (p) => p.weight_coding === "affine" },
+      { kind: "toggle", key: "use_model_mix", label: "Keep 8-bit tensors", help: "Keeps the embeddings and the output head at 8 bits and the rest at 4. For Qwen it reproduces the mix of its released weights, which also keeps out_proj and the MLP of the last layers at 8. The cells keep two 4-bit codes in each 8-bit word.", when: (p) => p.weight_coding === "affine" },
       { kind: "toggle", key: "weight_bias", label: "Bias per group", help: "Whether each group also keeps a bias (weight = code · scale + bias). MLX and Q4_1 do; Q4_0 only keeps a scale. The bias costs memory and an addition per group.", when: (p) => p.weight_coding === "affine" },
       { kind: "toggle", key: "weight_fine_scale", label: "Fine scale per group", help: "A floating-point scale like NVFP4 needs a multiplier. A power of two like MXFP4 only a shifter, but it loses precision.", when: (p) => p.weight_coding === "float" && Number(p.group_size) > 0 },
       { kind: "range", key: "group_size", label: "Weights per group", min: 0, max: 256, step: 8, integer: true, help: "Consecutive weights that share scale and bias (32 in MLX's Qwen). Small groups give more precision but more factors to keep and apply. With 0 there are no groups.", when: (p) => p.weight_coding === "affine" || p.weight_coding === "float" },

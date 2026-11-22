@@ -3869,6 +3869,29 @@ a.pill:not(.primary-pill) {
   box-shadow: inset 0 0 0 1.5px var(--accent);
 }
 
+.browser-model-row {
+  display: flex;
+  gap: 4px;
+}
+
+.browser-model-row .browser-model {
+  flex: 1;
+  min-width: 0;
+}
+
+.browser-forget {
+  width: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--control);
+  color: inherit;
+  font-size: 16px;
+}
+
+.browser-forget:hover {
+  background: var(--control-hover);
+}
+
 .browser-repo {
   display: flex;
   gap: 6px;

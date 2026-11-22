@@ -27,6 +27,7 @@ export type SidebarTab = "parameters" | "optimizations";
 export type View = "floorplan" | "logic" | "schematic" | "simulator" | "images" | "explorer" | "optimize" | "models" | "numeric" | "parameters";
 export type Appearance = "auto" | "light" | "dark";
 import { readLanguage, writeLanguage, type Language } from "./i18n";
+import { LINK } from "./link";
 
 export interface SavedDesign {
   name: string;
@@ -223,7 +224,7 @@ export const useDesign = create<DesignState>((set, get) => {
     designName: "Untitled",
     selection: null,
     overlay: "function",
-    view: "floorplan",
+    view: LINK?.view ?? "floorplan",
     appearance: "auto",
     language: readLanguage(),
     sidebarTab: "parameters",

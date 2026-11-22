@@ -170,7 +170,7 @@ In floating point, the exponent bits. In posit, “es”. In logarithmic, the fr
 
 ### Keep 8-bit tensors (`use_model_mix`)
 
-Reproduces the mix of Qwen's real weights in MLX: most at 4 bits, and embed_tokens, lm_head, out_proj and the MLP of the last layers at 8. The cells keep two 4-bit codes in each 8-bit word.
+Keeps the embeddings and the output head at 8 bits and the rest at 4. For Qwen it reproduces the mix of its released weights, which also keeps out_proj and the MLP of the last layers at 8. The cells keep two 4-bit codes in each 8-bit word.
 
 *On or off.*
 
