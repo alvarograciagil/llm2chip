@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type { Bit, NetlistModule } from "../engine";
 import { IconButton } from "../components/controls";
-import { AREA_VIEW_THRESHOLD, layoutAreas, layoutModule, type Edge, type Layout, type Node, type Pin } from "./layout";
+import { AREA_VIEW_THRESHOLD, fitCamera, layoutAreas, layoutModule, valuePlace, type Edge, type Layout, type Node, type Pin } from "./layout";
 import type { Design } from "../engine";
 import { currentModule } from "./simStore";
 import { useT } from "../i18n";
@@ -39,6 +39,8 @@ function compactValue(bits: string): string {
   const full = showValue(bits);
   if (full.length <= 6) return full;
   const value = Number(full);
+  // Past a thousand tera, a wide word fits the box only with its exponent.
+  if (Math.abs(value) >= 1e15) return value.toExponential(1).replace("e+", "e");
   const [limit, suffix] = Math.abs(value) >= 1e12 ? [1e12, "T"] : Math.abs(value) >= 1e9 ? [1e9, "G"] : Math.abs(value) >= 1e6 ? [1e6, "M"] : [1e3, "k"];
   return `${(value / limit).toFixed(Math.abs(value / limit) >= 100 ? 0 : 1)}${suffix}`;
 }
@@ -119,7 +121,7 @@ function BoxSymbol({ node, selected, value }: { node: Node; selected: boolean; v
             {p.name}
           </text>
           {p.width > 1 && (
-            <text className="pin-value" x={node.w / 2} y={p.y + 3.5} textAnchor="middle">
+            <text className="pin-value" x={valuePlace(node, p).x} y={p.y + 3.5} textAnchor={valuePlace(node, p).anchor}>
               {compactValue(value(p))}
             </text>
           )}
@@ -324,10 +326,9 @@ export function NetlistStage({ design, path, area, snapshot, selected, onSelect:
     if (!el || !layout) return;
     const { width, height } = el.getBoundingClientRect();
     // Never shrink so far that the labels stop being readable: the rest is reached by panning.
-    const k = Math.max(Math.min(MIN_FIT, 1.4), Math.min(1.4, (width - 80) / layout.width, (height - 130) / layout.height));
-    if (!(k > 0)) return;
-    const overflow = layout.width * k > width - 48;
-    camera.current = { k, x: overflow ? 24 : (width - layout.width * k) / 2, y: Math.max(62, 62 + (height - 110 - layout.height * k) / 2) };
+    const start = fitCamera(layout, width, height, MIN_FIT);
+    if (!start) return;
+    camera.current = start;
     apply();
   }, [layout, apply]);
 

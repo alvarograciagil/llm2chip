@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Bit, Design, Instance, NetlistModule } from "../engine";
-import { layoutModule } from "./layout";
+import { fitCamera, layoutModule, valuePlace, type Layout, type Node, type Pin } from "./layout";
 
 const bit = (net: number, index = 0): Bit => ({ net: [net, index] });
 
@@ -61,5 +61,48 @@ describe("layoutModule", () => {
     };
     const layout = await layoutModule(module, design(module));
     for (const edge of layout.edges) expect(edge.d.startsWith("M")).toBe(true);
+  });
+});
+
+describe("the start of the camera", () => {
+  const block = (id: string, x: number, y: number, w = 160, h = 80): Node => ({ id, kind: "instance", title: id, group: "", x, y, w, h, pins: [] });
+  const drawing = (nodes: Node[], width: number, height: number): Layout => ({ nodes, edges: [], groups: [], junctions: [], width, height });
+
+  it("shows the whole drawing, centred, when it fits", () => {
+    const camera = fitCamera(drawing([block("a", 0, 0)], 400, 200), 1000, 800, 0.7)!;
+    expect(camera.k).toBe(1.4);
+    expect(camera.x).toBeCloseTo((1000 - 400 * 1.4) / 2);
+  });
+
+  it("starts at the top left of a drawing too large to read whole", () => {
+    const camera = fitCamera(drawing([block("a", 20, 20), block("b", 3000, 5000)], 3200, 5100), 1000, 800, 0.7)!;
+    expect(camera).toEqual({ x: 24, y: 62, k: 0.7 });
+  });
+
+  it("starts at the middle when the top left of such a drawing is empty", () => {
+    // A tall block of gates down the middle, as the sequencer lays out.
+    const gates = Array.from({ length: 40 }, (_, i) => block(`g${i}`, 1500, 200 * i));
+    const camera = fitCamera(drawing(gates, 2300, 8400), 1000, 900, 0.7)!;
+    const middle = gates.reduce((a, b) => (Math.abs(b.y + 40 - 4200) < Math.abs(a.y + 40 - 4200) ? b : a));
+    // The block nearest the middle of the drawing lands in the middle of the stage.
+    expect((middle.x + 80) * camera.k + camera.x).toBeCloseTo(500);
+    expect((middle.y + 40) * camera.k + camera.y).toBeCloseTo(450);
+  });
+});
+
+describe("the values inside a box", () => {
+  const pin = (name: string, side: "left" | "right", y: number, width = 16): Pin => ({ name, width, x: side === "left" ? 0 : 164, y, side });
+  const box = (pins: Pin[]): Node => ({ id: "r", kind: "instance", title: "Register", group: "", x: 0, y: 0, w: 164, h: 80, pins });
+
+  it("sit in the middle when a row has one", () => {
+    const node = box([pin("d", "left", 50), pin("en", "left", 70, 1), pin("q", "right", 70)]);
+    expect(valuePlace(node, node.pins[0])).toEqual({ x: 82, anchor: "middle" });
+    expect(valuePlace(node, node.pins[2])).toEqual({ x: 82, anchor: "middle" });
+  });
+
+  it("take a half each when both sides of a row have one", () => {
+    const node = box([pin("d", "left", 50), pin("q", "right", 50)]);
+    expect(valuePlace(node, node.pins[0])).toEqual({ x: 78, anchor: "end" });
+    expect(valuePlace(node, node.pins[1])).toEqual({ x: 86, anchor: "start" });
   });
 });

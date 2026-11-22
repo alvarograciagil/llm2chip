@@ -469,3 +469,35 @@ export function layoutModule(fullModule: NetlistModule, design: Design, area: st
   const showGroups = new Set(module.instances.map((i) => i.group)).size > 1;
   return place(nodes, addJoins(collectLinks(module, nodes), nodes), showGroups);
 }
+
+/** Where the camera starts on a drawing of `layout` in a stage of `width` × `height`: the
+ * whole of it, centred, if it fits at a readable scale (no smaller than `least`); else from
+ * its top left, the way a schematic is read. When that corner holds nothing (a tall, narrow
+ * block lays out its gates down the middle), it starts at the block nearest the centre. */
+export function fitCamera(layout: Layout, width: number, height: number, least: number): { x: number; y: number; k: number } | null {
+  const k = Math.max(Math.min(least, 1.4), Math.min(1.4, (width - 80) / layout.width, (height - 130) / layout.height));
+  if (!(k > 0)) return null;
+  const wide = layout.width * k > width - 48;
+  const tall = layout.height * k > height - 110;
+  let x = wide ? 24 : (width - layout.width * k) / 2;
+  let y = Math.max(62, 62 + (height - 110 - layout.height * k) / 2);
+  if (!wide && !tall) return { x, y, k };
+  const blocks = layout.nodes.filter((n) => n.kind === "instance" || n.kind === "area");
+  const seen = (n: Node) => n.x * k + x < width && (n.x + n.w) * k + x > 0 && n.y * k + y < height && (n.y + n.h) * k + y > 0;
+  if (blocks.length === 0 || blocks.some(seen)) return { x, y, k };
+  const middle = (n: Node) => [n.x + n.w / 2, n.y + n.h / 2];
+  const distance = (n: Node) => Math.hypot(middle(n)[0] - layout.width / 2, middle(n)[1] - layout.height / 2);
+  const near = blocks.reduce((a, b) => (distance(b) < distance(a) ? b : a));
+  const [cx, cy] = middle(near);
+  if (wide) x = width / 2 - cx * k;
+  if (tall) y = height / 2 - cy * k;
+  return { x, y, k };
+}
+
+/** Where a pin's value is written inside its box: in the middle, unless a pin on the other
+ * side shares its row and shows a value too; then each takes its own half. */
+export function valuePlace(node: Node, pin: Pin): { x: number; anchor: "start" | "middle" | "end" } {
+  const facing = node.pins.some((p) => p.side !== pin.side && p.width > 1 && Math.abs(p.y - pin.y) < 1);
+  if (!facing) return { x: node.w / 2, anchor: "middle" };
+  return pin.side === "left" ? { x: node.w / 2 - 4, anchor: "end" } : { x: node.w / 2 + 4, anchor: "start" };
+}
