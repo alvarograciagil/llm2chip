@@ -7,7 +7,7 @@ type Pending<T> = { resolve: (value: T) => void; reject: (error: Error) => void 
 
 let worker: Worker | null = null;
 const describing = new Map<string, Pending<BrowserModel>>();
-let loading: (Pending<{ seconds: number; kept: boolean }> & { progress: (phase: string, done: number, total: number) => void }) | null = null;
+let loading: (Pending<{ seconds: number; kept: boolean; threads: number }> & { progress: (phase: string, done: number, total: number) => void }) | null = null;
 let onEvent: ((event: Event) => void) | null = null;
 const replies = new Map<number, Pending<unknown>>();
 let asked = 0;
@@ -29,7 +29,7 @@ function receive(event: Event) {
   } else if (event.type === "progress") {
     loading?.progress(String(event.phase), Number(event.done), Number(event.total));
   } else if (event.type === "loaded") {
-    loading?.resolve({ seconds: Number(event.seconds), kept: event.kept !== false });
+    loading?.resolve({ seconds: Number(event.seconds), kept: event.kept !== false, threads: Number(event.threads) || 1 });
     loading = null;
   } else if (event.type === "reply") {
     const pending = replies.get(Number(event.id));
@@ -65,18 +65,18 @@ function ask<T>(message: (id: number) => WorkerRequest): Promise<T> {
 }
 
 /** How many bytes of each model the browser keeps, so they need no download, and in all. */
-export const keptModels = (models: BrowserModel[]) => ask<{ models: Record<string, number>; total: number }>((id) => ({ type: "kept", id, models }));
+export const keptModels = (models: BrowserModel[], sweep = false) => ask<{ models: Record<string, number>; total: number }>((id) => ({ type: "kept", id, models, sweep }));
 
 /** Deletes the browser's copy of a model, or with none, of every model. */
 export const forgetModel = (model: BrowserModel | null) => ask<void>((id) => ({ type: "forget", id, model }));
 
 /** Downloads (or takes from the browser's storage) a model and builds the chip's engine for
- * it; `kept` says whether there was room to keep a copy. */
-export function loadModel(model: BrowserModel, setup: { activation_bits: number; format: unknown; context_tokens: number }, progress: (phase: string, done: number, total: number) => void): Promise<{ seconds: number; kept: boolean }> {
+ * it, keeping a copy if `keep`; `kept` says whether it did, `threads` how many it runs on. */
+export function loadModel(model: BrowserModel, setup: { activation_bits: number; format: unknown; context_tokens: number }, keep: boolean, progress: (phase: string, done: number, total: number) => void): Promise<{ seconds: number; kept: boolean; threads: number }> {
   return new Promise((resolve, reject) => {
     loading?.reject(new Error("Replaced by another load."));
     loading = { resolve, reject, progress };
-    send({ type: "load", model, setup });
+    send({ type: "load", model, setup, keep });
   });
 }
 

@@ -136,6 +136,9 @@ interface SimulatorState {
   keptTotal: number;
   /** In the online demo: the last load had no room to keep a copy. */
   noRoom: boolean;
+  /** In the online demo: whether downloads stay in the browser; by default they do not. */
+  keepModels: boolean;
+  setKeepModels: (keep: boolean) => void;
 
   connect: () => Promise<void>;
   /** In the online demo: adds a model from Hugging Face if the browser can run it. */
@@ -150,6 +153,16 @@ interface SimulatorState {
   load: () => Promise<void>;
   generate: () => void;
   stop: () => void;
+}
+
+const KEEP_KEY = "llm2chip.keepModels";
+
+function readKeep(): boolean {
+  try {
+    return localStorage.getItem(KEEP_KEY) === "1";
+  } catch {
+    return false;
+  }
 }
 
 /** The question the simulator starts with. */
@@ -232,17 +245,18 @@ async function loadInBrowser(get: Getter, set: Setter) {
   set({ loading: true, error: null, download: null });
   try {
     const setup = { activation_bits: chipNumeric(params).activation_bits, format: chipFormat(params), context_tokens: Number(params.context_tokens) || 0 };
-    const { kept } = await loadModel(model, setup, (phase, done, total) => set({ download: { phase, done, total } }));
+    const keep = get().keepModels;
+    const { kept, threads } = await loadModel(model, setup, keep, (phase, done, total) => set({ download: { phase, done, total } }));
     await refreshKept(get, set);
-    set({ noRoom: !kept, loaded: model.name, accelerator: "WebAssembly", loadReport: null, loading: false, download: null, numericLoaded: "exact", loadedSignature: signature });
+    set({ noRoom: keep && !kept, loaded: model.name, accelerator: threads > 1 ? `WebAssembly, ${threads} threads` : "WebAssembly", loadReport: null, loading: false, download: null, numericLoaded: "exact", loadedSignature: signature });
   } catch (e) {
     set({ error: e instanceof Error ? e.message : String(e), loading: false, download: null });
   }
 }
 
-async function refreshKept(get: Getter, set: Setter) {
+async function refreshKept(get: Getter, set: Setter, sweep = false) {
   try {
-    const { models, total } = await keptModels(get().browserModels);
+    const { models, total } = await keptModels(get().browserModels, sweep);
     set({ kept: models, keptTotal: total });
   } catch {
     set({ kept: {}, keptTotal: 0 });
@@ -326,6 +340,15 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   kept: {},
   keptTotal: 0,
   noRoom: false,
+  keepModels: readKeep(),
+  setKeepModels(keep) {
+    try {
+      localStorage.setItem(KEEP_KEY, keep ? "1" : "0");
+    } catch {
+      // Remembered for this visit only.
+    }
+    set({ keepModels: keep });
+  },
 
   async connect() {
     if (DEMO) {
@@ -335,7 +358,8 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
         set({ online: true });
         await Promise.all(SUGGESTED.map((source) => get().addBrowserModel(source)));
         set({ browserRefusal: null });
-        await refreshKept(get, set);
+        // Once per visit: what was left halfway, or not used for a month, goes.
+        await refreshKept(get, set, true);
         if (LINK?.view === "simulator") await followLink(LINK.model, get);
       })();
       return described;

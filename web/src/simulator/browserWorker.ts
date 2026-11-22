@@ -1,17 +1,46 @@
 // The chip simulator of the online demo: it describes, downloads and runs a model in the
 // browser, away from the interface, and speaks as the local engine does.
-import init, { BrowserChip, Checkpoint, simulation_refusal } from "../wasm-sim/llm2chip_wasm_sim.js";
-import { DOWNLOAD_LIMIT, TEXT_FILES, type BrowserModel, type BrowserSource } from "./browserModels";
+import * as singleThread from "../wasm-sim/llm2chip_wasm_sim.js";
+import { DOWNLOAD_LIMIT, KEEP_DAYS, simulatorThreads, TEXT_FILES, THREADED_BUILD, THREADS_FROM, type BrowserModel, type BrowserSource } from "./browserModels";
+
+type Simulator = typeof singleThread;
+type BrowserChip = InstanceType<Simulator["BrowserChip"]>;
 
 export type WorkerRequest =
   | { type: "describe"; source: BrowserSource }
-  | { type: "load"; model: BrowserModel; setup: { activation_bits: number; format: unknown; context_tokens: number } }
+  | { type: "load"; model: BrowserModel; setup: { activation_bits: number; format: unknown; context_tokens: number }; keep: boolean }
   | { type: "generate"; request: Record<string, unknown> }
   | { type: "stop" }
-  | { type: "kept"; id: number; models: BrowserModel[] }
+  | { type: "kept"; id: number; models: BrowserModel[]; sweep?: boolean }
   | { type: "forget"; id: number; model: BrowserModel | null };
 
-const ready = init();
+/** The simulator on this thread, and on several where the page allows it. Both bundles hold
+ * the same code; only the threaded one shares its memory with workers, started when a model
+ * large enough to gain from it is first loaded. */
+const ready = singleThread.default().then(() => ({ sim: singleThread, threads: 1 }));
+let threaded: Promise<{ sim: Simulator; threads: number } | null> | null = null;
+
+async function startThreads(threads: number) {
+  try {
+    const sim = (await Object.values(THREADED_BUILD)[0]()) as Simulator & { initThreadPool(threads: number): Promise<void> };
+    await sim.default();
+    await sim.initThreadPool(threads);
+    return { sim, threads };
+  } catch {
+    // A browser without shared memory after all: one thread.
+    return null;
+  }
+}
+
+async function simulatorFor(model: BrowserModel) {
+  const threads = simulatorThreads();
+  if (threads > 1 && model.bytes >= THREADS_FROM) {
+    threaded ??= startThreads(threads);
+    const found = await threaded;
+    if (found) return found;
+  }
+  return ready;
+}
 const MB = 2 ** 20;
 let chip: BrowserChip | null = null;
 let running = 0;
@@ -42,17 +71,17 @@ async function describe(source: BrowserSource): Promise<BrowserModel> {
   if (bytes > DOWNLOAD_LIMIT) throw new Error(`${repo} takes ${megabytes(bytes)}, and the online demo downloads up to ${megabytes(DOWNLOAD_LIMIT)}: run it with the app on your computer.`);
   const base = `https://huggingface.co/${repo}/resolve/${info.sha}/`;
   const config = await (await fetch(base + "config.json")).text();
-  await ready;
-  const refusal = simulation_refusal(config);
+  const { sim } = await ready;
+  const refusal = sim.simulation_refusal(config);
   if (refusal) throw new Error(`The simulator cannot run ${repo}: ${refusal}`);
   return { id: `hf:${repo}`, name: repo.split("/")[1], base, texts, weights, bytes, config, architecture: JSON.parse(config).model_type ?? "", credit: null };
 }
 
 const STORE = "llm2chip-models";
 
-async function storeFolder(): Promise<FileSystemDirectoryHandle | null> {
+async function storeFolder(create = false): Promise<FileSystemDirectoryHandle | null> {
   try {
-    return await (await navigator.storage.getDirectory()).getDirectoryHandle(STORE, { create: true });
+    return await (await navigator.storage.getDirectory()).getDirectoryHandle(STORE, { create });
   } catch {
     return null;
   }
@@ -97,17 +126,37 @@ async function keptBytes(folder: FileSystemDirectoryHandle, model: BrowserModel)
 
 /** The bytes of each model the browser keeps, and of everything kept: copies of models no
  * longer offered, or of another commit, count too. */
-async function kept(models: BrowserModel[]): Promise<{ models: Record<string, number>; total: number }> {
+async function kept(models: BrowserModel[], sweeping: boolean): Promise<{ models: Record<string, number>; total: number }> {
   const folder = await storeFolder();
+  if (folder && sweeping) await sweep(folder);
   const out: Record<string, number> = {};
   let total = 0;
   if (folder) {
     for (const model of models) out[model.id] = await keptBytes(folder, model);
-    for await (const handle of (folder as FileSystemDirectoryHandle & { values(): AsyncIterable<FileSystemHandle> }).values()) {
+    for await (const handle of (folder as Folder).values()) {
       if (handle.kind === "file") total += (await (handle as FileSystemFileHandle).getFile()).size;
     }
   }
   return { models: out, total };
+}
+
+type Folder = FileSystemDirectoryHandle & { values(): AsyncIterable<FileSystemHandle> };
+
+/** Deletes what was left halfway, and the copies not loaded for KEEP_DAYS. A file being
+ * written in another tab is locked, and stays. */
+async function sweep(folder: FileSystemDirectoryHandle) {
+  const names: string[] = [];
+  for await (const handle of (folder as Folder).values()) if (handle.kind === "file") names.push(handle.name);
+  const stale = Date.now() - KEEP_DAYS * 24 * 3600 * 1000;
+  for (const name of names.filter((n) => !n.endsWith(".done"))) {
+    let used = 0;
+    try {
+      used = (await (await folder.getFileHandle(`${name}.done`)).getFile()).lastModified;
+    } catch {
+      // Never completed.
+    }
+    if (used < stale) for (const entry of [`${name}.done`, name]) await folder.removeEntry(entry).catch(() => undefined);
+  }
 }
 
 /** Deletes a model's copy, or with none, everything kept. */
@@ -125,36 +174,46 @@ async function forget(model: BrowserModel | null) {
 
 /** Whether the browser has room to keep a copy of `bytes` more: without it, the model runs
  * all the same and downloads again next time, instead of filling the disk to fail halfway. */
-let room = true;
-async function checkRoom(bytes: number) {
+async function hasRoom(bytes: number): Promise<boolean> {
   try {
     const { quota, usage } = await navigator.storage.estimate();
-    room = quota === undefined || usage === undefined || quota - usage > bytes + 64 * MB;
+    return quota === undefined || usage === undefined || quota - usage > bytes + 64 * MB;
   } catch {
-    room = true;
+    return true;
   }
 }
 
+/** Whether this load keeps a copy of what it downloads. Without it nothing reaches the
+ * disk: the model lives in the page's memory and goes when the page closes. */
+let keeping = false;
+
 /** A file's bytes, given to `take` as they come: from the browser's private storage when a
- * complete copy is there, otherwise from the network, keeping a copy as it arrives. Models
- * come at a fixed commit, so a copy never goes stale. Returns how many bytes there were. */
+ * complete copy is there, otherwise from the network, keeping a copy as it arrives when
+ * asked. Models come at a fixed commit, so a copy never goes stale. Returns how many bytes
+ * there were. */
 async function download(url: string, take: (part: Uint8Array) => void): Promise<number> {
-  const folder = await storeFolder();
+  const folder = await storeFolder(keeping);
   const name = storedName(url);
-  if (folder) {
-    try {
-      await folder.getFileHandle(`${name}.done`);
-      const file = await (await folder.getFileHandle(name)).getFile();
-      return await readAll(file.stream(), take);
-    } catch {
-      // Not kept yet, or kept only in part.
-    }
+  let file: File | null = null;
+  let marker: FileSystemFileHandle | null = null;
+  try {
+    marker = (await folder?.getFileHandle(`${name}.done`)) ?? null;
+    file = marker && (await (await folder!.getFileHandle(name)).getFile());
+  } catch {
+    // Not kept yet, or kept only in part.
   }
-  const response = await fetch(url);
+  if (file && marker) {
+    const size = await readAll(file.stream(), take);
+    // Used now: the days until it is deleted count from here.
+    await marker.createWritable().then((w) => w.close()).catch(() => undefined);
+    return size;
+  }
+  // Not kept: not in the browser's HTTP cache either.
+  const response = await fetch(url, keeping ? {} : { cache: "no-store" });
   if (!response.ok || !response.body) throw new Error(`${url}: ${response.status}`);
   let copy: SyncHandle | null = null;
   try {
-    if (!room) throw new Error("No room to keep it.");
+    if (!keeping) throw new Error("Not kept.");
     const handle = (await folder?.getFileHandle(name, { create: true })) as (FileSystemFileHandle & { createSyncAccessHandle(): Promise<SyncHandle> }) | undefined;
     copy = (await handle?.createSyncAccessHandle()) ?? null;
     copy?.truncate(0);
@@ -194,14 +253,14 @@ async function downloadText(url: string): Promise<string> {
   return text + decoder.decode();
 }
 
-async function load(model: BrowserModel, setup: unknown) {
-  await ready;
+async function load(model: BrowserModel, setup: unknown, keep: boolean) {
+  const { sim, threads } = await simulatorFor(model);
   chip?.free();
   chip = null;
-  const checkpoint = new Checkpoint();
+  const checkpoint = new sim.Checkpoint();
   try {
     const folder = await storeFolder();
-    await checkRoom(model.bytes - (folder ? await keptBytes(folder, model) : 0));
+    keeping = keep && (await hasRoom(model.bytes - (folder ? await keptBytes(folder, model) : 0)));
     for (const name of model.texts) checkpoint.add_text(name, await downloadText(model.base + name));
     const total = model.weights.reduce((sum, w) => sum + w.size, 0);
     let done = 0;
@@ -223,8 +282,8 @@ async function load(model: BrowserModel, setup: unknown) {
     }
     postMessage({ type: "progress", phase: "Building the chip", done: total, total });
     const started = performance.now();
-    chip = new BrowserChip(checkpoint, JSON.stringify(setup));
-    postMessage({ type: "loaded", seconds: (performance.now() - started) / 1000, kept: room });
+    chip = new sim.BrowserChip(checkpoint, JSON.stringify(setup));
+    postMessage({ type: "loaded", seconds: (performance.now() - started) / 1000, kept: keeping, threads });
   } catch (e) {
     checkpoint.free();
     throw e;
@@ -249,10 +308,10 @@ onmessage = async (event: MessageEvent<WorkerRequest>) => {
   const message = event.data;
   try {
     if (message.type === "describe") postMessage({ type: "described", source: message.source, model: await describe(message.source) });
-    if (message.type === "load") await load(message.model, message.setup);
+    if (message.type === "load") await load(message.model, message.setup, message.keep);
     if (message.type === "generate") await generate(message.request);
     if (message.type === "stop") running++;
-    if (message.type === "kept") postMessage({ type: "reply", id: message.id, value: await kept(message.models) });
+    if (message.type === "kept") postMessage({ type: "reply", id: message.id, value: await kept(message.models, message.sweep === true) });
     if (message.type === "forget") postMessage({ type: "reply", id: message.id, value: await forget(message.model) });
   } catch (e) {
     // A panic leaves the engine unusable: it must be loaded again.

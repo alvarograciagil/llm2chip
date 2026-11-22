@@ -435,6 +435,7 @@ const ES: Record<string, string> = {
   "Choose one of these models to simulate it.": "Elige uno de estos modelos para simularlo.",
   "kept in this browser": "guardado en este navegador",
   "Delete them all": "Borrarlos todos",
+  "Without it a model is only in the page's memory: it goes when the page closes, and downloads again next time.": "Si no, el modelo solo está en la memoria de la página: se va al cerrarla y se vuelve a descargar la próxima vez.",
   "Delete the copy kept in this browser": "Borrar la copia guardada en este navegador",
   "There was no room to keep a copy in this browser: it will download again next time.": "No había sitio para guardar una copia en este navegador: se descargará de nuevo la próxima vez.",
   "Downloading": "Descargando",

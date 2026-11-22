@@ -342,7 +342,7 @@ export function SimulatorPanel() {
               {state.download ? `${t(state.download.phase)}… ${formatNumber(Math.floor((state.download.done / Math.max(state.download.total, 1)) * 100))} %` : t(state.loading ? "Loading…" : state.loaded ? "Reload" : "Load the chip")}
             </button>
             {stale && <p className="note-warning">{t("The design changed since it was loaded: reload to simulate the current chip.")}</p>}
-            {state.loaded && <p className="muted-text">{t("Loaded")}: {state.loaded} · {state.accelerator ?? "CPU"}</p>}
+            {state.loaded && <p className="muted-text">{t("Loaded")}: {state.loaded} · {t(state.accelerator ?? "CPU")}</p>}
           </>
         )}
       </div>

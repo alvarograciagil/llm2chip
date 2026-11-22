@@ -2,7 +2,7 @@ import { useState } from "react";
 import { formatNumber } from "../format";
 import { useT } from "../i18n";
 import { useDesign } from "../store";
-import { DOWNLOAD_LIMIT, memoryWarning } from "./browserModels";
+import { DOWNLOAD_LIMIT, KEEP_DAYS, memoryWarning, simulatorThreads } from "./browserModels";
 import { useSimulator } from "./simulatorStore";
 
 const MB = 2 ** 20;
@@ -21,7 +21,10 @@ export function ModelPicker() {
   const forget = useSimulator((s) => s.forgetBrowserModel);
   const kept = useSimulator((s) => s.kept);
   const noRoom = useSimulator((s) => s.noRoom);
+  const keep = useSimulator((s) => s.keepModels);
+  const setKeep = useSimulator((s) => s.setKeepModels);
   const keptTotal = useSimulator((s) => s.keptTotal);
+  const threads = simulatorThreads();
   const chosen = models.find((m) => m.id === path);
   const warning = chosen ? memoryWarning(chosen.bytes) : null;
   const [repo, setRepo] = useState("");
@@ -39,7 +42,11 @@ export function ModelPicker() {
 
   return (
     <>
-      <p className="muted-text">{t(`The online demo runs models of up to ${formatNumber(DOWNLOAD_LIMIT / MB)} MB in your browser, on one thread and without a GPU; larger ones need the app on your computer.`)}</p>
+      <p className="muted-text">
+        {threads > 1
+          ? t(`The online demo runs models of up to ${formatNumber(DOWNLOAD_LIMIT / MB)} MB in your browser, on up to ${threads} threads and without a GPU; larger ones need the app on your computer.`)
+          : t(`The online demo runs models of up to ${formatNumber(DOWNLOAD_LIMIT / MB)} MB in your browser, on one thread and without a GPU; larger ones need the app on your computer.`)}
+      </p>
       {models.length === 0 && <p className="muted-text">{t("Finding the models…")}</p>}
       <div className="browser-models">
         {models.map((model) => (
@@ -61,6 +68,11 @@ export function ModelPicker() {
         ))}
       </div>
       {warning && <p className="note-warning">{t(warning)}</p>}
+      <label className="check">
+        <input type="checkbox" checked={keep} onChange={(e) => setKeep(e.target.checked)} />
+        {t(`Keep the downloaded models in this browser, until ${KEEP_DAYS} days without using them`)}
+      </label>
+      {!keep && <p className="muted-text">{t("Without it a model is only in the page's memory: it goes when the page closes, and downloads again next time.")}</p>}
       <form
         className="browser-repo"
         onSubmit={(e) => {

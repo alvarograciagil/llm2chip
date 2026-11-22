@@ -4,6 +4,23 @@
  * times its size in memory to run, and a larger one would run too slowly on one thread. */
 export const DOWNLOAD_LIMIT = 300 * 2 ** 20;
 
+/** The simulator built for several threads, when it was (scripts/build-wasm.sh --threads). */
+export const THREADED_BUILD = import.meta.glob("../wasm-sim-threads/llm2chip_wasm_sim.js");
+
+/** How many threads the simulator can run on: all the device has when the page is
+ * cross-origin isolated and the threaded build is there, as on a Hugging Face Space; else one. */
+export function simulatorThreads(): number {
+  const isolated = (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true;
+  return isolated && Object.keys(THREADED_BUILD).length > 0 ? Math.max(1, navigator.hardwareConcurrency || 1) : 1;
+}
+
+/** A model kept in the browser is deleted after this many days without being loaded. */
+export const KEEP_DAYS = 30;
+
+/** Below this size a model runs on one thread: its steps are too short to share out, and
+ * stories260K runs four times slower on twelve threads than on one. */
+export const THREADS_FROM = 32 * 2 ** 20;
+
 /** The files of a checkpoint the simulator reads besides its weights. */
 export const TEXT_FILES = ["config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json", "chat_template.jinja"];
 

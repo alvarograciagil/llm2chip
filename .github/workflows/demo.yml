@@ -1,4 +1,6 @@
-# The online demo: the interface with its WebAssembly estimator, served by GitHub Pages.
+# The online demo: the interface with its WebAssembly estimator and simulator, served by
+# GitHub Pages on one thread and, once the repository has an HF_TOKEN secret and an HF_SPACE
+# variable (owner/name of a static Space), by a Hugging Face Space on several.
 # Every push that touches it builds it; only main publishes it.
 name: Online demo
 
@@ -8,6 +10,9 @@ on:
       - "web/**"
       - "crates/**"
       - "Cargo.*"
+      - "scripts/build-wasm.sh"
+      - "scripts/demo-models.sh"
+      - "space/**"
       - ".github/workflows/demo.yml"
   workflow_dispatch:
 
@@ -39,20 +44,9 @@ jobs:
         run: |
           wasm-pack build crates/wasm --target web --out-dir ../../web/src/wasm --no-typescript --release
           wasm-pack build crates/wasm-sim --target web --out-dir ../../web/src/wasm-sim --no-typescript --release
-      # A model small enough to load at once, served with the demo: Andrej Karpathy's
-      # stories260K (llama2.c, MIT), converted at build time, so no weights live in the repository.
+      # A model small enough to load at once, served with the demo, converted at build time.
       - name: Convert stories260K
-        env:
-          SOURCE: https://huggingface.co/karpathy/tinyllamas/resolve/0bd21da7698eaf29a0d7de3992de8a46ef624add/stories260K
-        run: |
-          cd "$RUNNER_TEMP"
-          curl -fsSL -o stories260K.bin "$SOURCE/stories260K.bin"
-          curl -fsSL -o tok512.bin "$SOURCE/tok512.bin"
-          sha256sum -c - <<'SUMS'
-          b0a507e7ad0f626624f17112325e66691f9076d622e1d3274d103d00299f2696  stories260K.bin
-          037cb335abb25d1fa9e8ecae30ed2a3a8ace9302862ebcdc05d51a6bbb10c312  tok512.bin
-          SUMS
-          python3 -I "$GITHUB_WORKSPACE/tools/convert/llama2c.py" stories260K.bin tok512.bin "$GITHUB_WORKSPACE/web/public/models/stories260K"
+        run: scripts/demo-models.sh
       - name: Build the interface
         working-directory: web
         env:
@@ -80,3 +74,43 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # The same demo on a Hugging Face Space, whose headers isolate the page so the simulator
+  # can share its memory with workers: models of 32 MB or more run on several threads.
+  space:
+    if: github.ref == 'refs/heads/main' && vars.HF_SPACE != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the estimator and both simulators
+        run: scripts/build-wasm.sh --threads
+      - name: Convert stories260K
+        run: scripts/demo-models.sh
+      - name: Build the interface
+        working-directory: web
+        env:
+          VITE_DEMO: "1"
+          LLM2CHIP_BASE: /
+        run: |
+          npm ci
+          npx vite build
+          cp ../space/README.md dist/README.md
+      - name: Publish to the Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SPACE: ${{ vars.HF_SPACE }}
+        run: |
+          pip install --quiet "huggingface_hub>=0.34,<2"
+          hf upload "$SPACE" web/dist . --repo-type space --delete "assets/*" --commit-message "Online demo from ${GITHUB_SHA::7}"

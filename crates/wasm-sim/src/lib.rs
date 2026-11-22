@@ -5,6 +5,8 @@
 mod generator;
 
 pub use generator::{Generator, Request, Setup};
+#[cfg(all(feature = "threads", target_arch = "wasm32"))]
+pub use wasm_bindgen_rayon::init_thread_pool;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 

@@ -141,19 +141,33 @@ Anyone with that address can load and run models on your machine: do not share i
 
 The interface also runs as static files, with no engine behind it: the estimator, the floorplan, how it works, the schematic simulated gate by gate, the explorer and the export to Verilog and VHDL all run in the browser on WebAssembly. The views that need the engine (Images, Numerics, Optimise and Models) say they need the app installed instead of calling it.
 
-The Simulator runs there too, on a WebAssembly build of the same simulator (`crates/wasm-sim`): it downloads a model into the browser and runs it on the design's integer arithmetic, on one thread and without a GPU, with the engine's framing, sampling and stops. It offers stories260K, served with the demo, and SmolLM2-135M-Instruct from Hugging Face, and takes any public model of a supported architecture up to 300 MB (`DOWNLOAD_LIMIT` in `web/src/simulator/browserModels.ts`); a model takes about three times its size in memory. Downloads stay in the browser's private storage (OPFS), so a model loads again without the network; the Simulator shows what is kept and deletes it, keeps nothing when the browser lacks room, and warns when a model may need more memory than the device has. The chip's CPU, its firmware and the image load need the app.
+The Simulator runs there too, on a WebAssembly build of the same simulator (`crates/wasm-sim`): it downloads a model into the browser and runs it on the design's integer arithmetic, on one thread and without a GPU, with the engine's framing, sampling and stops. It offers stories260K, served with the demo, and SmolLM2-135M-Instruct from Hugging Face, and takes any public model of a supported architecture up to 300 MB (`DOWNLOAD_LIMIT` in `web/src/simulator/browserModels.ts`); a model takes about three times its size in memory. By default a download lives only in the page's memory and goes when the page closes, so trying a model leaves nothing on disk. With "Keep the downloaded models in this browser" ticked (the choice is remembered), downloads stay in the browser's private storage (OPFS) and load again without the network; a model not loaded for 30 days (`KEEP_DAYS`) is deleted the next time the Simulator opens, and so is any download cut off halfway. The Simulator shows what is kept and deletes it, keeps nothing when the browser lacks room, and warns when a model may need more memory than the device has. The chip's CPU, its firmware and the image load need the app.
 
 A link can open a view: `#schematic`, `#explorer` and the rest by their names. `#simulator` also loads stories260K and runs it, and `#simulator/HuggingFaceTB/SmolLM2-135M-Instruct` chooses that model, which waits for a click because it is a larger download.
 
 ```bash
 scripts/build-wasm.sh
-python3 tools/convert/llama2c.py stories260K.bin tok512.bin web/public/models/stories260K
+scripts/demo-models.sh
 cd web && VITE_DEMO=1 LLM2CHIP_BASE=/llm2chip/ npx vite build
 ```
 
-`stories260K.bin` and `tok512.bin` come from [karpathy/tinyllamas](https://huggingface.co/karpathy/tinyllamas/tree/main/stories260K); without them the demo offers only the models on Hugging Face.
+`scripts/demo-models.sh` downloads stories260K from [karpathy/tinyllamas](https://huggingface.co/karpathy/tinyllamas/tree/main/stories260K) at a fixed commit, checks it and converts it; without it the demo offers only the models on Hugging Face.
 
 `LLM2CHIP_BASE` is the path the files are served under (`/` by default). The workflow in `.github/workflows/demo.yml` builds it on every push and publishes it to GitHub Pages from `main`.
+
+#### On several threads, on a Hugging Face Space
+
+WebAssembly threads share their memory, which browsers allow only to pages served with two headers (`Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy`). GitHub Pages cannot send them; a static Hugging Face Space can, with `custom_headers` in its README (`space/README.md`). There, models of 32 MB or more run on as many threads as the device has: SmolLM2-135M took 0.14–0.24 s per token against 0.29–0.39 on one thread, measured with other work running on the machine. Smaller ones stay on one thread, where they are faster.
+
+`scripts/build-wasm.sh --threads` builds the threaded simulator as well, with a pinned nightly toolchain (installed if missing) into `web/src/wasm-sim-threads`. The page picks it only when it is cross-origin isolated, so the same build runs everywhere, on one thread where the headers are missing.
+
+To publish the Space from `main`:
+
+1. Create a Space on Hugging Face with the Static SDK (for example `your-name/llm2chip`).
+2. Create a Hugging Face access token with write access to it.
+3. In the GitHub repository, add the token as the secret `HF_TOKEN`, and the Space's name as the variable `HF_SPACE` (Settings → Secrets and variables → Actions).
+
+The `space` job then builds the demo with threads and uploads it on every push to `main`. Share the Space's own address (`https://<owner>-<name>.static.hf.space`): embedded in the Hugging Face page the browser may not isolate it, and the simulator falls back to one thread.
 
 ## Start-up options
 
@@ -163,7 +177,8 @@ cd web && VITE_DEMO=1 LLM2CHIP_BASE=/llm2chip/ npx vite build
 |---|---|
 | `scripts/dev.sh` | Builds and starts the engine and the interface. |
 | `scripts/dev.sh --lan` | The same, reachable from the local network with a key. On Windows, `dev.ps1 -Lan`. |
-| `scripts/build-wasm.sh` | Rebuilds only the WebAssembly estimator. |
+| `scripts/build-wasm.sh` | Rebuilds only the WebAssembly estimator and the browser's simulator. |
+| `scripts/build-wasm.sh --threads` | Also the simulator on several threads, for a Hugging Face Space. |
 | `scripts/build-app.sh` | Builds the desktop application. |
 | `scripts/check.sh` | The quick tests and lints, a few minutes. |
 | `scripts/check.sh --full` | Also the whole chips in gates and the slow tests; for changes to the hardware. |
