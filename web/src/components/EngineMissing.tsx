@@ -28,13 +28,15 @@ export function EngineMissing() {
 }
 
 /** The views that only work with the engine, in the online demo: what they do and where to get them. */
-export const ENGINE_VIEWS = new Set<View>(["images", "optimize", "numeric", "models"]);
+export const ENGINE_VIEWS = new Set<View>(["images", "viewer", "optimize", "numeric", "models"]);
 
 function useWhat(view: View): [string, string] {
   const t = useT();
   switch (view) {
     case "images":
       return [t("Images"), t("Draws an image from a text, or retouches a region of one, with Show-o running on the chip's arithmetic.")];
+    case "viewer":
+      return [t("Chip at work"), t("Plays back, in 3D and cycle by cycle, a run of the chip that the engine simulated gate by gate: the dies, the tokens going through the layers, the KV cache and the links between chips.")];
     case "optimize":
       return [t("Automatic optimisation"), t("Searches numbers of chips, ways of sharing, units, lanes and cells, measuring each candidate on its generated circuit with the model's weights, and recommends one.")];
     case "numeric":
@@ -52,7 +54,7 @@ export function DemoStage({ view }: { view: View }) {
       <div className="demo-card">
         <h2>{title}</h2>
         <p>{what}</p>
-        <p className="muted-text">{t("It needs llm2chip's engine on your computer, because it works with the model's weights. This online demo runs only what fits in the browser: the floorplan, how it works, the schematic simulated gate by gate, the explorer, the export to Verilog and VHDL, and the simulator with small models.")}</p>
+        <p className="muted-text">{t("It needs llm2chip's engine on your computer, which reads the model's weights and simulates the whole circuit. This online demo runs only what fits in the browser: the floorplan, how it works, the schematic simulated gate by gate, the explorer, the export to Verilog and VHDL, and the simulator with small models.")}</p>
         <div className="demo-links">
           <a className="pill primary-pill" href={INSTALL_GUIDE} target="_blank" rel="noreferrer">{t("How to install it")}</a>
           <a className="pill" href={REPOSITORY} target="_blank" rel="noreferrer">{t("Source on GitHub")}</a>
