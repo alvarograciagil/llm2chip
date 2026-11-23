@@ -1969,6 +1969,20 @@ button.link-row {
   cursor: pointer;
 }
 
+.sort-header {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sort-header:hover {
+  color: var(--accent);
+}
+
 .format-table tbody tr:hover,
 .format-table tbody tr.selected-row {
   background: var(--accent-soft, rgba(10, 132, 255, 0.14));

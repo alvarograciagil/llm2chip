@@ -255,28 +255,66 @@ const REFERENCES: Reference[] = [
   },
 ];
 
+/** The columns the formats can be sorted by, and which way is best first. */
+const FORMAT_COLUMNS = [
+  { key: "format", label: "Format", best: 1 },
+  { key: "area", label: "Area", best: 1 },
+  { key: "speed", label: "Speed", best: -1 },
+  { key: "power", label: "Power", best: 1 },
+  { key: "energy", label: "Energy", best: 1 },
+  { key: "top1", label: "Top-1", best: -1 },
+] as const;
+
+type FormatColumn = (typeof FORMAT_COLUMNS)[number]["key"];
+
 function FormatComparison() {
   const t = useT();
   const model = useDesign((s) => s.model);
   const params = useDesign((s) => s.params);
   const setParam = useDesign((s) => s.setParam);
   const sweep = useSweep("formats", model, params, FORMAT_VARIANTS);
-  const rows = useMemo(
-    () => (sweep.results ?? []).map((r, i) => ({ preset: FORMAT_PRESETS[i], metrics: r.metrics, errors: r.errors })).sort((a, b) => a.metrics.total_area_mm2 - b.metrics.total_area_mm2),
-    [sweep],
-  );
+  const [order, setOrder] = useState<{ column: FormatColumn; direction: 1 | -1 }>({ column: "area", direction: 1 });
+  const rows = useMemo(() => {
+    const value = (row: { preset: { label: string }; metrics: Record<string, number> }): number | string | undefined => {
+      switch (order.column) {
+        case "format": return t(row.preset.label);
+        case "area": return row.metrics.total_area_mm2;
+        case "speed": return row.metrics.tok_s;
+        case "power": return row.metrics.power_w;
+        case "energy": return row.metrics.energy_token_mj;
+        case "top1": return FORMAT_QUALITY[row.preset.label]?.top1;
+      }
+    };
+    const list = (sweep.results ?? []).map((r, i) => ({ preset: FORMAT_PRESETS[i], metrics: r.metrics, errors: r.errors }));
+    // Formats without a value, such as a Top-1 never measured, go last either way.
+    return list.sort((a, b) => {
+      const [x, y] = [value(a), value(b)];
+      if (x === undefined || y === undefined) return x === y ? 0 : x === undefined ? 1 : -1;
+      return order.direction * (typeof x === "string" ? x.localeCompare(String(y), undefined, { numeric: true }) : x - (y as number));
+    });
+  }, [sweep, order, t]);
+  const sortBy = (column: FormatColumn, best: 1 | -1) => setOrder((o) => ({ column, direction: o.column === column ? (-o.direction as 1 | -1) : best }));
   const current = matchingPreset(params as unknown as Record<string, unknown>);
   return (
     <div className="card">
       <div className="card-title">
         <h2>{t("Weight formats")}</h2>
       </div>
-      <p className="muted-text plot-sub">{t("Each format's circuit with this design, from smallest to largest area. Click a row to use it. Top-1 is the agreement with floating point over 16 or 64 tokens of the real Qwen3.8. That model already comes quantized to 4 bits, so small formats may come out better than they would with the original weights.")}</p>
+      <p className="muted-text plot-sub">{t("Each format's circuit with this design. Click a column to sort by it, and a row to use it. Top-1 is the agreement with floating point over 16 or 64 tokens of the real Qwen3.8. That model already comes quantized to 4 bits, so small formats may come out better than they would with the original weights.")}</p>
       <SweepProgress sweep={sweep} />
       <div className="format-table">
         <table className="front">
           <thead>
-            <tr><th>{t("Format")}</th><th>{t("Area")}</th><th>{t("Speed")}</th><th>{t("Power")}</th><th>{t("Energy")}</th><th>Top-1</th></tr>
+            <tr>
+              {FORMAT_COLUMNS.map(({ key, label, best }) => (
+                <th key={key} aria-sort={order.column === key ? (order.direction === 1 ? "ascending" : "descending") : "none"}>
+                  <button type="button" className="sort-header" onClick={() => sortBy(key, best)}>
+                    {t(label)}
+                    <span aria-hidden="true">{order.column === key ? (order.direction === 1 ? " ↑" : " ↓") : ""}</span>
+                  </button>
+                </th>
+              ))}
+            </tr>
           </thead>
           <tbody>
             {rows.map(({ preset, metrics, errors }) => {
