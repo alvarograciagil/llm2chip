@@ -9,6 +9,7 @@ export type Language = "es" | "en";
 const ES: Record<string, string> = {
   // The 3D viewer of the chip at work
   "Chip at work": "Chip en marcha",
+  "Starting the simulation…": "Arrancando la simulación…",
   "The chip at work": "El chip en marcha",
   "This browser cannot draw in 3D here.": "Este navegador no puede dibujar en 3D aquí.",
   "Record a run of a small model on its dies, or open a trace, to watch the chip at work.": "Simula un modelo pequeño en sus dies o abre una traza para ver el chip en marcha.",

@@ -167,7 +167,7 @@ export function SimulatorView() {
               <img src={picture.data} width={picture.side} height={picture.side} alt={`${t("Generated image")}: ${prompt}`} />
               <figcaption>{picture.side} × {picture.side} px, in {formatNumber(picture.seconds)} s</figcaption>
             </figure>
-          ) : output ? <p>{output}</p> : <p className="placeholder">{loaded ? (draw ? t("The image will appear here.") : t("The model's answer will appear here.")) : t("Load the chip in the right panel to simulate it: with the design's model and arithmetic.")}</p>}
+          ) : output ? <p>{output}{running && !drawing && <span className="sim-caret" aria-hidden="true" />}</p> : running ? null : <p className="placeholder">{loaded ? (draw ? t("The image will appear here.") : t("The model's answer will appear here.")) : t("Load the chip in the right panel to simulate it: with the design's model and arithmetic.")}</p>}
           {!running && ending && !draw && (
             <p className="note-warning">
               {ending === "loop" ? t("The model started repeating itself without writing its end of turn and the chip stopped it, as its firmware does.") : ending === "context" ? t("The chip's context filled up: it remembers no more tokens. Raise the context in the design for longer answers.") : t("The model did not write its end of turn: it stopped at the token limit.")}
@@ -178,7 +178,13 @@ export function SimulatorView() {
               {drawing.decoding ? t("The decoder turns the tokens into pixels…") : `${t("The model writes the image")}: ${drawing.done} / ${drawing.total} ${t("visual tokens")} (${formatNumber(drawing.seconds)} s)`}
             </p>
           )}
-          {running && phase === "Reading the prompt" && <p className="placeholder">{t("Reading the prompt")}: {prefilled} / {promptTokens} tokens</p>}
+          {running && !output && !drawing && (
+            <div className="sim-waiting" role="status">
+              <span className="spinner" aria-hidden="true" />
+              <span>{phase === "Reading the prompt" ? `${t("Reading the prompt")}: ${prefilled} / ${promptTokens} tokens` : t("Starting the simulation…")}</span>
+              {phase === "Reading the prompt" && promptTokens > 0 && <progress max={promptTokens} value={prefilled} />}
+            </div>
+          )}
         </div>
         {error && (
           <div className="issue error" role="alert">
