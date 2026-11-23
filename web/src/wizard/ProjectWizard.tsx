@@ -255,7 +255,7 @@ function BoardPicker({ board, choose }: { board: string; choose: (id: string) =>
           <select value={current.id} onChange={(e) => choose(e.target.value)}>
             {models.map((b) => (
               <option key={b.id} value={b.id}>
-                {t(b.name)} · {b.price}
+                {t(b.name)}
               </option>
             ))}
           </select>
