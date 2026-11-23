@@ -5,6 +5,7 @@ import { Plot } from "../explorer/ExplorerView";
 import { formatNumber, locale } from "../format";
 import { useT } from "../i18n";
 import { useSimulator } from "../simulator/simulatorStore";
+import { matchingPreset } from "../params";
 import { useDesign } from "../store";
 import { shapeOf, useOptimize, type Design, type Goal, type Request } from "./optimizeStore";
 
@@ -201,6 +202,8 @@ export function OptimizeView() {
   const online = useSimulator((s) => s.online);
   const models = useSimulator((s) => s.models);
   const designModel = useDesign((s) => s.model);
+  const designParams = useDesign((s) => s.params);
+  const weightFormat = matchingPreset(designParams as unknown as Record<string, unknown>) ?? "custom";
   const addModel = useDesign((s) => s.addModel);
   const setParams = useDesign((s) => s.setParams);
   const setView = useDesign((s) => s.setView);
@@ -271,6 +274,7 @@ export function OptimizeView() {
               </select>
             </div>
           </div>
+          <p className="muted-text">{t("With its weights in the design's format")}: {t(weightFormat)}. {t("It is chosen in the sidebar, under Arithmetic.")}</p>
         </Section>
 
         <Section number={2} title={t("What matters most")}>

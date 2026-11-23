@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { chipFormat } from "../simulator/simulatorStore";
+import { useDesign } from "../store";
 
 export type Goal = "speed" | "area" | "efficiency" | "energy";
 export type Effort = "quick" | "thorough";
@@ -126,7 +128,10 @@ export const useOptimize = create<OptimizeState>((set, get) => ({
   },
   async start(path, request, factorSteps) {
     try {
-      await call("/api/optimize", { method: "POST", headers: json, body: JSON.stringify({ path, request, factor_steps: factorSteps }) });
+      // The weights go in the design's format, as the simulator loads them: weights a
+      // checkpoint keeps unquantized fit the cells no other way.
+      const format = chipFormat(useDesign.getState().params as unknown as Record<string, unknown>);
+      await call("/api/optimize", { method: "POST", headers: json, body: JSON.stringify({ path, request, factor_steps: factorSteps, format }) });
       set({ error: null, startedAt: Date.now() });
       await get().poll();
     } catch (e) {

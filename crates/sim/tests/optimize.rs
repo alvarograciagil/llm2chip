@@ -76,6 +76,26 @@ fn asking_again_measures_nothing_new() {
 }
 
 #[test]
+fn a_design_that_failed_before_is_tried_again() {
+    let dir = checkpoint("failed");
+    let cache = dir.join("sizing.json");
+    let first = search(&dir, &small(Goal::Speed), Some(&cache));
+    // As an earlier version kept them: every design stored as one that could not be built,
+    // which would leave the search with nothing to recommend and no reason why.
+    let mut kept: serde_json::Value = serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+    for value in kept["measured"].as_object_mut().unwrap().values_mut() {
+        *value = serde_json::Value::Null;
+    }
+    std::fs::write(&cache, serde_json::to_vec(&kept).unwrap()).unwrap();
+    let again = search(&dir, &small(Goal::Speed), Some(&cache));
+    assert!(again.measured > 0, "the failed designs are measured again");
+    assert!(again.recommended.is_some(), "and the search finds a design");
+    let shape = |r: &Report| r.recommended.as_ref().map(|d| (d.candidate.chips, d.candidate.sharing, d.candidate.cluster_bits, d.candidate.lane_bits, d.candidate.cell_bits));
+    assert_eq!(shape(&again), shape(&first));
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn a_search_uses_only_what_answers_its_own_question() {
     let dir = checkpoint("scope");
     let cache = dir.join("sizing.json");

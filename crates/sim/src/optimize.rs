@@ -145,7 +145,8 @@ pub struct Report {
     pub too_few_chips: Vec<u32>,
     pub measured: usize,
     pub from_cache: usize,
-    /// Why a design could not be built, when one could not: with no design found, why.
+    /// Why designs could not be built, when some could not: the reason most of them gave,
+    /// so that with no design found it says why rather than what one odd shape hit.
     pub failure: Option<String>,
 }
 
@@ -197,7 +198,7 @@ struct Search<'a> {
     /// Designs measured by an earlier search and not yet used by this one.
     earlier: Mutex<std::collections::HashSet<String>>,
     /// Why the first design that could not be built could not.
-    failure: Mutex<Option<String>>,
+    failures: Mutex<HashMap<String, usize>>,
     cancel: &'a AtomicBool,
     progress: &'a (dyn Fn(Progress) + Sync),
 }
@@ -229,7 +230,7 @@ pub fn optimize(model: &Model, silicon: &Silicon, request: &Request, cancel: &At
     });
     let store: Store = model.cache.as_ref().and_then(|path| std::fs::read(path).ok()).and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
     let earlier = Mutex::new(store.measured.keys().cloned().collect());
-    let search = Search { model, silicon, request, target, params, earlier, store: Mutex::new(store), measured: AtomicUsize::new(0), cached: AtomicUsize::new(0), planned: AtomicUsize::new(0), phase: Mutex::new("pruning"), best: Mutex::new(None), failure: Mutex::new(None), cancel, progress };
+    let search = Search { model, silicon, request, target, params, earlier, store: Mutex::new(store), measured: AtomicUsize::new(0), cached: AtomicUsize::new(0), planned: AtomicUsize::new(0), phase: Mutex::new("pruning"), best: Mutex::new(None), failures: Mutex::new(HashMap::new()), cancel, progress };
     let report = search.run();
     search.save();
     report
@@ -352,13 +353,15 @@ impl Search<'_> {
     /// Measures one design, or takes it from what was measured before.
     fn measure(&self, chips: u32, sharing: Sharing, units: u32, lanes: u32, cells: u32) -> Option<Design> {
         let key = self.key(chips, sharing, units, lanes, cells);
-        let known = self.store.lock().unwrap().measured.get(&key).copied();
+        // Only designs that were built are kept: one that failed is tried again, so that the
+        // search can say why. Building fails early, so trying again costs little.
+        let known = self.store.lock().unwrap().measured.get(&key).copied().flatten();
         let candidate = match known {
             Some(c) => {
                 if self.earlier.lock().unwrap().remove(&key) {
                     self.cached.fetch_add(1, Ordering::Relaxed);
                 }
-                c
+                Some(c)
             }
             None if self.stopped() => return None,
             None => {
@@ -366,11 +369,13 @@ impl Search<'_> {
                 let c = match measure(self.model.program, self.model.weights, s.base, &s.costs, &self.target, sharing, (chips, units, lanes, cells)) {
                     Ok(c) => Some(c),
                     Err(e) => {
-                        self.failure.lock().unwrap().get_or_insert(e);
+                        *self.failures.lock().unwrap().entry(e).or_default() += 1;
                         None
                     }
                 };
-                self.store.lock().unwrap().measured.insert(key, c);
+                if c.is_some() {
+                    self.store.lock().unwrap().measured.insert(key, c);
+                }
                 self.measured.fetch_add(1, Ordering::Relaxed);
                 self.tell();
                 c
@@ -558,7 +563,7 @@ impl Search<'_> {
                 _ => Vec::new(),
             }
         });
-        Report { goal: self.request.goal, recommended, alternatives, frontier: all, limiting, too_few_chips: too_few, measured: self.measured.load(Ordering::Relaxed), from_cache: self.cached.load(Ordering::Relaxed), failure: self.failure.lock().unwrap().clone() }
+        Report { goal: self.request.goal, recommended, alternatives, frontier: all, limiting, too_few_chips: too_few, measured: self.measured.load(Ordering::Relaxed), from_cache: self.cached.load(Ordering::Relaxed), failure: self.commonest_failure() }
     }
 
     fn stopped(&self) -> bool {
@@ -574,6 +579,12 @@ impl Search<'_> {
         let done = self.measured.load(Ordering::Relaxed);
         let planned = self.planned.load(Ordering::Relaxed).max(done);
         (self.progress)(Progress { phase: *self.phase.lock().unwrap(), done, planned, best: self.best.lock().unwrap().clone() });
+    }
+
+    /// The reason most designs that failed gave; among as many, the first in order.
+    fn commonest_failure(&self) -> Option<String> {
+        let failures = self.failures.lock().unwrap();
+        failures.iter().max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0))).map(|(reason, _)| reason.clone())
     }
 
     /// Keeps what was measured for the next search.
