@@ -1,5 +1,5 @@
 import { DEMO, REPOSITORY } from "../demo";
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent } from "react";
 import { useDesign, type Appearance } from "../store";
 import { datasheet } from "../datasheet";
 import { download } from "../download";
@@ -147,6 +147,42 @@ function LanguageMenu() {
   );
 }
 
+/** Whether the bar's parts sit side by side without covering each other or leaving it. */
+function fits(bar: HTMLElement): boolean {
+  const parts = [...bar.children] as HTMLElement[];
+  if (parts.some((p) => p.scrollWidth > p.clientWidth + 1)) return false;
+  const edge = bar.getBoundingClientRect();
+  const boxes = parts.map((p) => p.getBoundingClientRect());
+  return boxes.every((box, i) => {
+    if (box.left < edge.left - 0.5 || box.right > edge.right + 0.5) return false;
+    const next = boxes[i + 1];
+    const sameRow = next && next.top < box.bottom && box.top < next.bottom;
+    return !sameRow || box.right <= next.left + 0.5;
+  });
+}
+
+/** How much the views give up to fit on the bar, measured rather than guessed from the
+ * window's width, since it depends on the language and on what the bar holds: 0 all their
+ * names, 1 only the open one's, 2 only icons; 3 to 5 the same on a row of their own. */
+function useFit(bar: React.RefObject<HTMLElement | null>, ...deps: unknown[]) {
+  useLayoutEffect(() => {
+    const element = bar.current;
+    if (!element) return;
+    const measure = () => {
+      for (let level = 0; level <= 5; level++) {
+        element.dataset.fit = String(level);
+        if (level === 5 || fits(element)) return;
+      }
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+    // The deps are what changes the width of the bar's contents.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+}
+
 export function Toolbar() {
   const t = useT();
   const undo = useDesign((s) => s.undo);
@@ -160,6 +196,10 @@ export function Toolbar() {
   const clearBaseline = useDesign((s) => s.clearBaseline);
   const [saving, setSaving] = useState(false);
   const [creating, setCreating] = useState(false);
+  const language = useDesign((s) => s.language);
+  const designName = useDesign((s) => s.designName);
+  const bar = useRef<HTMLElement>(null);
+  useFit(bar, language, view, baseline, designName);
   const exportDatasheet = () => {
     const { report, designName, model, params } = useDesign.getState();
     if (!report || !model) return;
@@ -167,7 +207,7 @@ export function Toolbar() {
   };
 
   return (
-    <header className="toolbar">
+    <header className="toolbar" ref={bar}>
       <div className="toolbar-side">
         <strong className="app-name">llm2chip</strong>
         <IconButton label={t("New project")} onClick={() => setCreating(true)}>
