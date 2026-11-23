@@ -34,7 +34,9 @@ fn local_tokenizers() -> Vec<PathBuf> {
             found.push(snapshot.path().join("tokenizer.json"));
         }
     }
-    found.retain(|p| p.exists());
+    // Only the kinds the chip handles: a cached model of another family, such as a BERT with
+    // WordPiece, is not one to compare.
+    found.retain(|p| std::fs::read_to_string(p).ok().and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok()).is_some_and(|json| matches!(json["model"]["type"].as_str(), Some("BPE" | "WordLevel"))));
     found
 }
 
