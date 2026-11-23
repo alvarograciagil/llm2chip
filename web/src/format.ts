@@ -16,6 +16,13 @@ export function formatNumber(value: number): string {
   return value.toLocaleString(locale(), { maximumFractionDigits: digits, minimumFractionDigits: digits });
 }
 
+/** The time a token takes and the speed it gives, as "1.71 ms/token · 585 tok/s": in
+ * milliseconds below a tenth of a second, so short times do not round to a misleading value. */
+export function formatTokenTime(seconds: number): string {
+  const time = seconds < 0.1 ? `${formatNumber(seconds * 1000)} ms/token` : `${formatNumber(seconds)} s/token`;
+  return `${time} · ${formatNumber(1 / seconds)} tok/s`;
+}
+
 /** Maps a slider position in [0, 1] onto a logarithmic range. */
 export function fromLog(position: number, min: number, max: number): number {
   return min * Math.pow(max / min, position);

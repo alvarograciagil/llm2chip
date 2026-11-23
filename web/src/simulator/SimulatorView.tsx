@@ -6,7 +6,7 @@ import { Segmented } from "../components/controls";
 import { Icon } from "../components/icons";
 import { useT } from "../i18n";
 import { scheduleDesign, type Schedule, type ScheduledStage } from "../engine";
-import { formatNumber } from "../format";
+import { formatNumber, formatTokenTime } from "../format";
 import { useDesign } from "../store";
 import { matchingPreset } from "../params";
 import { chipDraftDepth, loadSignature, useSimulator } from "./simulatorStore";
@@ -408,7 +408,7 @@ export function SimulatorPanel() {
       <dl className="inset metrics">
         <div><dt>{t("Phase")}</dt><dd>{state.phase ? t(state.phase) : "—"}</dd></div>
         <div><dt>{t("Tokens generated")}</dt><dd>{state.tokens}</dd></div>
-        <div><dt>{t("Simulation")}</dt><dd>{mean ? `${formatNumber(mean)} s/token` : "—"}</dd></div>
+        <div><dt>{t("Simulation")}</dt><dd>{mean ? formatTokenTime(mean) : "—"}</dd></div>
         <div><dt>{t("This chip, estimated")}</dt><dd>{formatNumber(chipRate)} tok/s</dd></div>
         <div><dt>{t("Faster than simulating it")}</dt><dd>{mean ? `×${formatNumber(chipRate * mean)}` : "—"}</dd></div>
         {state.loadReport && <div><dt>{t("Image: blocks")}</dt><dd>{formatNumber(state.loadReport.segments)}{state.loadReport.created ? ` (${t("created")})` : ""}</dd></div>}
