@@ -21,13 +21,12 @@ const ICONS = {
       <path d="M3 9h8M11 3v14M11 12h6" {...line} />
     </>
   ),
-  // A token going through the steps.
+  // A flowchart: one step leading to the next.
   logic: (
     <>
-      <circle cx="5" cy="5" r="2" {...line} />
-      <circle cx="15" cy="10" r="2" {...line} />
-      <circle cx="5" cy="15" r="2" {...line} />
-      <path d="M7 5.8 13 9M13 11 7 14.2" {...line} />
+      <rect x="4" y="2.5" width="12" height="4.5" rx="1.2" {...line} />
+      <rect x="4" y="13" width="12" height="4.5" rx="1.2" {...line} />
+      <path d="M10 7v5.5M7.8 10.3 10 12.5l2.2-2.2" {...line} />
     </>
   ),
   // A logic gate.

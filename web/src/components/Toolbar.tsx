@@ -152,7 +152,15 @@ function fits(bar: HTMLElement): boolean {
   const parts = [...bar.children] as HTMLElement[];
   if (parts.some((p) => p.scrollWidth > p.clientWidth + 1)) return false;
   const edge = bar.getBoundingClientRect();
-  const boxes = parts.map((p) => p.getBoundingClientRect());
+  // What each part holds, which spills out of it to the left when it is aligned to the right.
+  const boxes = parts.map((p) => {
+    const own = p.getBoundingClientRect();
+    const inside = [...p.children]
+      .filter((c) => !["fixed", "absolute"].includes(getComputedStyle(c).position))
+      .map((c) => c.getBoundingClientRect())
+      .filter((r) => r.width > 0);
+    return inside.length === 0 ? own : { top: own.top, bottom: own.bottom, left: Math.min(own.left, ...inside.map((r) => r.left)), right: Math.max(own.right, ...inside.map((r) => r.right)) };
+  });
   return boxes.every((box, i) => {
     if (box.left < edge.left - 0.5 || box.right > edge.right + 0.5) return false;
     const next = boxes[i + 1];
