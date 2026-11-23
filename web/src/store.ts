@@ -140,6 +140,13 @@ function readAddedModels(): ModelSource[] {
   }
 }
 
+/** The models listed, with the added ones last: one added under the name of another, such as
+ * the real stories260K the online demo loads beside the built-in one, takes its place. */
+export function withoutReplaced(models: ModelSource[], added: ModelSource[]): ModelSource[] {
+  const names = new Set(added.map((m) => m.name));
+  return [...models.filter((m) => !names.has(m.name)), ...added];
+}
+
 function writeAddedModels(models: ModelSource[]) {
   try {
     localStorage.setItem(ADDED_MODELS_KEY, JSON.stringify(models.filter((m) => isAddedFile(m.id))));
@@ -233,7 +240,7 @@ export const useDesign = create<DesignState>((set, get) => {
     revealed: null,
 
     bootstrap() {
-      const models = [...builtinModels(), ...readAddedModels()];
+      const models = withoutReplaced(builtinModels(), readAddedModels());
       const defaults = defaultParams();
       const shared = readHash();
       const model = models.find((m) => m.id === shared?.model) ?? models[0];
@@ -276,7 +283,7 @@ export const useDesign = create<DesignState>((set, get) => {
 
     addModel(name, config, path) {
       const model = { id: `file:${name}`, name, config, ...(path ? { path } : {}) };
-      const added = [...get().models.filter((m) => m.id !== model.id), model];
+      const added = withoutReplaced(get().models.filter((m) => m.id !== model.id), [model]);
       writeAddedModels(added);
       set({ models: added });
       commit({ ...get().params, ...fitted(model, get().params) } as ChipParams, "", { model, selection: null });
