@@ -88,6 +88,22 @@ The Simulator view chooses a level per block:
 
 For each token it shows the simulated cycles, the time the chip would take and what the CPU, the die and the sampling unit did, in order. Every cycle shown says whether it was simulated or estimated.
 
+### A conversation in the simulator
+
+The simulator holds a conversation as the chip does ([full-chip.md](full-chip.md#a-conversation-and-the-clear-pin)). Each question goes on over the cache the earlier ones left. On top of it goes only what the chat template writes after the last answer and the new question (`PromptStyle::next_turn`). The view shows the turns, and how much of the chip's context they take.
+
+- **New conversation** empties the cache, as the clear pin does. The button tells how long the pin takes in the design.
+- **Through the real firmware**, the simulated chip stays on between questions with the engine inside it. A new conversation on the same chip raises its clear pin. The view shows the cycles the firmware took to handle it. There the engine stands in for the cache, so emptying the cache is not counted, and the view shows the design's estimate beside them.
+- **What ends a conversation:**
+  - loading a model;
+  - changing the chip, the system prompt or, through the firmware, the generation settings;
+  - a question about a picture, or drawing one;
+  - stopping an answer halfway.
+- **A full context** ends the answer. A question that does not fit is refused until a new conversation starts.
+- **In the browser** (the online demo) it works the same, on the die alone.
+
+`a_conversation_goes_on_over_the_cache_in_the_browser` (in `crates/wasm-sim/tests/parity.rs`) checks the browser's simulator with SmolLM2-135M. A second question answers as the whole conversation fed at once does, and a new conversation answers the first question as the first time.
+
 ## Verification at a glance
 
 | Check | Where |

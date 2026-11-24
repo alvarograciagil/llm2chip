@@ -1,7 +1,7 @@
 //! Several identical chips on a simulated board: one design, told apart by its pins.
 
 use compiler::compile_qwen3_5;
-use netlist::chip::{chip_design, ChipConfig, ChipModel, GenerationSetup, DEBUG_LINK_CORRECTED, DEBUG_LINK_FAILED, RESET_RELEASE};
+use netlist::chip::{chip_design, ChipConfig, ChipModel, ClearEntry, GenerationSetup, DEBUG_LINK_CORRECTED, DEBUG_LINK_FAILED, INFO_CONVERSATION, RESET_RELEASE};
 use netlist::image::build_plan_image;
 use netlist::rv32::Rv32Iss;
 use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
@@ -92,16 +92,18 @@ struct Board<'a> {
     noise: Noise,
     flips: u32,
     doubles: u32,
-    input: &'a [u8],
+    input: Vec<u8>,
     fed: usize,
     output: Vec<u8>,
     cycles: u64,
+    /// The leading chip's clear pin is raised for the next cycle.
+    clear: bool,
 }
 
 impl<'a> Board<'a> {
     /// With `group`, the chips are in groups of that many and the last of each closes its
     /// group's ring with a loop back to the first.
-    fn new(design: &Design, count: usize, image: &'a [u32], input: &'a [u8], link_lanes: usize, group: Option<usize>) -> Self {
+    fn new(design: &Design, count: usize, image: &'a [u32], input: &[u8], link_lanes: usize, group: Option<usize>) -> Self {
         let mut chips: Vec<Simulator> = (0..count).map(|_| Simulator::with_names(design).unwrap()).collect();
         for (index, chip) in chips.iter_mut().enumerate() {
             chip.set("follower", (index != 0) as u64).unwrap();
@@ -133,11 +135,16 @@ impl<'a> Board<'a> {
                 }
             }
         }
-        Self { chips, wires, pending: vec![None; count], image, noise: Noise(0x0BAD_C0DE_1234_5678), flips: 0, doubles: 0, input, fed: 0, output: Vec::new(), cycles: 0 }
+        Self { chips, wires, pending: vec![None; count], image, noise: Noise(0x0BAD_C0DE_1234_5678), flips: 0, doubles: 0, input: input.to_vec(), fed: 0, output: Vec::new(), cycles: 0, clear: false }
     }
 
     /// Runs until the leading chip stops.
     fn run(&mut self, limit: u64) {
+        self.run_until(limit, |board| board.chips[0].get("halted").unwrap() == 1);
+    }
+
+    /// Runs until `done` says so, looking before each cycle.
+    fn run_until(&mut self, limit: u64, done: impl Fn(&Self) -> bool) {
         loop {
             for wire in &mut self.wires {
                 wire.drive(&mut self.chips, &mut self.noise, &mut self.flips, &mut self.doubles);
@@ -146,6 +153,7 @@ impl<'a> Board<'a> {
                 chip.set("image_resp_valid", pending.is_some() as u64).unwrap();
                 chip.set("image_resp_data", pending.unwrap_or(0) as u64).unwrap();
             }
+            self.chips[0].set("clear", std::mem::take(&mut self.clear) as u64).unwrap();
             let feeding = self.fed < self.input.len() && self.chips[0].get("host_rx_ready") == Some(1);
             self.chips[0].set("host_rx_valid", feeding as u64).unwrap();
             self.chips[0].set("host_rx_data", self.input.get(self.fed).copied().unwrap_or(0) as u64).unwrap();
@@ -157,9 +165,8 @@ impl<'a> Board<'a> {
             if self.chips[0].get("host_tx_valid").unwrap() == 1 {
                 self.output.push(self.chips[0].get("host_tx_data").unwrap() as u8);
             }
-            if self.chips[0].get("halted").unwrap() == 1 {
-                return;
-            }
+            // The cycle ends whether or not the board stops here, so the wires stay full.
+            let stop = done(self);
             for wire in &mut self.wires {
                 wire.sample(&self.chips);
             }
@@ -167,6 +174,9 @@ impl<'a> Board<'a> {
                 chip.tick();
             }
             self.cycles += 1;
+            if stop {
+                return;
+            }
             if self.cycles.is_multiple_of(500_000) {
                 eprintln!("{} cycles, output {:?}", self.cycles, String::from_utf8_lossy(&self.output));
             }
@@ -207,7 +217,7 @@ fn setup_for(name: &str, firmware: &FirmwareImage, die: DieConfig, sharing: Shar
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let tables = tiny_tokenizer();
     let generation = GenerationSetup { max_new: 1, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
-    let plans: Vec<_> = [1, chips].iter().map(|chips| plan_parts(&program, &dir, die, CHIP_TOKENS, &generation, *chips, sharing).unwrap()).collect();
+    let plans: Vec<_> = [1, chips].iter().map(|chips| plan_parts(&program, &dir, die, CHIP_TOKENS, &generation, *chips, sharing, false).unwrap()).collect();
     let image = build_plan_image(&firmware.program, &firmware.data, &tables.to_words(), &plans).unwrap();
     Setup { design: chip_design(config), image, dir, config, die }
 }
@@ -329,6 +339,85 @@ fn chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &str,
         assert_eq!(gates, exact, "logit {index}");
     }
     std::fs::remove_dir_all(&setup.dir).ok();
+}
+
+/// The entries of a chip's conversation table, from its description.
+fn conversation_entries(info: &[u32]) -> Vec<ClearEntry> {
+    let at = info[INFO_CONVERSATION] as usize;
+    (0..info[at + 1] as usize)
+        .map(|k| {
+            let w = &info[at + 2 + 5 * k..];
+            ClearEntry { address: w[0], registers: w[1], step: w[2], extent: w[3], row: w[4] }
+        })
+        .collect()
+}
+
+/// The clear pin on a board: only the leading chip's is wired, and it passes the order down
+/// the chain, so each chip empties its part of the cache and of the recurrent state, and
+/// the same question then gets the same answer, as the first time.
+#[test]
+#[ignore = "slow: two whole chips in gates: only with optimizations"]
+fn the_leading_chips_clear_pin_clears_every_chip_of_the_chain() {
+    const LIMIT: u64 = 20_000_000;
+    let Some(firmware) = build_firmware() else { return };
+    let die = DieConfig { microcode_bits: 15, ..cell_die_config() };
+    let dir = std::env::temp_dir().join(format!("llm2chip-board-clear-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let generation = GenerationSetup { max_new: 2, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
+    // Each chip holds the layers it runs, their cache and their recurrent state.
+    let plans: Vec<_> = [1, 2].iter().map(|chips| plan_parts(&program, &dir, die, CHIP_TOKENS, &generation, *chips, Sharing::Layers, true).unwrap()).collect();
+    let entries: Vec<Vec<ClearEntry>> = plans[1].iter().map(|part| conversation_entries(&part.info)).collect();
+    let image = build_plan_image(&firmware.program, &firmware.data, &tiny_tokenizer().to_words(), &plans).unwrap();
+    let design = chip_design(config);
+    let question = b"hoy\0";
+    let mut board = Board::new(&design, 2, &image, question, die.features.link_lanes(), None);
+    // Each answer ends with a zero byte, and the chip waits for the next turn.
+    let answers = |board: &Board| -> Vec<String> {
+        let text: Vec<u8> = board.output.iter().copied().filter(|b| *b != b'.').collect();
+        let mut parts: Vec<String> = text.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+        parts.pop();
+        parts
+    };
+    // Whether each chip's part of the conversation holds anything.
+    let lane_bits = die.features.lane_bits;
+    let held = |board: &Board| -> Vec<bool> {
+        board
+            .chips
+            .iter()
+            .zip(&entries)
+            .map(|(chip, entries)| {
+                entries.iter().any(|e| {
+                    (0..e.registers).any(|r| {
+                        (0..e.extent).any(|i| {
+                            let address = (e.address + r * e.step + i) as usize;
+                            let bank = if lane_bits == 0 { "/die/vectors_a".to_string() } else { format!("/die/vectors_a{}", address & ((1 << lane_bits) - 1)) };
+                            chip.peek_memory(&bank, address >> lane_bits).unwrap() & 0xFFFF != 0
+                        })
+                    })
+                })
+            })
+            .collect()
+    };
+
+    board.run_until(LIMIT, |b| answers(b).len() == 1);
+    let first = answers(&board)[0].clone();
+    assert!(!first.is_empty());
+    assert_eq!(held(&board), [true, true], "each chip holds its part of the conversation");
+
+    // The pin while the chips wait: both parts become zeros.
+    board.clear = true;
+    let raised = board.cycles;
+    board.run_until(LIMIT, |b| b.cycles > raised && b.cycles.is_multiple_of(1024) && held(b) == [false, false]);
+    eprintln!("both chips cleared within {} cycles", board.cycles - raised);
+
+    // A new conversation: the same question, the same answer.
+    board.input.extend(question);
+    board.run_until(LIMIT, |b| answers(b).len() == 2);
+    assert_eq!(answers(&board)[1], first, "after the clear the chain answers as the first time");
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

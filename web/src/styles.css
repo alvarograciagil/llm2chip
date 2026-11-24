@@ -1556,6 +1556,40 @@ button.link-row {
   margin: 0;
 }
 
+/* A conversation: each question above its answer, earlier turns first. */
+.transcript .turn {
+  margin-bottom: 12px;
+}
+
+.transcript .turn-question {
+  margin: 0 0 4px auto;
+  width: fit-content;
+  max-width: 85%;
+  padding: 4px 10px;
+  border-radius: 10px;
+  background: var(--control);
+  color: var(--label);
+}
+
+.conversation-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  font-size: 13px;
+}
+
+.conversation-context {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.conversation-context progress {
+  width: 120px;
+}
+
 .placeholder {
   color: var(--label-2);
 }

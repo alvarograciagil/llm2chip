@@ -115,6 +115,18 @@ interface SimulatorState {
   error: string | null;
   /** Why the last answer ended, when it was not the model's own end token. */
   ending: "limit" | "loop" | "context" | null;
+  /** The question of the turn shown, which `output` answers. */
+  asked: string | null;
+  /** The earlier turns of the conversation the chip holds, oldest first. */
+  turns: { question: string; answer: string }[];
+  /** The turn shown before this run, for the conversation it goes on from. */
+  shownTurn: { question: string; answer: string } | null;
+  /** The next question goes on from the last answer, over the chip's cache. */
+  goOn: boolean;
+  /** Tokens the chip's cache holds: every turn so far, the one running too. */
+  held: number;
+  /** Cycles the chip at instruction level took to clear its conversation, the last time. */
+  clearCycles: number | null;
   promptTokens: number;
   prefilled: number;
   tokens: number;
@@ -155,6 +167,8 @@ interface SimulatorState {
   load: () => Promise<void>;
   generate: () => void;
   stop: () => void;
+  /** Starts a new conversation: the next question empties the cache, as the clear pin does. */
+  newConversation: () => void;
 }
 
 const KEEP_KEY = "llm2chip.keepModels";
@@ -192,8 +206,11 @@ const message = async (r: Response) => (await r.text()) || `Error ${r.status}`;
 type Setter = (patch: Partial<SimulatorState> | ((s: SimulatorState) => Partial<SimulatorState>)) => void;
 type Getter = () => SimulatorState;
 
+/** No conversation: a new model, or a new one asked for, starts with an empty cache. */
+const NO_CONVERSATION: Partial<SimulatorState> = { goOn: false, turns: [], shownTurn: null, asked: null, held: 0, clearCycles: null };
+
 /** What a new run starts from. */
-const FRESH_RUN: Partial<SimulatorState> = { ending: null, drawing: null, chip: null, output: "", running: true, error: null, phase: "Connecting", tokens: 0, prefilled: 0, promptTokens: 0, seconds: [], saturated: 0, acceptance: { hits: [], tries: [] }, cpuInfo: null, steps: [], totals: null };
+const FRESH_RUN: Partial<SimulatorState> = { clearCycles: null, ending: null, drawing: null, chip: null, output: "", running: true, error: null, phase: "Connecting", tokens: 0, prefilled: 0, promptTokens: 0, seconds: [], saturated: 0, acceptance: { hits: [], tries: [] }, cpuInfo: null, steps: [], totals: null };
 
 /** A step the chip reported, with what it did, at the end of the list. */
 const step = (kind: ChipStep["kind"], index: number, text: string, data: Record<string, unknown>) => (s: SimulatorState) => {
@@ -210,7 +227,12 @@ function handleEvent(set: Setter, data: any, close: () => void) {
   if (data.type === "drawing") set((s) => ({ phase: "Drawing", drawing: { done: data.done, total: data.total, seconds: data.seconds, decoding: false }, pulse: s.pulse + 1 }));
   if (data.type === "decoding") set((s) => ({ phase: "Decoding the image", drawing: s.drawing && { ...s.drawing, decoding: true } }));
   if (data.type === "picture") set({ picture: { data: data.data, side: data.side, seconds: data.seconds } });
-  if (data.type === "start") set({ promptTokens: data.prompt_tokens, phase: "Reading the prompt" });
+  if (data.type === "start") {
+    // The turn shown joins the conversation, unless the chip starts a new one.
+    const before = Number(data.held) || 0;
+    set((s) => ({ promptTokens: data.prompt_tokens, phase: "Reading the prompt", held: before, turns: before > 0 && s.shownTurn ? [...s.turns, s.shownTurn] : [], shownTurn: null }));
+  }
+  if (data.type === "cleared") set({ clearCycles: Number(data.cycles) || 0 });
   if (data.type === "cpu") set({ cpuInfo: readCpuInfo(data) });
   if (data.type === "prefill") set((s) => ({ prefilled: data.done, saturated: s.saturated, pulse: s.pulse + 1, ...step("prefill", data.done, "", data)(s) }));
   if (data.type === "token") {
@@ -228,10 +250,15 @@ function handleEvent(set: Setter, data: any, close: () => void) {
   if (data.type === "done") {
     // What the firmware did after its last token: closing the answer.
     if (data.activity) set((s) => ({ totals: addActivity(s.totals ?? EMPTY_ACTIVITY, readActivity(data.activity)) }));
-    set({ phase: "Finished", running: false, ending: ["limit", "loop", "context"].includes(data.reason) ? data.reason : null, chip: data.chip ? { cycles: data.chip.cycles, dieCycles: data.chip.die_cycles, tokenizerMatch: data.chip.tokenizer_match ?? null } : null });
+    // The chip keeps the conversation for the next question when its cache holds it.
+    const held = Number(data.held) || 0;
+    set({ held, goOn: held > 0, phase: "Finished", running: false, ending: ["limit", "loop", "context"].includes(data.reason) ? data.reason : null, chip: data.chip ? { cycles: data.chip.cycles, dieCycles: data.chip.die_cycles, tokenizerMatch: data.chip.tokenizer_match ?? null } : null });
     close();
   }
   if (data.type === "error") {
+    // Before the chip took the question, the conversation is as it was; after, it is lost.
+    // The question goes back to the composer if the chip never took it.
+    set((s) => (s.phase === "Connecting" ? { prompt: s.asked ?? s.prompt, asked: s.shownTurn?.question ?? null, output: s.shownTurn?.answer ?? "", shownTurn: null } : { goOn: false, turns: [], held: 0 }));
     set({ error: data.message, phase: "", running: false });
     close();
   }
@@ -250,7 +277,7 @@ async function loadInBrowser(get: Getter, set: Setter) {
     const keep = get().keepModels;
     const { kept, threads } = await loadModel(model, setup, keep, (phase, done, total) => set({ download: { phase, done, total } }));
     await refreshKept(get, set);
-    set({ noRoom: keep && !kept, loaded: model.name, accelerator: threads > 1 ? `WebAssembly, ${threads} threads` : "WebAssembly", loadReport: null, loading: false, download: null, numericLoaded: "exact", loadedSignature: signature });
+    set({ ...NO_CONVERSATION, output: "", ending: null, noRoom: keep && !kept, loaded: model.name, accelerator: threads > 1 ? `WebAssembly, ${threads} threads` : "WebAssembly", loadReport: null, loading: false, download: null, numericLoaded: "exact", loadedSignature: signature });
   } catch (e) {
     set({ error: e instanceof Error ? e.message : String(e), loading: false, download: null });
   }
@@ -266,10 +293,16 @@ async function refreshKept(get: Getter, set: Setter, sweep = false) {
 }
 
 function generateInBrowser(get: Getter, set: Setter) {
-  const { prompt, maxTokens, temperature, topK, thinking, thinkBudget } = get();
+  const { prompt, maxTokens, temperature, topK, thinking, thinkBudget, goOn } = get();
   const budget = thinkBudget.trim() === "" ? null : Math.max(0, Math.floor(Number(thinkBudget) || 0));
-  set({ ...FRESH_RUN, image: null, draw: false });
-  runModel({ prompt, system: systemPrompt(), max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, seed: Math.floor(Math.random() * 2 ** 32) }, (event) => handleEvent(set, event, () => undefined));
+  set({ ...FRESH_RUN, ...askTurn(get, prompt), image: null, draw: false });
+  runModel({ prompt, system: systemPrompt(), max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, seed: Math.floor(Math.random() * 2 ** 32), conversation: goOn }, (event) => handleEvent(set, event, () => undefined));
+}
+
+/** A question asked: the turn shown waits to join the conversation, and the composer empties. */
+function askTurn(get: Getter, prompt: string): Partial<SimulatorState> {
+  const { asked, output, goOn } = get();
+  return { asked: prompt, prompt: "", shownTurn: goOn && asked !== null ? { question: asked, answer: output } : null };
 }
 
 /** A link to the simulator: chooses its model, stories260K if it names none, and runs it if
@@ -327,6 +360,12 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   phase: "",
   error: null,
   ending: null,
+  asked: null,
+  turns: [],
+  shownTurn: null,
+  goOn: false,
+  held: 0,
+  clearCycles: null,
   promptTokens: 0,
   prefilled: 0,
   tokens: 0,
@@ -398,7 +437,8 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
     useDesign.getState().addModel(model.name, model.config, model.id);
     // A model that only continues text gets a beginning to continue, unless the prompt is one's own.
     const { prompt } = get();
-    const ours = prompt === QUESTION || Object.values(PROMPTS).includes(prompt);
+    // An empty composer, after a question was sent, is ours too.
+    const ours = prompt.trim() === "" || prompt === QUESTION || Object.values(PROMPTS).includes(prompt);
     set({ path: model.id, ...(ours ? { prompt: PROMPTS[model.id] ?? QUESTION } : {}) });
   },
 
@@ -431,7 +471,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
       const response = await fetch("/api/load", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       if (!response.ok) throw new Error(await message(response));
       const { loaded, accelerator, load_report: loadReport } = await response.json();
-      set({ loaded, accelerator, loadReport: loadReport ?? null, loading: false, numericLoaded: "exact", loadedSignature: signature });
+      set({ ...NO_CONVERSATION, output: "", ending: null, loaded, accelerator, loadReport: loadReport ?? null, loading: false, numericLoaded: "exact", loadedSignature: signature });
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e), loading: false });
     }
@@ -439,7 +479,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
 
   generate() {
     if (DEMO) return generateInBrowser(get, set);
-    const { prompt, maxTokens, temperature, topK, thinking, thinkBudget, firmware, samplerUnit, firmwareTokenizer, image, draw } = get();
+    const { prompt, maxTokens, temperature, topK, thinking, thinkBudget, firmware, samplerUnit, firmwareTokenizer, image, draw, goOn } = get();
     // The draft head is part of the chip only when the design has one.
     const mtpDepth = chipDraftDepth(useDesign.getState().params);
     const budget = thinkBudget.trim() === "" ? null : Math.max(0, Math.floor(Number(thinkBudget) || 0));
@@ -447,11 +487,12 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
     const rate = metric("tok_s");
     const fidelity = { firmware, sampler_unit: samplerUnit || firmware, cycles_per_token: rate > 0 ? (metric("freq_ghz") * 1e9) / rate : 0, sampler_lanes: useDesign.getState().params.sampler_lanes, tokenizer: firmware && firmwareTokenizer, context_tokens: useDesign.getState().params.context_tokens };
     socket?.close();
-    set({ ...FRESH_RUN, picture: draw ? null : get().picture });
+    // A picture drawn is not a turn of the conversation, and the prompt stays for another.
+    set({ ...FRESH_RUN, ...(draw ? { goOn: false, turns: [], held: 0, asked: prompt, shownTurn: null } : askTurn(get, prompt)), picture: draw ? null : get().picture });
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${location.host}/api/generate`);
     socket = ws;
-    ws.onopen = () => ws.send(JSON.stringify({ prompt, system: systemPrompt(), max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, mtp_depth: mtpDepth, fidelity, image: image && { width: image.width, height: image.height, rgb: image.rgb }, draw }));
+    ws.onopen = () => ws.send(JSON.stringify({ prompt, system: systemPrompt(), max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, mtp_depth: mtpDepth, fidelity, image: image && { width: image.width, height: image.height, rgb: image.rgb }, draw, conversation: goOn && !draw }));
     ws.onerror = () => set({ error: "The connection to the engine was lost.", running: false });
     ws.onclose = () => set({ running: false });
     ws.onmessage = (event) => handleEvent(set, JSON.parse(event.data), () => ws.close());
@@ -460,6 +501,11 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
   stop() {
     if (DEMO) stopModel();
     socket?.close();
-    set({ running: false, phase: "Stopped" });
+    // An answer left halfway leaves the conversation behind: the next question starts anew.
+    set({ running: false, phase: "Stopped", goOn: false, held: 0 });
+  },
+
+  newConversation() {
+    set({ ...NO_CONVERSATION, output: "", ending: null, error: null, phase: "" });
   },
 }));

@@ -77,9 +77,11 @@ function Failure() {
 function NewConversation() {
   const t = useT();
   const s = useVoice();
+  const clearMs = useDesign((d) => d.report?.metrics.find((m) => m.id === "clear_ms")?.value ?? null);
   if (s.fresh || s.running) return null;
+  const title = clearMs !== null ? `${t("Empties the chip's cache, as its clear pin does")}: ${formatNumber(clearMs)} ms ${t("in this design")}` : t("Empties the chip's cache, as its clear pin does");
   return (
-    <button className="pill" title={t("Forget the conversation: the next question starts a new one")} onClick={() => s.set({ fresh: true, history: [], result: null, asked: null })}>
+    <button className="pill" title={title} onClick={() => s.set({ fresh: true, history: [], result: null, asked: null })}>
       {t("New conversation")}
     </button>
   );

@@ -1107,6 +1107,12 @@ export const ENGINE_TEXT: [string, string][] = [
   ["Raise the context or shorten the system prompt.", "Sube el contexto o acorta el system prompt."],
   ["this model's chat template does not put the system prompt apart, ahead of the question", "la plantilla de chat de este modelo no separa el system prompt delante de la pregunta"],
   ["the system prompt's last tokens join the question's first, so the chip cannot carry it apart: end it with a full stop or a new line", "los últimos tokens del system prompt se unen a los primeros de la pregunta, así que el chip no puede llevarlo aparte: termínalo con un punto o un salto de línea"],
+  // A conversation over the chip's cache
+  ["this model's chat template does not write an earlier answer as it was, so a conversation cannot go on over the cache", "la plantilla de chat de este modelo no escribe una respuesta anterior tal como fue, así que una conversación no puede seguir sobre la caché"],
+  ["the conversation takes {s} tokens and the question {s} more, and the chip remembers {s}: start a new conversation", "la conversación ocupa {0} tokens y la pregunta {1} más, y el chip recuerda {2}: empieza una conversación nueva"],
+  ["the chip that held the conversation is gone: start a new one", "el chip que llevaba la conversación ya no está: empieza una nueva"],
+  ["the chip stopped instead of clearing its conversation", "el chip se detuvo en vez de borrar su conversación"],
+  ["the engine is in the chip that holds the conversation", "el motor está en el chip que lleva la conversación"],
   ["the system prompt takes {n} tokens and the chip's description has room for {n}", "el system prompt ocupa {0} tokens y la descripción del chip tiene sitio para {1}"],
   ["{n} die of reference, measured with Show-o's transformer in N6; its embedding table, {n} MB, stays in external memory, and MAGVIT-v2 runs on the host.", "{0} die de referencia, medido con el transformador de Show-o en N6; su tabla de embedding, {1} MB, queda en la memoria externa, y MAGVIT-v2 se ejecuta en el host."],
   ["{n} die while it is on; not in the power while generating text.", "{0} die mientras está encendido; no entra en la potencia al generar texto."],

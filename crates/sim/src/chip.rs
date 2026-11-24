@@ -320,9 +320,45 @@ enum Waiting {
     Image(usize, [u64; 3]),
 }
 
+/// The engine behind a software die: lent for a run, or kept by the die between runs.
+enum Held<'a> {
+    Lent(&'a mut dyn Runner),
+    Kept(Box<dyn Runner>),
+}
+
+impl<'a> std::ops::Deref for Held<'a> {
+    type Target = dyn Runner + 'a;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Held::Lent(engine) => &**engine,
+            Held::Kept(engine) => &**engine,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Held<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Held::Lent(engine) => &mut **engine,
+            Held::Kept(engine) => &mut **engine,
+        }
+    }
+}
+
+/// The register a software die keeps its cache behind: the cache is the engine's own, and a
+/// write here, as the clear pin's fills make, empties it. Just below the exponents', clear
+/// of the registers a picture's patches go through.
+pub const FLOW_CACHE_REGISTER: u32 = (1 << FLOW_REGISTER_BITS) - 2;
+
+/// What a conversation leaves in a software die, for the clear pin to empty (see
+/// `netlist::chip::add_conversation`): its engine's cache, behind `FLOW_CACHE_REGISTER`.
+pub fn runner_conversation() -> Vec<netlist::chip::ClearEntry> {
+    vec![netlist::chip::ClearEntry { address: FLOW_CACHE_REGISTER << FLOW_INDEX_BITS, registers: 1, step: 0, extent: 1, row: 0 }]
+}
+
 /// Any engine behind the die's registers, so the real firmware can drive a real model.
 pub struct RunnerEngine<'a> {
-    engine: &'a mut dyn Runner,
+    engine: Held<'a>,
     /// A token waits here until it is known whether its logits are wanted.
     pending: Option<Waiting>,
     /// An image the host sent, its tokens and their places, where the first one went, and
@@ -343,11 +379,37 @@ pub struct RunnerEngine<'a> {
     pub tokens: Vec<u32>,
     /// How many times the firmware has asked for logits.
     pub generated: usize,
+    /// Tokens the engine's cache holds since it was last emptied.
+    cached: usize,
 }
 
 impl<'a> RunnerEngine<'a> {
     pub fn new(engine: &'a mut dyn Runner, bits: u32, cycles_per_token: u64) -> Self {
-        Self { engine, pending: None, image: None, placeholder: 0, mantissas: Vec::new(), exponent: 0, draft_mantissas: Vec::new(), bits, cycles_per_token, steps: 0, last_seconds: 0.0, saturated: 0, die_cycles: 0, error: None, tokens: Vec::new(), generated: 0 }
+        Self::holding(Held::Lent(engine), bits, cycles_per_token)
+    }
+
+    fn holding(engine: Held<'a>, bits: u32, cycles_per_token: u64) -> Self {
+        Self { engine, pending: None, image: None, placeholder: 0, mantissas: Vec::new(), exponent: 0, draft_mantissas: Vec::new(), bits, cycles_per_token, steps: 0, last_seconds: 0.0, saturated: 0, die_cycles: 0, error: None, tokens: Vec::new(), generated: 0, cached: 0 }
+    }
+
+    /// The engine's own die, which keeps it between runs, as a chip that holds a conversation
+    /// keeps its cache.
+    pub fn keeping(engine: Box<dyn Runner>, bits: u32, cycles_per_token: u64) -> RunnerEngine<'static> {
+        RunnerEngine::holding(Held::Kept(engine), bits, cycles_per_token)
+    }
+
+    /// Tokens the cache holds, a token that waits to know whether its logits are wanted
+    /// among them.
+    pub fn cache_tokens(&self) -> usize {
+        self.cached + usize::from(self.pending.is_some())
+    }
+
+    /// Gives back the engine a die kept.
+    pub fn into_engine(self) -> Option<Box<dyn Runner>> {
+        match self.engine {
+            Held::Kept(engine) => Some(engine),
+            Held::Lent(_) => None,
+        }
     }
 
     /// The image the firmware will put in its placeholder's place, already encoded.
@@ -365,6 +427,7 @@ impl<'a> RunnerEngine<'a> {
         match self.engine.step(token, want_logits) {
             Ok((logits, stats)) => {
                 self.steps += 1;
+                self.cached += 1;
                 self.last_seconds = stats.seconds;
                 self.saturated += stats.saturated;
                 if let Some(logits) = logits {
@@ -386,6 +449,7 @@ impl<'a> RunnerEngine<'a> {
         let next = placement.positions(*start, tokens.len()).1;
         match done {
             Ok((logits, stats)) => {
+                self.cached += 1;
                 self.last_seconds = stats.seconds;
                 if let Some(logits) = logits {
                     let values: Vec<f64> = logits.iter().map(|v| *v as f64).collect();
@@ -465,6 +529,16 @@ impl DieEngine for RunnerEngine<'_> {
         }
         let source = if register == FLOW_DRAFT_REGISTER { &self.draft_mantissas } else { &self.mantissas };
         source.get((address & ((1 << FLOW_INDEX_BITS) - 1)) as usize).copied().unwrap_or(0)
+    }
+
+    /// The clear pin's fill of the cache's register empties the engine's cache, and a token
+    /// that waited goes with it.
+    fn write(&mut self, address: u32, _value: i64) {
+        if address >> FLOW_INDEX_BITS == FLOW_CACHE_REGISTER {
+            self.pending = None;
+            self.cached = 0;
+            self.engine.reset();
+        }
     }
 }
 
@@ -570,7 +644,10 @@ impl ShareOut {
 }
 
 /// What each chip takes from the image when the model is shared among `chips` of them.
-pub fn plan_parts(program: &Program, dir: &Path, config: DieConfig, chip_tokens: usize, setup: &GenerationSetup, chips: usize, sharing: Sharing) -> Result<Vec<ChipPart>, String> {
+/// With `conversation`, each chip holds one, `chip_tokens` positions at most, and clears
+/// its part at the clear pin (see `netlist::chip::add_conversation`).
+#[allow(clippy::too_many_arguments)]
+pub fn plan_parts(program: &Program, dir: &Path, config: DieConfig, chip_tokens: usize, setup: &GenerationSetup, chips: usize, sharing: Sharing, conversation: bool) -> Result<Vec<ChipPart>, String> {
     let share = ShareOut::new(program, &Weights::open(dir)?, chips, chip_tokens, config.cell.activation_bits, sharing)?;
     (0..chips)
         .map(|chip| {
@@ -579,7 +656,11 @@ pub fn plan_parts(program: &Program, dir: &Path, config: DieConfig, chip_tokens:
             let code = share.microprogram(&mut layout, program, chip)?;
             let mut segments = image_segments(&config, &code, &layout);
             segments.extend(cell_segments(&config, &layout, &weights)?);
-            Ok(ChipPart { info: chip_info(&config, &code, layout.logits_register(program), program.vocab as u32, setup), segments })
+            let mut info = chip_info(&config, &code, layout.logits_register(program), program.vocab as u32, setup);
+            if conversation {
+                netlist::chip::add_conversation(&mut info, chip_tokens as u32, &layout.conversation_state(program))?;
+            }
+            Ok(ChipPart { info, segments })
         })
         .collect()
 }

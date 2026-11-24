@@ -75,6 +75,69 @@ struct Loaded {
     painter: Option<sim::janus::Janus>,
     /// The bits of the die's arithmetic when the model runs on it, for drawing too.
     exact_bits: Option<u32>,
+    /// The conversation the cache holds.
+    talk: Talk,
+}
+
+impl Loaded {
+    /// Takes the engine back from the chip that kept it, which forgets its conversation.
+    fn reclaim(&mut self) {
+        if let Some(chip) = self.talk.chip.take() {
+            if let Some(engine) = chip.bus.peripheral.engine.into_engine() {
+                self.engine = engine;
+            }
+        }
+    }
+}
+
+/// The conversation the simulator holds, as a chip keeps one between questions.
+#[derive(Default)]
+struct Talk {
+    /// Tokens the cache holds: none when it is empty, or when the last turn was left halfway.
+    held: usize,
+    /// What it is held with: a question that goes on must come with the same.
+    signature: String,
+    /// The chip that holds it, when the firmware runs: it keeps the engine meanwhile.
+    chip: Option<KeptChip>,
+}
+
+/// A chip at instruction level, with the engine it keeps, waiting for its next turn.
+struct KeptChip {
+    bus: SocBus<ChipModel<RunnerEngine<'static>>>,
+    cpu: Rv32Iss,
+    profile: netlist::activity::CpuProfile,
+    signature: String,
+    /// It writes tokens, not text.
+    raw: bool,
+    /// It holds a conversation; otherwise it stops after one answer.
+    conversation: bool,
+    /// What its CPU is, for the simulator.
+    about: serde_json::Value,
+}
+
+/// What stands for the engine while a chip keeps it.
+struct Lent;
+
+impl Runner for Lent {
+    fn reset(&mut self) {}
+    fn vocabulary(&self) -> usize {
+        0
+    }
+    fn step(&mut self, _token: u32, _want_logits: bool) -> Result<(Option<&[f32]>, sim::StepStats), String> {
+        Err("the engine is in the chip that holds the conversation".into())
+    }
+    fn has_draft_head(&self) -> bool {
+        false
+    }
+    fn draft_tokens(&self) -> usize {
+        0
+    }
+    fn truncate_draft(&mut self, _tokens: usize) {}
+    fn feed_draft_from_main(&mut self) {}
+    fn feed_draft_from_draft(&mut self) {}
+    fn draft(&mut self, _token: u32, _want_logits: bool) -> Result<Option<&[f32]>, String> {
+        Err("the engine is in the chip that holds the conversation".into())
+    }
 }
 
 #[derive(Clone)]
@@ -746,7 +809,7 @@ fn load_model(catalog: &Catalog, request: LoadRequest) -> Result<Loaded, String>
         Some(bits) => Box::new(ExactEngine::new(program, weights, bits)?),
         None => Box::new(Engine::new(program, weights, mode)?),
     };
-    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator, dir: dir.to_path_buf(), firmware_tables: None, load_report, prompt, vision: None, painter: None, exact_bits })
+    Ok(Loaded { name: entry.name, engine, tokenizer, accelerator, dir: dir.to_path_buf(), firmware_tables: None, load_report, prompt, vision: None, painter: None, exact_bits, talk: Talk::default() })
 }
 
 async fn load(State(app): State<App>, Json(request): Json<LoadRequest>) -> Response {
@@ -790,6 +853,11 @@ struct GenerateRequest {
     /// How much of the chip around the die to simulate.
     #[serde(default)]
     fidelity: Fidelity,
+    /// The question goes on from the last answer, over the cache, as a chip that holds a
+    /// conversation takes its next turn; otherwise the cache is emptied first, as the clear
+    /// pin does.
+    #[serde(default)]
+    conversation: bool,
 }
 
 #[derive(Deserialize)]
@@ -912,14 +980,92 @@ fn activity_json(a: &netlist::activity::ChipActivity) -> serde_json::Value {
     serde_json::json!({ "cpu": cpu, "routines": routines, "samples": [a.samples.0, a.samples.1] })
 }
 
-/// Runs the chip's real firmware at instruction level around the loaded engine.
 /// An image for the firmware: its tokens and their places, as the engine reads them, and
 /// what the host sends the chip with the chip's description of its encoder.
 type ImageForFirmware = (ImageTokens, Placement, u32, (Vec<u8>, netlist::chip::VisionInfo));
 
+/// Where a question stands in the conversation the simulator holds: whether it goes on
+/// from the last answer, and what the conversation is held with.
+struct Turn {
+    going_on: bool,
+    signature: String,
+}
+
+/// Runs the chip's real firmware at instruction level around the loaded engine. Without a
+/// picture the chip holds a conversation: it is kept, with the engine, waiting for the
+/// next turn, and a new conversation on the same chip raises its clear pin.
 #[allow(clippy::too_many_arguments)]
-fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32], request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &std::sync::atomic::AtomicBool, picture: Option<ImageForFirmware>) -> Result<(), String> {
-    use std::sync::atomic::Ordering::Relaxed;
+fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32], request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &AtomicBool, picture: Option<ImageForFirmware>, turn: Turn) -> Result<(), String> {
+    let use_tables = request.fidelity.tokenizer;
+    let system = request.system.trim();
+    // What the chip carries and runs before the host's text, and what the host sends. The
+    // system prompt's tokens go in the chip's description, with the special tokens, which
+    // open a conversation once and not every turn; a turn that goes on sends only its own.
+    let (carried, rest, sent) = if turn.going_on {
+        (Vec::new(), text.to_string(), ids.to_vec())
+    } else {
+        let tokenizer = &loaded.tokenizer;
+        let encode = |text: &str, special: bool| tokenizer.encode(text, special).map(|e| e.get_ids().to_vec()).map_err(|e| e.to_string());
+        if !system.is_empty() {
+            let (tokens, rest) = loaded.prompt.split_system(system, text, picture.is_some(), add_special, encode)?;
+            let sent = ids[tokens.len()..].to_vec();
+            (tokens, rest, sent)
+        } else if add_special && picture.is_none() {
+            let bare = encode(text, false)?;
+            match ids.len().checked_sub(bare.len()).filter(|at| ids[*at..] == bare[..]) {
+                Some(at) => (ids[..at].to_vec(), text.to_string(), bare),
+                None => (Vec::new(), text.to_string(), ids.to_vec()),
+            }
+        } else {
+            (Vec::new(), text.to_string(), ids.to_vec())
+        }
+    };
+    // The chip that held the conversation, if it is this same chip.
+    let kept = match loaded.talk.chip.take() {
+        Some(chip) if chip.signature == turn.signature && picture.is_none() => Some(chip),
+        other => {
+            // Another chip: its engine comes back, emptied.
+            if other.is_some() {
+                loaded.talk.chip = other;
+                loaded.reclaim();
+                loaded.engine.reset();
+            }
+            None
+        }
+    };
+    if turn.going_on && kept.is_none() {
+        return Err("the chip that held the conversation is gone: start a new one".into());
+    }
+    // The firmware's tokenizer adds the special tokens itself only when they did not go first.
+    let special = !turn.going_on && carried.is_empty() && add_special;
+    let context = if request.fidelity.context_tokens > 0 { request.fidelity.context_tokens } else { DEFAULT_CONTEXT };
+    let prompt: Vec<u8> = if use_tables {
+        rest.bytes().chain([0]).collect()
+    } else {
+        sent.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect()
+    };
+    let clear = kept.is_some() && !turn.going_on;
+    let (mut chip, input) = match kept {
+        Some(chip) => (chip, prompt),
+        None => build_chip(loaded, &carried, special, context, request, picture, &turn.signature, prompt)?,
+    };
+    let outcome = run_turn(&mut chip, &loaded.tokenizer, &input, ids, request, sender, cancelled, clear, context);
+    match outcome {
+        // A chip that holds a conversation waits for the next turn with the engine.
+        Ok(Some(held)) if chip.conversation => loaded.talk = Talk { held, signature: turn.signature, chip: Some(chip) },
+        _ => {
+            if let Some(engine) = chip.bus.peripheral.engine.into_engine() {
+                loaded.engine = engine;
+            }
+        }
+    }
+    outcome.map(|_| ())
+}
+
+/// A chip at instruction level around the loaded engine, which it keeps, and what the host
+/// sends it first: a picture, if there is one, before the prompt.
+#[allow(clippy::too_many_arguments)]
+fn build_chip(loaded: &mut Loaded, carried: &[u32], special: bool, context: u64, request: &GenerateRequest, picture: Option<ImageForFirmware>, signature: &str, prompt: Vec<u8>) -> Result<(KeptChip, Vec<u8>), String> {
     if request.mtp_depth > 0 && !loaded.engine.has_draft_head() {
         return Err("this model has no MTP head".into());
     }
@@ -931,13 +1077,14 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
     let routines = if picture.is_some() { sim::lower::ENTRY_VISION as u32 + 2 } else { 6 };
     let code = Microprogram { words: Vec::new(), entries: (0..routines).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }], group: (0, 0), marks: Vec::new() };
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u32);
+    let use_tables = request.fidelity.tokenizer;
     let setup = GenerationSetup {
         max_new: request.max_tokens as u32,
         greedy: request.temperature <= 0.0,
         limit: request.top_k.clamp(1, SAMPLER_ENTRIES as usize) as u32,
         temperature: (request.temperature.max(0.0) * 256.0).round().max(1.0) as u32,
         seed,
-        raw_tokens: !request.fidelity.tokenizer,
+        raw_tokens: !use_tables,
         stop: loaded.prompt.stop.clone(),
         draft_depth: request.mtp_depth.min(3) as u32,
         draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS,
@@ -945,123 +1092,166 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
         think_budget: request.think_budget.unwrap_or(u32::MAX),
     };
     let mut info = chip_info(&die, &code, FLOW_LOGITS_REGISTER, vocabulary as u32, &setup);
-    // The system prompt's tokens go in the chip's description, which runs them first; the
-    // host sends the rest, without the special tokens, which went with them.
-    let system = request.system.trim();
-    let (text, add_special, sent) = if system.is_empty() {
-        (text.to_string(), add_special, ids.to_vec())
-    } else {
-        let tokenizer = &loaded.tokenizer;
-        let encode = |text: &str, special: bool| tokenizer.encode(text, special).map(|e| e.get_ids().to_vec()).map_err(|e| e.to_string());
-        let (tokens, rest) = loaded.prompt.split_system(system, text, picture.is_some(), add_special, encode)?;
-        netlist::chip::add_system_prompt(&mut info, &tokens)?;
-        (rest, false, ids[tokens.len()..].to_vec())
-    };
+    if !carried.is_empty() {
+        netlist::chip::add_system_prompt(&mut info, carried)?;
+    }
+    let conversation = picture.is_none();
+    if conversation {
+        // It waits for the next turn instead of stopping, and its clear pin empties the
+        // engine's cache.
+        netlist::chip::add_conversation(&mut info, context.min(u32::MAX as u64) as u32, &sim::chip::runner_conversation())?;
+    }
     if let Some((.., (_, vision))) = &picture {
         netlist::chip::add_vision(&mut info, vision);
     }
-    let use_tables = request.fidelity.tokenizer;
-    let context = if request.fidelity.context_tokens > 0 { request.fidelity.context_tokens } else { DEFAULT_CONTEXT };
-    if use_tables && loaded.firmware_tables.as_ref().is_none_or(|(built_for, _)| *built_for != (context, add_special)) {
+    if use_tables && loaded.firmware_tables.as_ref().is_none_or(|(built_for, _)| *built_for != (context, special)) {
         let mut tables = TokenizerTables::from_file(&loaded.dir.join("tokenizer.json"), context)?;
-        tables.set_add_special(add_special);
-        loaded.firmware_tables = Some(((context, add_special), tables.to_words()));
+        tables.set_add_special(special);
+        loaded.firmware_tables = Some(((context, special), tables.to_words()));
     }
     let tables: &[u32] = match &loaded.firmware_tables {
         Some((_, words)) if use_tables => words,
         _ => &[],
     };
     let image = build_image(&firmware.program, &firmware.data, &info, tables, &[])?;
-    let prompt: Vec<u8> = if use_tables {
-        text.bytes().chain([0]).collect()
-    } else {
-        sent.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect()
-    };
-    // The image goes first, before the prompt that places it.
-    let (input, picture) = match picture {
-        Some((tokens, placement, placeholder, (bytes, _))) => (bytes.into_iter().chain(prompt).collect::<Vec<u8>>(), Some((tokens, placement, placeholder))),
-        None => (prompt, None),
-    };
-
-    let Loaded { engine, tokenizer, .. } = loaded;
     // The memory the chip needs for this model's tables and its image layout.
     let data_bits = (image.len().max(1 << 13).next_power_of_two().ilog2()).max(13);
-    let unit = sampler_model(vocabulary, seed, request.fidelity.sampler_lanes);
-    let mut runner = RunnerEngine::new(engine.as_mut(), FLOW_BITS, request.fidelity.cycles_per_token.max(0.0) as u64);
-    if let Some((tokens, placement, placeholder)) = picture {
-        runner = runner.with_image(tokens, placement, placeholder);
-    }
     let soc = SocConfig { program_bits: 14, data_bits, fifo_bits: 6 };
-    let mut bus = SocBus::booted_with(soc, &image, &input, ChipModel::new(runner, code, unit))?;
-    let mut cpu = Rv32Iss::default();
+    // The image must boot before the engine goes into the chip.
+    SocBus::booted(soc, &image, &[])?;
+    let unit = sampler_model(vocabulary, seed, request.fidelity.sampler_lanes);
+    let engine = std::mem::replace(&mut loaded.engine, Box::new(Lent));
+    let mut runner = RunnerEngine::keeping(engine, FLOW_BITS, request.fidelity.cycles_per_token.max(0.0) as u64);
+    // The image goes first, before the prompt that places it.
+    let input = match picture {
+        Some((tokens, placement, placeholder, (bytes, _))) => {
+            runner = runner.with_image(tokens, placement, placeholder);
+            bytes.into_iter().chain(prompt).collect()
+        }
+        None => prompt,
+    };
+    let bus = SocBus::booted_with(soc, &image, &[], ChipModel::new(runner, code, unit))?;
     // What the CPU is, for the simulator to show beside what it does.
-    let _ = sender.blocking_send(serde_json::json!({ "type": "cpu", "isa": "RV32IM", "program_bytes": 4u64 << soc.program_bits, "data_bytes": 4u64 << soc.data_bits, "firmware_bytes": 4 * firmware.program.len(), "image_bytes": 4 * image.len(), "tokenizer": use_tables }));
-    let mut profile = netlist::activity::CpuProfile::from_elf(FIRMWARE);
-    let mut last = ChipActivity::default();
-    let (mut emitted, mut reported, mut shown) = (0, 0, 0);
+    let about = serde_json::json!({ "type": "cpu", "isa": "RV32IM", "program_bytes": 4u64 << soc.program_bits, "data_bytes": 4u64 << soc.data_bits, "firmware_bytes": 4 * firmware.program.len(), "image_bytes": 4 * image.len(), "tokenizer": use_tables });
+    let chip = KeptChip { bus, cpu: Rv32Iss::default(), profile: netlist::activity::CpuProfile::from_elf(FIRMWARE), signature: signature.to_string(), raw: !use_tables, conversation, about };
+    Ok((chip, input))
+}
+
+/// One turn on a chip: the clear pin first if `clear`, then `input`, until the chip ends its
+/// answer (or stops, without a conversation). Gives the tokens its cache holds then, or
+/// nothing if the run was cancelled.
+#[allow(clippy::too_many_arguments)]
+fn run_turn(chip: &mut KeptChip, tokenizer: &Tokenizer, input: &[u8], ids: &[u32], request: &GenerateRequest, sender: &mpsc::Sender<serde_json::Value>, cancelled: &AtomicBool, clear: bool, context: u64) -> Result<Option<usize>, String> {
+    let KeptChip { bus, cpu, profile, raw, about, conversation, .. } = chip;
+    let raw = *raw;
+    let _ = sender.blocking_send(about.clone());
+    if clear {
+        // The clear pin, while the chip waits: it empties the cache and the recurrent state,
+        // and reads its system prompt again when the next turn comes.
+        let from = cpu.cycle;
+        bus.clear();
+        while bus.clearing() {
+            if cancelled.load(Relaxed) {
+                return Ok(None);
+            }
+            let pc = cpu.pc;
+            cpu.step(bus);
+            profile.record(pc, bus.last_access.take(), cpu.cycle);
+            if cpu.halted {
+                return Err("the chip stopped instead of clearing its conversation".into());
+            }
+        }
+        let _ = sender.blocking_send(serde_json::json!({ "type": "cleared", "cycles": cpu.cycle - from }));
+    }
+    bus.send(input);
+    let engine = &bus.peripheral.engine;
+    let (first_cycle, first_die) = (cpu.cycle, engine.die_cycles);
+    let (steps, generated, tokens, start) = (engine.steps, engine.generated, engine.tokens.len(), bus.tx.len());
+    let mut last = ChipActivity::of(profile, &bus.peripheral);
+    let (mut emitted, mut reported, mut shown) = (0, 0, start);
     let mut output: Vec<u32> = Vec::new();
-    while !cpu.halted {
+    let mut decoded_shown = 0;
+    // The text the chip writes ends with a zero byte, its tokens with `END_OF_TOKENS`.
+    let mut ended = false;
+    while !cpu.halted && !ended {
         if cancelled.load(Relaxed) {
-            return Ok(());
+            return Ok(None);
         }
         // A token's step ends when the firmware orders the next one, so it is cut just before
         // that order: the order and its run belong to the next step.
-        let before = ChipActivity::of(&profile, &bus.peripheral);
+        let before = ChipActivity::of(profile, &bus.peripheral);
         let pc = cpu.pc;
-        cpu.step(&mut bus);
+        cpu.step(bus);
         profile.record(pc, bus.last_access.take(), cpu.cycle);
         if let Some(error) = bus.peripheral.engine.error.take() {
             return Err(error);
         }
-        while reported < bus.peripheral.engine.steps && reported < ids.len() {
+        while reported < bus.peripheral.engine.steps - steps && reported < ids.len() {
             reported += 1;
             let _ = sender.blocking_send(serde_json::json!({ "type": "prefill", "done": reported, "total": ids.len(), "seconds": bus.peripheral.engine.last_seconds, "cycles": cpu.cycle, "activity": activity_json(&before.since(&last)) }));
             last = before;
         }
-        if use_tables {
+        if !raw {
+            let end = bus.tx[start..].iter().position(|b| *b == 0).map(|at| start + at);
+            ended = end.is_some();
+            let text = &bus.tx[..end.unwrap_or(bus.tx.len())];
             // A token's text is complete once the firmware asks for the next token's logits.
-            while emitted + 1 < bus.peripheral.engine.generated {
+            while emitted + 1 < bus.peripheral.engine.generated - generated {
                 emitted += 1;
-                let piece = take_text(&bus.tx, &mut shown);
+                let piece = take_text(text, &mut shown);
                 let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth), "activity": activity_json(&before.since(&last)) }));
                 last = before;
             }
             continue;
         }
-        while bus.tx.len() / 4 > emitted {
-            let at = emitted * 4;
-            output.push(u32::from_le_bytes([bus.tx[at], bus.tx[at + 1], bus.tx[at + 2], bus.tx[at + 3]]));
+        while !ended && (bus.tx.len() - start) / 4 > emitted {
+            let at = start + emitted * 4;
+            let token = u32::from_le_bytes([bus.tx[at], bus.tx[at + 1], bus.tx[at + 2], bus.tx[at + 3]]);
+            if token == u32::MAX {
+                ended = true;
+                break;
+            }
+            output.push(token);
             emitted += 1;
             let decoded = tokenizer.decode(&output, true).map_err(|e| e.to_string())?;
-            let piece = if decoded.ends_with('\u{FFFD}') { String::new() } else { let part = decoded[shown..].to_string(); shown = decoded.len(); part };
+            let piece = if decoded.ends_with('\u{FFFD}') { String::new() } else { let part = decoded[decoded_shown..].to_string(); decoded_shown = decoded.len(); part };
             // Here the step ends with the token written to the host, this very instruction.
-            let now = ChipActivity::of(&profile, &bus.peripheral);
-            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "id": output[emitted - 1], "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth), "activity": activity_json(&now.since(&last)) }));
+            let now = ChipActivity::of(profile, &bus.peripheral);
+            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "id": token, "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth), "activity": activity_json(&now.since(&last)) }));
             last = now;
         }
     }
     profile.settle();
-    if use_tables {
-        let piece = take_text(&bus.tx, &mut shown);
+    if !raw {
+        let end = bus.tx[start..].iter().position(|b| *b == 0).map_or(bus.tx.len(), |at| start + at);
+        let piece = take_text(&bus.tx[..end], &mut shown);
         if !piece.is_empty() {
             emitted += 1;
-            let now = ChipActivity::of(&profile, &bus.peripheral);
+            let now = ChipActivity::of(profile, &bus.peripheral);
             let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth), "activity": activity_json(&now.since(&last)) }));
             last = now;
         }
-    } else {
-        emitted = output.len();
     }
     let runner = &bus.peripheral.engine;
-    if use_tables && runner.tokens.is_empty() && !ids.is_empty() {
+    let fed = &runner.tokens[tokens..];
+    if !raw && fed.is_empty() && !ids.is_empty() {
         return Err("the text does not fit in the chip tokenizer's working memory".into());
     }
-    let tokenizer_match = use_tables.then(|| runner.tokens.len() >= ids.len() && runner.tokens[..ids.len()] == *ids);
-    // Short of the limit, the firmware stopped by its own rules: an end token or a loop.
-    let reason = if emitted >= request.max_tokens { "limit" } else { "chip" };
-    let now = ChipActivity::of(&profile, &bus.peripheral);
-    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": emitted, "reason": reason, "chip": { "cycles": cpu.cycle, "die_cycles": runner.die_cycles, "tokenizer_match": tokenizer_match }, "activity": activity_json(&now.since(&last)), "totals": activity_json(&now) }));
-    Ok(())
+    let tokenizer_match = (!raw).then(|| fed.starts_with(ids));
+    // A chip without a conversation keeps nothing for the next question.
+    let held = if *conversation { runner.cache_tokens() } else { 0 };
+    // Short of the limit, the firmware stopped by its own rules: an end token, a loop or a
+    // full cache.
+    let reason = if emitted >= request.max_tokens {
+        "limit"
+    } else if runner.cache_tokens() as u64 >= context {
+        "context"
+    } else {
+        "chip"
+    };
+    let now = ChipActivity::of(profile, &bus.peripheral);
+    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": emitted, "reason": reason, "held": held, "chip": { "cycles": cpu.cycle - first_cycle, "die_cycles": runner.die_cycles - first_die, "tokenizer_match": tokenizer_match }, "activity": activity_json(&now.since(&last)), "totals": activity_json(&now) }));
+    Ok(Some(held))
 }
 
 /// Base64, for a picture sent inside a message.
@@ -1134,14 +1324,36 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     let mut guard = app.loaded.lock().unwrap();
     let loaded = guard.as_mut().ok_or("load a model first")?;
     if request.draw {
+        loaded.reclaim();
+        loaded.talk = Talk::default();
         return run_drawing(loaded, &request, sender, cancelled);
     }
+    let system = request.system.trim();
+    let fidelity = request.fidelity;
+    // What a conversation is held with: the same system prompt, and through the firmware
+    // the same chip, whose image carries the generation's settings.
+    let signature = if fidelity.firmware {
+        serde_json::json!(["firmware", system, request.max_tokens, request.temperature, request.top_k, request.think_budget, request.mtp_depth, fidelity.cycles_per_token, fidelity.sampler_lanes, fidelity.tokenizer, fidelity.context_tokens])
+    } else {
+        serde_json::json!(["engine", system, request.mtp_depth])
+    }
+    .to_string();
+    // A question about a picture starts a conversation of its own and ends there.
+    let going_on = request.conversation && request.image.is_none() && loaded.talk.held > 0 && loaded.talk.signature == signature;
+    let before = if going_on { loaded.talk.held } else { 0 };
     let (text, add_special) = match request.image {
-        Some(_) => (loaded.prompt.render_with_image(request.system.trim(), &request.prompt, request.thinking)?, false),
-        None => loaded.prompt.render_with_system(request.system.trim(), &request.prompt, request.thinking)?,
+        Some(_) => (loaded.prompt.render_with_image(system, &request.prompt, request.thinking)?, false),
+        None if going_on => (loaded.prompt.next_turn(system, &request.prompt, request.thinking)?, false),
+        None => loaded.prompt.render_with_system(system, &request.prompt, request.thinking)?,
     };
     let ids = loaded.tokenizer.encode(text.as_str(), add_special).map_err(|e| e.to_string())?.get_ids().to_vec();
-    loaded.engine.reset();
+    // The engine leaves a chip that held a conversation unless the chip goes on with it.
+    if request.image.is_some() || !fidelity.firmware {
+        loaded.reclaim();
+    }
+    if !going_on && loaded.talk.chip.is_none() {
+        loaded.engine.reset();
+    }
     // The image becomes the tokens that take the place of its `<|image_pad|>`.
     let image = match &request.image {
         Some(input) => {
@@ -1183,12 +1395,18 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
     let image_tokens = image.as_ref().map_or(0, |(tokens, ..)| tokens.len().saturating_sub(1));
     // The chip remembers its context and no more: the prompt must fit, and the answer ends there.
     let context = request.fidelity.context_tokens as usize;
-    if context > 0 && ids.len() + image_tokens >= context {
-        return Err(format!("the prompt takes {} tokens and the chip remembers {context}: raise the design's context", ids.len() + image_tokens));
+    if context > 0 && before + ids.len() + image_tokens >= context {
+        return Err(if going_on {
+            format!("the conversation takes {before} tokens and the question {} more, and the chip remembers {context}: start a new conversation", ids.len())
+        } else {
+            format!("the prompt takes {} tokens and the chip remembers {context}: raise the design's context", ids.len() + image_tokens)
+        });
     }
-    let _ = sender.blocking_send(serde_json::json!({ "type": "start", "prompt_tokens": ids.len() + image_tokens }));
-    if request.fidelity.firmware {
-        return run_firmware(loaded, &text, add_special, &ids, &request, sender, cancelled, image);
+    let _ = sender.blocking_send(serde_json::json!({ "type": "start", "prompt_tokens": ids.len() + image_tokens, "held": before }));
+    // Until this turn ends well, the conversation is left halfway.
+    loaded.talk.held = 0;
+    if fidelity.firmware {
+        return run_firmware(loaded, &text, add_special, &ids, &request, sender, cancelled, image, Turn { going_on, signature });
     }
 
     let mut unit = sampler_model(loaded.engine.vocabulary(), 0x1234_5679, request.fidelity.sampler_lanes);
@@ -1252,7 +1470,7 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
             reason = "stop";
             break;
         }
-        if context > 0 && ids.len() + image_tokens + output.len() >= context {
+        if context > 0 && before + ids.len() + image_tokens + output.len() >= context {
             reason = "context";
             break;
         }
@@ -1260,6 +1478,13 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
         let looping = watch.push(next);
         let decoded = loaded.tokenizer.decode(&output, true).map_err(|e| e.to_string())?;
         let piece = if decoded.ends_with('\u{FFFD}') { String::new() } else { let part = decoded[shown..].to_string(); shown = decoded.len(); part };
+        // The chip writes the token that closes a loop and stops without running it, so the
+        // cache a conversation keeps ends before it, as the firmware's does.
+        if looping {
+            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "id": next, "text": piece, "seconds": 0.0, "saturated": 0, "index": output.len(), "hits": hits, "tries": tries }));
+            reason = "loop";
+            break;
+        }
         let (logits, stats) = loaded.engine.step(next, true)?;
         let saturated = stats.saturated;
         let seconds = stats.seconds;
@@ -1296,12 +1521,15 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
             loaded.engine.draft(next, false)?;
         }
         let _ = sender.blocking_send(serde_json::json!({ "type": "token", "id": token, "text": piece, "seconds": seconds, "saturated": saturated, "index": output.len(), "hits": hits, "tries": tries }));
-        if looping {
-            reason = "loop";
-            break;
-        }
     }
-    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": output.len(), "reason": reason }));
+    // The cache holds the conversation for the next question, unless it was left halfway or
+    // the question was about a picture.
+    let kept = reason != "cancelled" && image.is_none();
+    let held = if kept { before + ids.len() + image_tokens + output.len() - usize::from(reason == "loop") } else { 0 };
+    if kept {
+        loaded.talk = Talk { held, signature, chip: None };
+    }
+    let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": output.len(), "reason": reason, "held": held }));
     Ok(())
 }
 

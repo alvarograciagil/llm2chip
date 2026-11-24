@@ -158,6 +158,28 @@ impl PromptStyle {
         Ok((tokens, rest.to_string()))
     }
 
+    /// What a host sends a chip that holds a conversation for its next question, on top of
+    /// the cache, which keeps every earlier turn and the last answer as the model wrote it:
+    /// what the template writes after an answer's text (its end) and the new turn, framed
+    /// for the model's answer. Without the special tokens, which went at the start. Refuses a
+    /// template that does not write an answer as it is.
+    pub fn next_turn(&self, system: &str, question: &str, thinking: bool) -> Result<String, String> {
+        // Stand-ins for the earlier turn, which the cache holds already.
+        const ASKED: &str = "\u{E000}";
+        const SAID: &str = "\u{E001}";
+        let mut messages = Vec::new();
+        if !system.is_empty() {
+            messages.push(("system", system));
+        }
+        messages.extend([("user", ASKED), ("assistant", SAID), ("user", question)]);
+        let (framed, _) = self.render_conversation(&messages, thinking, true)?;
+        framed
+            .split_once(SAID)
+            .map(|(_, after)| after.to_string())
+            .filter(|after| after.contains(question) && !after.contains(ASKED))
+            .ok_or_else(|| "this model's chat template does not write an earlier answer as it was, so a conversation cannot go on over the cache".into())
+    }
+
     /// The text to tokenize, and whether the tokenizer must add its special tokens.
     pub fn render(&self, prompt: &str, thinking: bool) -> Result<(String, bool), String> {
         self.render_conversation(&[("user", prompt)], thinking, true)
@@ -229,6 +251,23 @@ mod tests {
         assert!(qwen.split_system("Answer briefly.", &image, true, false, by_character).is_ok());
         // Without one, nothing changes.
         assert_eq!(qwen.render_with_system("", "Hi", false).unwrap(), qwen.render("Hi", false).unwrap());
+    }
+
+    #[test]
+    fn the_next_turn_goes_on_from_the_answer_the_cache_holds() {
+        let qwen = PromptStyle { template: None, bos: String::new(), eos: String::new(), chatml_thinking: true, janus: false, stop: vec![], think: None };
+        assert_eq!(qwen.next_turn("Be brief.", "And Italy?", false).unwrap(), "<|im_end|>\n<|im_start|>user\nAnd Italy?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+        // The first turn, the answer and the next turn make the whole conversation.
+        let (first, _) = qwen.render_with_system("Be brief.", "France?", false).unwrap();
+        let (whole, _) = qwen.render_conversation(&[("system", "Be brief."), ("user", "France?"), ("assistant", "Paris."), ("user", "And Italy?")], false, true).unwrap();
+        assert_eq!(format!("{first}Paris.{}", qwen.next_turn("Be brief.", "And Italy?", false).unwrap()), whole);
+        // A template written in Jinja, and none.
+        let chatml = "{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}";
+        assert_eq!(style(Some(chatml), vec![2]).next_turn("", "Hi", false).unwrap(), "<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n");
+        assert_eq!(style(None, vec![2]).next_turn("", "Hi", false).unwrap(), "\nHi");
+        // A template that drops earlier answers cannot go on over a cache.
+        let forgets = "{% for m in messages %}{% if m['role'] == 'user' %}[INST] {{ m['content'] }} [/INST]{% endif %}{% endfor %}";
+        assert!(style(Some(forgets), vec![2]).next_turn("", "Hi", false).is_err());
     }
 
     #[test]

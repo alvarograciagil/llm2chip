@@ -148,6 +148,31 @@ export function SimulatorView() {
   const promptTokens = useSimulator((s) => s.promptTokens);
   const pulse = useSimulator((s) => s.pulse);
   const error = useSimulator((s) => s.error);
+  const asked = useSimulator((s) => s.asked);
+  const turns = useSimulator((s) => s.turns);
+  const goOn = useSimulator((s) => s.goOn);
+  const held = useSimulator((s) => s.held);
+  const tokens = useSimulator((s) => s.tokens);
+  const clearCycles = useSimulator((s) => s.clearCycles);
+  const newConversation = useSimulator((s) => s.newConversation);
+  const clearMs = useDesign((s) => s.report?.metrics.find((m) => m.id === "clear_ms")?.value ?? null);
+  const context = Number(params.context_tokens) || 0;
+  // What the chip's cache holds: the conversation so far and the turn running.
+  const used = running ? held + prefilled + tokens : held;
+  const talking = !draw && (asked !== null || turns.length > 0);
+  // The transcript follows the conversation down: to each new question, and along an answer
+  // while the reader is at its end.
+  const transcript = useRef<HTMLDivElement>(null);
+  const following = useRef(true);
+  useEffect(() => {
+    const el = transcript.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    following.current = true;
+  }, [asked, turns.length]);
+  useEffect(() => {
+    const el = transcript.current;
+    if (el && following.current) el.scrollTop = el.scrollHeight;
+  }, [output]);
 
   const schedule = useMemo(() => {
     if (!model) return null;
@@ -161,7 +186,23 @@ export function SimulatorView() {
   return (
     <section className="stage sim-stage">
       <div className="sim-column">
-        <div className="transcript" aria-live="polite">
+        <div
+          className="transcript"
+          aria-live="polite"
+          ref={transcript}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+          }}
+        >
+          {!draw &&
+            turns.map((turn, i) => (
+              <div className="turn" key={i}>
+                <p className="turn-question">{turn.question}</p>
+                <p>{turn.answer}</p>
+              </div>
+            ))}
+          {!draw && asked !== null && <p className="turn-question">{asked}</p>}
           {picture && draw ? (
             <figure className="picture">
               <img src={picture.data} width={picture.side} height={picture.side} alt={`${t("Generated image")}: ${prompt}`} />
@@ -170,7 +211,7 @@ export function SimulatorView() {
           ) : output ? <p>{output}{running && !drawing && <span className="sim-caret" aria-hidden="true" />}</p> : running ? null : <p className="placeholder">{loaded ? (draw ? t("The image will appear here.") : t("The model's answer will appear here.")) : t("Load the chip in the right panel to simulate it: with the design's model and arithmetic.")}</p>}
           {!running && ending && !draw && (
             <p className="note-warning">
-              {ending === "loop" ? t("The model started repeating itself without writing its end of turn and the chip stopped it, as its firmware does.") : ending === "context" ? t("The chip's context filled up: it remembers no more tokens. Raise the context in the design for longer answers.") : t("The model did not write its end of turn: it stopped at the token limit.")}
+              {ending === "loop" ? t("The model started repeating itself without writing its end of turn and the chip stopped it, as its firmware does.") : ending === "context" ? t(turns.length > 0 ? "The chip's context filled up: it remembers no more tokens. Start a new conversation, or raise the context in the design." : "The chip's context filled up: it remembers no more tokens. Raise the context in the design for longer answers.") : t("The model did not write its end of turn: it stopped at the token limit.")}
             </p>
           )}
           {running && drawing && (
@@ -186,6 +227,27 @@ export function SimulatorView() {
             </div>
           )}
         </div>
+        {talking && (
+          <div className="conversation-bar">
+            <span>{goOn || running ? `${t("Turns in the conversation")}: ${turns.length + 1}` : t("The next question starts a new conversation.")}</span>
+            {context > 0 && (
+              <span className="conversation-context" title={t("Tokens the chip's cache holds: the system prompt, every question and every answer so far.")}>
+                <progress max={context} value={Math.min(used, context)} aria-label={t("Context the conversation takes")} />
+                <span className="muted-text">
+                  {formatNumber(used)} / {formatNumber(context)} tokens
+                </span>
+              </span>
+            )}
+            <button className="pill" disabled={running || (!goOn && asked === null)} title={clearMs !== null ? `${t("Empties the chip's cache, as its clear pin does")}: ${formatNumber(clearMs)} ms ${t("in this design")}` : t("Empties the chip's cache, as its clear pin does")} onClick={newConversation}>
+              {t("New conversation")}
+            </button>
+          </div>
+        )}
+        {clearCycles !== null && (
+          <p className="muted-text">
+            {`${t("The firmware handled the clear pin in")} ${formatNumber(clearCycles)} ${t("cycles")}. ${t("Here the engine stands in for the cache, so emptying it is not counted.")}${clearMs !== null ? ` ${t("Estimated for this design")}: ${formatNumber(clearMs)} ms.` : ""}`}
+          </p>
+        )}
         {error && (
           <div className="issue error" role="alert">
             <span className="issue-icon" aria-hidden="true">!</span>

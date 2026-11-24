@@ -82,7 +82,7 @@ fn a_checkpoint_in_memory_answers_as_one_on_disk() {
                 next = sample(logits.unwrap(), 0.0, 1, &mut 1);
             }
 
-            let start = generator.start(Request { prompt: text.into(), max_tokens: TOKENS, temperature: 0.0, top_k: 1, thinking: false, think_budget: None, seed: 7, system: String::new() }).unwrap();
+            let start = generator.start(Request { prompt: text.into(), max_tokens: TOKENS, temperature: 0.0, top_k: 1, thinking: false, think_budget: None, seed: 7, system: String::new(), conversation: false }).unwrap();
             assert_eq!(start["prompt_tokens"], ids.len(), "{model}: {text:?}");
             let (mut got, mut said) = (Vec::new(), String::new());
             loop {
@@ -102,4 +102,65 @@ fn a_checkpoint_in_memory_answers_as_one_on_disk() {
             assert_eq!(said, tokenizer.decode(&got, true).unwrap(), "{model}: the text of {text:?}");
         }
     }
+}
+
+/// Runs a question to its end: the tokens of the answer and the last event.
+fn answer(generator: &mut Generator, prompt: &str, system: &str, conversation: bool) -> (Vec<u32>, serde_json::Value, serde_json::Value) {
+    let start = generator.start(Request { prompt: prompt.into(), max_tokens: TOKENS, temperature: 0.0, top_k: 1, thinking: false, think_budget: None, seed: 7, system: system.into(), conversation }).unwrap();
+    let mut got = Vec::new();
+    loop {
+        let event = generator.advance().unwrap();
+        match event["type"].as_str().unwrap() {
+            "token" => got.push(event["id"].as_u64().unwrap() as u32),
+            "done" => return (got, start, event),
+            _ => {}
+        }
+    }
+}
+
+/// A second question goes on over the cache the first left, as a chip that holds a
+/// conversation takes it: it answers as the whole conversation fed from the start does, and
+/// without the conversation it starts again from an empty cache.
+#[test]
+fn a_conversation_goes_on_over_the_cache_in_the_browser() {
+    let model = "HuggingFaceTB--SmolLM2-135M";
+    let Some(dir) = folder(model) else { return };
+    let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    let program = compiler::compile_model(&config).unwrap();
+    let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).unwrap();
+    let style = PromptStyle::read(&program.family, |name| std::fs::read_to_string(dir.join(name)).ok(), |t| tokenizer.token_to_id(t));
+    let mut generator = Generator::new(&texts(&dir), weights(&dir), &SETUP).unwrap();
+    let system = "You are a helpful assistant.";
+    let (first, start, done) = answer(&mut generator, "What is the capital of France?", system, true);
+    assert_eq!(start["held"], 0, "a conversation with nothing before starts empty");
+    let held = done["held"].as_u64().unwrap() as usize;
+    let (second, start, _) = answer(&mut generator, "And of Italy?", system, true);
+    assert_eq!(start["held"].as_u64().unwrap() as usize, held, "the second turn goes on from the first");
+
+    // The whole conversation, from the start.
+    let (framed, add) = style.render_with_system(system, "What is the capital of France?", false).unwrap();
+    let mut whole = tokenizer.encode(framed, add).unwrap().get_ids().to_vec();
+    whole.extend(&first);
+    assert_eq!(whole.len(), held);
+    whole.extend(tokenizer.encode(style.next_turn(system, "And of Italy?", false).unwrap(), false).unwrap().get_ids());
+    let mut engine = ExactEngine::new(program, Weights::open(&dir).unwrap(), SETUP.activation_bits).unwrap();
+    let mut next = 0;
+    for (i, id) in whole.iter().enumerate() {
+        if let (Some(l), _) = Runner::step(&mut engine, *id, i + 1 == whole.len()).unwrap() {
+            next = sample(l, 0.0, 1, &mut 1);
+        }
+    }
+    let mut expected = Vec::new();
+    while expected.len() < TOKENS && !style.stop.contains(&next) {
+        expected.push(next);
+        let (logits, _) = Runner::step(&mut engine, next, true).unwrap();
+        next = sample(logits.unwrap(), 0.0, 1, &mut 1);
+    }
+    assert!(!second.is_empty());
+    assert_eq!(second[..], expected[..second.len()], "{}", tokenizer.decode(&second, true).unwrap());
+
+    // A new conversation forgets the old one, as the clear pin makes it.
+    let (again, start, _) = answer(&mut generator, "What is the capital of France?", system, false);
+    assert_eq!(start["held"], 0);
+    assert_eq!(again, first);
 }

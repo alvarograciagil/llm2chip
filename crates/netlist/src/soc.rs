@@ -756,6 +756,11 @@ impl<P: Peripheral> SocBus<P> {
         self.clear_requested = true;
     }
 
+    /// The clear pin was raised and the firmware has not yet ended its clearing.
+    pub fn clearing(&self) -> bool {
+        self.clear_requested
+    }
+
     /// The host sends more bytes.
     pub fn send(&mut self, bytes: &[u8]) {
         self.rx.extend(bytes);

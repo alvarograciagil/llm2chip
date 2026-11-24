@@ -1168,3 +1168,78 @@ fn chips_that_share_the_heads_give_the_logits_of_one_die() {
     }
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// The firmware holds a conversation on a software die that keeps its engine, as the
+/// simulator runs it: the second turn goes on from the cache the first left, as the whole
+/// conversation fed at once does, and the clear pin empties the engine's cache, so the
+/// first question gets its first answer again.
+#[test]
+fn the_firmware_holds_a_conversation_on_a_kept_engine_until_the_clear_pin() {
+    use netlist::chip::{add_conversation, chip_info, ChipModel, GenerationSetup};
+    use netlist::image::build_image;
+    use netlist::rv32::Rv32Iss;
+    use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
+    use netlist::soc::{FirmwareImage, SocBus, SocConfig};
+    use netlist::Parameter;
+    use sim::chip::{runner_conversation, RunnerEngine, FLOW_DRAFT_REGISTER, FLOW_INDEX_BITS, FLOW_REGISTER_BITS};
+
+    let dir = std::env::temp_dir().join(format!("llm2chip-kept-conversation-{}", std::process::id()));
+    draft_checkpoint(&dir);
+    let config = draft_config();
+    let engine = || Engine::new(compile_qwen3_5(&config).unwrap(), Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
+    let best = |v: &[f32]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
+    let count = 3usize;
+    let (first, second) = ([3u32, 7, 1], [2u32, 5]);
+
+    // The whole conversation in one engine: each turn on top of the last answer.
+    let mut software = engine();
+    let mut turn = |prompt: &[u32]| {
+        let mut next = 0;
+        for id in prompt {
+            next = best(software.step(*id, true).unwrap().0.unwrap());
+        }
+        let mut answer = Vec::new();
+        for _ in 0..count {
+            answer.push(next);
+            next = best(software.step(next, true).unwrap().0.unwrap());
+        }
+        answer
+    };
+    let expected = [turn(&first), turn(&second)];
+
+    let firmware = FirmwareImage::from_elf(include_bytes!("../../../firmware/prebuilt/firmware.elf")).unwrap();
+    let die = DieConfig { reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, ..die_config() };
+    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }], group: (0, 0), marks: Vec::new() };
+    let setup = GenerationSetup { max_new: count as u32, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: None, think_budget: u32::MAX };
+    let mut info = chip_info(&die, &code, 1, 8, &setup);
+    add_conversation(&mut info, 64, &runner_conversation()).unwrap();
+    let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
+    let runner = RunnerEngine::keeping(Box::new(engine()), 16, 0);
+    let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
+    let mut bus = SocBus::booted_with(SocConfig { program_bits: 14, data_bits: 13, fifo_bits: 6 }, &image, &[], ChipModel::new(runner, code, sampler)).unwrap();
+    let mut cpu = Rv32Iss::default();
+    let words = |tx: &[u8]| tx.as_chunks::<4>().0.iter().map(|t| u32::from_le_bytes(*t)).collect::<Vec<u32>>();
+    let mut ask = |bus: &mut SocBus<_>, prompt: &[u32]| {
+        let start = bus.tx.len();
+        bus.send(&prompt.iter().chain(&[u32::MAX]).flat_map(|t| t.to_le_bytes()).collect::<Vec<u8>>());
+        while !words(&bus.tx[start..]).contains(&u32::MAX) {
+            cpu.step(bus);
+            assert!(!cpu.halted && cpu.cycle < 200_000_000, "the chip stopped or never answered");
+        }
+        let mut answer = words(&bus.tx[start..]);
+        answer.pop();
+        answer
+    };
+    assert_eq!(ask(&mut bus, &first), expected[0]);
+    assert_eq!(bus.peripheral.engine.cache_tokens(), first.len() + count);
+    assert_eq!(ask(&mut bus, &second), expected[1], "the second turn goes on from the first");
+    assert_eq!(bus.peripheral.engine.cache_tokens(), first.len() + second.len() + 2 * count);
+
+    // The clear pin empties the engine's cache: the first question, its first answer.
+    bus.clear();
+    assert_eq!(ask(&mut bus, &first), expected[0], "a new conversation starts as the first did");
+    assert_eq!(bus.peripheral.engine.cache_tokens(), first.len() + count);
+    assert!(bus.peripheral.engine.error.is_none(), "{:?}", bus.peripheral.engine.error);
+    assert!(bus.peripheral.engine.into_engine().is_some(), "the die gives its engine back");
+    std::fs::remove_dir_all(dir).unwrap();
+}

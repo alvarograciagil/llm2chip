@@ -35,6 +35,11 @@ pub struct Request {
     /// The project's fixed system prompt, read before the question as the chip runs it.
     #[serde(default)]
     pub system: String,
+    /// The question goes on from the last answer, over the cache, as a chip that holds a
+    /// conversation takes its next turn; otherwise the cache is emptied first, as the clear
+    /// pin does.
+    #[serde(default)]
+    pub conversation: bool,
 }
 
 pub struct Generator {
@@ -43,6 +48,8 @@ pub struct Generator {
     prompt: PromptStyle,
     context: usize,
     run: Option<Run>,
+    /// Tokens the cache holds: every earlier turn of the conversation and its answers.
+    held: usize,
 }
 
 struct Run {
@@ -85,25 +92,40 @@ impl Generator {
         let prompt = PromptStyle::read(&family, |name| texts.get(name).cloned(), |token| ids.get(token).copied());
         let weights = Weights::from_buffers(weights)?.with_format(setup.format);
         let engine = ExactEngine::new(program, weights, setup.activation_bits.clamp(8, 24))?;
-        Ok(Self { engine, tokenizer, prompt, context: setup.context_tokens as usize, run: None })
+        Ok(Self { engine, tokenizer, prompt, context: setup.context_tokens as usize, run: None, held: 0 })
     }
 
-    /// Frames and tokenizes the prompt and starts from an empty context.
+    /// Frames and tokenizes the prompt and starts from an empty context, or, in a
+    /// conversation, from the cache its earlier turns left.
     pub fn start(&mut self, request: Request) -> Result<Value, String> {
-        let (text, add_special) = self.prompt.render_with_system(request.system.trim(), &request.prompt, request.thinking)?;
+        // A run left halfway leaves an answer the conversation does not know of.
+        let going_on = request.conversation && self.held > 0 && self.run.is_none();
+        let (text, add_special) = if going_on {
+            (self.prompt.next_turn(request.system.trim(), &request.prompt, request.thinking)?, false)
+        } else {
+            self.prompt.render_with_system(request.system.trim(), &request.prompt, request.thinking)?
+        };
         self.tokenizer.set_add_special(add_special);
         let ids = self.tokenizer.encode(&text)?;
         if ids.is_empty() {
             return Err("the prompt has no tokens".into());
         }
-        if self.context > 0 && ids.len() >= self.context {
-            return Err(format!("the prompt takes {} tokens and the chip remembers {}: raise the design's context", ids.len(), self.context));
+        let before = if going_on { self.held } else { 0 };
+        if self.context > 0 && before + ids.len() >= self.context {
+            return Err(if going_on {
+                format!("the conversation takes {before} tokens and the question {} more, and the chip remembers {}: start a new conversation", ids.len(), self.context)
+            } else {
+                format!("the prompt takes {} tokens and the chip remembers {}: raise the design's context", ids.len(), self.context)
+            });
         }
-        self.engine.reset();
+        if !going_on {
+            self.engine.reset();
+        }
+        self.held = before;
         let reasoning = ReasoningBudget::new(self.prompt.think, request.think_budget);
         // A zero seed would stay zero through the xorshift.
         let seed = 0x9E37_79B9_7F4A_7C15 ^ request.seed.max(1);
-        let event = json!({ "type": "start", "prompt_tokens": ids.len() });
+        let event = json!({ "type": "start", "prompt_tokens": ids.len(), "held": before });
         self.run = Some(Run { request, ids, fed: 0, next: 0, output: Vec::new(), shown: 0, watch: LoopWatch::default(), reasoning, seed, ending: None });
         Ok(event)
     }
@@ -113,7 +135,7 @@ impl Generator {
         let run = self.run.as_mut().ok_or("nothing is running")?;
         if let Some(reason) = run.ending {
             self.run = None;
-            return Ok(json!({ "type": "done", "reason": reason }));
+            return Ok(json!({ "type": "done", "reason": reason, "held": self.held }));
         }
         if run.fed < run.ids.len() {
             let id = run.ids[run.fed];
@@ -121,6 +143,7 @@ impl Generator {
             run.fed += 1;
             let last = run.fed == run.ids.len();
             let (logits, stats) = Runner::step(&mut self.engine, id, last)?;
+            self.held += 1;
             if let (true, Some(logits)) = (last, logits) {
                 let request = &run.request;
                 run.next = run.reasoning.steer(sample(logits, request.temperature, request.top_k, &mut run.seed));
@@ -131,14 +154,14 @@ impl Generator {
             Some("limit")
         } else if self.prompt.stop.contains(&run.next) {
             Some("stop")
-        } else if self.context > 0 && run.ids.len() + run.output.len() >= self.context {
+        } else if self.context > 0 && self.held >= self.context {
             Some("context")
         } else {
             None
         };
         if let Some(reason) = reason {
             self.run = None;
-            return Ok(json!({ "type": "done", "reason": reason }));
+            return Ok(json!({ "type": "done", "reason": reason, "held": self.held }));
         }
         let token = run.next;
         run.output.push(token);
@@ -152,13 +175,17 @@ impl Generator {
             run.shown = decoded.len();
             piece
         };
+        // The chip writes the token that closes a loop and stops without running it, so the
+        // cache a conversation keeps ends before it, as the firmware's does.
+        if looping {
+            run.ending = Some("loop");
+            return Ok(json!({ "type": "token", "id": token, "text": piece, "seconds": 0.0, "saturated": 0, "index": run.output.len(), "hits": [], "tries": [] }));
+        }
         let (logits, stats) = Runner::step(&mut self.engine, token, true)?;
+        self.held += 1;
         let logits = logits.ok_or("no logits")?;
         let request = &run.request;
         run.next = run.reasoning.steer(sample(logits, request.temperature, request.top_k, &mut run.seed));
-        if looping {
-            run.ending = Some("loop");
-        }
         Ok(json!({ "type": "token", "id": token, "text": piece, "seconds": stats.seconds, "saturated": stats.saturated, "index": run.output.len(), "hits": [], "tries": [] }))
     }
 }

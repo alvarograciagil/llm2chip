@@ -109,8 +109,8 @@ pub fn answer(dir: &Path, system: &str, question: &str, arithmetic: Arithmetic, 
 
 /// A spoken conversation with a language model: its cache stays between questions, so
 /// each new one costs only its own tokens. What is fed on top of the cache is what the chat
-/// template writes after the last answer's text: its end and the new turn. A template that
-/// does not write the last answer as it was makes it start again from the whole conversation.
+/// template writes after the last answer's text: its end and the new turn
+/// (`PromptStyle::next_turn`), as a chip that holds a conversation is sent it.
 pub struct Conversation {
     model: Model,
     style: PromptStyle,
@@ -121,8 +121,6 @@ pub struct Conversation {
     pub dir: std::path::PathBuf,
     /// The fixed system prompt it starts with, empty for none.
     pub system: String,
-    /// Times the conversation had to start again from the whole text.
-    pub replayed: usize,
 }
 
 impl Conversation {
@@ -133,7 +131,7 @@ impl Conversation {
         let style = PromptStyle::read(&family, |name| std::fs::read_to_string(dir.join(name)).ok(), token_id);
         let system = system.trim().to_string();
         let messages = if system.is_empty() { Vec::new() } else { vec![("system".to_string(), system.clone())] };
-        Ok(Self { model: Model::open(dir, arithmetic)?, style, messages, tokens: Vec::new(), arithmetic, dir: dir.to_path_buf(), system, replayed: 0 })
+        Ok(Self { model: Model::open(dir, arithmetic)?, style, messages, tokens: Vec::new(), arithmetic, dir: dir.to_path_buf(), system })
     }
 
     /// Questions asked so far.
@@ -150,27 +148,13 @@ impl Conversation {
     /// system prompt and every earlier question and answer; with the next token's scores. How
     /// long it is, the system prompt says.
     pub fn ask(&mut self, question: &str, limit: usize, encode: &Encode, decode: &Decode) -> Result<(String, Vec<f32>), String> {
-        let earlier: Vec<(&str, &str)> = self.messages.iter().map(|(r, c)| (r.as_str(), c.as_str())).collect();
-        let asked = question.to_string();
-        let mut messages = earlier.clone();
-        messages.push(("user", &asked));
-        let (framed, add) = self.style.render_conversation(&messages, false, true)?;
-        // On top of the cache: what the template writes after the last answer's text, before
-        // the new question (the answer's end), and the new turn itself. Templates may write
-        // earlier turns otherwise than they wrote them last time (Qwen3 drops an answer's
-        // empty reasoning once a question follows), so only the new framing is read.
-        let on_top = match earlier.last() {
-            Some((_, last)) if !self.tokens.is_empty() && !last.is_empty() => framed.rfind(asked.as_str()).and_then(|question| framed[..question].rfind(last)).map(|at| framed[at + last.len()..].to_string()),
-            _ => None,
-        };
-        let new = match on_top {
-            Some(rest) => encode(&rest, false)?,
-            None => {
-                self.replayed += usize::from(!self.tokens.is_empty());
-                self.model.reset();
-                self.tokens.clear();
-                encode(&framed, add)?
-            }
+        // On top of the cache, as a host sends a chip that holds the conversation: what the
+        // template writes after the last answer's text (its end) and the new turn.
+        let new = if self.tokens.is_empty() {
+            let (framed, add) = self.style.render_with_system(&self.system, question, false)?;
+            encode(&framed, add)?
+        } else {
+            encode(&self.style.next_turn(&self.system, question, false)?, false)?
         };
         let mut logits = Vec::new();
         for token in &new {
@@ -188,7 +172,7 @@ impl Conversation {
         }
         self.tokens.extend(&reply);
         let said = decode(&reply)?.trim().to_string();
-        self.messages.push(("user".into(), asked));
+        self.messages.push(("user".into(), question.to_string()));
         self.messages.push(("assistant".into(), said.clone()));
         Ok((said, logits))
     }
