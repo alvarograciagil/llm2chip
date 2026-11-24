@@ -840,20 +840,28 @@ fn repeat_calls(first: usize, body: usize, count: u32, vars: &[u32; 16]) -> bool
             steps[k][p] = times(info(at + 1), f(2)).wrapping_add(times(info(at + 2), f(5)));
         }
     }
-    let mut registers = [0usize; 16];
+    // Each parameter register's address, worked out once.
+    let mut registers = [core::ptr::null_mut::<u32>(); 16];
     for (p, register) in registers.iter_mut().enumerate().take(parameters) {
-        *register = info(INFO_PARAMETERS + 7 * p) as usize;
+        *register = unsafe { PERIPHERALS.add(info(INFO_PARAMETERS + 7 * p) as usize) };
     }
+    let entry = unsafe { PERIPHERALS.add(REG_ENTRY) };
+    let registers = &registers[..parameters];
+    // Between two routines the CPU only writes the parameters and starts the die; the next
+    // values are worked out while the die runs.
     for _ in 0..count {
-        for k in 0..body {
-            for p in 0..parameters {
-                peripheral_write(registers[p], values[k][p]);
-                values[k][p] = values[k][p].wrapping_add(steps[k][p]);
-            }
-            peripheral_write(REG_ENTRY, entries[k]);
+        for ((entry_word, values), steps) in entries.iter().zip(values.iter_mut()).zip(&steps).take(body) {
             wait_for_die();
+            for (register, value) in registers.iter().zip(values.iter()) {
+                unsafe { write_volatile(*register, *value) };
+            }
+            unsafe { write_volatile(entry, *entry_word) };
+            for (value, step) in values.iter_mut().zip(steps.iter()).take(parameters) {
+                *value = value.wrapping_add(*step);
+            }
         }
     }
+    wait_for_die();
     true
 }
 

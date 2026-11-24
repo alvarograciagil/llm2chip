@@ -128,9 +128,10 @@ impl DieEngine for VmEngine {
 
 /// The control CPU's cycles beyond the die's to follow a schedule, at three cycles an
 /// instruction, measured at instruction level (the firmware tests of Moonshine and DAC
-/// check them): to start a routine of a repeat made only of calls and notice its end, the
-/// lean path (about 270)…
-pub const FIRMWARE_CYCLES_PER_ROUTINE: u64 = 300;
+/// check them): to start a routine of a repeat made only of calls, the lean path: about 120
+/// to write its parameters and start it once the die is free, and up to 250 when the die's
+/// routines are too short to hide the next parameters' working out…
+pub const FIRMWARE_CYCLES_PER_ROUTINE: u64 = 250;
 /// …a routine started alone, reading its record and working out its parameters (about 930)…
 pub const FIRMWARE_CYCLES_PER_ROUTINE_ALONE: u64 = 1_000;
 /// …and a word received from the host or sent to it, a byte at a time.
