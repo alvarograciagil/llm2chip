@@ -119,6 +119,12 @@ fn language_model(dir: &Path, costs: &Costs, (chips, sharing): (u32, Sharing), s
     Ok(Fit { shape, dies: c.chips, parts_mm2: c.parts_mm2, clock_hz: c.clock_hz, first_cycles: (c.prompt_seconds * c.clock_hz).round() as u64, output_cycles: c.cycles, needs, variant: String::new(), first_macs: per_token * prompt as u64, output_macs: per_token, pj_per_mac: pj_per_mac(16) })
 }
 
+/// A die whose programs are routines the firmware orders, with a command queue of 16 orders
+/// before it: the CPU orders the next routine while the die runs this one.
+fn queued(die: netlist::DieConfig) -> netlist::DieConfig {
+    netlist::DieConfig { features: die.features.with_queue_bits(4), ..die }
+}
+
 /// Each stage measured on every shape of `ask` it can be built on, saying what it is doing.
 pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn FnMut(String)) -> Result<Vec<StagePlan>, String> {
     let costs = Costs::measure(reference_die(8));
@@ -157,7 +163,7 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
         progress(format!("Moonshine on {name}"));
         if listen_config.streaming.is_some() {
             // Its widths, the front end's 80 among them, take groups of 16.
-            let chip = crate::moonshine_stream_chip::StreamingChip::from_parts(listen_config.clone(), weights(&models.listen, 16)?, frames, die_of(base, context as u32, shape), Some(context));
+            let chip = crate::moonshine_stream_chip::StreamingChip::from_parts(listen_config.clone(), weights(&models.listen, 16)?, frames, queued(die_of(base, context as u32, shape)), Some(context));
             if let Some((chip, code)) = chip.ok().and_then(|chip| chip.routines().ok().map(|(_, code)| (chip, code))) {
                 let (parts, clock) = routines_die(chip.parts().1, &code, &costs, &N6, shape, CLOCK);
                 let t = chip.timing(frames, &code)?;
@@ -167,7 +173,7 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
                 }
             }
         }
-        let chip = if listen_config.streaming.is_some() { Err(String::new()) } else { MoonshineChip::from_parts(listen_config.clone(), weights(&models.listen, 32)?, samples, die_of(base, context as u32, shape), Some(context)) };
+        let chip = if listen_config.streaming.is_some() { Err(String::new()) } else { MoonshineChip::from_parts(listen_config.clone(), weights(&models.listen, 32)?, samples, queued(die_of(base, context as u32, shape)), Some(context)) };
         if let Ok(chip) = chip {
             let calls: Vec<_> = (0..lengths.sample_rows).map(|r| chip.store_samples_call(r)).chain(chip.encoder_calls()).chain(chip.token_calls(listen_config.start, 0)).collect();
             if let Ok((_, code)) = chip.microprogram(&calls) {
@@ -177,7 +183,7 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
                 let count = |calls: &[crate::moonshine_chip::Call]| calls.iter().map(|c| crate::system::macs(&ops[c.routine.clone()], &chip.parts().0.buffers)).sum::<u64>();
                 let token = chip.token_calls(listen_config.start, 0);
                 // The firmware orders every routine: its cycles come on top of the die's.
-                let (first, each) = chip.firmware_cycles();
+                let (first, each) = chip.firmware_cycles()?;
                 listen.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: stage.first_cycles + first, output_cycles: stage.output_cycles + each, needs: 0, variant: String::new(), first_macs: count(&calls), output_macs: count(&token), pj_per_mac: pj_per_mac(16) });
             }
         }
@@ -194,12 +200,12 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
         for &chunk in &ask.chunks {
             let frames = chunk + 2 * sound_config.reach_frames();
             progress(format!("DAC on {name}, windows of {frames} frames"));
-            let Ok(chip) = DacChip::from_parts(sound_config.clone(), weights(&models.sound, 8)?, frames, die_of(wide, 32_768, shape), true) else { continue };
+            let Ok(chip) = DacChip::from_parts(sound_config.clone(), weights(&models.sound, 8)?, frames, queued(die_of(wide, 32_768, shape)), true) else { continue };
             let Ok(code) = chip.microprogram() else { continue };
             let calls = chip.calls(&vec![vec![0; frames]; sound_config.codebooks])?;
             let (parts, clock) = routines_die(chip.parts().1, &code, &wide_costs, &N6, shape, CLOCK);
             // The die's cycles, and the firmware's to order its routines.
-            let cycles = chip.cycles(&calls)? + chip.firmware_cycles(chunk * sound_config.hop());
+            let cycles = chip.cycles(&calls)? + chip.firmware_cycles(chunk * sound_config.hop(), &code);
             let needs = (frames as f64 * TOKENS_PER_FRAME).ceil() as u32;
             let window_macs: u64 = calls.iter().map(|c| crate::system::macs(&chip.routines()[c.routine], &chip.parts().0.buffers)).sum();
             sound.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: cycles, output_cycles: cycles / chunk as u64, needs, variant: format!("windows of {frames} frames, {chunk} kept"), first_macs: window_macs, output_macs: window_macs / chunk as u64, pj_per_mac: pj_per_mac(20) });
@@ -233,7 +239,7 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
 pub type Planned = (Option<Plan>, Vec<Weighed>, Vec<StagePlan>);
 
 /// Changes when the way stages are measured changes, so plans kept from before are not used.
-const PLAN_VERSION: u32 = 2;
+const PLAN_VERSION: u32 = 3;
 
 /// The system planned for `ask`: the plan chosen, if any meets it, every grouping weighed,
 /// and the stages as measured.
