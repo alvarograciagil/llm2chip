@@ -126,12 +126,21 @@ impl DieEngine for VmEngine {
     }
 }
 
-/// The control CPU's cycles to start each routine of a schedule and notice its end, beyond
-/// the die's own: writing the parameters and the entry and polling, at three cycles an
-/// instruction, in the firmware's lean path for repeated calls (about 270; the general path
-/// takes about 930). Measured at instruction level, and checked by
-/// `the_firmware_decodes_window_by_window_as_the_host_does`.
+/// The control CPU's cycles beyond the die's to follow a schedule, at three cycles an
+/// instruction, measured at instruction level (the firmware tests of Moonshine and DAC
+/// check them): to start a routine of a repeat made only of calls and notice its end, the
+/// lean path (about 270)…
 pub const FIRMWARE_CYCLES_PER_ROUTINE: u64 = 300;
+/// …a routine started alone, reading its record and working out its parameters (about 930)…
+pub const FIRMWARE_CYCLES_PER_ROUTINE_ALONE: u64 = 1_000;
+/// …and a word received from the host or sent to it, a byte at a time.
+pub const FIRMWARE_CYCLES_PER_WORD: u64 = 200;
+
+/// The CPU's cycles for `lean` routines in repeats of calls, `alone` routines on their own
+/// and `words` exchanged with the host.
+pub fn firmware_cycles(lean: u64, alone: u64, words: u64) -> u64 {
+    lean * FIRMWARE_CYCLES_PER_ROUTINE + alone * FIRMWARE_CYCLES_PER_ROUTINE_ALONE + words * FIRMWARE_CYCLES_PER_WORD
+}
 
 /// A die whose program is a set of routines, run by the exact machine, as a chip's firmware
 /// drives it: each routine by its number in the microprogram `code`, with whether it rotates.

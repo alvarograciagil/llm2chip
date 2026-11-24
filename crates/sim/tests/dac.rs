@@ -223,12 +223,14 @@ fn the_firmware_decodes_window_by_window_as_the_host_does() {
     let die = netlist::DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, activation_bits: 20, accumulator_bits: 56, weight_bits: 20, ..base.cell }, scale_bits: 24, features: base.features.with_host_writes(true).with_key_shift(7), ..base };
     let mut chip = DacChip::new(&dir, width, die, false).unwrap();
     let chip_samples = chip.samples();
+    let per_window: Vec<u64> = (0..=frames * config.hop()).map(|kept| chip.firmware_cycles(kept)).collect();
+    let firmware_per_window = |kept: usize| per_window[kept];
     let (code, schedule) = chip.schedule().unwrap();
     let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     let mut info = chip_info(&die, &code, chip.output_register(), 1, &setup);
-    add_schedule(&mut info, &schedule);
-    eprintln!("the chip's description: {} words, {} records of schedule", info.len(), schedule.len());
-    let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
+    let schedule_words = add_schedule(&mut info, &schedule);
+    eprintln!("the chip's description: {} words, and a schedule of {} records", info.len(), schedule.len());
+    let image = build_image(&firmware.program, &firmware.data, &info, &schedule_words, &[]).unwrap();
     let input: Vec<u8> = sim::dac_chip::schedule_input(&config, &codes, chunk).iter().flat_map(|w| w.to_le_bytes()).collect();
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() };
     let model = ChipModel::new(chip.die_engine(code.clone()), code, sampler);
@@ -241,12 +243,41 @@ fn the_firmware_decodes_window_by_window_as_the_host_does() {
     let start = bus.tx.iter().position(|b| *b != b'.').unwrap_or(bus.tx.len());
     let words: Vec<i64> = bus.tx[start..].chunks(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as i64).collect();
     eprintln!("{} cycles of the CPU, {} of the die, {} routines run, {} samples", cpu.cycle, bus.peripheral.die_busy, bus.peripheral.routines.iter().map(|r| r.0).sum::<u64>(), words.len() / 2);
-    // What the planner counts for the firmware's work on each routine.
-    let routines: u64 = bus.peripheral.routines.iter().map(|r| r.0).sum();
-    assert!((cpu.cycle - bus.peripheral.die_busy) / routines <= sim::chip::FIRMWARE_CYCLES_PER_ROUTINE, "{} cycles a routine", (cpu.cycle - bus.peripheral.die_busy) / routines);
+    // What the planner counts for the firmware: each window's, and the count of windows.
+    let windows = config.windows(frames, chunk).len() as u64;
+    let firmware = cpu.cycle - bus.peripheral.die_busy;
+    let counted = windows * firmware_per_window(0) + firmware_per_window(expected.len()) - firmware_per_window(0) + sim::chip::FIRMWARE_CYCLES_PER_WORD;
+    eprintln!("the CPU's own cycles: {firmware}, counted {counted}");
+    assert!(firmware <= counted && 2 * firmware > counted, "the CPU's own cycles: {firmware}, counted {counted}");
     let mantissas: Vec<i64> = words.chunks(2).map(|p| p[0]).collect();
     let first = mantissas.iter().zip(&expected).position(|(a, b)| a != b);
     assert_eq!(mantissas.len(), expected.len(), "samples");
     assert!(first.is_none(), "the die's mantissas differ from sample {first:?} of {}, windows of {} samples", expected.len(), chip_samples);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The real decoder's chip image holds its description and its schedule, for windows of
+/// 54 and 86 frames (what the planner weighs), with the prebuilt firmware. Skipped without
+/// the converted DAC.speech in `~/.llm2chip/models`.
+#[test]
+fn the_real_decoder_s_schedule_fits_its_chip_image() {
+    use netlist::chip::{add_schedule, chip_info, GenerationSetup};
+    let dir = Path::new(&std::env::var("HOME").unwrap()).join(".llm2chip/models/dac-speech-24khz-1.5kbps");
+    if !dir.join("config.json").exists() {
+        eprintln!("no DAC.speech at {}: skipped", dir.display());
+        return;
+    }
+    let firmware = netlist::soc::FirmwareImage::from_elf(include_bytes!("../../../firmware/prebuilt/firmware.elf")).unwrap();
+    let base = cell_die_config();
+    let die = netlist::DieConfig { microcode_bits: 18, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { activation_bits: 20, accumulator_bits: 56, ..base.cell }, scale_bits: 24, features: base.features.with_key_shift(8), ..base };
+    for frames in [54, 86] {
+        let chip = DacChip::new(&dir, frames, die, false).unwrap();
+        let (code, schedule) = chip.schedule().unwrap();
+        let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
+        let mut info = chip_info(&die, &code, chip.output_register(), 1, &setup);
+        let words = add_schedule(&mut info, &schedule);
+        eprintln!("{frames} frames: a description of {} words, a schedule of {} records ({} words)", info.len(), schedule.len(), words.len());
+        netlist::image::build_image(&firmware.program, &firmware.data, &info, &words, &[]).unwrap();
+        assert!(netlist::soc::TOKENIZER_WORD + words.len() <= 1 << 14, "the schedule fits a data memory of 16,384 words");
+    }
 }

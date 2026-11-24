@@ -803,11 +803,11 @@ const S_TOKEN: u32 = 1;
 const S_POSITION: u32 = 2;
 
 fn field(at: usize, word: usize) -> u32 {
-    info(info(INFO_SCHEDULE) as usize + at * RECORD_WORDS + word)
+    data_word(info(INFO_SCHEDULE) as usize + at * RECORD_WORDS + word)
 }
 
 /// The most calls in a repeat that `repeat_calls` takes.
-const FAST_CALLS: usize = 8;
+const FAST_CALLS: usize = 16;
 
 /// A repeat whose body is only calls, run lean on a single chip: each call's entry and the
 /// value of each parameter register at the first iteration are worked out once, with how

@@ -437,9 +437,12 @@ fn the_firmware_transcribes_a_clip_as_the_host_ordering_the_routines() {
     let end = chip.config.end;
     let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: vec![end], draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     let mut info = chip_info(&die, &code, chip.logits_register(), chip.config.vocab as u32, &setup);
-    add_schedule(&mut info, &schedule);
-    eprintln!("the chip's description: {} words, {} of them the schedule's {} records", info.len(), schedule.len() * netlist::schedule::RECORD_WORDS, schedule.len());
-    let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
+    let schedule_words = add_schedule(&mut info, &schedule);
+    eprintln!("the chip's description: {} words, and a schedule of {} records", info.len(), schedule.len());
+    // What the planner counts for the firmware: up to the first token, and each after it.
+    let (first, each) = chip.firmware_cycles();
+    let positions = (expected.len() as u64 + 1).min(chip.limit() as u64);
+    let image = build_image(&firmware.program, &firmware.data, &info, &schedule_words, &[]).unwrap();
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() };
     let count = routines.len();
     let model = ChipModel::new(chip.die_engine(&routines, code.clone()), code, sampler);
@@ -453,6 +456,33 @@ fn the_firmware_transcribes_a_clip_as_the_host_ordering_the_routines() {
     let tokens: Vec<u32> = bus.tx[start..].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     eprintln!("{} cycles of the CPU, {} of the die, tokens {tokens:?}", cpu.cycle, bus.peripheral.die_busy);
     assert_eq!(tokens, expected);
+    let firmware = cpu.cycle - bus.peripheral.die_busy;
+    let counted = first + (positions - 1) * each;
+    eprintln!("the CPU's own cycles: {firmware}, counted {counted}");
+    assert!(firmware <= counted && 2 * firmware > counted, "the CPU's own cycles: {firmware}, counted {counted}");
     assert!(bus.peripheral.routines[..count].iter().all(|(runs, _)| *runs > 0), "every routine ran: {:?}", bus.peripheral.routines);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Moonshine-tiny's chip image holds its description and its schedule for three-second
+/// clips, with the prebuilt firmware. Skipped without the model in `~/.llm2chip/models`.
+#[test]
+fn the_real_recogniser_s_schedule_fits_its_chip_image() {
+    use netlist::chip::{add_schedule, chip_info, GenerationSetup};
+    let dir = Path::new(&std::env::var("HOME").unwrap()).join(".llm2chip/models/UsefulSensors--moonshine-tiny");
+    if !dir.join("config.json").exists() {
+        eprintln!("no Moonshine-tiny at {}: skipped", dir.display());
+        return;
+    }
+    let firmware = netlist::soc::FirmwareImage::from_elf(include_bytes!("../../../firmware/prebuilt/firmware.elf")).unwrap();
+    let base = cell_die_config();
+    let die = netlist::DieConfig { microcode_bits: 18, reg_bits: 12, index_bits: 20, features: base.features.with_key_shift(10), ..base };
+    let chip = MoonshineChip::new(&dir, 48_000, die, None).unwrap();
+    let (_, code, schedule) = chip.schedule().unwrap();
+    let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: vec![chip.config.end], draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
+    let mut info = chip_info(&die, &code, chip.logits_register(), chip.config.vocab as u32, &setup);
+    let words = add_schedule(&mut info, &schedule);
+    eprintln!("a description of {} words, a schedule of {} records ({} words)", info.len(), schedule.len(), words.len());
+    netlist::image::build_image(&firmware.program, &firmware.data, &info, &words, &[]).unwrap();
+    assert!(netlist::soc::TOKENIZER_WORD + words.len() <= 1 << 14, "the schedule fits a data memory of 16,384 words");
 }

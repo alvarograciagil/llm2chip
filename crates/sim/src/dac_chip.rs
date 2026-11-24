@@ -482,6 +482,17 @@ impl DacChip {
         Ok((code, [vec![Record::Receive { var: windows }], repeat(windows, 0, window)].concat()))
     }
 
+    /// The control CPU's cycles beyond the die's to follow `schedule` for a window keeping
+    /// `kept` samples (`crate::chip::firmware_cycles`): each frame's routines start alone
+    /// with their codes received, the passes' on the lean path, and each sample kept alone,
+    /// sent back with its exponent.
+    pub fn firmware_cycles(&self, kept: usize) -> u64 {
+        let frames = self.frames as u64;
+        let books = self.codes_in.len() as u64;
+        let passes: u64 = self.passes.iter().map(|p| (p.rows * p.steps.len()) as u64).sum();
+        crate::chip::firmware_cycles(passes, frames * (books + 1) + kept as u64, frames * books + 2 + 2 * kept as u64)
+    }
+
     /// The die as its firmware sees it, run by the exact machine, routines numbered as in
     /// the microprogram `code`.
     pub fn die_engine(&mut self, code: netlist::Microprogram) -> RoutinesDie<'_> {

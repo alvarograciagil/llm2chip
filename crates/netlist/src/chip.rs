@@ -697,7 +697,8 @@ pub const INFO_SHOWO: usize = 25;
 pub const INFO_ROTATION_SOURCE: usize = 26;
 pub const INFO_ROTATION_ADDRESS: usize = 27;
 pub const INFO_ROTATION_COLS: usize = 28;
-/// Where the schedule of a die run by routines starts (see `schedule`); zero if it has none.
+/// The word of data memory where the schedule of a die run by routines starts (see
+/// `schedule`); zero if it has none.
 pub const INFO_SCHEDULE: usize = 29;
 pub const INFO_PARAMETERS: usize = 30;
 
@@ -760,10 +761,13 @@ pub fn add_showo(info: &mut Vec<u32>, showo: &ShowOInfo) {
 }
 
 /// Adds a schedule of routines to a chip's description: the firmware follows it in place of
-/// reading a prompt.
-pub fn add_schedule(info: &mut Vec<u32>, records: &[crate::schedule::Record]) {
-    info[INFO_SCHEDULE] = info.len() as u32;
-    info.extend(crate::schedule::words(records));
+/// reading a prompt. A schedule can be longer than the description has room for, so it goes
+/// where a tokenizer's tables would (`TOKENIZER_WORD`): a chip run by a schedule exchanges
+/// words, not text, and has none. Gives the words to place there (`build_image`'s
+/// `tokenizer`).
+pub fn add_schedule(info: &mut [u32], records: &[crate::schedule::Record]) -> Vec<u32> {
+    info[INFO_SCHEDULE] = crate::soc::TOKENIZER_WORD as u32;
+    crate::schedule::words(records)
 }
 
 /// Adds the image encoder's description to a chip's.

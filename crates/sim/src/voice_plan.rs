@@ -159,9 +159,9 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
                 let ops = &chip.parts().0.rows().expect("the routines").ops;
                 let count = |calls: &[crate::moonshine_chip::Call]| calls.iter().map(|c| crate::system::macs(&ops[c.routine.clone()], &chip.parts().0.buffers)).sum::<u64>();
                 let token = chip.token_calls(listen_config.start, 0);
-                // The firmware starts every routine: its cycles come on top of the die's.
-                let firmware = |calls: usize| calls as u64 * crate::chip::FIRMWARE_CYCLES_PER_ROUTINE;
-                listen.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: stage.first_cycles + firmware(calls.len()), output_cycles: stage.output_cycles + firmware(token.len()), needs: 0, variant: String::new(), first_macs: count(&calls), output_macs: count(&token), pj_per_mac: pj_per_mac(16) });
+                // The firmware orders every routine: its cycles come on top of the die's.
+                let (first, each) = chip.firmware_cycles();
+                listen.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: stage.first_cycles + first, output_cycles: stage.output_cycles + each, needs: 0, variant: String::new(), first_macs: count(&calls), output_macs: count(&token), pj_per_mac: pj_per_mac(16) });
             }
         }
         if think_fits_one {
@@ -181,8 +181,8 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
             let Ok(code) = chip.microprogram() else { continue };
             let calls = chip.calls(&vec![vec![0; frames]; sound_config.codebooks])?;
             let (parts, clock) = routines_die(chip.parts().1, &code, &wide_costs, &N6, shape, CLOCK);
-            // The die's cycles, and the firmware's to start each routine.
-            let cycles = chip.cycles(&calls)? + calls.len() as u64 * crate::chip::FIRMWARE_CYCLES_PER_ROUTINE;
+            // The die's cycles, and the firmware's to order its routines.
+            let cycles = chip.cycles(&calls)? + chip.firmware_cycles(chunk * sound_config.hop());
             let needs = (frames as f64 * TOKENS_PER_FRAME).ceil() as u32;
             let window_macs: u64 = calls.iter().map(|c| crate::system::macs(&chip.routines()[c.routine], &chip.parts().0.buffers)).sum();
             sound.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: cycles, output_cycles: cycles / chunk as u64, needs, variant: format!("windows of {frames} frames, {chunk} kept"), first_macs: window_macs, output_macs: window_macs / chunk as u64, pj_per_mac: pj_per_mac(20) });
