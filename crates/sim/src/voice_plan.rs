@@ -129,7 +129,12 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
     let samples = (ask.seconds * 16_000.0) as usize;
     let lengths = Lengths::of(samples)?;
     let listen_config = MoonshineConfig::read(&models.listen)?;
-    let context = lengths.sample_rows.max(listen_config.max_tokens).next_power_of_two();
+    let frames = listen_config.frames_of(samples);
+    let context = match &listen_config.streaming {
+        // A streaming recogniser's stores of the front end, and its text.
+        Some(streaming) => (4 + 4 * frames).max(frames * streaming.samples_per_frame() * 6 / 16_000 + 2).next_power_of_two(),
+        None => lengths.sample_rows.max(listen_config.max_tokens).next_power_of_two(),
+    };
     let sound_config = DacConfig::read(&models.sound)?;
     let question_tokens = (ask.seconds * TOKENS_PER_SECOND_SPOKEN).ceil() as u32;
     // The writer's prompt: a sentence's, and the profile's sentence and codes before it.
@@ -150,7 +155,19 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
     for &shape in &ask.shapes {
         let name = format!("{} units × {} lanes, {} cells", 1u32 << shape.0, 1u32 << shape.1, 1u64 << shape.2);
         progress(format!("Moonshine on {name}"));
-        let chip = MoonshineChip::from_parts(listen_config.clone(), weights(&models.listen, 32)?, samples, die_of(base, context as u32, shape), Some(context));
+        if listen_config.streaming.is_some() {
+            // Its widths, the front end's 80 among them, take groups of 16.
+            let chip = crate::moonshine_stream_chip::StreamingChip::from_parts(listen_config.clone(), weights(&models.listen, 16)?, frames, die_of(base, context as u32, shape), Some(context));
+            if let Some((chip, code)) = chip.ok().and_then(|chip| chip.routines().ok().map(|(_, code)| (chip, code))) {
+                let (parts, clock) = routines_die(chip.parts().1, &code, &costs, &N6, shape, CLOCK);
+                let t = chip.timing(frames, &code)?;
+                // It listens while the question is spoken: each 20 ms in less than 20 ms.
+                if t.step as f64 / clock <= 0.02 {
+                    listen.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: t.after, output_cycles: t.token, needs: 0, variant: "listening as the question is spoken".into(), first_macs: t.clip_macs, output_macs: t.token_macs, pj_per_mac: pj_per_mac(16) });
+                }
+            }
+        }
+        let chip = if listen_config.streaming.is_some() { Err(String::new()) } else { MoonshineChip::from_parts(listen_config.clone(), weights(&models.listen, 32)?, samples, die_of(base, context as u32, shape), Some(context)) };
         if let Ok(chip) = chip {
             let calls: Vec<_> = (0..lengths.sample_rows).map(|r| chip.store_samples_call(r)).chain(chip.encoder_calls()).chain(chip.token_calls(listen_config.start, 0)).collect();
             if let Ok((_, code)) = chip.microprogram(&calls) {

@@ -3,7 +3,9 @@
 //!
 //!     cargo run --release -p sim --example listen -- MODEL_DIR clip.wav [golden.json] [bits]
 //!
-//! `golden.json` is what `tools/golden/moonshine.py` writes; `bits` the die's vectors (16).
+//! `golden.json` is what `tools/golden/moonshine.py` writes (`moonshine_streaming.py` for a
+//! streaming model); `bits` the die's vectors (16). A streaming model takes the clip's whole
+//! 20 ms and runs on the die as the chip's firmware would, listening as the speech comes.
 
 use sim::audio::Clip;
 use sim::moonshine::Moonshine;
@@ -22,12 +24,16 @@ fn main() -> Result<(), String> {
         return Err("usage: listen MODEL_DIR clip.wav [golden.json] [bits]".into());
     };
     let dir = Path::new(dir);
-    let clip = Clip::read(Path::new(wav))?.resampled(16_000);
+    let mut clip = Clip::read(Path::new(wav))?.resampled(16_000);
+    let config = sim::moonshine::MoonshineConfig::read(dir)?;
+    if let Some(streaming) = &config.streaming {
+        clip.samples.truncate(clip.samples.len() / streaming.samples_per_frame() * streaming.samples_per_frame());
+    }
     let golden: Option<serde_json::Value> = rest.first().filter(|r| r.ends_with(".json")).map(|p| std::fs::read_to_string(p).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))).transpose()?;
     let bits: u32 = rest.iter().find_map(|r| r.parse().ok()).unwrap_or(16);
     let tokenizer = TokenizerTables::from_file(&dir.join("tokenizer.json"), 256)?;
     let text = |tokens: &[u32]| String::from_utf8_lossy(&tokenizer.decode(tokens)).into_owned();
-    println!("{:.2} s of audio, {} frames", clip.samples.len() as f32 / 16_000.0, sim::moonshine::MoonshineConfig::frames(clip.samples.len()));
+    println!("{:.2} s of audio, {} frames", clip.samples.len() as f32 / 16_000.0, config.frames_of(clip.samples.len()));
 
     let model = Moonshine::open(dir)?;
     let started = std::time::Instant::now();
@@ -54,8 +60,11 @@ fn main() -> Result<(), String> {
     }
 
     let started = std::time::Instant::now();
-    let mut chip = MoonshineChip::exact(dir, clip.samples.len(), bits)?;
-    let on_chip = chip.transcribe(&clip.samples)?;
+    let on_chip = if config.streaming.is_some() {
+        sim::moonshine_stream_chip::StreamingChip::exact(dir, config.frames_of(clip.samples.len()), bits)?.transcribe(&clip.samples)?.0
+    } else {
+        MoonshineChip::exact(dir, clip.samples.len(), bits)?.transcribe(&clip.samples)?
+    };
     println!("die's arithmetic, {bits}-bit vectors ({:.1} s): {on_chip:?} “{}”", started.elapsed().as_secs_f32(), text(&on_chip));
     if on_chip != tokens {
         println!("  differs from floating point");

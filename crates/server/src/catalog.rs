@@ -73,7 +73,7 @@ pub struct ModelEntry {
 /// What the checkpoint in `dir` does in a spoken turn, from its configuration and files.
 pub fn voice_role(dir: &Path, config: &Value) -> Option<&'static str> {
     match config.get("model_type").and_then(Value::as_str) {
-        Some("moonshine") => Some("listens"),
+        Some("moonshine" | "moonshine_streaming") => Some("listens"),
         Some("dac") => Some("sounds"),
         _ if std::fs::read_to_string(dir.join("added_tokens.json")).is_ok_and(|t| t.contains("<|c1_0|>")) => Some("speaks"),
         _ => None,

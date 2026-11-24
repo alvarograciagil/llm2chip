@@ -11,6 +11,17 @@
 //!
 //! RoPE rotates adjacent pairs of each head (`x[2i]`, `x[2i + 1]`), not its two halves.
 //! Every LayerNorm has a weight and no bias; the convolutions and the MLPs have biases.
+//!
+//! **Streaming Moonshine** (`moonshine_streaming`, `modular_moonshine_streaming.py`) changes
+//! the encoder so that it can run while the speech comes in:
+//!
+//! - **Front end:** every 80 samples (5 ms) normalised to zero mean and unit RMS (CMVN),
+//!   compressed with `asinh(k·x)`, projected to the width and bent with SiLU; then two causal
+//!   convolutions of kernel 5 and stride 2 (the first with SiLU): one frame every 20 ms.
+//! - **Encoder:** no RoPE; each layer's attention sees a window of frames, the 15 before
+//!   and, in the first two and last two layers, the 3 after; LayerNorms whose weight is
+//!   stored less one (`gamma + 1`).
+//! - **Decoder:** as Moonshine's, the frames given learned positions first, and its own head.
 
 use crate::Weights;
 use serde_json::Value;
@@ -39,6 +50,30 @@ pub struct MoonshineConfig {
     pub end: u32,
     /// The most tokens the decoder writes.
     pub max_tokens: usize,
+    /// A streaming encoder's front end and windows, if it is one.
+    pub streaming: Option<Streaming>,
+}
+
+/// What a streaming encoder adds: frames of the front end and each layer's window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Streaming {
+    /// Samples in a frame of the front end: 80, 5 ms.
+    pub frame: usize,
+    /// Each layer's window: the frames it sees up to its own (with it), and the frames it
+    /// sees after its own, plus one (Transformers' `sliding_windows`).
+    pub windows: Vec<(usize, usize)>,
+}
+
+impl Streaming {
+    /// The frames after its own each layer sees.
+    pub fn ahead(&self, layer: usize) -> usize {
+        self.windows[layer].1.saturating_sub(1)
+    }
+
+    /// Samples in one of the encoder's frames: four of the front end's.
+    pub fn samples_per_frame(&self) -> usize {
+        4 * self.frame
+    }
 }
 
 impl MoonshineConfig {
@@ -49,6 +84,9 @@ impl MoonshineConfig {
 
     pub fn parse(text: &str) -> Result<Self, String> {
         let config: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        if config["model_type"].as_str() == Some("moonshine_streaming") {
+            return Self::parse_streaming(&config);
+        }
         if config["model_type"].as_str() != Some("moonshine") {
             return Err("not a Moonshine checkpoint".into());
         }
@@ -81,7 +119,57 @@ impl MoonshineConfig {
             start: config["decoder_start_token_id"].as_u64().unwrap_or(1) as u32,
             end: config["eos_token_id"].as_u64().unwrap_or(2) as u32,
             max_tokens: config["max_position_embeddings"].as_u64().unwrap_or(194) as usize,
+            streaming: None,
         })
+    }
+
+    fn parse_streaming(config: &Value) -> Result<Self, String> {
+        let encoder = &config["encoder_config"];
+        let number = |c: &Value, key: &str| c[key].as_u64().map(|v| v as usize).ok_or(format!("“{key}” is missing from the config"));
+        let hidden = number(config, "hidden_size")?;
+        let heads = number(config, "num_attention_heads")?;
+        let head_dim = number(config, "head_dim").unwrap_or(hidden / heads);
+        let same = [("hidden_size", hidden), ("num_attention_heads", heads), ("head_dim", head_dim), ("intermediate_size", number(config, "intermediate_size")?)];
+        if same.iter().any(|(key, value)| number(encoder, key).ok() != Some(*value)) || number(config, "encoder_hidden_size").unwrap_or(hidden) != hidden {
+            return Err("only streaming encoders as wide as their decoders, with the same heads, are read".into());
+        }
+        if number(encoder, "num_key_value_heads").unwrap_or(heads) != heads || number(config, "num_key_value_heads").unwrap_or(heads) != heads || head_dim * heads != hidden {
+            return Err("only heads each with its own keys, filling the width, are read".into());
+        }
+        let windows: Vec<(usize, usize)> = encoder["sliding_windows"].as_array().ok_or("“sliding_windows” is missing")?.iter().map(|w| (w[0].as_u64().unwrap_or(0) as usize, w[1].as_u64().unwrap_or(0) as usize)).collect();
+        let layers = number(encoder, "num_hidden_layers")?;
+        if windows.len() != layers || windows.iter().any(|(before, after)| *before == 0 || *after > *before) {
+            return Err("each encoder layer needs a window".into());
+        }
+        let rope = &config["rope_parameters"];
+        let factor = rope["partial_rotary_factor"].as_f64().unwrap_or(1.0);
+        let rope_dim = (head_dim as f64 * factor) as usize;
+        let frame = (encoder["sample_rate"].as_f64().unwrap_or(16_000.0) * encoder["frame_ms"].as_f64().unwrap_or(5.0) / 1000.0).round() as usize;
+        Ok(Self {
+            hidden,
+            intermediate: number(config, "intermediate_size")?,
+            encoder_layers: layers,
+            decoder_layers: number(config, "num_hidden_layers")?,
+            heads,
+            head_dim,
+            rope_dim,
+            rotary: rope_dim.div_ceil(2) * 2,
+            rope_theta: rope["rope_theta"].as_f64().unwrap_or(10_000.0) as f32,
+            vocab: number(config, "vocab_size")?,
+            start: config["decoder_start_token_id"].as_u64().unwrap_or(1) as u32,
+            end: config["eos_token_id"].as_u64().unwrap_or(2) as u32,
+            max_tokens: number(config, "max_position_embeddings").unwrap_or(4096),
+            streaming: Some(Streaming { frame, windows }),
+        })
+    }
+
+    /// The encoder's frames for `samples` samples: a streaming encoder takes whole frames of
+    /// 20 ms, the others as `frames`.
+    pub fn frames_of(&self, samples: usize) -> usize {
+        match &self.streaming {
+            Some(s) => samples / s.samples_per_frame(),
+            None => Self::frames(samples),
+        }
     }
 
     /// The encoder's frames for `samples` samples of audio: none below 1,151 samples.
@@ -125,12 +213,24 @@ fn rotate(x: &mut [f32], head_dim: usize, turns: &[(f32, f32)]) {
 }
 
 fn layer_norm(x: &[f32], weight: &[f32]) -> Vec<f32> {
+    layer_norm_with(x, weight, EPSILON)
+}
+
+fn layer_norm_with(x: &[f32], weight: &[f32], epsilon: f32) -> Vec<f32> {
     let n = x.len() as f32;
     let mean = x.iter().sum::<f32>() / n;
     let variance = x.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
-    let scale = 1.0 / (variance + EPSILON).sqrt();
+    let scale = 1.0 / (variance + epsilon).sqrt();
     x.iter().zip(weight).map(|(v, w)| (v - mean) * scale * w).collect()
 }
+
+/// A streaming encoder's LayerNorm weight: stored less one.
+fn unit_offset(gamma: &[f32]) -> Vec<f32> {
+    gamma.iter().map(|g| g + 1.0).collect()
+}
+
+/// The streaming front end's normalisation of a frame: zero mean, unit RMS.
+pub const CMVN_EPSILON: f32 = 1e-6;
 
 fn gelu(v: f32) -> f32 {
     0.5 * v * (1.0 + crate::vision::erf(v / std::f32::consts::SQRT_2))
@@ -142,6 +242,12 @@ fn silu(v: f32) -> f32 {
 
 fn add(a: &mut [f32], b: &[f32]) {
     a.iter_mut().zip(b).for_each(|(a, b)| *a += b);
+}
+
+/// The keys a streaming layer's frame `t` of `frames` sees: `before` up to its own, with it,
+/// and `after − 1` after it.
+pub fn window(t: usize, frames: usize, (before, after): (usize, usize)) -> std::ops::Range<usize> {
+    (t + 1).saturating_sub(before)..(t + after.max(1)).min(frames)
 }
 
 /// Each head's attention over `keys` and `values`, one row per token.
@@ -219,6 +325,9 @@ impl Moonshine {
 
     /// The front end: samples to frames, before the encoder's blocks.
     pub fn front(&self, samples: &[f32]) -> Result<Vec<Vec<f32>>, String> {
+        if let Some(streaming) = &self.config.streaming {
+            return self.streaming_front(streaming, samples);
+        }
         let p = |n: &str| format!("model.encoder.{n}");
         let wave: Vec<Vec<f32>> = samples.iter().map(|s| vec![*s]).collect();
         let mut x = self.conv(&p("conv1"), &wave, 127, 64)?;
@@ -241,8 +350,36 @@ impl Moonshine {
         Ok(x)
     }
 
+    /// A streaming front end over the whole frames of `samples`.
+    fn streaming_front(&self, streaming: &Streaming, samples: &[f32]) -> Result<Vec<Vec<f32>>, String> {
+        let p = |n: &str| format!("model.encoder.embedder.{n}");
+        let k = self.tensor(&p("comp.log_k"))?.first().ok_or("log_k is empty")?.exp();
+        let ones = vec![k; streaming.frame];
+        let whole = samples.len() / streaming.samples_per_frame() * streaming.samples_per_frame();
+        let embedded = samples[..whole]
+            .chunks(streaming.frame)
+            .map(|frame| {
+                let compressed: Vec<f32> = layer_norm_with(frame, &ones, CMVN_EPSILON).iter().map(|v| v.asinh()).collect();
+                self.linear(&p("linear"), &compressed).map(|y| y.into_iter().map(silu).collect::<Vec<f32>>())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Causal: four rows of zeros before each convolution.
+        let causal = |x: Vec<Vec<f32>>| {
+            let width = x.first().map_or(0, Vec::len);
+            let mut padded = vec![vec![0f32; width]; 4];
+            padded.extend(x);
+            padded
+        };
+        let mut x = self.conv(&p("conv1"), &causal(embedded), 5, 2)?;
+        x.iter_mut().flatten().for_each(|v| *v = silu(*v));
+        self.conv(&p("conv2"), &causal(x), 5, 2)
+    }
+
     /// The encoder's frames for `samples`, 16 kHz mono in [−1, 1].
     pub fn encode(&self, samples: &[f32]) -> Result<Vec<Vec<f32>>, String> {
+        if let Some(streaming) = &self.config.streaming {
+            return self.streaming_encode(streaming, samples);
+        }
         let c = &self.config;
         let mut x = self.front(samples)?;
         let turns: Vec<Vec<(f32, f32)>> = (0..x.len()).map(|t| rotation(c, t)).collect();
@@ -274,9 +411,46 @@ impl Moonshine {
         Ok(x.iter().map(|row| layer_norm(row, weight)).collect())
     }
 
+    /// A streaming encoder's frames: each layer's attention within its window, no RoPE.
+    fn streaming_encode(&self, streaming: &Streaming, samples: &[f32]) -> Result<Vec<Vec<f32>>, String> {
+        let c = &self.config;
+        let mut x = self.front(samples)?;
+        let frames = x.len();
+        for layer in 0..c.encoder_layers {
+            let p = |n: &str| format!("model.encoder.layers.{layer}.{n}");
+            let first = unit_offset(self.tensor(&p("input_layernorm.gamma"))?);
+            let second = unit_offset(self.tensor(&p("post_attention_layernorm.gamma"))?);
+            let normed: Vec<Vec<f32>> = x.iter().map(|row| layer_norm(row, &first)).collect();
+            let queries = normed.iter().map(|row| self.linear(&p("self_attn.q_proj"), row)).collect::<Result<Vec<_>, _>>()?;
+            let keys = normed.iter().map(|row| self.linear(&p("self_attn.k_proj"), row)).collect::<Result<Vec<_>, _>>()?;
+            let values = normed.iter().map(|row| self.linear(&p("self_attn.v_proj"), row)).collect::<Result<Vec<_>, _>>()?;
+            for (t, q) in queries.iter().enumerate() {
+                let seen = window(t, frames, streaming.windows[layer]);
+                let attended = attend(q, &keys[seen.clone()], &values[seen], c.head_dim);
+                add(&mut x[t], &self.linear(&p("self_attn.o_proj"), &attended)?);
+                let normed = layer_norm(&x[t], &second);
+                let mut inner = self.linear(&p("mlp.fc1"), &normed)?;
+                inner.iter_mut().for_each(|v| *v = gelu(*v));
+                let out = self.linear(&p("mlp.fc2"), &inner)?;
+                add(&mut x[t], &out);
+            }
+        }
+        let last = unit_offset(self.tensor("model.encoder.final_norm.gamma")?);
+        Ok(x.iter().map(|row| layer_norm(row, &last)).collect())
+    }
+
     /// A decoder that reads `frames`, the encoder's output: each layer's keys and values
-    /// of every frame are made once, here.
+    /// of every frame are made once, here. A streaming model's frames take their learned
+    /// positions first.
     pub fn decoder(&self, frames: &[Vec<f32>]) -> Result<Decoder<'_>, String> {
+        let placed: Vec<Vec<f32>>;
+        let frames = match self.tensor("model.decoder.pos_emb.weight") {
+            Ok(positions) => {
+                placed = frames.iter().zip(positions.chunks(self.config.hidden)).map(|(f, p)| f.iter().zip(p).map(|(a, b)| a + b).collect()).collect();
+                &placed
+            }
+            Err(_) => frames,
+        };
         let mut cross = Vec::new();
         for layer in 0..self.config.decoder_layers {
             let p = |n: &str| format!("model.decoder.layers.{layer}.encoder_attn.{n}");

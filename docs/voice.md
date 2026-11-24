@@ -28,6 +28,7 @@ Speech needs few tokens: DAC codes come at 75 frames per second (the 24 kHz rate
 | Stage | Model | What it is | Size | Licence |
 |---|---|---|---|---|
 | Speech to text | [Moonshine](https://huggingface.co/UsefulSensors/moonshine-tiny) tiny / base | Encoder–decoder transformer over the raw 16 kHz waveform | 27 M / 61 M parameters (108 / 246 MB in F32) | MIT (tiny's card) |
+| Speech to text while it is spoken | [Moonshine Streaming](https://huggingface.co/moonshine-ai/moonshine-streaming-tiny) tiny | The same decoder; an encoder over 20 ms frames whose attention sees a window of frames | 44 M parameters (176 MB in F32) | MIT |
 | Text to speech | [OuteTTS-1.0-0.6B](https://huggingface.co/OuteAI/OuteTTS-1.0-0.6B) | A Qwen3-0.6B (`model_type: qwen3`, 28 layers, hidden 1,024, vocabulary 157,760) that writes the codec's codes as tokens | 0.6 B parameters (BF16) | Apache-2.0 |
 | Codes to sound | [DAC.speech v1.0](https://huggingface.co/ibm-research/DAC.speech.v1.0) | The decoder of the Descript Audio Codec, 24 kHz, fine-tuned for speech | 296 MB per checkpoint (`.pth`) | CDLA-Permissive-2.0 |
 
@@ -119,6 +120,21 @@ Until now all the dies of a design ran parts of one program: layers in sequence,
 
 Speculative decoding with a separate draft model is not built yet. The MTP head (`DraftProgram`) is its cousin inside one model.
 
+## Listening while the question is spoken
+
+Moonshine reads the whole clip before it writes; its streaming model (`moonshine-ai/moonshine-streaming-tiny`, 44 M parameters) is built to read it as it comes. Its front end takes 80 samples (5 ms) at a time: normalised to zero mean and unit RMS, compressed with `asinh(k·x)`, projected and bent with SiLU; two causal convolutions of stride 2 leave a frame every 20 ms. Its encoder has no RoPE, and each layer's attention sees the 15 frames before and, in the first two and last two layers, the 3 after. The decoder is Moonshine's, the frames given learned positions first. `sim::moonshine` reads it (`MoonshineConfig::streaming`): on "What is the capital of France?" from macOS's `say`, its frames are within 0.0003 % of Transformers' and its scores within 0.0001 % (`tools/golden/moonshine_streaming.py`, `--example listen`).
+
+On the chip (`sim::moonshine_stream_chip`) it listens as the question comes:
+
+- **What the die gains:** a tenth function table, `asinh` (`FN_ASINH`), on dies with sixteen table places, as the sine's: within 0.0014 of floating point over the front end's range. CMVN is a LayerNorm whose weight is `k`, the samples scaled by √10 first so that the die's epsilon (10⁻⁵) acts as the model's (10⁻⁶).
+- **A layer that sees `a` frames ahead runs `a` frames behind the one before.** Every 20 ms the host sends the samples; the firmware runs the front end, and each layer as far as its window lets it: Moonshine-tiny's last layer runs 12 frames (240 ms) behind the speech. When the question ends only those frames are left, then the text.
+- **Keys and values go into rings** as wide as each layer's window (`KvAppend` with a window), so attention at the window's last frame sees exactly the window. The clip's last frames see fewer ahead: a layer that sees 3 ahead also keeps rings 1, 2 and 3 frames narrower, and frame `last − j` attends at the last frame in the ring `3 − j` narrower, which holds exactly its keys.
+- **Learned positions** are a table of 4,096 rows read a row at a time: a program of routines now says how many rows each of its own tables has (`RowPart::tables`), so the die keeps them and not the vocabulary's 32,768.
+
+The die's arithmetic with 16-bit vectors writes what Transformers writes: "What is the capital of France?" and "Hello, this chip can listen and speak." (`--example listen`). On a toy checkpoint the exact machine's scores are within 0.2 % of floating point for every kind of window (none ahead, some ahead, one wider than the clip, no layers), the gates give the exact machine's scores bit for bit (900,912 cycles), and the firmware, at instruction level, writes the host's tokens (`crates/sim/tests/moonshine_stream.rs`).
+
+In the plan, the recogniser's first token comes **0.4 ms** after the question ends instead of 25.7 ms, and each 20 ms takes much less than 20 ms on any die tried. With the rest as before the system is three dies, 930 mm², and the first sound comes in **458 ms** instead of 483. Moonshine-tiny stays the default; the streaming model is used wherever its folder is given as the recogniser.
+
 ## The firmware's schedule
 
 A die whose program is a set of routines (an encoder that runs once per clip, a decoder that writes tokens, a decoder of sound over rows) needs someone to order them. Until now the host did. Now the chip's description can carry a **schedule** (`netlist::schedule`) and the firmware follows it, so the chip takes its input and gives its output by itself. The schedule knows nothing of a model; it is a list of records of eight words:
@@ -133,6 +149,7 @@ A die whose program is a set of routines (an encoder that runs once per clip, a 
 | `HALVE` | Rows added pairwise until one is left (a sum over a length known only at run time) |
 | `GENERATE` | Up to some tokens: the next records for each, then the sampler; a stop token ends it |
 | `SEND` | A die element and its exponent to the host |
+| `STREAM` | The next records for as long as the host sends a word other than zero first: input that comes while it is worked on |
 
 `MoonshineChip::schedule` writes Moonshine's (63 records for Moonshine-tiny, 39 for the tests' toy): the host sends the clip's length, `1 / count` for its GroupNorm and the rows of samples; the firmware works out the lengths as `Lengths::of` does, runs the encoder and writes the tokens greedily until the end token. `DacChip::schedule` writes DAC's (172 records for DAC.speech, 76 for the toy): the host sends each window's codes and which of its samples to keep, and the chip sends back only those, so it skips computing the overlap's. A schedule can be longer than the chip's description has room for (1,008 words), so it goes where a tokenizer's tables would, at word 0x2000 of the data memory: a chip run by a schedule exchanges words, not text, and has none. DAC.speech's takes 1,384 words there, Moonshine-tiny's 512 (`the_real_decoder_s_schedule_fits_its_chip_image`, `the_real_recogniser_s_schedule_fits_its_chip_image`). `netlist::schedule::expand` reads a schedule as the firmware does, so a schedule is checked against the host's own order of routines (for four clip lengths). At instruction level, the firmware driving a die run by the exact machine writes the host's tokens and the host's sound, mantissa for mantissa (`the_firmware_transcribes_a_clip_as_the_host_ordering_the_routines`, `the_firmware_decodes_window_by_window_as_the_host_does`).
 
@@ -165,6 +182,9 @@ Voice adds files; the core only gains general things.
 | The engine's job and the application's view | `crates/server/src/voice_job.rs`, `web/src/voice/` | Voice |
 | Schedules the firmware follows | `crates/netlist/src/schedule.rs`, `firmware/src/main.rs` (`follow`, `repeat_calls`), `sim::chip::RoutinesDie` | General: any program of routines |
 | Moonshine's and DAC's schedules | `MoonshineChip::schedule`, `DacChip::schedule`, `dac_chip::schedule_input` | Voice |
+| `FN_ASINH` and `Asinh` | `crates/netlist/src/block.rs`, `crates/compiler`, `crates/sim/src/lower.rs`, `crates/sim/src/exec.rs` | General: built only where used |
+| Tables of a program's own rows (`RowPart::tables`) | `crates/compiler` | General |
+| Streaming Moonshine: reference, on the die, tests | `crates/sim/src/moonshine.rs`, `crates/sim/src/moonshine_stream_chip.rs`, `crates/sim/tests/moonshine_stream.rs`, `tools/golden/moonshine_streaming.py` | Voice |
 
 ## The system, planned
 
@@ -280,4 +300,4 @@ Before voice, `Program` had two fields named after images: `image` (Janus's head
 | 14 | Moonshine and DAC on their own firmware | Done: schedules the firmware follows, bit for bit the host's at instruction level, and their CPU cycles counted in the plan (see "The firmware's schedule") |
 | 15 | One real layer of Moonshine-tiny in gates | Done: the stem, the first encoder and decoder layers and 64 rows of the vocabulary with the model's own weights, a two-frame clip and two tokens: 160 routines, 13,568,264 cycles, the gates' scores the exact machine's bit for bit (20 minutes; `LLM2CHIP_REAL_MOONSHINE=1`) |
 | 16 | A language model of several dies in the plan | Done (see "A larger language model") |
-| 17 | Recognising while the question is spoken | Not built: Moonshine's streaming models (`moonshine-streaming-tiny`, 176 MB, MIT) compress their input with `asinh`, a function table the die does not have, and the recogniser's first token already comes 26 ms after the question ends (most of it the CPU taking in the clip's 48,000 samples), so it would save at most that |
+| 17 | Recognising while the question is spoken | Done: streaming Moonshine, the `asinh` table and the `STREAM` record (see "Listening while the question is spoken") |

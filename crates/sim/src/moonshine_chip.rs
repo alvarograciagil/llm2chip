@@ -66,34 +66,34 @@ pub struct Call {
     pub read: bool,
 }
 
-struct Builder<'a> {
-    weights: &'a Weights,
-    buffers: Vec<usize>,
-    ops: Vec<Inst>,
-    derived: Vec<Tensor>,
+pub(crate) struct Builder<'a> {
+    pub(crate) weights: &'a Weights,
+    pub(crate) buffers: Vec<usize>,
+    pub(crate) ops: Vec<Inst>,
+    pub(crate) derived: Vec<Tensor>,
 }
 
 impl Builder<'_> {
-    fn buf(&mut self, len: usize) -> Buf {
+    pub(crate) fn buf(&mut self, len: usize) -> Buf {
         self.buffers.push(len);
         self.buffers.len() - 1
     }
 
-    fn op(&mut self, name: &'static str, op: Op) {
+    pub(crate) fn op(&mut self, name: &'static str, op: Op) {
         self.ops.push(Inst { op, layer: None, name });
     }
 
-    fn routine(&mut self, body: impl FnOnce(&mut Self) -> Result<(), String>) -> Result<Range<usize>, String> {
+    pub(crate) fn routine(&mut self, body: impl FnOnce(&mut Self) -> Result<(), String>) -> Result<Range<usize>, String> {
         let start = self.ops.len();
         body(self)?;
         Ok(start..self.ops.len())
     }
 
-    fn floats(&self, name: &str) -> Result<Vec<f32>, String> {
+    pub(crate) fn floats(&self, name: &str) -> Result<Vec<f32>, String> {
         self.weights.floats(name)
     }
 
-    fn derive(&mut self, name: String, shape: Vec<usize>, values: Vec<f32>) -> String {
+    pub(crate) fn derive(&mut self, name: String, shape: Vec<usize>, values: Vec<f32>) -> String {
         if !self.derived.iter().any(|(n, _, _)| *n == name) {
             self.derived.push((name.clone(), shape, values));
         }
@@ -101,7 +101,7 @@ impl Builder<'_> {
     }
 
     /// `matrix · src` into a new buffer, plus `{bias}` when given.
-    fn product(&mut self, matrix: &str, src: Buf, outputs: usize, bias: Option<String>) -> Buf {
+    pub(crate) fn product(&mut self, matrix: &str, src: Buf, outputs: usize, bias: Option<String>) -> Buf {
         let out = self.buf(outputs);
         self.op("product", Op::Matvec { matrix: matrix.into(), src, dst: out });
         match bias {
@@ -115,14 +115,14 @@ impl Builder<'_> {
     }
 
     /// A linear layer of the checkpoint, with its bias if it has one.
-    fn linear(&mut self, name: &str, src: Buf, outputs: usize) -> Buf {
+    pub(crate) fn linear(&mut self, name: &str, src: Buf, outputs: usize) -> Buf {
         let bias = format!("{name}.bias");
         let bias = self.weights.shape(&bias).is_some().then_some(bias);
         self.product(name, src, outputs, bias)
     }
 
     /// A LayerNorm of the checkpoint, its missing bias zeros.
-    fn layer_norm(&mut self, name: &str, src: Buf, width: usize) -> Buf {
+    pub(crate) fn layer_norm(&mut self, name: &str, src: Buf, width: usize) -> Buf {
         if self.weights.shape(&format!("{name}.bias")).is_none() {
             self.derive(format!("{name}.bias"), vec![width], vec![0.0; width]);
         }
@@ -133,7 +133,7 @@ impl Builder<'_> {
 
     /// A query or key projection with its rows reordered for the die's rotation: in each
     /// head, the rotated pairs' first elements, then their second ones, then the rest.
-    fn rotated(&mut self, name: &str, heads: usize, head_dim: usize, rotary: usize) -> Result<String, String> {
+    pub(crate) fn rotated(&mut self, name: &str, heads: usize, head_dim: usize, rotary: usize) -> Result<String, String> {
         let weight = self.floats(&format!("{name}.weight"))?;
         let cols = weight.len() / (heads * head_dim);
         let order: Vec<usize> = (0..rotary / 2).map(|i| 2 * i).chain((0..rotary / 2).map(|i| 2 * i + 1)).chain(rotary..head_dim).collect();
@@ -150,7 +150,7 @@ impl Builder<'_> {
 
     /// A convolution's kernel `[out, in, kernel]` as one matrix over `kernel` rows side by
     /// side, padded with zero columns to `width` rows.
-    fn kernel(&mut self, name: &str, kernel: usize, width: usize) -> Result<(String, usize), String> {
+    pub(crate) fn kernel(&mut self, name: &str, kernel: usize, width: usize) -> Result<(String, usize), String> {
         let weight = self.floats(&format!("{name}.weight"))?;
         let shape = self.weights.shape(&format!("{name}.weight")).ok_or(format!("{name} is missing"))?.to_vec();
         let (outputs, inputs) = (shape[0], shape[1]);
@@ -190,13 +190,77 @@ fn strided(b: &mut Builder, name: &str, src: Buf, inputs: usize, kernel: usize, 
 
 /// The routines of a decoder token.
 #[derive(Clone, Debug)]
-struct DecoderRoutines {
-    embed: Range<usize>,
+pub(crate) struct DecoderRoutines {
+    pub(crate) embed: Range<usize>,
     /// Each layer's self-attention, at the token's position.
-    own: Vec<Range<usize>>,
+    pub(crate) own: Vec<Range<usize>>,
     /// Each layer's cross-attention and MLP, at the last frame's.
-    cross: Vec<Range<usize>>,
-    logits: Range<usize>,
+    pub(crate) cross: Vec<Range<usize>>,
+    pub(crate) logits: Range<usize>,
+}
+
+/// Moonshine's decoder as routines: its layers' own keys in `own_slot(layer)`, the frames'
+/// in `cross_slot(layer)`. The routines, the logits and the decoder's last output.
+pub(crate) fn decoder_routines(b: &mut Builder, config: &MoonshineConfig, own_slot: &dyn Fn(usize) -> usize, cross_slot: &dyn Fn(usize) -> usize) -> Result<(DecoderRoutines, Buf, Buf), String> {
+    let (h, heads, head_dim, rotary) = (config.hidden, config.heads, config.head_dim, config.rotary);
+    let mut x = b.buf(h);
+    let embed = b.routine(|b| {
+        b.op("read embedding", Op::EmbRead { table: "model.decoder.embed_tokens".into(), dst: x });
+        Ok(())
+    })?;
+    let (mut own, mut cross) = (Vec::new(), Vec::new());
+    for layer in 0..config.decoder_layers {
+        let l = |n: &str| format!("model.decoder.layers.{layer}.{n}");
+        let (q_proj, k_proj) = (b.rotated(&l("self_attn.q_proj"), heads, head_dim, rotary)?, b.rotated(&l("self_attn.k_proj"), heads, head_dim, rotary)?);
+        let mut after = 0;
+        own.push(b.routine(|b| {
+            let normed = b.layer_norm(&l("input_layernorm"), x, h);
+            let q = b.product(&q_proj, normed, h, None);
+            let k = b.product(&k_proj, normed, h, None);
+            let v = b.linear(&l("self_attn.v_proj"), normed, h);
+            b.op("RoPE on Q", Op::Rope { buf: q, block: head_dim, rotary, table: 0 });
+            b.op("RoPE on K", Op::Rope { buf: k, block: head_dim, rotary, table: 0 });
+            b.op("store key and value", Op::KvAppend { slot: own_slot(layer), key: k, value: v, window: None });
+            let attended = b.buf(h);
+            b.op("attention", Op::AttnSum { slot: own_slot(layer), query: q, head_dim, scale_dim: head_dim, heads, kv_heads: heads, window: None, softcap: None, dst: attended });
+            let out = b.linear(&l("self_attn.o_proj"), attended, h);
+            after = b.buf(h);
+            b.op("residual", Op::Add { a: x, b: out, dst: after });
+            Ok(())
+        })?);
+        let mut next = 0;
+        cross.push(b.routine(|b| {
+            let normed = b.layer_norm(&l("post_attention_layernorm"), after, h);
+            let q = b.linear(&l("encoder_attn.q_proj"), normed, h);
+            let attended = b.buf(h);
+            b.op("cross-attention", Op::AttnSum { slot: cross_slot(layer), query: q, head_dim, scale_dim: head_dim, heads, kv_heads: heads, window: None, softcap: None, dst: attended });
+            let out = b.linear(&l("encoder_attn.o_proj"), attended, h);
+            let x1 = b.buf(h);
+            b.op("residual", Op::Add { a: after, b: out, dst: x1 });
+            let normed = b.layer_norm(&l("final_layernorm"), x1, h);
+            let both = b.linear(&l("mlp.fc1"), normed, 2 * config.intermediate);
+            let (value, gate) = (b.buf(config.intermediate), b.buf(config.intermediate));
+            b.op("value half", Op::Slice { src: both, from: 0, dst: value });
+            b.op("gate half", Op::Slice { src: both, from: config.intermediate, dst: gate });
+            let bent = b.buf(config.intermediate);
+            b.op("SiLU", Op::Silu { src: gate, dst: bent });
+            let gated = b.buf(config.intermediate);
+            b.op("gate × value", Op::MulElem { a: bent, b: value, dst: gated });
+            let out = b.linear(&l("mlp.fc2"), gated, h);
+            next = b.buf(h);
+            b.op("residual", Op::Add { a: x1, b: out, dst: next });
+            Ok(())
+        })?);
+        x = next;
+    }
+    let head = if b.weights.shape("proj_out.weight").is_some() { "proj_out" } else { "model.decoder.embed_tokens" };
+    let mut logits = 0;
+    let logits_routine = b.routine(|b| {
+        let normed = b.layer_norm("model.decoder.norm", x, h);
+        logits = b.product(head, normed, config.vocab, None);
+        Ok(())
+    })?;
+    Ok((DecoderRoutines { embed, own, cross, logits: logits_routine }, logits, x))
 }
 
 /// How long a clip is, in samples, rows of samples, outputs of the first and second
@@ -412,63 +476,7 @@ impl MoonshineChip {
         })?;
 
         // A decoder token.
-        let mut x = b.buf(h);
-        let embed = b.routine(|b| {
-            b.op("read embedding", Op::EmbRead { table: "model.decoder.embed_tokens".into(), dst: x });
-            Ok(())
-        })?;
-        let (mut own, mut cross) = (Vec::new(), Vec::new());
-        for layer in 0..config.decoder_layers {
-            let l = |n: &str| format!("model.decoder.layers.{layer}.{n}");
-            let (q_proj, k_proj) = (b.rotated(&l("self_attn.q_proj"), heads, head_dim, rotary)?, b.rotated(&l("self_attn.k_proj"), heads, head_dim, rotary)?);
-            let mut after = 0;
-            own.push(b.routine(|b| {
-                let normed = b.layer_norm(&l("input_layernorm"), x, h);
-                let q = b.product(&q_proj, normed, h, None);
-                let k = b.product(&k_proj, normed, h, None);
-                let v = b.linear(&l("self_attn.v_proj"), normed, h);
-                b.op("RoPE on Q", Op::Rope { buf: q, block: head_dim, rotary, table: 0 });
-                b.op("RoPE on K", Op::Rope { buf: k, block: head_dim, rotary, table: 0 });
-                b.op("store key and value", Op::KvAppend { slot: own_slot(layer), key: k, value: v, window: None });
-                let attended = b.buf(h);
-                b.op("attention", Op::AttnSum { slot: own_slot(layer), query: q, head_dim, scale_dim: head_dim, heads, kv_heads: heads, window: None, softcap: None, dst: attended });
-                let out = b.linear(&l("self_attn.o_proj"), attended, h);
-                after = b.buf(h);
-                b.op("residual", Op::Add { a: x, b: out, dst: after });
-                Ok(())
-            })?);
-            let mut next = 0;
-            cross.push(b.routine(|b| {
-                let normed = b.layer_norm(&l("post_attention_layernorm"), after, h);
-                let q = b.linear(&l("encoder_attn.q_proj"), normed, h);
-                let attended = b.buf(h);
-                b.op("cross-attention", Op::AttnSum { slot: cross_slot(layer), query: q, head_dim, scale_dim: head_dim, heads, kv_heads: heads, window: None, softcap: None, dst: attended });
-                let out = b.linear(&l("encoder_attn.o_proj"), attended, h);
-                let x1 = b.buf(h);
-                b.op("residual", Op::Add { a: after, b: out, dst: x1 });
-                let normed = b.layer_norm(&l("final_layernorm"), x1, h);
-                let both = b.linear(&l("mlp.fc1"), normed, 2 * config.intermediate);
-                let (value, gate) = (b.buf(config.intermediate), b.buf(config.intermediate));
-                b.op("value half", Op::Slice { src: both, from: 0, dst: value });
-                b.op("gate half", Op::Slice { src: both, from: config.intermediate, dst: gate });
-                let bent = b.buf(config.intermediate);
-                b.op("SiLU", Op::Silu { src: gate, dst: bent });
-                let gated = b.buf(config.intermediate);
-                b.op("gate × value", Op::MulElem { a: bent, b: value, dst: gated });
-                let out = b.linear(&l("mlp.fc2"), gated, h);
-                next = b.buf(h);
-                b.op("residual", Op::Add { a: x1, b: out, dst: next });
-                Ok(())
-            })?);
-            x = next;
-        }
-        let head = if weights.shape("proj_out.weight").is_some() { "proj_out" } else { "model.decoder.embed_tokens" };
-        let mut logits = 0;
-        let logits_routine = b.routine(|b| {
-            let normed = b.layer_norm("model.decoder.norm", x, h);
-            logits = b.product(head, normed, config.vocab, None);
-            Ok(())
-        })?;
+        let (decoder, logits, x) = decoder_routines(&mut b, &config, &own_slot, &cross_slot)?;
 
         let Builder { buffers, ops, derived, .. } = b;
         let reach = [sample_rows, first, second, frames, config.max_tokens].into_iter().max().unwrap_or(1);
@@ -493,7 +501,7 @@ impl MoonshineChip {
             final_hidden: x,
             embedding_rows: None,
             draft: None,
-            parts: vec![Part::Rows(RowPart { ops, embed: 0..0, blocks: Vec::new(), merge: 0..0, pixels: input, position: input, output: logits, head_dim, patches: reach, extra: Vec::new() })],
+            parts: vec![Part::Rows(RowPart { ops, embed: 0..0, blocks: Vec::new(), merge: 0..0, pixels: input, position: input, output: logits, head_dim, patches: reach, extra: Vec::new(), tables: Vec::new() })],
         };
         let weights = Arc::new(weights.with_floats(derived)?);
         let layout = match tokens {
@@ -502,7 +510,6 @@ impl MoonshineChip {
         };
         let mut vm = BlockVm::new(&die, layout.registers_used() as usize + 8, Some(weights.clone()));
         vm.compute_in_cells();
-        let decoder = DecoderRoutines { embed, own, cross, logits: logits_routine };
         Ok(Self {
             config,
             program,

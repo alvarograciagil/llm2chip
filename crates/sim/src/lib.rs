@@ -13,6 +13,7 @@ pub mod lower;
 pub mod magvit_chip;
 pub mod moonshine;
 pub mod moonshine_chip;
+pub mod moonshine_stream_chip;
 pub mod optimize;
 pub mod prompt;
 pub mod showo;

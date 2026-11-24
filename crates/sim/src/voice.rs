@@ -58,9 +58,15 @@ impl Model {
 
 /// The text Moonshine, in `dir`, hears in `clip`.
 pub fn listen(dir: &Path, clip: &Clip, arithmetic: Arithmetic) -> Result<String, String> {
-    let samples = clip.resampled(16_000).samples;
+    let mut samples = clip.resampled(16_000).samples;
+    let config = crate::moonshine::MoonshineConfig::read(dir)?;
+    // A streaming recogniser takes whole 20 ms.
+    if let Some(streaming) = &config.streaming {
+        samples.truncate(samples.len() / streaming.samples_per_frame() * streaming.samples_per_frame());
+    }
     let tokens = match arithmetic {
         Arithmetic::Float => Moonshine::open(dir)?.transcribe(&samples)?,
+        Arithmetic::Die(bits) if config.streaming.is_some() => crate::moonshine_stream_chip::StreamingChip::exact(dir, config.frames_of(samples.len()), bits)?.transcribe(&samples)?.0,
         Arithmetic::Die(bits) => MoonshineChip::exact(dir, samples.len(), bits)?.transcribe(&samples)?,
     };
     let text = TokenizerTables::from_file(&dir.join("tokenizer.json"), 256)?.decode(&tokens);
