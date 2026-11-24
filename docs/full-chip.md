@@ -67,7 +67,7 @@ Every cycle the application shows says whether it was simulated or estimated, de
 
 ## The whole chip in gates
 
-`chip_design` joins the CPU, the memories, the load controller, the die and the sampling unit. With a tiny model, the real firmware receives bytes, loads the image, runs the tokens and returns bytes. The result and the cycles match the instruction level (CPU in the ISS and die on the exact machine): 525,668 cycles in both.
+`chip_design` joins the CPU, the memories, the load controller, the die and the sampling unit. With a tiny model, the real firmware receives bytes, loads the image, runs the tokens and returns bytes. The result and the cycles match the instruction level (CPU in the ISS and die on the exact machine): 230,203 cycles in both (`text_goes_through_the_whole_chip_in_gates`).
 
 ## The cost of sampling
 
