@@ -23,6 +23,9 @@ pub const FN_TANH: u32 = 7;
 /// `sin(π·x/8)`: one period over the table's whole range, so a wrapping alignment takes
 /// any argument to its place in the period. A die that uses it has a ninth table.
 pub const FN_SIN: u32 = 8;
+/// `asinh(x)`, its outputs up to 2.8 within the table's range: a die that uses it has ten
+/// tables (sixteen places, as the sine's).
+pub const FN_ASINH: u32 = 9;
 pub const FN_EXP: u32 = 0;
 pub const FN_SIGMOID: u32 = 1;
 pub const FN_RECIPROCAL: u32 = 2;
@@ -32,6 +35,16 @@ pub const FN_SOFTPLUS: u32 = 4;
 pub const TABLE_INPUT_EXPONENT: i64 = 3;
 pub const SOFTPLUS_OUTPUT_EXPONENT: i64 = 4;
 pub const UNIT_OUTPUT_EXPONENT: i64 = 0;
+pub const ASINH_OUTPUT_EXPONENT: i64 = 2;
+
+/// The exponent of a function table's outputs.
+pub fn output_exponent(function: u32) -> i64 {
+    match function {
+        FN_SOFTPLUS => SOFTPLUS_OUTPUT_EXPONENT,
+        FN_ASINH => ASINH_OUTPUT_EXPONENT,
+        _ => UNIT_OUTPUT_EXPONENT,
+    }
+}
 pub const RECIPROCAL_OUTPUT_EXPONENT: i64 = 1;
 /// The accumulator's width: a full product plus 16 guard bits.
 pub const fn accumulator_bits(bits: u32) -> u32 {
@@ -62,6 +75,7 @@ fn table_value(function: u32, index: usize, index_bits: u32, bits: u32) -> i64 {
         FN_SOFTPLUS => ((1.0 + input.exp()).ln(), SOFTPLUS_OUTPUT_EXPONENT),
         FN_TANH => (input.tanh(), UNIT_OUTPUT_EXPONENT),
         FN_SIN => ((std::f64::consts::PI * input / 8.0).sin(), UNIT_OUTPUT_EXPONENT),
+        FN_ASINH => (input.asinh(), ASINH_OUTPUT_EXPONENT),
         FN_GELU => (0.5 * (1.0 + libm::erf(input / std::f64::consts::SQRT_2)), UNIT_OUTPUT_EXPONENT),
         FN_GELU_TANH => (0.5 * (1.0 + ((2.0 / std::f64::consts::PI).sqrt() * (input + 0.044715 * input.powi(3))).tanh()), UNIT_OUTPUT_EXPONENT),
         _ => (0.0, 0),
@@ -2417,8 +2431,7 @@ impl BlockOps for Assembly {
             (step.a, step.function, step.dst, step.vector) = ((scratch, i + start), function, (dst, i), vector);
             s.push(step);
         });
-        let exponent = if function == FN_SOFTPLUS { SOFTPLUS_OUTPUT_EXPONENT } else { UNIT_OUTPUT_EXPONENT };
-        self.immediate(exponent, self.exponent(dst));
+        self.immediate(output_exponent(function), self.exponent(dst));
         if function != FN_EXP || !self.from_top {
             self.normalize(dst, len);
         }

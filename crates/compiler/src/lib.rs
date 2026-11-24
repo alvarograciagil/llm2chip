@@ -27,6 +27,8 @@ pub enum Op {
     MulWeight { src: Buf, weight: String, dst: Buf },
     /// The sine of every element, in radians, whatever its size.
     Sin { src: Buf, dst: Buf },
+    /// `asinh(x)` element by element.
+    Asinh { src: Buf, dst: Buf },
     /// `x · rsqrt(mean(x²) + eps) · (offset + w)`, per block of `block` values.
     RmsNorm { src: Buf, weight: String, offset: f32, block: usize, dst: Buf },
     /// `q_proj` interleaves each head's query and gate.
@@ -72,7 +74,7 @@ impl Op {
     pub fn buffers(&self) -> (Vec<Buf>, Vec<Buf>) {
         match self {
             Op::EmbRead { dst, .. } => (vec![], vec![*dst]),
-            Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Gelu { src, dst, .. } | Op::Scale { src, dst, .. } | Op::SoftCap { src, dst, .. } | Op::AddWeight { src, dst, .. } | Op::MulWeight { src, dst, .. } | Op::Sin { src, dst } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } | Op::Moe { src, dst, .. } => (vec![*src], vec![*dst]),
+            Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Gelu { src, dst, .. } | Op::Scale { src, dst, .. } | Op::SoftCap { src, dst, .. } | Op::AddWeight { src, dst, .. } | Op::MulWeight { src, dst, .. } | Op::Sin { src, dst } | Op::Asinh { src, dst } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } | Op::Moe { src, dst, .. } => (vec![*src], vec![*dst]),
             Op::Add { a, b, dst } | Op::MulElem { a, b, dst } | Op::Concat { a, b, dst } => (vec![*a, *b], vec![*dst]),
             Op::SplitQueryGate { src, query, gate, .. } => (vec![*src], vec![*query, *gate]),
             Op::Slice { src, dst, .. } => (vec![*src], vec![*dst]),
@@ -213,6 +215,9 @@ impl Program {
 
     /// Rows of an embedding table: the vocabulary's, or the second codebook's.
     pub fn table_rows(&self, table: &str) -> usize {
+        if let Some((_, rows)) = self.rows().and_then(|r| r.tables.iter().find(|(name, _)| name == table)) {
+            return *rows;
+        }
         match self.codes() {
             Some(codes) if codes.input_ops.iter().any(|i| matches!(&i.op, Op::EmbRead { table: t, .. } if t == table)) => codes.codes,
             _ => self.embedding_rows.unwrap_or(self.vocab),
@@ -1020,7 +1025,7 @@ mod tests {
         for inst in &program.ops {
             let (reads, writes): (Vec<Buf>, Vec<Buf>) = match &inst.op {
                 Op::EmbRead { dst, .. } => (vec![], vec![*dst]),
-                Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Gelu { src, dst, .. } | Op::Scale { src, dst, .. } | Op::SoftCap { src, dst, .. } | Op::AddWeight { src, dst, .. } | Op::MulWeight { src, dst, .. } | Op::Sin { src, dst } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } => (vec![*src], vec![*dst]),
+                Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Gelu { src, dst, .. } | Op::Scale { src, dst, .. } | Op::SoftCap { src, dst, .. } | Op::AddWeight { src, dst, .. } | Op::MulWeight { src, dst, .. } | Op::Sin { src, dst } | Op::Asinh { src, dst } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } => (vec![*src], vec![*dst]),
                 Op::Add { a, b, dst } | Op::MulElem { a, b, dst } => (vec![*a, *b], vec![*dst]),
                 Op::SplitQueryGate { src, query, gate, .. } => (vec![*src], vec![*query, *gate]),
                 Op::Slice { src, dst, .. } | Op::SigmoidMoe { src, dst, .. } => (vec![*src], vec![*dst]),
@@ -1075,6 +1080,9 @@ pub struct RowPart {
     /// Routines of its own after the merge, each with an entry: Show-o keeps the scores
     /// with the text and combines them with those without it.
     pub extra: Vec<std::ops::Range<usize>>,
+    /// Tables its routines read whose rows are not the vocabulary's, such as learned
+    /// positions: each one's name and rows.
+    pub tables: Vec<(String, usize)>,
 }
 
 impl RowPart {
@@ -1230,5 +1238,5 @@ fn vision_part(root: &Value, patches: usize, program: &mut Program) -> Result<Ro
     debug_assert_eq!(ops.len(), merge_range.end);
 
     program.kv_slots.extend((0..depth).map(|_| KvShape { head_dim, heads }));
-    Ok(RowPart { ops, embed, blocks, merge: merge_range, pixels, position, output, head_dim, patches, extra: Vec::new() })
+    Ok(RowPart { ops, embed, blocks, merge: merge_range, pixels, position, output, head_dim, patches, extra: Vec::new(), tables: Vec::new() })
 }

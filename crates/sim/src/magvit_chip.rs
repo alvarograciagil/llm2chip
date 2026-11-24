@@ -519,7 +519,7 @@ impl MagvitChip {
             final_hidden: output,
             embedding_rows: input_read.is_some().then_some(1 << CODE_BITS),
             draft: None,
-            parts: vec![Part::Rows(RowPart { ops, embed: 0..0, blocks: Vec::new(), merge: 0..0, pixels: input, position: input, output, head_dim: attention_channels, patches: reach, extra: Vec::new() })],
+            parts: vec![Part::Rows(RowPart { ops, embed: 0..0, blocks: Vec::new(), merge: 0..0, pixels: input, position: input, output, head_dim: attention_channels, patches: reach, extra: Vec::new(), tables: Vec::new() })],
         };
         let weights = Arc::new(weights.with_floats(derived)?);
         let layout = match tokens {

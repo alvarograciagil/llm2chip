@@ -369,7 +369,7 @@ impl DacChip {
             final_hidden: sound,
             embedding_rows: Some(config.codebook_size),
             draft: None,
-            parts: vec![Part::Rows(RowPart { ops, embed: 0..0, blocks: Vec::new(), merge: 0..0, pixels: sound, position: sound, output: sound, head_dim: 1, patches: reach, extra: Vec::new() })],
+            parts: vec![Part::Rows(RowPart { ops, embed: 0..0, blocks: Vec::new(), merge: 0..0, pixels: sound, position: sound, output: sound, head_dim: 1, patches: reach, extra: Vec::new(), tables: Vec::new() })],
         };
         let lists = routines.iter().map(|r| program.rows().expect("the routines").ops[r.clone()].to_vec()).collect();
         let weights = Arc::new(weights.with_floats(derived)?);
@@ -572,7 +572,7 @@ mod tests {
             family: "sine".into(), vocab: 1, hidden: 64, num_layers: 0, buffers: vec![64, 64], ops: Vec::new(), logits_from: 0, logits: 1,
             kv_slots: Vec::new(), delta_slots: Vec::new(), conv_slots: Vec::new(), rope_theta: 1.0, rope_scaling: None, local_rope_theta: None, rms_epsilon: 1e-6,
             final_hidden: 1, embedding_rows: None, draft: None,
-            parts: vec![Part::Rows(RowPart { ops: vec![Inst { op: Op::Sin { src: 0, dst: 1 }, layer: None, name: "sine" }], embed: 0..0, blocks: Vec::new(), merge: 0..0, pixels: 0, position: 0, output: 1, head_dim: 1, patches: 1, extra: Vec::new() })],
+            parts: vec![Part::Rows(RowPart { ops: vec![Inst { op: Op::Sin { src: 0, dst: 1 }, layer: None, name: "sine" }], embed: 0..0, blocks: Vec::new(), merge: 0..0, pixels: 0, position: 0, output: 1, head_dim: 1, patches: 1, extra: Vec::new(), tables: Vec::new() })],
         };
         let header = b"{}";
         let mut file = (header.len() as u64).to_le_bytes().to_vec();

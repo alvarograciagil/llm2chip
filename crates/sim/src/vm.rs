@@ -2,7 +2,7 @@
 //! the microcode bit for bit, which the tiny-model test proves against the gates.
 
 use crate::weights::Weights;
-use netlist::block::{accumulator_bits, round_right, tables, BlockOps, Place, FN_EXP, FN_RECIPROCAL, FN_INV_SQRT, FN_SIN, FN_SOFTPLUS, RECIPROCAL_OUTPUT_EXPONENT, SOFTPLUS_OUTPUT_EXPONENT, TABLE_INPUT_EXPONENT, UNIT_OUTPUT_EXPONENT};
+use netlist::block::{accumulator_bits, round_right, tables, BlockOps, Place, FN_EXP, FN_RECIPROCAL, FN_INV_SQRT, FN_SIN, RECIPROCAL_OUTPUT_EXPONENT, TABLE_INPUT_EXPONENT, UNIT_OUTPUT_EXPONENT};
 use netlist::DieConfig;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -344,7 +344,7 @@ impl BlockOps for BlockVm {
         for (i, x) in inputs.iter().enumerate() {
             self.set(dst, i as u32, self.table_at(function, *x));
         }
-        self.set_exp(dst, if function == FN_SOFTPLUS { SOFTPLUS_OUTPUT_EXPONENT } else { UNIT_OUTPUT_EXPONENT });
+        self.set_exp(dst, netlist::block::output_exponent(function));
         self.normalize(dst, len);
     }
 

@@ -274,7 +274,7 @@ pub fn program_guided(s: &Shape, guidance: Option<f32>) -> Program {
         draft: None,
         // The image's routines, as the chip numbers them: the embedding (by the token), each
         // layer's two passes (by the row), and the codes' scores (by the row).
-        parts: vec![Part::Rows(RowPart { ops: image_ops, embed, blocks, merge: score, pixels: unused, position: unused, output: guided.unwrap_or(scores), head_dim: s.head_dim(), patches: rows, extra })],
+        parts: vec![Part::Rows(RowPart { ops: image_ops, embed, blocks, merge: score, pixels: unused, position: unused, output: guided.unwrap_or(scores), head_dim: s.head_dim(), patches: rows, extra, tables: Vec::new() })],
     }
 }
 

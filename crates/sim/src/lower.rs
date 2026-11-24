@@ -3,7 +3,7 @@
 
 use crate::weights::{CellRow, Weights};
 use compiler::{Inst, Op, Program, RopeScaling};
-use netlist::block::{FN_GELU, FN_GELU_TANH, FN_SIN, FN_TANH};
+use netlist::block::{FN_ASINH, FN_GELU, FN_GELU_TANH, FN_SIN, FN_TANH};
 
 /// Radians to the input of the sine's table, which holds one period over 16.
 const SIN_SCALE: f32 = 8.0 / std::f32::consts::PI;
@@ -335,7 +335,7 @@ fn cell_runs(plan: &[CellEntry], lanes: u32) -> Vec<(&[CellEntry], Vec<usize>, u
 fn buffers_read(op: &Op) -> Vec<usize> {
     match op {
         Op::EmbRead { .. } => vec![],
-        Op::Matvec { src, .. } | Op::Copy { src, .. } | Op::Silu { src, .. } | Op::Gelu { src, .. } | Op::Scale { src, .. } | Op::AddWeight { src, .. } | Op::MulWeight { src, .. } | Op::Sin { src, .. } | Op::RmsNorm { src, .. } | Op::SplitQueryGate { src, .. } | Op::SoftCap { src, .. } | Op::Sigmoid { src, .. } | Op::Dconv { src, .. } | Op::Slice { src, .. } | Op::SigmoidMoe { src, .. } | Op::Moe { src, .. } => vec![*src],
+        Op::Matvec { src, .. } | Op::Copy { src, .. } | Op::Silu { src, .. } | Op::Gelu { src, .. } | Op::Scale { src, .. } | Op::AddWeight { src, .. } | Op::MulWeight { src, .. } | Op::Sin { src, .. } | Op::Asinh { src, .. } | Op::RmsNorm { src, .. } | Op::SplitQueryGate { src, .. } | Op::SoftCap { src, .. } | Op::Sigmoid { src, .. } | Op::Dconv { src, .. } | Op::Slice { src, .. } | Op::SigmoidMoe { src, .. } | Op::Moe { src, .. } => vec![*src],
         Op::Add { a, b, .. } | Op::MulElem { a, b, .. } | Op::Concat { a, b, .. } => vec![*a, *b],
         Op::Rope { buf, .. } => vec![*buf],
         Op::KvAppend { key, value, .. } => vec![*key, *value],
@@ -2378,6 +2378,7 @@ impl Layout {
                 ops.scale(self.small[&format!("escala:{}", SIN_SCALE)], self.reg(*src), turns, size(*dst));
                 ops.function(FN_SIN, turns, self.reg(*dst), size(*dst));
             }
+            Op::Asinh { src, dst } => ops.function(FN_ASINH, self.reg(*src), self.reg(*dst), size(*dst)),
             Op::Silu { src, dst } => {
                 ops.slices_across_chips(self.local.contains(dst));
                 self.silu_at(ops, self.reg(*src), self.reg(*dst), self.slice_of(program, *dst));

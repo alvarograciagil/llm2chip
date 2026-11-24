@@ -600,6 +600,11 @@ impl Engine {
                 y.iter_mut().zip(x).for_each(|(o, v)| *o = v.sin());
                 self.quantize(*dst);
             }
+            Op::Asinh { src, dst } => {
+                let (x, y) = pair(&mut self.buffers, *src, *dst);
+                y.iter_mut().zip(x).for_each(|(o, v)| *o = v.asinh());
+                self.quantize(*dst);
+            }
             Op::Silu { src, dst } => {
                 let (x, y) = pair(&mut self.buffers, *src, *dst);
                 let f = self.functions;
