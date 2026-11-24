@@ -555,6 +555,10 @@ pub struct Layout {
     /// For each store of rows, the register that keeps each row's exponent, and how wide
     /// its rows are.
     row_exponents: HashMap<usize, (u32, u32)>,
+    /// The most words a register that holds a store of rows can need: its largest buffer,
+    /// or for a store's exponents, its rows. Its routines take the row as their token, and
+    /// the token's range (a vocabulary, the longest map) would otherwise size every store.
+    store_words: HashMap<u32, u32>,
     /// The most tokens and positions the routines can see: a token is also an image
     /// encoder's patch.
     tokens: u32,
@@ -998,7 +1002,15 @@ impl Layout {
             _ => None,
         });
         let token_range = table_rows.chain([program.vocab, program.rows().map_or(0, |v| v.patches)]).max().unwrap_or(0) as u32;
-        let mut layout = Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: if outside.is_some() { program.rows().map_or(program.vocab, |v| v.patches) as u32 } else { token_range }, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside, rotation_outside: None, group_field: Cell::new(None), group_used: Cell::new(false), heads_shard: None, local: HashSet::new(), gather_local: HashSet::new(), replicas: HashMap::new(), part_base: Cell::new(0) };
+        let mut store_words: HashMap<u32, u32> = HashMap::new();
+        for (store, (exponents, row)) in &row_exponents {
+            let length = program.buffers[*store] as u32;
+            store_words.insert(*exponents, length.div_ceil(*row).max(store_words.get(exponents).copied().unwrap_or(0)));
+            let register = buffers[*store];
+            let largest = (0..program.buffers.len()).filter(|b| buffers[*b] == register).map(|b| program.buffers[b] as u32).max().unwrap_or(length);
+            store_words.insert(register, largest);
+        }
+        let mut layout = Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, store_words, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: if outside.is_some() { program.rows().map_or(program.vocab, |v| v.patches) as u32 } else { token_range }, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside, rotation_outside: None, group_field: Cell::new(None), group_used: Cell::new(false), heads_shard: None, local: HashSet::new(), gather_local: HashSet::new(), replicas: HashMap::new(), part_base: Cell::new(0) };
         if table_out {
             layout.rotation_out(program, matrices_in_registers);
         }
@@ -1322,6 +1334,11 @@ impl Layout {
         }
         let exponents = extents.entry(exponent_register(&self.config)).or_default();
         *exponents = (*exponents).max(self.next);
+        for (register, limit) in &self.store_words {
+            if let Some(extent) = extents.get_mut(register) {
+                *extent = (*extent).min(*limit);
+            }
+        }
         let words = |r: u32| (extents.get(&r).copied().unwrap_or(0) as u64).max(1).next_multiple_of(lanes);
         // Runs of registers a loop visits by number; runs that overlap become one.
         let mut runs: Vec<(u32, u32)> = self.windows.borrow().iter().map(|(first, reach)| (*first, first + reach)).collect();
