@@ -7,9 +7,9 @@
 //! of BITS bits (20 or more for the decoder: see docs/voice.md).
 
 use sim::audio::Clip;
-use sim::dac::Dac;
-use sim::dac_chip::DacChip;
-use sim::speak::{write, SpeechVocabulary};
+use sim::speak::dac::Dac;
+use sim::speak::dac_chip::DacChip;
+use sim::speak::outetts::{write, SpeechVocabulary};
 use sim::tokenizer::TokenizerTables;
 use sim::{Engine, ExactEngine, Numeric, Weights};
 use std::path::Path;
@@ -28,7 +28,7 @@ fn main() -> Result<(), String> {
     let mut tokenizer = TokenizerTables::from_file(&tts.join("tokenizer.json"), 1024)?;
     tokenizer.set_add_special(false);
     // `speaker FILE` speaks in that voice, as OuteTTS's own profiles do.
-    let speaker = rest.iter().position(|r| r == "speaker").and_then(|i| rest.get(i + 1)).map(|p| sim::speak::Speaker::read(Path::new(p))).transpose()?;
+    let speaker = rest.iter().position(|r| r == "speaker").and_then(|i| rest.get(i + 1)).map(|p| sim::speak::outetts::Speaker::read(Path::new(p))).transpose()?;
     // `words N` keeps only the profile's first N words.
     let speaker = match rest.iter().position(|r| r == "words").and_then(|i| rest.get(i + 1)).and_then(|n| n.parse().ok()) {
         Some(n) => speaker.map(|s| s.first_words(n)),
@@ -92,7 +92,7 @@ fn main() -> Result<(), String> {
         None => Dac::open(dac_dir)?.decode(&codes)?,
         Some(bits) => DacChip::exact(dac_dir, codes[0].len(), bits)?.decode(&codes)?.0,
     };
-    let rate = sim::dac::DacConfig::read(dac_dir)?.sampling_rate;
+    let rate = sim::speak::dac::DacConfig::read(dac_dir)?.sampling_rate;
     Clip { rate, samples: sound }.write(Path::new(out))?;
     println!("decoded in {:.1} s to {out}", started.elapsed().as_secs_f32());
     Ok(())

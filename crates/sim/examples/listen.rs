@@ -8,8 +8,8 @@
 //! 20 ms and runs on the die as the chip's firmware would, listening as the speech comes.
 
 use sim::audio::Clip;
-use sim::moonshine::Moonshine;
-use sim::moonshine_chip::MoonshineChip;
+use sim::listen::moonshine::Moonshine;
+use sim::listen::moonshine_chip::MoonshineChip;
 use sim::tokenizer::TokenizerTables;
 use std::path::Path;
 
@@ -25,7 +25,7 @@ fn main() -> Result<(), String> {
     };
     let dir = Path::new(dir);
     let mut clip = Clip::read(Path::new(wav))?.resampled(16_000);
-    let config = sim::moonshine::MoonshineConfig::read(dir)?;
+    let config = sim::listen::moonshine::MoonshineConfig::read(dir)?;
     if let Some(streaming) = &config.streaming {
         clip.samples.truncate(clip.samples.len() / streaming.samples_per_frame() * streaming.samples_per_frame());
     }
@@ -61,7 +61,7 @@ fn main() -> Result<(), String> {
 
     let started = std::time::Instant::now();
     let on_chip = if config.streaming.is_some() {
-        sim::moonshine_stream_chip::StreamingChip::exact(dir, config.frames_of(clip.samples.len()), bits)?.transcribe(&clip.samples)?.0
+        sim::listen::moonshine_stream_chip::StreamingChip::exact(dir, config.frames_of(clip.samples.len()), bits)?.transcribe(&clip.samples)?.0
     } else {
         MoonshineChip::exact(dir, clip.samples.len(), bits)?.transcribe(&clip.samples)?
     };

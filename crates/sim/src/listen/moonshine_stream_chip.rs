@@ -22,8 +22,8 @@
 
 use crate::chip::RoutinesDie;
 use crate::lower::Layout;
-use crate::moonshine::{MoonshineConfig, Streaming, CMVN_EPSILON};
-use crate::moonshine_chip::{decoder_routines, Builder, DecoderRoutines, Routine};
+use crate::listen::moonshine::{MoonshineConfig, Streaming, CMVN_EPSILON};
+use crate::listen::moonshine_chip::{decoder_routines, Builder, DecoderRoutines, Routine};
 use crate::vm::BlockVm;
 use crate::weights::Weights;
 use compiler::{Buf, KvShape, Op, Part, Program, RowPart};

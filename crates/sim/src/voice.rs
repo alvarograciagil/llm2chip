@@ -4,11 +4,11 @@
 //! the next.
 
 use crate::audio::Clip;
-use crate::dac::{Dac, DacConfig};
-use crate::moonshine::Moonshine;
-use crate::moonshine_chip::MoonshineChip;
+use crate::speak::dac::{Dac, DacConfig};
+use crate::listen::moonshine::Moonshine;
+use crate::listen::moonshine_chip::MoonshineChip;
 use crate::prompt::PromptStyle;
-use crate::speak::{write_sampled, Sampling, Speaker, SpeechVocabulary};
+use crate::speak::outetts::{write_sampled, Sampling, Speaker, SpeechVocabulary};
 use crate::tokenizer::TokenizerTables;
 use crate::{Engine, ExactEngine, Numeric, Weights};
 use std::path::Path;
@@ -59,14 +59,14 @@ impl Model {
 /// The text Moonshine, in `dir`, hears in `clip`.
 pub fn listen(dir: &Path, clip: &Clip, arithmetic: Arithmetic) -> Result<String, String> {
     let mut samples = clip.resampled(16_000).samples;
-    let config = crate::moonshine::MoonshineConfig::read(dir)?;
+    let config = crate::listen::moonshine::MoonshineConfig::read(dir)?;
     // A streaming recogniser takes whole 20 ms.
     if let Some(streaming) = &config.streaming {
         samples.truncate(samples.len() / streaming.samples_per_frame() * streaming.samples_per_frame());
     }
     let tokens = match arithmetic {
         Arithmetic::Float => Moonshine::open(dir)?.transcribe(&samples)?,
-        Arithmetic::Die(bits) if config.streaming.is_some() => crate::moonshine_stream_chip::StreamingChip::exact(dir, config.frames_of(samples.len()), bits)?.transcribe(&samples)?.0,
+        Arithmetic::Die(bits) if config.streaming.is_some() => crate::listen::moonshine_stream_chip::StreamingChip::exact(dir, config.frames_of(samples.len()), bits)?.transcribe(&samples)?.0,
         Arithmetic::Die(bits) => MoonshineChip::exact(dir, samples.len(), bits)?.transcribe(&samples)?,
     };
     let text = TokenizerTables::from_file(&dir.join("tokenizer.json"), 256)?.decode(&tokens);
@@ -87,7 +87,7 @@ pub fn answer(dir: &Path, question: &str, arithmetic: Arithmetic, limit: usize, 
     }
     let mut reply = Vec::new();
     for _ in 0..limit {
-        let next = crate::moonshine::argmax(&logits);
+        let next = crate::listen::moonshine::argmax(&logits);
         if style.stop.contains(&next) {
             break;
         }
@@ -162,7 +162,7 @@ impl Conversation {
         self.tokens.extend(&new);
         let mut reply = Vec::new();
         for _ in 0..limit {
-            let next = crate::moonshine::argmax(&logits);
+            let next = crate::listen::moonshine::argmax(&logits);
             if self.style.stop.contains(&next) {
                 break;
             }
@@ -243,7 +243,7 @@ pub fn speak(tts: &Path, dac: &Path, text: &str, arithmetic: Arithmetic, samplin
         }
         let sound = match (&floating, arithmetic) {
             (Some(dac), _) => dac.decode(&codes)?,
-            (None, Arithmetic::Die(bits)) => crate::dac_chip::decode_chunked(dac, &codes, CHUNK_FRAMES, bits)?.0,
+            (None, Arithmetic::Die(bits)) => crate::speak::dac_chip::decode_chunked(dac, &codes, CHUNK_FRAMES, bits)?.0,
             (None, Arithmetic::Float) => unreachable!(),
         };
         samples.extend(sound);

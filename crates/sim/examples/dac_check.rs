@@ -1,7 +1,7 @@
 //! DAC's decoder in floating point against Transformers' on the codes `tools/golden/speak.py`
 //! wrote, and in the die's arithmetic with `bits`-bit vectors:
 //! `cargo run --release -p sim --example dac_check -- DAC_DIR golden.json [bits] [out.wav]`.
-use sim::dac::Dac;
+use sim::speak::dac::Dac;
 use std::path::Path;
 
 fn main() -> Result<(), String> {
@@ -38,7 +38,7 @@ fn main() -> Result<(), String> {
     if let Some(bits) = args.get(2).and_then(|b| b.parse().ok()) {
         let started = std::time::Instant::now();
         let accumulator = std::env::var("ACCUMULATOR").ok().and_then(|a| a.parse().ok()).unwrap_or(2 * bits + 8);
-        let mut chip = sim::dac_chip::DacChip::exact_summing(Path::new(&args[0]), codes[0].len(), bits, accumulator)?;
+        let mut chip = sim::speak::dac_chip::DacChip::exact_summing(Path::new(&args[0]), codes[0].len(), bits, accumulator)?;
         let (die, _) = chip.decode(&codes)?;
         let worst = die.iter().zip(&ours).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
         let error: f32 = die.iter().zip(&ours).map(|(a, b)| (a - b) * (a - b)).sum::<f32>() / ours.iter().map(|v| v * v).sum::<f32>();

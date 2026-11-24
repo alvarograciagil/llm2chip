@@ -6,8 +6,8 @@ mod common;
 use common::*;
 #[allow(unused_imports)]
 use common::{cell_die_config, enter, load_assembly, load_microprogram, mask};
-use sim::moonshine::{window, Moonshine, MoonshineConfig};
-use sim::moonshine_stream_chip::StreamingChip;
+use sim::listen::moonshine::{window, Moonshine, MoonshineConfig};
+use sim::listen::moonshine_stream_chip::StreamingChip;
 use std::path::Path;
 
 /// Width 16 in 2 heads of 8 (6 values rotated in the decoder), 3 encoder layers seeing

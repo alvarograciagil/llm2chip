@@ -32,7 +32,7 @@
 
 use crate::chip::RoutinesDie;
 use crate::lower::Layout;
-use crate::moonshine::{argmax, MoonshineConfig};
+use crate::listen::moonshine::{argmax, MoonshineConfig};
 use crate::vm::BlockVm;
 use crate::weights::{Tensor, Weights};
 use compiler::{Buf, Inst, KvShape, Op, Part, Program, RowPart};

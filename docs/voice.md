@@ -100,7 +100,7 @@ The decoder's routines are shared by both recognisers (`moonshine_chip::decoder_
 
 ### Streaming Moonshine's encoder
 
-Its front end takes 80 samples (5 ms) at a time: normalised to zero mean and unit RMS (CMVN), compressed with `asinh(k·x)`, projected and bent with SiLU; two causal convolutions of kernel 5 and stride 2 leave a frame every 20 ms. Its encoder has no RoPE, and each layer's attention sees the 15 frames before and, in the first two and last two layers, the 3 after; its LayerNorms keep their weight less one (`gamma + 1`). The decoder is Moonshine's, the frames given learned positions first, with a head of its own. On the die (`sim::moonshine_stream_chip`):
+Its front end takes 80 samples (5 ms) at a time: normalised to zero mean and unit RMS (CMVN), compressed with `asinh(k·x)`, projected and bent with SiLU; two causal convolutions of kernel 5 and stride 2 leave a frame every 20 ms. Its encoder has no RoPE, and each layer's attention sees the 15 frames before and, in the first two and last two layers, the 3 after; its LayerNorms keep their weight less one (`gamma + 1`). The decoder is Moonshine's, the frames given learned positions first, with a head of its own. On the die (`sim::listen::moonshine_stream_chip`):
 
 - **A tenth function table, `asinh` (`FN_ASINH`),** on dies with sixteen table places, as the sine's: within 0.0014 of floating point over the front end's range (a frame at unit RMS reaches √79 ≈ 8.9, times the compression's 0.64, inside the table's ±8). CMVN is a LayerNorm whose weight is `k`, the samples scaled by √10 first so that the die's epsilon (10⁻⁵) acts as the model's (10⁻⁶).
 - **Causal convolutions** read five rows from a store with four rows of zeros before; each is a routine that reads and one that stores.
@@ -416,11 +416,11 @@ Voice adds files; the core only gains general things.
 | Command queue before the die | `crates/netlist/src/chip.rs` (gates and `ChipModel::with_queue`), `DieFeatures::queue_bits`, `firmware/src/main.rs` | General: built only where asked |
 | The firmware's cycles | `sim::chip::{firmware_cycles, lean_cycles}` | General |
 | Systems of stages and their plan | `crates/sim/src/system.rs`, `sizing::routines_die` | General: several programs on several dies |
-| Moonshine: floating-point reference (both kinds) | `crates/sim/src/moonshine.rs` | Voice |
-| Moonshine on the die, its schedule | `crates/sim/src/moonshine_chip.rs` | Voice |
-| Streaming Moonshine on the die, its schedule | `crates/sim/src/moonshine_stream_chip.rs` | Voice |
-| DAC: reference, on the die, its schedule | `crates/sim/src/dac.rs`, `crates/sim/src/dac_chip.rs` | Voice |
-| OuteTTS's prompt, codes and sampling | `crates/sim/src/speak.rs` | Voice |
+| Moonshine: floating-point reference (both kinds) | `crates/sim/src/listen/moonshine.rs` | Voice |
+| Moonshine on the die, its schedule | `crates/sim/src/listen/moonshine_chip.rs` | Voice |
+| Streaming Moonshine on the die, its schedule | `crates/sim/src/listen/moonshine_stream_chip.rs` | Voice |
+| DAC: reference, on the die, its schedule | `crates/sim/src/speak/dac.rs`, `crates/sim/src/speak/dac_chip.rs` | Voice |
+| OuteTTS's prompt, codes and sampling | `crates/sim/src/speak/outetts.rs` | Voice |
 | Sound in and out, WAV | `crates/sim/src/audio.rs` | Voice |
 | A spoken turn's stages, the conversation | `crates/sim/src/voice.rs` | Voice |
 | The voice system planned | `crates/sim/src/voice_plan.rs` | Voice |

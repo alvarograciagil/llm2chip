@@ -9,7 +9,7 @@
 //! or more for the speech decoder: see docs/voice.md); without it, in floating point.
 
 use sim::audio::Clip;
-use sim::speak::Sampling;
+use sim::speak::outetts::Sampling;
 use sim::voice::{answer, listen, speak, Arithmetic};
 use std::path::Path;
 use std::time::Instant;

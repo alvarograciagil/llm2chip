@@ -19,7 +19,7 @@
 //! - **The codes** come in as tokens: each picks its codebook's row (`EmbRead`), projected
 //!   to the latent's width; the codebooks add up.
 
-use crate::dac::DacConfig;
+use crate::speak::dac::DacConfig;
 use crate::lower::Layout;
 use crate::vm::BlockVm;
 use crate::weights::{Tensor, Weights};
@@ -551,8 +551,8 @@ pub fn decode_chunked(dir: &Path, codes: &[Vec<u32>], chunk: usize, bits: u32) -
     let width = config.window_frames(frames, chunk);
     let mut chip = DacChip::exact(dir, width, bits)?;
     let mut mantissas = Vec::new();
-    let sound = crate::dac::stitch(&config, frames, chunk, &mut |start, width| {
-        let (values, raw) = chip.decode(&crate::dac::window(codes, start, width))?;
+    let sound = crate::speak::dac::stitch(&config, frames, chunk, &mut |start, width| {
+        let (values, raw) = chip.decode(&crate::speak::dac::window(codes, start, width))?;
         mantissas.push((start, raw));
         Ok(values)
     })?;

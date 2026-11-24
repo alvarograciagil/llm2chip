@@ -3,17 +3,13 @@
 pub mod accel;
 pub mod audio;
 pub mod chip;
-pub mod dac;
-pub mod dac_chip;
 mod exact;
 mod exec;
 pub mod image;
 pub mod janus;
+pub mod listen;
 pub mod lower;
 pub mod magvit_chip;
-pub mod moonshine;
-pub mod moonshine_chip;
-pub mod moonshine_stream_chip;
 pub mod optimize;
 pub mod prompt;
 pub mod showo;

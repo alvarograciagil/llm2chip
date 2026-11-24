@@ -6,8 +6,8 @@ mod common;
 use common::*;
 #[allow(unused_imports)]
 use common::{cell_die_config, enter, load_assembly, load_microprogram, mask};
-use sim::moonshine::{Moonshine, MoonshineConfig};
-use sim::moonshine_chip::MoonshineChip;
+use sim::listen::moonshine::{Moonshine, MoonshineConfig};
+use sim::listen::moonshine_chip::MoonshineChip;
 use std::path::Path;
 
 /// Width 16 in 2 heads of 8 (6 values rotated), 2 encoder and 2 decoder layers, 24 tokens.
@@ -170,10 +170,10 @@ fn gates_score_as_the_exact_machine(dir: &Path, longest: usize, clip: &[f32], vo
     let sized = DieConfig { index_bits, cell: netlist::CellConfig { addr_bits, ..roomy.cell }, ..roomy };
     // Every routine the host runs, in order, with what it writes before some: each row of
     // samples, and the clip's `1 / count` before the encoder.
-    type Write = Option<(u32, sim::moonshine_chip::Vector)>;
+    type Write = Option<(u32, sim::listen::moonshine_chip::Vector)>;
     let schedule = |chip: &MoonshineChip| {
         let (register, rows) = chip.sample_rows(clip).unwrap();
-        let mut calls: Vec<(Write, sim::moonshine_chip::Call)> = rows.into_iter().enumerate().map(|(r, row)| (Some((register, row)), chip.store_samples_call(r))).collect();
+        let mut calls: Vec<(Write, sim::listen::moonshine_chip::Call)> = rows.into_iter().enumerate().map(|(r, row)| (Some((register, row)), chip.store_samples_call(r))).collect();
         let mut encoder = chip.encoder_calls().into_iter();
         calls.push((Some(chip.inverse_write()), encoder.next().unwrap()));
         calls.extend(encoder.map(|c| (None, c)));
@@ -184,7 +184,7 @@ fn gates_score_as_the_exact_machine(dir: &Path, longest: usize, clip: &[f32], vo
     };
     let calls = schedule(&probe);
     let routines = probe.microprogram(&calls.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>()).unwrap().0;
-    let only: Vec<sim::moonshine_chip::Call> = calls.iter().map(|(_, c)| c.clone()).collect();
+    let only: Vec<sim::listen::moonshine_chip::Call> = calls.iter().map(|(_, c)| c.clone()).collect();
     let microprogram = |chip: &MoonshineChip| chip.microprogram(&only).unwrap().1;
     // The routines assembled once on a die with room, to know how many registers they reach.
     let wide = MoonshineChip::new(dir, samples, sized, Some(places)).unwrap();
@@ -394,8 +394,8 @@ fn the_firmware_s_schedule_runs_what_the_host_runs() {
         let mut script = Script { input: input.into(), runs: Vec::new(), picks: picks.clone(), end: chip.config.end, sent: Vec::new() };
         expand(&words(&schedule), &mut script).unwrap();
         assert!(script.input.is_empty(), "every word the host sends is read");
-        let rows = sim::moonshine_chip::Lengths::of(length).unwrap().sample_rows;
-        let mut calls: Vec<sim::moonshine_chip::Call> = (0..rows).map(|r| chip.store_samples_call(r)).collect();
+        let rows = sim::listen::moonshine_chip::Lengths::of(length).unwrap().sample_rows;
+        let mut calls: Vec<sim::listen::moonshine_chip::Call> = (0..rows).map(|r| chip.store_samples_call(r)).collect();
         calls.extend(chip.encoder_calls());
         // As many tokens as the clip's limit allows, up to the end token.
         let limit = chip.limit().min(3);

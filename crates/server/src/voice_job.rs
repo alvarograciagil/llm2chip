@@ -107,7 +107,7 @@ pub fn run(start: &VoiceStart, job: &VoiceJob, kept: &Mutex<Option<Conversation>
     // OuteTTS's own sampling, a new draw each time.
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
     let speaker = if start.speaker { sim::voice::speaker_of(Path::new(&start.speak))? } else { None };
-    let (sound, tokens) = speak(Path::new(&start.speak), Path::new(&start.sound), &said, arithmetic, sim::speak::Sampling::outetts(seed), speaker.as_ref())?;
+    let (sound, tokens) = speak(Path::new(&start.speak), Path::new(&start.sound), &said, arithmetic, sim::speak::outetts::Sampling::outetts(seed), speaker.as_ref())?;
     let audio = format!("data:audio/wav;base64,{}", crate::base64(&sound.to_wav()));
     let spoken = json!({ "tokens": tokens, "seconds": started.elapsed().as_secs_f64(), "duration": sound.samples.len() as f64 / sound.rate as f64, "audio": audio });
     let mut report = job.partial.lock().unwrap().clone();

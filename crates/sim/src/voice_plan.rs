@@ -7,10 +7,10 @@
 //! speech writer and the decoder run at once, each taking the one before's first sentence
 //! or window while it goes on. So only the recogniser may share a die, with any one of them.
 
-use crate::dac::DacConfig;
-use crate::dac_chip::DacChip;
-use crate::moonshine::MoonshineConfig;
-use crate::moonshine_chip::{Lengths, MoonshineChip};
+use crate::speak::dac::DacConfig;
+use crate::speak::dac_chip::DacChip;
+use crate::listen::moonshine::MoonshineConfig;
+use crate::listen::moonshine_chip::{Lengths, MoonshineChip};
 use crate::sizing::{die_of, measure, reference_die, routines_die, Costs, Sharing, Target, N6};
 use crate::system::{plan, Fit, Limits, Plan, StagePlan, Weighed};
 use crate::Weights;
@@ -146,7 +146,7 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
     // The writer's prompt: a sentence's, and the profile's sentence and codes before it.
     let writer_prompt = match crate::voice::speaker_of(&models.speak)?.filter(|_| ask.speaker) {
         Some(speaker) => {
-            let vocabulary = crate::speak::SpeechVocabulary::read(&models.speak)?;
+            let vocabulary = crate::speak::outetts::SpeechVocabulary::read(&models.speak)?;
             let mut tokenizer = crate::tokenizer::TokenizerTables::from_file(&models.speak.join("tokenizer.json"), 4096)?;
             tokenizer.set_add_special(false);
             vocabulary.prompt_with(&speaker, "A sentence of about twelve words, as the answer's first.", &|t| tokenizer.encode(t))?.len() as u32
@@ -163,7 +163,7 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
         progress(format!("Moonshine on {name}"));
         if listen_config.streaming.is_some() {
             // Its widths, the front end's 80 among them, take groups of 16.
-            let chip = crate::moonshine_stream_chip::StreamingChip::from_parts(listen_config.clone(), weights(&models.listen, 16)?, frames, queued(die_of(base, context as u32, shape)), Some(context));
+            let chip = crate::listen::moonshine_stream_chip::StreamingChip::from_parts(listen_config.clone(), weights(&models.listen, 16)?, frames, queued(die_of(base, context as u32, shape)), Some(context));
             if let Some((chip, code)) = chip.ok().and_then(|chip| chip.routines().ok().map(|(_, code)| (chip, code))) {
                 let (parts, clock) = routines_die(chip.parts().1, &code, &costs, &N6, shape, CLOCK);
                 let t = chip.timing(frames, &code)?;
@@ -180,7 +180,7 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
                 let (parts, clock) = routines_die(chip.parts().1, &code, &costs, &N6, shape, CLOCK);
                 let stage = chip.stage(1, parts.iter().sum(), clock)?;
                 let ops = &chip.parts().0.rows().expect("the routines").ops;
-                let count = |calls: &[crate::moonshine_chip::Call]| calls.iter().map(|c| crate::system::macs(&ops[c.routine.clone()], &chip.parts().0.buffers)).sum::<u64>();
+                let count = |calls: &[crate::listen::moonshine_chip::Call]| calls.iter().map(|c| crate::system::macs(&ops[c.routine.clone()], &chip.parts().0.buffers)).sum::<u64>();
                 let token = chip.token_calls(listen_config.start, 0);
                 // The firmware orders every routine: its cycles come on top of the die's.
                 let (first, each) = chip.firmware_cycles()?;

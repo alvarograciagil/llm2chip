@@ -5,8 +5,8 @@
 mod common;
 #[allow(unused_imports)]
 use common::{cell_die_config, enter, load_assembly, load_microprogram, mask, Rng, Writer};
-use sim::dac::Dac;
-use sim::dac_chip::DacChip;
+use sim::speak::dac::Dac;
+use sim::speak::dac_chip::DacChip;
 use std::path::Path;
 
 /// Writes a tensor of random values: `(writer, name, shape, spread, offset)`.
@@ -194,7 +194,7 @@ fn decoding_window_by_window_gives_the_whole_sound() {
         assert!(worst < 1e-5, "chunks of {chunk}: {worst}");
     }
     let (_, whole) = DacChip::exact(&dir, frames, 20).unwrap().decode(&codes).unwrap();
-    let (_, chunked) = sim::dac_chip::decode_chunked(&dir, &codes, 4, 20).unwrap();
+    let (_, chunked) = sim::speak::dac_chip::decode_chunked(&dir, &codes, 4, 20).unwrap();
     assert_eq!(chunked, whole, "the die's mantissas");
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -215,12 +215,12 @@ fn the_firmware_decodes_window_by_window_as_the_host_does() {
     // the real decoder's are.
     for channels in [8, 64] {
     let dir = toy(&format!("firmware-{channels}"), channels, &[3, 2]);
-    let config = sim::dac::DacConfig::read(&dir).unwrap();
+    let config = sim::speak::dac::DacConfig::read(&dir).unwrap();
     let (reach, chunk) = (config.reach_frames(), 4);
     let frames = 2 * reach + 9;
     let codes = codes(frames);
     let width = config.window_frames(frames, chunk);
-    let (_, expected) = sim::dac_chip::decode_chunked(&dir, &codes, chunk, 20).unwrap();
+    let (_, expected) = sim::speak::dac_chip::decode_chunked(&dir, &codes, chunk, 20).unwrap();
 
     // Without a command queue before the die, and with one of 16 orders.
     for queue in [0, 4] {
@@ -236,7 +236,7 @@ fn the_firmware_decodes_window_by_window_as_the_host_does() {
     let schedule_words = add_schedule(&mut info, &schedule);
     eprintln!("the chip's description: {} words, and a schedule of {} records", info.len(), schedule.len());
     let image = build_image(&firmware.program, &firmware.data, &info, &schedule_words, &[]).unwrap();
-    let input: Vec<u8> = sim::dac_chip::schedule_input(&config, &codes, chunk).iter().flat_map(|w| w.to_le_bytes()).collect();
+    let input: Vec<u8> = sim::speak::dac_chip::schedule_input(&config, &codes, chunk).iter().flat_map(|w| w.to_le_bytes()).collect();
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() };
     let model = ChipModel::new(chip.die_engine(code.clone()), code, sampler).with_queue(queue);
     let mut bus = SocBus::booted_with(SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, &image, &input, model).unwrap();
