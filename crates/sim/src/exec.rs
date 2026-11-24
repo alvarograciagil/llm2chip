@@ -175,7 +175,7 @@ impl Engine {
                 Op::LayerNorm { weight, .. } => vec![format!("{weight}.weight"), format!("{weight}.bias")],
                 Op::Dconv { weight, .. } => vec![format!("{weight}.weight")],
                 Op::DeltaStep { a_log, dt_bias, .. } => vec![a_log.clone(), dt_bias.clone()],
-                Op::AddWeight { weight, .. } => vec![weight.clone()],
+                Op::AddWeight { weight, .. } | Op::MulWeight { weight, .. } => vec![weight.clone()],
                 _ => vec![],
             };
             for name in names {
@@ -587,6 +587,17 @@ impl Engine {
                 let w = self.floats[weight].clone();
                 let (x, y) = pair(&mut self.buffers, *src, *dst);
                 y.iter_mut().zip(x).zip(&w).for_each(|((o, v), b)| *o = v + b);
+                self.quantize(*dst);
+            }
+            Op::MulWeight { src, weight, dst } => {
+                let w = self.floats[weight].clone();
+                let (x, y) = pair(&mut self.buffers, *src, *dst);
+                y.iter_mut().zip(x).zip(&w).for_each(|((o, v), m)| *o = v * m);
+                self.quantize(*dst);
+            }
+            Op::Sin { src, dst } => {
+                let (x, y) = pair(&mut self.buffers, *src, *dst);
+                y.iter_mut().zip(x).for_each(|(o, v)| *o = v.sin());
                 self.quantize(*dst);
             }
             Op::Silu { src, dst } => {

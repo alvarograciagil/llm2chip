@@ -2,7 +2,7 @@
 //! the microcode bit for bit, which the tiny-model test proves against the gates.
 
 use crate::weights::Weights;
-use netlist::block::{accumulator_bits, round_right, tables, BlockOps, Place, FN_EXP, FN_RECIPROCAL, FN_INV_SQRT, FN_SOFTPLUS, RECIPROCAL_OUTPUT_EXPONENT, SOFTPLUS_OUTPUT_EXPONENT, TABLE_INPUT_EXPONENT, UNIT_OUTPUT_EXPONENT};
+use netlist::block::{accumulator_bits, round_right, tables, BlockOps, Place, FN_EXP, FN_RECIPROCAL, FN_INV_SQRT, FN_SIN, FN_SOFTPLUS, RECIPROCAL_OUTPUT_EXPONENT, SOFTPLUS_OUTPUT_EXPONENT, TABLE_INPUT_EXPONENT, UNIT_OUTPUT_EXPONENT};
 use netlist::DieConfig;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -181,6 +181,25 @@ impl BlockVm {
             .collect()
     }
 
+    /// `aligned`, but a left shift wraps around instead of saturating, as the dies do
+    /// before a periodic function's table.
+    fn wrapped(&self, src: u32, exponent: i64, len: u32) -> Vec<i64> {
+        let e = self.exp(src);
+        let left = self.wrap(e - exponent).max(0);
+        if left == 0 {
+            return self.aligned(src, 0, exponent, len);
+        }
+        let bits = self.bits;
+        let amount = shift_amount(left);
+        (0..len)
+            .map(|i| {
+                let shifted = (self.get(src, i) as i128) << amount.min(100);
+                let low = (shifted as i64) & ((1i64 << bits) - 1);
+                (low << (64 - bits)) >> (64 - bits)
+            })
+            .collect()
+    }
+
     fn matrix_exponent(&self, name: &str, cols: u32) -> i64 {
         let weights = self.weights.as_ref().expect("the machine needs the weights");
         *self.matrix_exponents.borrow_mut().entry(name.to_string()).or_insert_with(|| {
@@ -321,7 +340,7 @@ impl BlockOps for BlockVm {
     }
 
     fn function(&mut self, function: u32, src: u32, dst: u32, len: u32) {
-        let inputs = self.aligned(src, 0, TABLE_INPUT_EXPONENT, len);
+        let inputs = if function == FN_SIN { self.wrapped(src, TABLE_INPUT_EXPONENT, len) } else { self.aligned(src, 0, TABLE_INPUT_EXPONENT, len) };
         for (i, x) in inputs.iter().enumerate() {
             self.set(dst, i as u32, self.table_at(function, *x));
         }

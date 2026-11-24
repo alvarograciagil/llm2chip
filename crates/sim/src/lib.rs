@@ -3,6 +3,8 @@
 pub mod accel;
 pub mod audio;
 pub mod chip;
+pub mod dac;
+pub mod dac_chip;
 mod exact;
 mod exec;
 pub mod image;

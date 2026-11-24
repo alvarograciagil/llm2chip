@@ -327,6 +327,9 @@ pub struct ControlWord {
     /// A left shift takes A rounded right by its shifter instead, when that is not zero:
     /// one pass aligns either way.
     pub align_shift: bool,
+    /// A left shift wraps around instead of saturating: what overflows is dropped, which
+    /// keeps a periodic function's argument within one period for its table.
+    pub wrap_left: bool,
     /// An index write only reaches this vector unit, plus one; zero means all of them.
     pub x_only: u32,
     /// Only the first `literal_b` vector units execute from now on.
@@ -377,12 +380,13 @@ pub struct ControlWord {
 }
 
 const REPEAT_BITS: u32 = 12;
-pub const FIELD_COUNT: usize = 85;
+pub const FIELD_COUNT: usize = 86;
 /// The field that names a unit of the group to read operand B from.
 pub const FROM_GROUP_FIELD: usize = 81;
 pub const SCAN_WRITTEN_FIELD: usize = 82;
 pub const WIDE_LEFT_FIELD: usize = 83;
 pub const ALIGN_SHIFT_FIELD: usize = 84;
+pub const WRAP_LEFT_FIELD: usize = 85;
 const LINK_LOOP_FIELD: usize = 79;
 const LINK_TAKE_LOOP_FIELD: usize = 80;
 const LINK_SEND_FIELD: usize = 17;
@@ -519,6 +523,7 @@ fn full_layout(c: &DieConfig) -> Vec<(&'static str, u32)> {
         ("scan_written", 1),
         ("wide_left", 1),
         ("align_shift", 1),
+        ("wrap_left", 1),
     ]
 }
 
@@ -615,6 +620,7 @@ impl ControlWord {
             self.scan_written as u128,
             self.wide_left as u128,
             self.align_shift as u128,
+            self.wrap_left as u128,
         ]
     }
 
@@ -2289,6 +2295,15 @@ impl Gen {
             let widened: Vec<Bit> = (0..left_bits as usize).map(|i| read_a.get(i).copied().unwrap_or(raw_sign)).collect();
             let moved_left = barrel_left(&mut b, &left_mux, "shift_left_barrel", &widened, &shift_left);
             let saturated = saturate(&mut b, &moved_left, a);
+            // A die whose microprogram takes a periodic function's argument modulo its
+            // period keeps the low bits of the shift instead: a mux beside the saturation.
+            let saturated = if c.features.widths[WRAP_LEFT_FIELD] > 0 {
+                let y = b.wire("wrap_either", a);
+                b.inst("wrap_select", &mux_a, &[("s", vec![fields["wrap_left"][0]]), ("a", saturated), ("b", moved_left[..a as usize].to_vec()), ("y", y.clone())]);
+                y
+            } else {
+                saturated
+            };
             // One pass aligns either way, and a narrowing with no shift right is normalised
             // as it goes: a second path beside each, never one after the other.
             let (aligns, widens) = (c.features.widths[ALIGN_SHIFT_FIELD] > 0, c.features.widths[WIDE_LEFT_FIELD] > 0);
@@ -3564,7 +3579,7 @@ impl DieProgram {
             }
             if (1..n + 1 + extra).contains(&k) {
                 (w.op, w.shift, w.function, w.magnitude_scan, w.accumulate, w.wide_scan, w.max_scan) = (step.op, step.shift, step.function, step.magnitude_scan && k <= n, step.accumulate && k <= n, step.wide_scan && k <= n, step.max_scan && k <= n);
-                (w.wide_left, w.align_shift) = (step.wide_left, step.align_shift);
+                (w.wide_left, w.align_shift, w.wrap_left) = (step.wide_left, step.align_shift, step.wrap_left);
                 (w.broadcast_a, w.broadcast_b) = (step.broadcast_a, step.broadcast_b);
                 // A stream that takes from a link takes from the port its step names.
                 w.link_take_loop = step.op == OP_LINK && if step.link_send { step.take_loop } else { step.link_loop };
@@ -3654,7 +3669,7 @@ impl DieProgram {
             if j >= 1 {
                 (slot.op, slot.shift, slot.function, slot.magnitude_scan, slot.accumulate) = (w.op, w.shift, w.function, w.magnitude_scan, w.accumulate);
                 (slot.wide_scan, slot.max_scan, slot.broadcast_a, slot.broadcast_b, slot.link_take_loop) = (w.wide_scan, w.max_scan, w.broadcast_a, w.broadcast_b, w.link_take_loop);
-                (slot.wide_left, slot.align_shift) = (w.wide_left, w.align_shift);
+                (slot.wide_left, slot.align_shift, slot.wrap_left) = (w.wide_left, w.align_shift, w.wrap_left);
             }
         }
         // The reads start in the tail, so the read counter clears in the word before them;
@@ -4078,7 +4093,7 @@ impl DieProgram {
             (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
             (w.from_cluster, w.from_group) = (step.from_cluster, step.from_group);
             w.op = step.op;
-            (w.wide_left, w.align_shift) = (step.wide_left, step.align_shift);
+            (w.wide_left, w.align_shift, w.wrap_left) = (step.wide_left, step.align_shift, step.wrap_left);
             // The word that takes from a link names the port with it.
             w.link_take_loop = step.op == OP_LINK && if step.link_send { step.take_loop } else { step.link_loop };
             w.shift = step.shift;
@@ -4166,7 +4181,7 @@ impl DieProgram {
         (w.window_x, w.window_a, w.window_b, w.window_dst) = (step.window_x, step.window_a, step.window_b, step.window_dst);
         (w.vector, w.broadcast_a, w.broadcast_b) = (step.vector, step.broadcast_a, step.broadcast_b);
         (w.from_cluster, w.from_group) = (step.from_cluster, step.from_group);
-        (w.op, w.shift, w.function, w.wide_left, w.align_shift) = (step.op, step.shift, step.function, step.wide_left, step.align_shift);
+        (w.op, w.shift, w.function, w.wide_left, w.align_shift, w.wrap_left) = (step.op, step.shift, step.function, step.wide_left, step.align_shift, step.wrap_left);
         (w.magnitude_scan, w.reduce_group, w.max_scan, w.max_out) = (step.magnitude_scan, step.reduce_group, step.max_scan, step.max_out);
         (w.accumulate, w.wide_scan) = (step.accumulate, step.wide_scan);
         (w.reg_dst, w.literal_dst, w.offset_dst, w.write_now, w.scan_written) = (step.dst.0, step.dst.1, step.offset_dst, step.write, step.scan_written);

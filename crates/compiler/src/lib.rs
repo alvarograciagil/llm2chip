@@ -23,6 +23,10 @@ pub enum Op {
     Scale { src: Buf, factor: f32, dst: Buf },
     /// Adds a stored vector, such as a projection's bias.
     AddWeight { src: Buf, weight: String, dst: Buf },
+    /// Multiplies by a stored vector, element by element: a scale per channel.
+    MulWeight { src: Buf, weight: String, dst: Buf },
+    /// The sine of every element, in radians, whatever its size.
+    Sin { src: Buf, dst: Buf },
     /// `x · rsqrt(mean(x²) + eps) · (offset + w)`, per block of `block` values.
     RmsNorm { src: Buf, weight: String, offset: f32, block: usize, dst: Buf },
     /// `q_proj` interleaves each head's query and gate.
@@ -68,7 +72,7 @@ impl Op {
     pub fn buffers(&self) -> (Vec<Buf>, Vec<Buf>) {
         match self {
             Op::EmbRead { dst, .. } => (vec![], vec![*dst]),
-            Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Gelu { src, dst, .. } | Op::Scale { src, dst, .. } | Op::SoftCap { src, dst, .. } | Op::AddWeight { src, dst, .. } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } | Op::Moe { src, dst, .. } => (vec![*src], vec![*dst]),
+            Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Gelu { src, dst, .. } | Op::Scale { src, dst, .. } | Op::SoftCap { src, dst, .. } | Op::AddWeight { src, dst, .. } | Op::MulWeight { src, dst, .. } | Op::Sin { src, dst } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } | Op::Moe { src, dst, .. } => (vec![*src], vec![*dst]),
             Op::Add { a, b, dst } | Op::MulElem { a, b, dst } | Op::Concat { a, b, dst } => (vec![*a, *b], vec![*dst]),
             Op::SplitQueryGate { src, query, gate, .. } => (vec![*src], vec![*query, *gate]),
             Op::Slice { src, dst, .. } => (vec![*src], vec![*dst]),
@@ -1016,7 +1020,7 @@ mod tests {
         for inst in &program.ops {
             let (reads, writes): (Vec<Buf>, Vec<Buf>) = match &inst.op {
                 Op::EmbRead { dst, .. } => (vec![], vec![*dst]),
-                Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Gelu { src, dst, .. } | Op::Scale { src, dst, .. } | Op::SoftCap { src, dst, .. } | Op::AddWeight { src, dst, .. } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } => (vec![*src], vec![*dst]),
+                Op::Matvec { src, dst, .. } | Op::Copy { src, dst } | Op::Silu { src, dst } | Op::Gelu { src, dst, .. } | Op::Scale { src, dst, .. } | Op::SoftCap { src, dst, .. } | Op::AddWeight { src, dst, .. } | Op::MulWeight { src, dst, .. } | Op::Sin { src, dst } | Op::Sigmoid { src, dst } | Op::RmsNorm { src, dst, .. } | Op::Dconv { src, dst, .. } => (vec![*src], vec![*dst]),
                 Op::Add { a, b, dst } | Op::MulElem { a, b, dst } => (vec![*a, *b], vec![*dst]),
                 Op::SplitQueryGate { src, query, gate, .. } => (vec![*src], vec![*query, *gate]),
                 Op::Slice { src, dst, .. } | Op::SigmoidMoe { src, dst, .. } => (vec![*src], vec![*dst]),

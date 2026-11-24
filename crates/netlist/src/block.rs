@@ -20,6 +20,9 @@ fn scratch_register(c: &DieConfig) -> u32 {
 pub const FN_GELU: u32 = 5;
 pub const FN_GELU_TANH: u32 = 6;
 pub const FN_TANH: u32 = 7;
+/// `sin(π·x/8)`: one period over the table's whole range, so a wrapping alignment takes
+/// any argument to its place in the period. A die that uses it has a ninth table.
+pub const FN_SIN: u32 = 8;
 pub const FN_EXP: u32 = 0;
 pub const FN_SIGMOID: u32 = 1;
 pub const FN_RECIPROCAL: u32 = 2;
@@ -58,6 +61,7 @@ fn table_value(function: u32, index: usize, index_bits: u32, bits: u32) -> i64 {
         FN_INV_SQRT => (if mantissa > 0.0 { 1.0 / mantissa.sqrt() } else { 0.0 }, RECIPROCAL_OUTPUT_EXPONENT),
         FN_SOFTPLUS => ((1.0 + input.exp()).ln(), SOFTPLUS_OUTPUT_EXPONENT),
         FN_TANH => (input.tanh(), UNIT_OUTPUT_EXPONENT),
+        FN_SIN => ((std::f64::consts::PI * input / 8.0).sin(), UNIT_OUTPUT_EXPONENT),
         FN_GELU => (0.5 * (1.0 + libm::erf(input / std::f64::consts::SQRT_2)), UNIT_OUTPUT_EXPONENT),
         FN_GELU_TANH => (0.5 * (1.0 + ((2.0 / std::f64::consts::PI).sqrt() * (input + 0.044715 * input.powi(3))).tanh()), UNIT_OUTPUT_EXPONENT),
         _ => (0.0, 0),
@@ -632,6 +636,8 @@ pub struct Alu<N = u32> {
     /// (`align_shift`).
     pub wide_left: bool,
     pub align_shift: bool,
+    /// A left shift wraps around instead of saturating (`wrap_left` on the die).
+    pub wrap_left: bool,
     /// A count of leading zeros looks at the magnitude of `1 << reduce_group` neighbouring units.
     pub reduce_group: u32,
     /// Keeps the largest mantissa read, across every lane of a block.
@@ -679,6 +685,7 @@ impl<N: Default> Alu<N> {
             scan_written: false,
             wide_left: false,
             align_shift: false,
+            wrap_left: false,
             broadcast_a: false,
             broadcast_b: false,
             shift: 0,
@@ -740,6 +747,7 @@ impl Alu<Expr> {
             scan_written: self.scan_written,
             wide_left: self.wide_left,
             align_shift: self.align_shift,
+            wrap_left: self.wrap_left,
             broadcast_a: self.broadcast_a,
             broadcast_b: self.broadcast_b,
             shift: self.shift,
@@ -788,7 +796,7 @@ impl From<Alu<u32>> for Alu<Expr> {
         out.load_wide_shift = s.load_wide_shift;
         out.magnitude_scan = s.magnitude_scan;
         out.scan_written = s.scan_written;
-        (out.wide_left, out.align_shift) = (s.wide_left, s.align_shift);
+        (out.wide_left, out.align_shift, out.wrap_left) = (s.wide_left, s.align_shift, s.wrap_left);
         out.reduce_group = s.reduce_group;
         (out.max_scan, out.max_clear, out.max_out, out.write_spread, out.gather_shift) = (s.max_scan, s.max_clear, s.max_out, s.write_spread, s.gather_shift);
         out.magnitude_clear = s.magnitude_clear;
@@ -1102,6 +1110,8 @@ pub struct Assembly {
     ring_heads: bool,
     /// The function being laid out is `exp_from_top`'s, normalised already.
     from_top: bool,
+    /// Left shifts wrap around: the alignment before a periodic function's table.
+    wrapping: bool,
     /// The die can scan what a step writes as it writes it.
     scans_writes: bool,
     /// The die shifts a wide read left, and aligns either way, in one pass.
@@ -1452,7 +1462,7 @@ impl Assembly {
 
     pub fn new(c: &DieConfig) -> Self {
         let initial = constants(c.cell.activation_bits).iter().enumerate().map(|(i, v)| ((scratch_register(c), CONSTANT_FIRST + i as u32), *v)).collect();
-        Self { steps: Vec::new(), initial, marks: Vec::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, slabs_keep_shifts: false, held: None, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false, scans_writes: c.features.widths[crate::die::SCAN_WRITTEN_FIELD] > 0, widens: c.features.widths[crate::die::WIDE_LEFT_FIELD] > 0, aligns: c.features.widths[crate::die::ALIGN_SHIFT_FIELD] > 0 }
+        Self { steps: Vec::new(), initial, marks: Vec::new(), wide_link: c.features.wide_link && c.features.lane_bits > 0, bits: c.cell.activation_bits, index_bits: c.index_bits, exponents: exponent_register(c), scratch: scratch_register(c), loops: 0, lane_bits: c.features.lane_bits, cells: c.cells, streams: c.features.streams(), combines: c.features.combines(), clusters: 1 << c.features.cluster_bits, key_shift: c.features.key_shift, split: None, head_round: None, slab_group: 0, in_units: false, head_units: Vec::new(), shift_zero: [false; 3], shifts_now: c.features.shifts_now(), drains_add: c.features.feeds_cells(), rows_stream: c.features.streams_rows() && c.features.combines(), heads_at_once: false, immediate_bits: c.index_bits.min(c.microcode_bits), spread: HashSet::new(), heads_aligned: 0, zero_ready: false, key_capacity: None, in_cells: HashMap::new(), ring: 1, ring_first: false, ring_last: false, across_chips: false, slabs_keep_shifts: false, held: None, group: None, group_field: (c.features.group_bits > 0).then_some((c.features.group_shift, c.features.group_bits)), group_used: false, group_reads: c.features.cluster_bits > 0 && c.features.widths[crate::die::FROM_GROUP_FIELD] > 0, ring_heads: false, from_top: false, wrapping: false, scans_writes: c.features.widths[crate::die::SCAN_WRITTEN_FIELD] > 0, widens: c.features.widths[crate::die::WIDE_LEFT_FIELD] > 0, aligns: c.features.widths[crate::die::ALIGN_SHIFT_FIELD] > 0 }
     }
 
     pub fn exponent(&self, reg: u32) -> At<Expr> {
@@ -2399,7 +2409,9 @@ impl BlockOps for Assembly {
         let scratch = self.scratch;
         // The table input must start on a block boundary to go a block at a time.
         let start: Expr = 32u32.max(1 << self.lane_bits).into();
+        self.wrapping = function == FN_SIN;
         self.align_to(src, 0.into(), TABLE_INPUT_EXPONENT, scratch, start, len);
+        self.wrapping = false;
         self.elements(len, &[start], true, |s, i, vector| {
             let mut step = alu(OP_FUNCTION);
             (step.a, step.function, step.dst, step.vector) = ((scratch, i + start), function, (dst, i), vector);
@@ -3007,7 +3019,7 @@ impl BlockOps for Assembly {
             // Only one of the two shifts is ever needed, and one pass takes whichever it is.
             self.elements(len, &[from, to], src != dst || from == to, |s, i, vector| {
                 let mut step = alu(OP_SHIFT_LEFT);
-                (step.a, step.dst, step.vector, step.align_shift) = ((src, from + i), (dst, to + i), vector, true);
+                (step.a, step.dst, step.vector, step.align_shift, step.wrap_left) = ((src, from + i), (dst, to + i), vector, true, s.wrapping);
                 s.push(step);
             });
             return self.clear_shifts();
@@ -3024,6 +3036,7 @@ impl BlockOps for Assembly {
                 left.a = (dst, to + i);
                 left.dst = (dst, to + i);
                 left.vector = vector;
+                left.wrap_left = s.wrapping;
                 s.push(left);
             }
         });
@@ -3033,6 +3046,7 @@ impl BlockOps for Assembly {
                 left.a = (dst, to + i);
                 left.dst = (dst, to + i);
                 left.vector = vector;
+                left.wrap_left = s.wrapping;
                 s.push(left);
             });
         }
@@ -3346,6 +3360,7 @@ impl Behavior {
                 }
             }
             OP_SHIFT_LEFT if s.align_shift && self.shift_a > 0 => aligned_a,
+            OP_SHIFT_LEFT if s.wrap_left => wrap((a as i128) << self.shift_left, bits),
             OP_SHIFT_LEFT => {
                 let wide = wrap((a as i128) << self.shift_left, 2 * bits);
                 let top = (1i64 << (bits - 1)) - 1;

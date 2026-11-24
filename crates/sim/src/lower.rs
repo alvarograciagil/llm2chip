@@ -3,7 +3,10 @@
 
 use crate::weights::{CellRow, Weights};
 use compiler::{Inst, Op, Program, RopeScaling};
-use netlist::block::{FN_GELU, FN_GELU_TANH, FN_TANH};
+use netlist::block::{FN_GELU, FN_GELU_TANH, FN_SIN, FN_TANH};
+
+/// Radians to the input of the sine's table, which holds one period over 16.
+const SIN_SCALE: f32 = 8.0 / std::f32::consts::PI;
 use netlist::block::{chained_rows, encode_vector, exponent_register, register_extents, Assembly, AttentionRegs, BlockOps, CellMatrix, DeltaRegs, Expr, KeyStore, MatvecPart, Step, Var, VarRanges, FN_EXP, FN_SIGMOID, FN_SOFTPLUS};
 use netlist::{DieConfig, DieProgram, Microprogram};
 use std::cell::{Cell, RefCell};
@@ -69,7 +72,7 @@ pub fn chip_plan(program: &Program, weights: &Weights, chips: usize, context: us
 fn small_of(op: &Op) -> Vec<String> {
     match op {
         Op::RmsNorm { weight, .. } | Op::RmsGated { weight, .. } | Op::Dconv { weight, .. } => vec![format!("{weight}.weight")],
-        Op::AddWeight { weight, .. } => vec![weight.clone()],
+        Op::AddWeight { weight, .. } | Op::MulWeight { weight, .. } => vec![weight.clone()],
         Op::LayerNorm { weight, .. } | Op::GroupNorm { weight, .. } => vec![format!("{weight}.weight"), format!("{weight}.bias")],
         Op::DeltaStep { a_log, dt_bias, .. } => vec![a_log.clone(), dt_bias.clone()],
         _ => Vec::new(),
@@ -332,7 +335,7 @@ fn cell_runs(plan: &[CellEntry], lanes: u32) -> Vec<(&[CellEntry], Vec<usize>, u
 fn buffers_read(op: &Op) -> Vec<usize> {
     match op {
         Op::EmbRead { .. } => vec![],
-        Op::Matvec { src, .. } | Op::Copy { src, .. } | Op::Silu { src, .. } | Op::Gelu { src, .. } | Op::Scale { src, .. } | Op::AddWeight { src, .. } | Op::RmsNorm { src, .. } | Op::SplitQueryGate { src, .. } | Op::SoftCap { src, .. } | Op::Sigmoid { src, .. } | Op::Dconv { src, .. } | Op::Slice { src, .. } | Op::SigmoidMoe { src, .. } | Op::Moe { src, .. } => vec![*src],
+        Op::Matvec { src, .. } | Op::Copy { src, .. } | Op::Silu { src, .. } | Op::Gelu { src, .. } | Op::Scale { src, .. } | Op::AddWeight { src, .. } | Op::MulWeight { src, .. } | Op::Sin { src, .. } | Op::RmsNorm { src, .. } | Op::SplitQueryGate { src, .. } | Op::SoftCap { src, .. } | Op::Sigmoid { src, .. } | Op::Dconv { src, .. } | Op::Slice { src, .. } | Op::SigmoidMoe { src, .. } | Op::Moe { src, .. } => vec![*src],
         Op::Add { a, b, .. } | Op::MulElem { a, b, .. } | Op::Concat { a, b, .. } => vec![*a, *b],
         Op::Rope { buf, .. } => vec![*buf],
         Op::KvAppend { key, value, .. } => vec![*key, *value],
@@ -811,7 +814,9 @@ impl Layout {
                     store(name, values, &mut setup, &mut small);
                 }
                 Op::Scale { factor, .. } => store(format!("escala:{factor}"), vec![*factor as f64], &mut setup, &mut small),
-                Op::AddWeight { weight, .. } => store(weight.clone(), weights.floats(weight)?.iter().map(|v| *v as f64).collect(), &mut setup, &mut small),
+                Op::AddWeight { weight, .. } | Op::MulWeight { weight, .. } => store(weight.clone(), weights.floats(weight)?.iter().map(|v| *v as f64).collect(), &mut setup, &mut small),
+                // The sine's table holds one period over its range of 16: radians times 8 / π.
+                Op::Sin { .. } => store(format!("escala:{}", SIN_SCALE), vec![SIN_SCALE as f64], &mut setup, &mut small),
                 Op::RmsGated { weight, .. } => {
                     let name = format!("{weight}.weight");
                     let values = weights.floats(&name)?.iter().map(|w| *w as f64).collect();
@@ -2350,6 +2355,12 @@ impl Layout {
             }
             Op::Scale { src, factor, dst } => ops.scale(self.small[&format!("escala:{factor}")], self.reg(*src), self.reg(*dst), size(*dst)),
             Op::AddWeight { src, weight, dst } => ops.add(self.reg(*src), self.small[weight], self.reg(*dst), size(*dst)),
+            Op::MulWeight { src, weight, dst } => ops.multiply(self.reg(*src), self.small[weight], self.reg(*dst), size(*dst)),
+            Op::Sin { src, dst } => {
+                let turns = self.temporaries[38];
+                ops.scale(self.small[&format!("escala:{}", SIN_SCALE)], self.reg(*src), turns, size(*dst));
+                ops.function(FN_SIN, turns, self.reg(*dst), size(*dst));
+            }
             Op::Silu { src, dst } => {
                 ops.slices_across_chips(self.local.contains(dst));
                 self.silu_at(ops, self.reg(*src), self.reg(*dst), self.slice_of(program, *dst));
