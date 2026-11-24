@@ -344,6 +344,22 @@ pub fn measure(program: &Program, weights: &Weights, base: DieConfig, costs: &Co
     Ok(Candidate { chips, cluster_bits, lane_bits, cell_bits, cycles, clock_hz: clock, tokens_per_second: clock / cycles as f64, prompt_seconds: timing.prompt_cycles as f64 / clock, gates: chips as f64 * gates, area_mm2: chips as f64 * die_mm2, die_mm2, parts_mm2, sharing })
 }
 
+/// A die that runs routines over rows, as a speech recogniser's or a sound decoder's does:
+/// its silicon and clock by the same counts as `measure`, from its own layout and
+/// microprogram. Gives what its silicon goes to (logic, the cells' memories, the vector
+/// units' memories and the microcode, in square millimetres) and its clock.
+pub fn routines_die(layout: &Layout, code: &Microprogram, costs: &Costs, process: &Process, (cluster_bits, lane_bits, cell_bits): (u32, u32, u32), max_clock_hz: f64) -> ([f64; 4], f64) {
+    let die = layout.config();
+    let (depth, groups) = layout.cell_depths();
+    let bits = depth * die.cell.weight_bits as u64 + groups * 2 * die.scale_bits as u64;
+    let banks = 1u64 << (cluster_bits + lane_bits);
+    let vectors = 2.0 * process.memory_mm2(banks, (layout.vector_words_used() * die.cell.activation_bits as u64) >> lane_bits);
+    let microcode = microcode_memory(die, std::slice::from_ref(code));
+    let gates = costs.gates(cluster_bits, lane_bits, cell_bits);
+    let parts = [gates * process.gate_um2 / 1e6, process.memory_mm2(1 << cell_bits, bits), vectors, process.memory_mm2(1, microcode)];
+    (parts, max_clock_hz.min(costs.clock_hz(cluster_bits, lane_bits, process.full_adder_ns)))
+}
+
 /// For each number of chips, width of unit and number of units, the fewest cells that
 /// reach the target, least silicon first. Those that cannot reach it are left out.
 /// Each number of chips with each way of sharing that comes to something different there.

@@ -65,6 +65,8 @@ The project assistant ("+" in the toolbar, "An FPGA") has these boards and says,
 
 The Cyclone IV EP4CE10 is the smallest in the catalogue: the smallest chip the project generates needs about 54,000 logic elements (measured with Yosys, `synth_intel`, memories not counted) and 1.68 Mbit of internal memory, against its 10,300 and 0.41 (the Cyclone IV has no distributed memory, so its register table stays in flip-flops, and the microcode alone takes 0.5 Mbit), even with the weights in the board's SDRAM. Its SDRAM is not usable for the weights today either: the chip keeps them in each cell's memory and has no path to read them from outside.
 
+Voice models do not fit either, in this board or in the largest Cyclone IV: Moonshine-tiny's 27 million weights need about 108 Mbit even in 4-bit codes, against the EP4CE115's 3.9 Mbit (see [voice](voice.md#the-demo)).
+
 What does fit in it is one of the chip's compute cells behind the serial port: `cargo run -p netlist --example board -- DIR` writes the project, with its testbench, the Quartus project and a host script that loads a matrix, multiplies it by a vector and compares each row with the exact computation. It takes about 790 LE and 280 flip-flops (10 % of the EP4CE10) and 32 Kbit of memory. The test `the_cell_behind_the_serial_port_multiplies_a_matrix_exactly` runs it in iverilog. The project's pins are the usual ones for these boards and are marked as unverified: check them against the board's schematic.
 
 ### Recommendation for about $200: Kria KV260

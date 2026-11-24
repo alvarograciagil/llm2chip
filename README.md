@@ -188,7 +188,7 @@ This is an architecture and logic design, not a manufacturable layout: there is 
 | [`docs/full-chip.md`](docs/full-chip.md) | The whole chip: blocks, simulation levels, several chips, the fixed microprogram |
 | [`docs/parameters.md`](docs/parameters.md) | Every parameter of the design, as the application explains it |
 | [`docs/vision.md`](docs/vision.md) | Images on the chip: the vision encoder, Janus-Pro and Show-o |
-| [`docs/voice.md`](docs/voice.md) | Voice on the chip: speech to text, text to speech and several programs on several dies (in progress) |
+| [`docs/voice.md`](docs/voice.md) | Voice on the chip: speech to text (Moonshine), text to speech (OuteTTS and DAC) and several programs on several dies |
 | [`docs/fpga.md`](docs/fpga.md) | Taking the chip to an FPGA: synthesis, boards, expected speed |
 | [`docs/asic.md`](docs/asic.md) | Layout with OpenROAD and calibration of the estimator |
 | [`docs/manufacturing.md`](docs/manufacturing.md) | What is verified, board rules, scan and ATPG, what manufacturing still needs |

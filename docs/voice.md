@@ -136,6 +136,37 @@ Voice adds files; the core only gains general things.
 | OuteTTS and DAC in Transformers, and DAC against it | `tools/golden/speak.py`, `crates/sim/examples/dac_check.rs` | Voice |
 | Demo, a WAV in and a WAV out (planned) | `crates/sim/examples/talk.rs` | Voice |
 
+## The system, sized
+
+`cargo run --release -p sim --example voice_system -- MOONSHINE LLM OUTETTS DAC` sizes the four stages in N6 with the optimiser's own counts, each on a die of its own, every number from the stage's microprogram: a three-second question, an answer whose first sentence is 12 tokens, and the speech decoded half a second at a time. Weights are 8-bit codes.
+
+| Stage | Die | Silicon | First output | Then |
+|---|---|---|---|---|
+| Speech to text (Moonshine-tiny) | 1 unit × 32 lanes, 2,048 cells | 88 mm² | 16.7 ms after the question | 6,118 tokens/s |
+| Language model (Qwen3-0.6B) | 16 units × 64 lanes, 65,536 cells | 508 mm² | 5.0 ms after a 40-token prompt | 4,068 tokens/s |
+| Speech writer (OuteTTS-1.0-0.6B) | the same | 510 mm² | 5.0 ms | 4,063 tokens/s |
+| Sound decoder (DAC, 20-bit vectors) | 1 unit × 64 lanes, 2,048 cells | 224 mm² | 233 ms for half a second of sound | about 4 such chunks a second |
+
+**Four dies and 1,330 mm²; the first sound comes 286 ms after the question ends**, well inside the half second a conversation needs, and every stage keeps ahead of the speech it feeds: the writer needs 180 tokens a second for real time and makes 4,000.
+
+The two speech dies are routines over rows, which keep whole maps in vector memory (59 and 153 mm² of them) and are sized here with one unit: on a die of several, every unit holds a copy. Decoding the sound a few frames at a time instead of half a second at a time would shrink the decoder's maps; it is not done. The sine's table and `wrap_left` are left out of the decoder's logic count (a 4,096-word table and a mux).
+
+## The demo
+
+```bash
+cargo run --release -p sim --example talk -- MOONSHINE_DIR LLM_DIR OUTETTS_DIR DAC_DIR question.wav answer.wav [die 20]
+```
+
+The four folders are `UsefulSensors/moonshine-tiny`, any language model of the catalogue (Qwen3-0.6B here), `OuteAI/OuteTTS-1.0-0.6B`, and DAC.speech converted with `uv run tools/convert/dac.py weights_24khz_1.5kbps_v1.0.pth DAC_DIR`. With macOS's `say` asking "What is the capital of France?", in floating point:
+
+1. Moonshine hears "What is the capital of France?" (0.8 s).
+2. Qwen3-0.6B answers "The capital of France is Paris." (7 tokens).
+3. OuteTTS writes 524 tokens, 3.04 seconds of speech, and DAC decodes them; Moonshine, listening to the answer, hears "The capital of France is Paris."
+
+With `die 20` every stage runs in the die's arithmetic with 20-bit vectors, and the turn goes the same way: the same question heard, the same answer, 530 tokens of speech (3.08 seconds) that Moonshine hears as "The capital of France is Paris." On a computer that takes about five minutes, since the simulation goes integer by integer; on the chip each stage is a program on dies of its own (see the system, sized, above).
+
+**On an FPGA.** None of the voice models fits one today. The chip keeps its weights in its cells' memory, and Moonshine-tiny alone has 27 million (about 108 Mbit in 4-bit codes), against 3.9 Mbit of internal memory in the largest Cyclone IV (EP4CE115) and 0.41 in the catalogue's EP4CE10, whose logic is also too small for the smallest chip (54,000 logic elements against 10,300). Larger boards fall short too: the Kria KV260 has 23.1 Mbit. Only a toy recogniser like the tests' fits.
+
 ## Programs with parts
 
 Before voice, `Program` had two fields named after images: `image` (Janus's heads, which write and read the codes of a second codebook) and `vision` (routines that go through a store of rows: the image encoder, Show-o's image half and MAGVIT-v2). Neither is about images: a speech decoder's codes are a second codebook, and a speech encoder's frames are a store of rows. They are now **parts** of a program, with names that say what they do:
@@ -157,5 +188,7 @@ Before voice, `Program` had two fields named after images: `image` (Janus's head
 | 6 | Moonshine on a toy checkpoint: floating-point reference, exact machine, gates | Done: the exact machine's scores are within 2.6 % of floating point (the die's function tables; the products agree to millionths), and the gates give the exact machine's scores bit for bit: 280 routines, 280,586 cycles for the clip and three tokens (`crates/sim/tests/moonshine.rs`) |
 | 7 | Moonshine with the real weights | Done: on a sentence spoken by macOS's `say`, the reference's frames are within 0.0002 % of Transformers' and its scores within 0.0001 %, the same tokens; the die's arithmetic with 16-bit vectors writes the same text, "Hello, this chip can listen and speak." (`--example listen`) |
 | 8 | `FN_SIN`, `wrap_left` and the DAC decoder | Done: the reference gives Transformers' sound sample for sample; on toy decoders the exact machine is 36 to 62 dB below floating point with 20-bit vectors, and the gates give its sound bit for bit (322 routines, 70,624 cycles, the microprogram's count the gates' cycle for cycle); the real decoder as in the table above |
-| 9 | OuteTTS and DAC with the real weights | Needs downloads (about 1.5 GB, and PyTorch for the conversion) |
-| 10 | The demo, a WAV in and a WAV out | After 7 and 9 |
+| 9 | OuteTTS with the real weights | Done: in floating point the same prompt and the same 317 tokens as Transformers for "Hello, I am a chip.", scores within 0.0005 %; in the die's arithmetic with 20-bit vectors the first 91 tokens match, and the sound the die's DAC makes of them is heard as the same sentence (`--example speak`) |
+| 10 | The demo: a question spoken in, the answer spoken out | Done in floating point and in the die's arithmetic (`--example talk`, below) |
+| 11 | The system sized: dies, silicon and the time to the first sound | Done from the command line (`--example voice_system`, above) |
+| 12 | Voice in the optimiser and the application | Not done |
