@@ -697,7 +697,9 @@ pub const INFO_SHOWO: usize = 25;
 pub const INFO_ROTATION_SOURCE: usize = 26;
 pub const INFO_ROTATION_ADDRESS: usize = 27;
 pub const INFO_ROTATION_COLS: usize = 28;
-pub const INFO_PARAMETERS: usize = 29;
+/// Where the schedule of a die run by routines starts (see `schedule`); zero if it has none.
+pub const INFO_SCHEDULE: usize = 29;
+pub const INFO_PARAMETERS: usize = 30;
 
 /// What the firmware needs to run the image encoder a chip carries, in the order of its
 /// words: see `VisionInfo`.
@@ -755,6 +757,13 @@ pub struct ShowOInfo {
 pub fn add_showo(info: &mut Vec<u32>, showo: &ShowOInfo) {
     info[INFO_SHOWO] = info.len() as u32;
     info.extend([showo.rows, showo.layers, showo.codebook, showo.scores.0, showo.scores.1, showo.rope, showo.rope_half, showo.guided]);
+}
+
+/// Adds a schedule of routines to a chip's description: the firmware follows it in place of
+/// reading a prompt.
+pub fn add_schedule(info: &mut Vec<u32>, records: &[crate::schedule::Record]) {
+    info[INFO_SCHEDULE] = info.len() as u32;
+    info.extend(crate::schedule::words(records));
 }
 
 /// Adds the image encoder's description to a chip's.

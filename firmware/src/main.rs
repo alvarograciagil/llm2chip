@@ -68,7 +68,8 @@ const INFO_SHOWO: usize = 25;
 const INFO_ROTATION_SOURCE: usize = 26;
 const INFO_ROTATION_ADDRESS: usize = 27;
 const INFO_ROTATION_COLS: usize = 28;
-const INFO_PARAMETERS: usize = 29;
+const INFO_SCHEDULE: usize = 29;
+const INFO_PARAMETERS: usize = 30;
 const TARGET_VECTOR: u32 = 3;
 
 /// The tokenizer's tables, which the image builder leaves after the segment table.
@@ -786,6 +787,106 @@ fn emit(token: u32, decoding: &mut Decoding) {
     tokenizer().write_token(token, decoding, &mut send);
 }
 
+/// A schedule's records: see `netlist::schedule`, which reads them the same way.
+const RECORD_WORDS: usize = 8;
+const S_INDEX: u32 = 3;
+const S_TOKEN: u32 = 1;
+const S_POSITION: u32 = 2;
+
+fn field(at: usize, word: usize) -> u32 {
+    info(info(INFO_SCHEDULE) as usize + at * RECORD_WORDS + word)
+}
+
+/// Follows the schedule's records from `at` to `end`; false once it meets its end.
+fn follow(mut at: usize, end: usize, vars: &mut [u32; 16]) -> bool {
+    while at < end {
+        let here = at;
+        let f = |word| field(here, word);
+        let var = |vars: &[u32; 16], v: u32| vars[(v & 15) as usize];
+        let set = |vars: &mut [u32; 16], v: u32, value: u32| {
+            if v != 0 {
+                vars[(v & 15) as usize] = value;
+            }
+        };
+        let next = here + 1;
+        at = next;
+        match f(0) {
+            1 => set(vars, f(1), receive_word()),
+            2 => {
+                let product = (var(vars, f(2)) as i32).wrapping_mul(f(3) as i32).wrapping_add(f(4) as i32);
+                let divisor = f(5) as i32;
+                let quotient = if divisor == 0 { 0 } else { product.wrapping_div(divisor) };
+                set(vars, f(1), quotient.wrapping_add(f(6) as i32).min(f(7) as i32) as u32);
+            }
+            3 => {
+                for i in 0..var(vars, f(1)) + f(2) {
+                    vector_write(f(4), receive_word());
+                    for e in 0..f(5) {
+                        vector_write(f(3) + e, receive_word());
+                    }
+                    if f(6) != u32::MAX {
+                        run_die(f(6), i, 0);
+                    }
+                }
+            }
+            4 => {
+                let (body, outer) = (f(1) as usize, var(vars, S_INDEX));
+                for i in 0..var(vars, f(2)) + f(3) {
+                    set(vars, S_INDEX, i);
+                    if !follow(next, next + body, vars) {
+                        return false;
+                    }
+                }
+                set(vars, S_INDEX, outer);
+                at = next + body;
+            }
+            5 => {
+                let i = var(vars, S_INDEX);
+                let token = f(2).wrapping_mul(i).wrapping_add(f(3)).wrapping_add(var(vars, f(4)));
+                let position = f(5).wrapping_mul(i).wrapping_add(f(6)).wrapping_add(var(vars, f(7)));
+                run_die(f(1), token, position);
+            }
+            6 => {
+                let mut count = var(vars, f(1));
+                while count > 1 {
+                    let half = count / 2;
+                    for i in 0..half {
+                        run_die(f(2), i, 0);
+                        run_die(f(3), i + half, 0);
+                        run_die(f(4), i, 0);
+                    }
+                    if count % 2 == 1 {
+                        run_die(f(2), 0, 0);
+                        run_die(f(3), count - 1, 0);
+                        run_die(f(4), 0, 0);
+                    }
+                    count = half;
+                }
+            }
+            7 => {
+                let body = f(1) as usize;
+                set(vars, S_TOKEN, f(3));
+                let stops = info(INFO_STOP_TABLE)..info(INFO_STOP_TABLE) + info(INFO_STOP_COUNT);
+                for position in 0..var(vars, f(2)) {
+                    set(vars, S_POSITION, position);
+                    if !follow(next, next + body, vars) {
+                        return false;
+                    }
+                    let token = sample();
+                    if stops.clone().any(|at| info(at as usize) == token) {
+                        break;
+                    }
+                    send_word(token);
+                    set(vars, S_TOKEN, token);
+                }
+                at = next + body;
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn main() {
     let (id, total) = count_chips();
@@ -800,6 +901,11 @@ extern "C" fn main() {
         serve_chain(id);
     }
     peripheral_write(REG_SAMPLE_SEED, info(INFO_SEED));
+    // A die run by routines follows its schedule: the host sends what it says.
+    if info(INFO_SCHEDULE) != 0 {
+        follow(0, usize::MAX, &mut [0; 16]);
+        return;
+    }
     // A chip that carries Show-o fills images instead of writing text.
     if info(INFO_SHOWO) != 0 {
         showo_pass();

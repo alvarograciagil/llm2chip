@@ -30,12 +30,14 @@
 //! totals are multiplied by `1 / count`, which the host writes for each clip, before a
 //! GroupNorm of one value.
 
+use crate::chip::RoutinesDie;
 use crate::lower::Layout;
 use crate::moonshine::{argmax, MoonshineConfig};
 use crate::vm::BlockVm;
 use crate::weights::{Tensor, Weights};
 use compiler::{Buf, Inst, KvShape, Op, Part, Program, RowPart};
 use netlist::block::{encode_vector, exponent_register, BlockOps};
+use netlist::schedule::{Record, FIRST_FREE, NO_ROUTINE, POSITION, TOKEN, ZERO};
 use netlist::DieConfig;
 use std::ops::Range;
 use std::path::Path;
@@ -683,6 +685,92 @@ impl MoonshineChip {
         Ok(crate::system::Stage { name: "speech to text".into(), dies, area_mm2: dies as f64 * die_mm2, clock_hz, first_cycles: first, output_cycles: each })
     }
 
+    /// Every routine the chip runs, with the microprogram that has an entry for each in
+    /// that order, and the schedule its firmware follows to transcribe a clip by itself: it
+    /// receives the clip's length in samples, `1 / count` for the GroupNorm and the rows of
+    /// samples (see `schedule_input`), works out the lengths, runs the encoder and writes
+    /// the tokens greedily, as `transcribe`, ending at the end token.
+    pub fn schedule(&self) -> Result<(Vec<Routine>, netlist::Microprogram, Vec<Record>), String> {
+        let all = [vec![self.store_samples_call(0)], self.encoder_calls(), self.token_calls(self.config.start, 0)].concat();
+        let (routines, code) = self.microprogram(&all)?;
+        let index = |r: &Range<usize>| routines.iter().position(|(x, _)| x == r).map(|i| i as u32).ok_or("a routine the schedule needs is not in the microprogram");
+        let config = self.layout.config();
+        let (ib, exponents) = (config.index_bits, self.exponents);
+        let vector = |buf: Buf| {
+            let register = self.layout.register_of(buf);
+            (register << ib, exponents << ib | register)
+        };
+        // The variables after the firmware's own.
+        let [samples, rows, first, second, frames, last, limit] = std::array::from_fn(|i| FIRST_FREE + i as u32);
+        let at = |var: u32| (0, 0, var);
+        let i = |times: u32| (times, 0, ZERO);
+        let call = |r: &Range<usize>, token: (u32, u32, u32), position: (u32, u32, u32)| -> Result<Record, String> { Ok(Record::Call { routine: index(r)?, token, position }) };
+        let repeat = |count: u32, body: Vec<Record>| [vec![Record::Repeat { body: body.len() as u32, count, add: 0 }], body].concat();
+        let compute = |dst, src, mul, pre, div, post| Record::Compute { dst, src, mul, pre, div, post, max: i32::MAX };
+        let mut s = vec![
+            Record::Receive { var: samples },
+            // As `Lengths::of`.
+            compute(first, samples, 1, -127, 64, 1),
+            compute(rows, first, 1, 0, 1, 1),
+            compute(second, first, 1, -7, 3, 1),
+            compute(frames, second, 1, -3, 2, 1),
+            compute(last, frames, 1, -1, 1, 0),
+            // As `limit`.
+            Record::Compute { dst: limit, src: samples, mul: 6, pre: 0, div: 16_000, post: 1, max: self.config.max_tokens as i32 - 1 },
+        ];
+        let (address, exponent) = vector(self.inverse);
+        s.push(Record::Vectors { count: ZERO, add: 1, address, exponent, size: 1, routine: NO_ROUTINE });
+        let (address, exponent) = vector(self.input);
+        s.push(Record::Vectors { count: rows, add: 0, address, exponent, size: SAMPLES_PER_ROW as u32, routine: index(&self.store_samples)? });
+        // As `encoder_calls`.
+        s.extend(repeat(first, vec![call(&self.conv1, i(1), at(ZERO))?, call(&self.sums, i(1), at(ZERO))?]));
+        let (load, second_load, add) = &self.reduce;
+        s.push(Record::Halve { count: first, load: index(load)?, second: index(second_load)?, add: index(add)? });
+        s.push(call(&self.totals, at(ZERO), at(ZERO))?);
+        s.extend(repeat(first, vec![call(&self.normalize, i(1), at(ZERO))?]));
+        s.extend(repeat(second, vec![call(&self.conv2.0, i(3), at(ZERO))?, call(&self.conv2.1, i(1), at(ZERO))?]));
+        s.extend(repeat(frames, vec![call(&self.conv3.0, i(2), at(ZERO))?, call(&self.conv3.1, i(1), at(ZERO))?]));
+        for (project, rest) in &self.blocks {
+            s.extend(repeat(frames, vec![call(project, i(1), i(1))?]));
+            s.extend(repeat(frames, vec![call(rest, i(1), at(last))?]));
+        }
+        s.extend(repeat(frames, vec![call(&self.cross_keys, i(1), i(1))?]));
+        // As `token_calls`, a token at a time.
+        let d = &self.decoder;
+        let mut body = vec![call(&d.embed, at(TOKEN), at(POSITION))?];
+        for (own, cross) in d.own.iter().zip(&d.cross) {
+            body.push(call(own, at(ZERO), at(POSITION))?);
+            body.push(call(cross, at(ZERO), at(last))?);
+        }
+        body.push(call(&d.logits, at(ZERO), at(POSITION))?);
+        s.push(Record::Generate { body: body.len() as u32, limit, start: self.config.start });
+        s.extend(body);
+        Ok((routines, code, s))
+    }
+
+    /// What the host sends a chip that follows `schedule`, as words: the clip's length, then
+    /// each vector's exponent and elements, `1 / count` first and then the rows of samples.
+    pub fn schedule_input(&mut self, samples: &[f32]) -> Result<Vec<u32>, String> {
+        self.clip(samples.len())?;
+        let (_, inverse) = self.inverse_write();
+        let (_, rows) = self.sample_rows(samples)?;
+        let mut words = vec![samples.len() as u32];
+        for (mantissas, exponent) in std::iter::once(&inverse).chain(&rows) {
+            words.push(*exponent as u32);
+            words.extend(mantissas.iter().map(|m| *m as u32));
+        }
+        Ok(words)
+    }
+
+    /// The die as its firmware sees it, run by the exact machine: `routines` numbered as in
+    /// the microprogram `code`.
+    pub fn die_engine(&mut self, routines: &[Routine], code: netlist::Microprogram) -> RoutinesDie<'_> {
+        self.reset();
+        let part = self.program.rows().expect("the routines");
+        let lists = routines.iter().map(|(r, rope)| (part.ops[r.clone()].to_vec(), *rope)).collect();
+        RoutinesDie::new(&self.layout, &self.program, &mut self.vm, lists, code)
+    }
+
     /// The most tokens it writes for a clip: six a second, as `Moonshine::transcribe`.
     pub fn limit(&self) -> usize {
         (self.now.samples * 6 / 16_000 + 1).min(self.config.max_tokens - 1)
@@ -742,3 +830,4 @@ impl MoonshineChip {
         Ok(text)
     }
 }
+

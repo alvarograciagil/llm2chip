@@ -347,3 +347,109 @@ fn one_real_moonshine_layer_on_the_die_s_gates_gives_the_exact_machine_s_scores(
     eprintln!("one layer of Moonshine-tiny in gates: {cycles} cycles");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The schedule the firmware follows runs the routines the host would, in the same order,
+/// for clips of any length the chip takes.
+#[test]
+fn the_firmware_s_schedule_runs_what_the_host_runs() {
+    use netlist::schedule::{expand, words, Driver};
+    struct Script {
+        input: std::collections::VecDeque<u32>,
+        runs: Vec<(u32, u32, u32)>,
+        picks: Vec<u32>,
+        end: u32,
+        sent: Vec<u32>,
+    }
+    impl Driver for Script {
+        fn receive(&mut self) -> u32 {
+            self.input.pop_front().expect("the host has sent everything")
+        }
+        fn write(&mut self, _: u32, _: u32) {}
+        fn run(&mut self, routine: u32, token: u32, position: u32) {
+            self.runs.push((routine, token, position));
+        }
+        fn sample(&mut self) -> u32 {
+            self.picks.remove(0)
+        }
+        fn stops(&self, token: u32) -> bool {
+            token == self.end
+        }
+        fn send(&mut self, token: u32) {
+            self.sent.push(token);
+        }
+    }
+    let dir = toy("schedule");
+    // Long enough for three tokens: six a second.
+    let longest = 6000;
+    let mut chip = MoonshineChip::exact(&dir, longest, 16).unwrap();
+    let (routines, _, schedule) = chip.schedule().unwrap();
+    for length in [1279, 1800, SAMPLES, longest] {
+        let clip = test_clip(length);
+        chip.clip(length).unwrap();
+        let input = chip.schedule_input(&clip).unwrap();
+        let picks = vec![5, 9, chip.config.end];
+        let mut script = Script { input: input.into(), runs: Vec::new(), picks: picks.clone(), end: chip.config.end, sent: Vec::new() };
+        expand(&words(&schedule), &mut script).unwrap();
+        assert!(script.input.is_empty(), "every word the host sends is read");
+        let rows = sim::moonshine_chip::Lengths::of(length).unwrap().sample_rows;
+        let mut calls: Vec<sim::moonshine_chip::Call> = (0..rows).map(|r| chip.store_samples_call(r)).collect();
+        calls.extend(chip.encoder_calls());
+        // As many tokens as the clip's limit allows, up to the end token.
+        let limit = chip.limit().min(3);
+        for (position, token) in [chip.config.start, 5, 9].into_iter().enumerate().take(limit) {
+            calls.extend(chip.token_calls(token, position));
+        }
+        let expected: Vec<(u32, u32, u32)> = calls.iter().map(|c| (routines.iter().position(|(r, _)| *r == c.routine).unwrap() as u32, c.token, c.position)).collect();
+        assert_eq!(script.runs, expected, "a clip of {length} samples");
+        assert_eq!(script.sent, picks[..limit.min(2)]);
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The chip's own firmware transcribes a clip by itself: the host sends the clip's length,
+/// `1 / count` and the rows of samples, and the firmware, at instruction level, follows the
+/// schedule, driving a die run by the exact machine, and sends back the same tokens as the
+/// host ordering every routine.
+#[test]
+fn the_firmware_transcribes_a_clip_as_the_host_ordering_the_routines() {
+    use netlist::chip::{add_schedule, chip_info, ChipModel, GenerationSetup};
+    use netlist::image::build_image;
+    use netlist::rv32::Rv32Iss;
+    use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
+    use netlist::soc::{SocBus, SocConfig};
+    let Some(firmware) = firmware() else { return };
+    let dir = toy("firmware");
+    // Long enough for a few tokens, six a second.
+    let longest = 8000;
+    let base = cell_die_config();
+    let die = netlist::DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, weight_bits: base.cell.activation_bits, ..base.cell }, features: base.features.with_host_writes(true).with_key_shift(7), ..base };
+    let clip = test_clip(longest);
+
+    let mut host = MoonshineChip::new(&dir, longest, die, Some(32)).unwrap();
+    let expected = host.transcribe(&clip).unwrap();
+
+    let mut chip = MoonshineChip::new(&dir, longest, die, Some(32)).unwrap();
+    let input: Vec<u8> = chip.schedule_input(&clip).unwrap().iter().flat_map(|w| w.to_le_bytes()).collect();
+    let (routines, code, schedule) = chip.schedule().unwrap();
+    let end = chip.config.end;
+    let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: vec![end], draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
+    let mut info = chip_info(&die, &code, chip.logits_register(), chip.config.vocab as u32, &setup);
+    add_schedule(&mut info, &schedule);
+    eprintln!("the chip's description: {} words, {} of them the schedule's {} records", info.len(), schedule.len() * netlist::schedule::RECORD_WORDS, schedule.len());
+    let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
+    let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() };
+    let count = routines.len();
+    let model = ChipModel::new(chip.die_engine(&routines, code.clone()), code, sampler);
+    let mut bus = SocBus::booted_with(SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, &image, &input, model).unwrap();
+    let mut cpu = Rv32Iss::default();
+    while !cpu.halted {
+        cpu.step(&mut bus);
+        assert!(cpu.cycle < 200_000_000, "the firmware does not finish");
+    }
+    let start = bus.tx.iter().position(|b| *b != b'.').unwrap_or(bus.tx.len());
+    let tokens: Vec<u32> = bus.tx[start..].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    eprintln!("{} cycles of the CPU, {} of the die, tokens {tokens:?}", cpu.cycle, bus.peripheral.die_busy);
+    assert_eq!(tokens, expected);
+    assert!(bus.peripheral.routines[..count].iter().all(|(runs, _)| *runs > 0), "every routine ran: {:?}", bus.peripheral.routines);
+    std::fs::remove_dir_all(&dir).ok();
+}

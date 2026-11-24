@@ -126,6 +126,54 @@ impl DieEngine for VmEngine {
     }
 }
 
+/// A die whose program is a set of routines, run by the exact machine, as a chip's firmware
+/// drives it: each routine by its number in the microprogram `code`, with whether it rotates.
+pub struct RoutinesDie<'a> {
+    layout: &'a Layout,
+    program: &'a Program,
+    vm: &'a mut BlockVm,
+    lists: Vec<(Vec<compiler::Inst>, bool)>,
+    code: netlist::Microprogram,
+    exponents: u32,
+}
+
+impl<'a> RoutinesDie<'a> {
+    pub fn new(layout: &'a Layout, program: &'a Program, vm: &'a mut BlockVm, lists: Vec<(Vec<compiler::Inst>, bool)>, code: netlist::Microprogram) -> Self {
+        let exponents = exponent_register(&layout.config());
+        Self { layout, program, vm, lists, code, exponents }
+    }
+
+    fn split(&self, address: u32) -> (u32, u32) {
+        let bits = self.layout.config().index_bits;
+        (address >> bits, address & ((1 << bits) - 1))
+    }
+}
+
+impl DieEngine for RoutinesDie<'_> {
+    fn run(&mut self, routine: usize, token: u32, position: u32) {
+        let (list, rope) = &self.lists[routine];
+        self.layout.run_ops(self.vm, self.program, list, token, position, *rope).expect("die routine");
+    }
+
+    fn cycles(&self, routine: usize, token: u32, position: u32) -> u64 {
+        self.code.cycles(&self.layout.config(), routine, token, position)
+    }
+
+    fn read(&mut self, address: u32) -> i64 {
+        let (register, index) = self.split(address);
+        if register == self.exponents { self.vm.register_exponent(index) } else { self.vm.mantissa(register, index) }
+    }
+
+    fn write(&mut self, address: u32, value: i64) {
+        let (register, index) = self.split(address);
+        if register == self.exponents {
+            self.vm.set_register_exponent(index, value)
+        } else {
+            self.vm.write_mantissa(register, index, value)
+        }
+    }
+}
+
 /// Addresses of the logits and their exponent when the die runs as one software engine.
 pub const FLOW_DRAFT_REGISTER: u32 = 2;
 pub const FLOW_INDEX_BITS: u32 = 18;
