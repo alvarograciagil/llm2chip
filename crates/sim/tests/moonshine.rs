@@ -141,18 +141,27 @@ fn moonshine_in_the_die_s_arithmetic_scores_as_floating_point_does() {
 /// The toy on the die's gates, for clips of up to `SAMPLES` samples, given a clip of
 /// `length`: the scores of three tokens, which must be the exact machine's.
 fn on_gates(length: usize) {
+    let dir = toy(&format!("gates-{length}"));
+    let cycles = gates_score_as_the_exact_machine(&dir, SAMPLES, &test_clip(length), VOCAB, &[1, 7, 12]);
+    eprintln!("toy Moonshine in gates, a clip of {length} samples: {cycles} cycles");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The checkpoint in `dir` on a die's gates, for clips of up to `longest` samples, given
+/// `clip`: the scores of `tokens` (of a vocabulary of `vocab`) must be the exact machine's,
+/// and the microprogram's count of cycles the gates'. Returns the cycles.
+fn gates_score_as_the_exact_machine(dir: &Path, longest: usize, clip: &[f32], vocab: usize, tokens: &[u32]) -> u64 {
     use netlist::demo::read_block_value;
     use netlist::{die_design, DieConfig, Simulator};
-    let dir = toy(&format!("gates-{length}"));
-    let clip = test_clip(length);
-    let tokens = [1u32, 7, 12];
+    let samples = longest;
+    let length = clip.len();
     let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
     // Cells as deep as the weights need, each a mantissa of the vectors' width, as many
     // registers as the routines reach, and key columns for every row of the clip.
     let base = cell_die_config();
-    let roomy = DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, weight_bits: base.cell.activation_bits, ..base.cell }, features: base.features.with_key_shift(6), ..base };
+    let roomy = DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 24, cell: netlist::CellConfig { addr_bits: 24, weight_bits: base.cell.activation_bits, ..base.cell }, features: base.features.with_key_shift(6), ..base };
     let places = 32;
-    let mut probe = MoonshineChip::new(&dir, SAMPLES, roomy, Some(places)).unwrap();
+    let mut probe = MoonshineChip::new(dir, samples, roomy, Some(places)).unwrap();
     probe.clip(length).unwrap();
     let (program, layout, _) = probe.parts();
     let (depth, groups) = layout.cell_depths();
@@ -163,7 +172,7 @@ fn on_gates(length: usize) {
     // samples, and the clip's `1 / count` before the encoder.
     type Write = Option<(u32, sim::moonshine_chip::Vector)>;
     let schedule = |chip: &MoonshineChip| {
-        let (register, rows) = chip.sample_rows(&clip).unwrap();
+        let (register, rows) = chip.sample_rows(clip).unwrap();
         let mut calls: Vec<(Write, sim::moonshine_chip::Call)> = rows.into_iter().enumerate().map(|(r, row)| (Some((register, row)), chip.store_samples_call(r))).collect();
         let mut encoder = chip.encoder_calls().into_iter();
         calls.push((Some(chip.inverse_write()), encoder.next().unwrap()));
@@ -178,13 +187,13 @@ fn on_gates(length: usize) {
     let only: Vec<sim::moonshine_chip::Call> = calls.iter().map(|(_, c)| c.clone()).collect();
     let microprogram = |chip: &MoonshineChip| chip.microprogram(&only).unwrap().1;
     // The routines assembled once on a die with room, to know how many registers they reach.
-    let wide = MoonshineChip::new(&dir, SAMPLES, sized, Some(places)).unwrap();
+    let wide = MoonshineChip::new(dir, samples, sized, Some(places)).unwrap();
     microprogram(&wide);
     let die = sim::chip::with_registers_needed(sized, wide.parts().1);
-    let mut chip = MoonshineChip::new(&dir, SAMPLES, die, Some(places)).unwrap();
+    let mut chip = MoonshineChip::new(dir, samples, die, Some(places)).unwrap();
 
     // The exact machine's scores after each token.
-    chip.encode(&clip).unwrap();
+    chip.encode(clip).unwrap();
     let exact: Vec<Vec<i64>> = tokens.iter().enumerate().map(|(position, token)| chip.step(*token, position).unwrap().1).collect();
 
     let code = microprogram(&chip);
@@ -233,16 +242,16 @@ fn on_gates(length: usize) {
         let index = routines.iter().position(|(r, _)| *r == call.routine).unwrap();
         cycles += enter(&mut sim, &code, index, call.token, call.position);
         if call.read {
-            gates.push((0..VOCAB as u32).map(|i| read_block_value(&mut sim, die, logits, i).0).collect::<Vec<i64>>());
+            gates.push((0..vocab as u32).map(|i| read_block_value(&mut sim, die, logits, i).0).collect::<Vec<i64>>());
         }
     }
-    eprintln!("toy Moonshine in gates, a clip of {length} samples: {} routines, {cycles} cycles", calls.len());
+    eprintln!("a clip of {length} samples: {} routines, {cycles} cycles", calls.len());
     assert_eq!(gates, exact, "scores");
     // The microprogram's own count is the gates' cycle for cycle, which a system's sizing uses.
     assert_eq!(chip.cycles(&only).unwrap(), cycles);
     let stage = chip.stage(1, 1.0, 1e9).unwrap();
     assert!(stage.output_cycles > 0 && stage.first_cycles + 2 * stage.output_cycles >= cycles / 2 && stage.first_cycles < cycles);
-    std::fs::remove_dir_all(&dir).ok();
+    cycles
 }
 
 #[test]
@@ -277,5 +286,64 @@ fn a_chip_for_longer_clips_scores_a_shorter_one_as_one_built_for_it() {
     let mut again = MoonshineChip::exact(&dir, SAMPLES, 16).unwrap();
     again.encode(&longest).unwrap();
     assert_eq!(long.step(1, 0).unwrap().1, again.step(1, 0).unwrap().1);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Moonshine-tiny's own first encoder and decoder layers, its stem and the first `vocab`
+/// rows of its vocabulary, written to `dst` as a checkpoint of one layer each.
+fn first_layers_of(src: &Path, dst: &Path, vocab: usize) {
+    let mut config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(src.join("config.json")).unwrap()).unwrap();
+    config["encoder_num_hidden_layers"] = 1.into();
+    config["decoder_num_hidden_layers"] = 1.into();
+    config["vocab_size"] = vocab.into();
+    // Positions enough for the test's frames and tokens, so the key columns stay short.
+    config["max_position_embeddings"] = 32.into();
+    std::fs::write(dst.join("config.json"), config.to_string()).unwrap();
+    let bytes = std::fs::read(src.join("model.safetensors")).unwrap();
+    let length = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+    let header: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&bytes[8..8 + length]).unwrap();
+    let data = &bytes[8 + length..];
+    let mut w = Writer::default();
+    for (name, entry) in &header {
+        if name == "__metadata__" || (name.contains(".layers.") && !name.contains(".layers.0.")) {
+            continue;
+        }
+        let mut shape: Vec<usize> = serde_json::from_value(entry["shape"].clone()).unwrap();
+        let [start, end]: [usize; 2] = serde_json::from_value(entry["data_offsets"].clone()).unwrap();
+        let mut values = data[start..end].to_vec();
+        if name == "model.decoder.embed_tokens.weight" {
+            values.truncate(vocab * shape[1] * 4);
+            shape[0] = vocab;
+        }
+        w.tensor(name, entry["dtype"].as_str().unwrap(), &shape, values);
+    }
+    w.write(&dst.join("model.safetensors"));
+}
+
+/// One layer of the real Moonshine-tiny on the die's gates, a spot check of the circuit
+/// with the model's own weights (288 wide, 8 heads, 1,152 inner): the stem, its first
+/// encoder and decoder layers and 64 rows of its vocabulary, a clip of 1,279 samples (two
+/// frames) and two tokens, with `LLM2CHIP_REAL_MOONSHINE=1`. The model is read from `MOONSHINE` or
+/// `~/.llm2chip/models/UsefulSensors--moonshine-tiny`.
+#[test]
+#[ignore = "very slow, and needs Moonshine-tiny: one real layer on the die's gates; with LLM2CHIP_REAL_MOONSHINE=1"]
+fn one_real_moonshine_layer_on_the_die_s_gates_gives_the_exact_machine_s_scores() {
+    // An hour or more of simulation: only when asked for.
+    if std::env::var_os("LLM2CHIP_REAL_MOONSHINE").is_none() {
+        eprintln!("skipped: LLM2CHIP_REAL_MOONSHINE=1 to run a real layer of Moonshine-tiny in gates");
+        return;
+    }
+    let src = std::env::var("MOONSHINE").map(std::path::PathBuf::from).unwrap_or_else(|_| Path::new(&std::env::var("HOME").unwrap()).join(".llm2chip/models/UsefulSensors--moonshine-tiny"));
+    if !src.join("model.safetensors").exists() {
+        eprintln!("no Moonshine-tiny at {}: skipped", src.display());
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("llm2chip-moonshine-real-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    first_layers_of(&src, &dir, 64);
+    let samples = 1279;
+    assert_eq!(MoonshineConfig::frames(samples), 2);
+    let cycles = gates_score_as_the_exact_machine(&dir, samples, &test_clip(samples), 64, &[1, 7]);
+    eprintln!("one layer of Moonshine-tiny in gates: {cycles} cycles");
     std::fs::remove_dir_all(&dir).ok();
 }
