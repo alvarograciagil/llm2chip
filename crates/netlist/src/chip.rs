@@ -827,7 +827,11 @@ pub const INFO_ROTATION_COLS: usize = 28;
 pub const INFO_SCHEDULE: usize = 29;
 /// How many orders the die's command queue holds; zero without one.
 pub const INFO_QUEUE: usize = 30;
-pub const INFO_PARAMETERS: usize = 31;
+/// Where the system prompt starts in the description: its count of tokens, then the
+/// tokens, which the firmware runs before the host's prompt on every power-up; zero if the
+/// chip has none.
+pub const INFO_SYSTEM: usize = 31;
+pub const INFO_PARAMETERS: usize = 32;
 
 /// What the firmware needs to run the image encoder a chip carries, in the order of its
 /// words: see `VisionInfo`.
@@ -895,6 +899,23 @@ pub fn add_showo(info: &mut Vec<u32>, showo: &ShowOInfo) {
 pub fn add_schedule(info: &mut [u32], records: &[crate::schedule::Record]) -> Vec<u32> {
     info[INFO_SCHEDULE] = crate::soc::TOKENIZER_WORD as u32;
     crate::schedule::words(records)
+}
+
+/// Adds a system prompt to a chip's description: its tokens go in the description, which the
+/// image carries, so they sit wherever the image does (burnt into ROM with the weights, or
+/// in the image loaded at power-up). Errors when they do not fit its room.
+pub fn add_system_prompt(info: &mut Vec<u32>, tokens: &[u32]) -> Result<(), String> {
+    if tokens.is_empty() {
+        return Ok(());
+    }
+    let room = crate::soc::PLAN_DIRECTORY_WORD - crate::soc::CONFIG_WORD;
+    if info.len() + 1 + tokens.len() > room {
+        return Err(format!("the system prompt takes {} tokens and the chip's description has room for {}", tokens.len(), room.saturating_sub(info.len() + 1)));
+    }
+    info[INFO_SYSTEM] = info.len() as u32;
+    info.push(tokens.len() as u32);
+    info.extend_from_slice(tokens);
+    Ok(())
 }
 
 /// Adds the image encoder's description to a chip's.

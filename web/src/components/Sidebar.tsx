@@ -153,12 +153,46 @@ function PresetRow({ field }: { field: Extract<Field, { kind: "preset" }> }) {
   );
 }
 
+/** A text the design carries: kept as it is typed, and given to the design when the field
+ * is left or typing pauses. */
+function TextRow({ field }: { field: Extract<Field, { kind: "text" }> }) {
+  const t = useT();
+  const value = String(useDesign((s) => s.params[field.key]) ?? "");
+  const setParam = useDesign((s) => s.setParam);
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  useEffect(() => {
+    if (draft === value) return;
+    const timer = setTimeout(() => setParam(field.key, draft), 600);
+    return () => clearTimeout(timer);
+  }, [draft, value, field.key, setParam]);
+  return (
+    <Row
+      field={field}
+      below={
+        <textarea
+          className="param-text"
+          aria-label={t(field.label)}
+          placeholder={field.placeholder && t(field.placeholder)}
+          rows={3}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => draft !== value && setParam(field.key, draft)}
+        />
+      }
+    >
+      {null}
+    </Row>
+  );
+}
+
 function FieldRow({ field }: { field: Field }) {
   const t = useT();
   const value = useDesign((s) => s.params[field.key]);
   const setParam = useDesign((s) => s.setParam);
   if (field.kind === "range") return <RangeRow field={field} />;
   if (field.kind === "preset") return <PresetRow field={field} />;
+  if (field.kind === "text") return <TextRow field={field} />;
   if (field.kind === "toggle") {
     return (
       <Row field={field}>

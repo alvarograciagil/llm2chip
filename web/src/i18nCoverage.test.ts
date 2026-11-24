@@ -13,7 +13,7 @@ const report = (lines: string[]) => {
 /** Texts that read the same in Spanish: names, units and symbols. */
 const SAME = new Set([
   "DeltaNet", "RoPE", "SiLU", "GELU", "Show-o", "Hugging Face", "GitHub", "ECC", "SRAM", "ROM", "HBM4", "tok/s", "Top-k", "top-k", "MTP", "CPU", "GPU", "FPGA", "UCIe", "Verilog", "VHDL", "MLX", "GGUF",
-  "Posit", "Error", "Total", "Booth", "Wallace", "Janus-Pro", "MAGVIT-v2", "Qwen", "ok", "PDK", "OpenROAD", "Yosys", "JTAG", "BIST", "KV", "Q·K", "lm_head", "RISC-V", "UART", "NVMe", "PCIe", "English", "Español", "llm2chip", "Bits", "Top-1", "MUX", "MLP",
+  "Posit", "Error", "Total", "Booth", "Wallace", "Janus-Pro", "MAGVIT-v2", "Qwen", "ok", "PDK", "OpenROAD", "Yosys", "JTAG", "BIST", "KV", "Q·K", "lm_head", "RISC-V", "UART", "NVMe", "PCIe", "English", "Español", "llm2chip", "Bits", "Top-1", "MUX", "MLP", "System prompt",
 ]);
 
 function sources(dir: string): string[] {

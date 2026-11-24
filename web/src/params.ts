@@ -14,6 +14,7 @@ export type Field = Base &
     | { kind: "select"; options: [string, string][] }
     | { kind: "preset"; sections: PresetSection[] }
     | { kind: "toggle" }
+    | { kind: "text"; placeholder?: string }
   );
 
 export interface PresetSection {
@@ -134,6 +135,7 @@ export const PARAM_GROUPS: Group[] = [
       { kind: "toggle", key: "draw_images", label: "Draws images (text to image)", help: "The chip also draws: a model (Show-o) draws and retouches pictures from a text, on a die of its own. It is not vision, which analyses images. The floorplan and the estimate count it: a reference die measured with Show-o's transformer, its embedding table in external memory and MAGVIT-v2 on the host. Off, nothing of drawing is in the chip or the app." },
       { kind: "toggle", key: "speech_in", label: "Listens (speech to text)", help: "The chip also listens: a speech recogniser (Moonshine) turns a spoken question into text for the language model, on dies of its own. The floorplan and the estimate count them: reference dies until they are planned with your models in the Listen view. Off, nothing of listening is in the chip or the app." },
       { kind: "toggle", key: "speech_out", label: "Speaks (text to speech)", help: "The chip also speaks: a speech writer (OuteTTS) and a sound decoder (DAC) say the answer aloud, on dies of their own. The floorplan and the estimate count them: reference dies until they are planned with your models in the Speak view. Off, nothing of speaking is in the chip or the app." },
+      { kind: "text", key: "system_prompt", label: "System prompt", placeholder: "You are a voice assistant. Answer in one short sentence.", help: "A fixed text the chip reads before every question, such as how it should answer; a voice assistant needs one to answer briefly. It goes in the chip's description, in the image: burnt into ROM with the weights, or loaded with them at power-up, where a new image changes it. The chip answers one question per power-up, so it reads it before each one: it adds that time to the first token and takes that much of the context. Empty, there is none." },
     ],
   },
   {

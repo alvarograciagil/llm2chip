@@ -117,6 +117,10 @@ pub struct ChipParams {
     /// The chip draws: a model that draws and retouches pictures from a text (the Images
     /// view), on a die of its own that the estimate and the floorplan count (`drawing`).
     pub draw_images: bool,
+    /// A fixed system prompt the chip runs before every question, empty for none. It goes in
+    /// the chip's description, in the image: burnt into ROM with the weights, or loaded at
+    /// power-up with them, where a new image changes it.
+    pub system_prompt: String,
 
     /// 0 lets the estimator pick the smallest number that fits.
     pub dies: u32,
@@ -221,6 +225,7 @@ impl Default for ChipParams {
             speech_out: false,
             voice_plan: None,
             draw_images: false,
+            system_prompt: String::new(),
             dies: 0,
             die_max_mm2: 815.0,
             macs_per_die: 136_000,

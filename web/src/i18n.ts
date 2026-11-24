@@ -1296,6 +1296,8 @@ const ES: Record<string, string> = {
   "Draws images (text to image)": "Dibuja imágenes (de texto a imagen)",
   "Image drawing": "Dibujo",
   "reference die, measured with Show-o": "die de referencia, medido con Show-o",
+  "You are a voice assistant. Answer in one short sentence.": "Eres un asistente de voz. Responde en una frase corta.",
+  "Free text.": "Texto libre.",
 };
 
 

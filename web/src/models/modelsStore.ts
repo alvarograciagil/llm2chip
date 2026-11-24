@@ -1,5 +1,6 @@
 import { locale } from "../format";
 import { create } from "zustand";
+import { systemPrompt } from "../store";
 
 export interface Adaptation {
   design: boolean;
@@ -151,7 +152,7 @@ export const useModels = create<ModelsState>((set, get) => ({
 
   async startImage(path, chips, context, cells, bits, lanes, units, sharing) {
     try {
-      await call("/api/image", { method: "POST", headers: json, body: JSON.stringify({ path, chips, context_tokens: context, cells, activation_bits: bits, vector_lanes: lanes, vector_units: units, sharing }) });
+      await call("/api/image", { method: "POST", headers: json, body: JSON.stringify({ path, chips, context_tokens: context, cells, activation_bits: bits, vector_lanes: lanes, vector_units: units, sharing, system: systemPrompt() }) });
       set({ error: null });
       await get().pollImage();
     } catch (e) {

@@ -15,7 +15,7 @@ fn main() -> Result<(), String> {
     names.sort();
     let weights = names.iter().map(|p| std::fs::read(p).map(Vec::into_boxed_slice).map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
     let mut generator = Generator::new(&texts, weights, &Setup { activation_bits: 16, format: None, context_tokens: 512 })?;
-    generator.start(Request { prompt: args[2].clone(), max_tokens: tokens, temperature: 0.0, top_k: 1, thinking: false, think_budget: None, seed: 7 })?;
+    generator.start(Request { prompt: args[2].clone(), max_tokens: tokens, temperature: 0.0, top_k: 1, system: String::new(), thinking: false, think_budget: None, seed: 7 })?;
     let (mut ids, mut seconds) = (Vec::new(), Vec::new());
     loop {
         let event = generator.advance()?;

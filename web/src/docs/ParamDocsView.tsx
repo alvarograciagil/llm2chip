@@ -20,6 +20,8 @@ function accepted(field: Field, t: (text: string) => string): string {
       return t("On or off.");
     case "preset":
       return t(`${field.sections.length} families of ready-made formats.`);
+    case "text":
+      return t("Free text.");
   }
 }
 

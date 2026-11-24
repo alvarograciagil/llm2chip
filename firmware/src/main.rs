@@ -71,7 +71,8 @@ const INFO_ROTATION_ADDRESS: usize = 27;
 const INFO_ROTATION_COLS: usize = 28;
 const INFO_SCHEDULE: usize = 29;
 const INFO_QUEUE: usize = 30;
-const INFO_PARAMETERS: usize = 31;
+const INFO_SYSTEM: usize = 31;
+const INFO_PARAMETERS: usize = 32;
 const TARGET_VECTOR: u32 = 3;
 
 /// The tokenizer's tables, which the image builder leaves after the segment table.
@@ -368,8 +369,15 @@ fn encode_text(length: usize, sink: &mut impl FnMut(u32)) {
     let _ = tokenizer().encode(text, arena, sink);
 }
 
-/// Reads the whole prompt from the host and hands over its tokens.
+/// Hands over the system prompt's tokens, which the chip carries, then reads the whole
+/// prompt from the host and hands over its tokens.
 fn read_prompt(sink: &mut impl FnMut(u32)) {
+    let system = info(INFO_SYSTEM) as usize;
+    if system != 0 {
+        for at in system + 1..=system + info(system) as usize {
+            sink(info(at));
+        }
+    }
     if info(INFO_RAW_TOKENS) != 0 {
         loop {
             let mut token = 0u32;

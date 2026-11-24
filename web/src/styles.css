@@ -605,6 +605,22 @@ select {
   background: var(--control);
 }
 
+.param-text {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--control);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  resize: vertical;
+}
+
 input[type="range"] {
   -webkit-appearance: none;
   appearance: none;

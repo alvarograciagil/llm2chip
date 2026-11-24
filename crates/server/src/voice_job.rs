@@ -39,6 +39,10 @@ pub struct VoiceStart {
     /// Speak in the voice of the profile kept with OuteTTS, if it keeps one.
     #[serde(default)]
     pub speaker: bool,
+    /// The project's fixed system prompt, which the language model reads before the first
+    /// question, as the chip runs it.
+    #[serde(default)]
+    pub system: String,
 }
 
 impl VoiceStart {
@@ -144,9 +148,9 @@ pub fn run(start: &VoiceStart, job: &VoiceJob, kept: &Mutex<Option<Conversation>
             let decode = |tokens: &[u32]| tokenizer.decode(tokens, true).map_err(|e| e.to_string());
             // The conversation goes on with the same model in the same arithmetic, its cache kept.
             let mut slot = kept.lock().unwrap();
-            let same = slot.as_ref().is_some_and(|c| c.dir == think && c.arithmetic == arithmetic);
+            let same = slot.as_ref().is_some_and(|c| c.dir == think && c.arithmetic == arithmetic && c.system == start.system.trim());
             if start.fresh || !same {
-                *slot = Some(Conversation::new(think, arithmetic, &|t| tokenizer.token_to_id(t))?);
+                *slot = Some(Conversation::new(think, arithmetic, &start.system, &|t| tokenizer.token_to_id(t))?);
             }
             let conversation = slot.as_mut().unwrap();
             let (said, _) = conversation.ask(&question, 60, &encode, &decode)?;
@@ -227,6 +231,24 @@ pub struct PlanStart {
     /// The speech writer reads a speaker's profile before each sentence.
     #[serde(default)]
     pub speaker: bool,
+    /// The project's fixed system prompt, which the language model reads before every
+    /// question.
+    #[serde(default)]
+    pub system: String,
+}
+
+/// Tokens the system prompt takes framed for the language model in `think`.
+fn system_tokens(think: &Path, system: &str) -> Result<u32, String> {
+    let system = system.trim();
+    if system.is_empty() {
+        return Ok(0);
+    }
+    let tokenizer = Tokenizer::from_file(think.join("tokenizer.json")).map_err(|e| e.to_string())?;
+    let family = compiler::compile_model(&std::fs::read_to_string(think.join("config.json")).map_err(|e| e.to_string())?)?.family;
+    let style = crate::prompt::read(think, &family, &tokenizer);
+    let (framed, special) = style.render_with_system(system, "?", false)?;
+    let encode = |text: &str, special: bool| tokenizer.encode(text, special).map(|e| e.get_ids().to_vec()).map_err(|e| e.to_string());
+    Ok(style.split_system(system, &framed, false, special, encode)?.0.len() as u32)
 }
 
 #[derive(Default)]
@@ -244,7 +266,7 @@ pub fn run_plan(start: &PlanStart, job: &PlanJob, home: &Path) -> Result<Value, 
     if !(0.5..=30.0).contains(&start.seconds) {
         return Err("the question must last between half a second and 30 seconds".into());
     }
-    let ask = VoiceAsk { first_output_seconds: start.first_output_ms / 1e3, seconds: start.seconds, area_mm2: start.area_mm2.unwrap_or(f64::INFINITY), speaker: start.speaker, text_apart: true, ..VoiceAsk::default() };
+    let ask = VoiceAsk { first_output_seconds: start.first_output_ms / 1e3, seconds: start.seconds, area_mm2: start.area_mm2.unwrap_or(f64::INFINITY), speaker: start.speaker, text_apart: true, system_tokens: system_tokens(Path::new(&start.think), &start.system)?, ..VoiceAsk::default() };
     let (best, weighed, stages) = plan_voice_cached(&home.join(".llm2chip/cache"), &models, &ask, &mut |what| *job.doing.lock().unwrap() = what)?;
     let names: Vec<&str> = stages.iter().map(|s| s.name.as_str()).collect();
     let named = |group: &[usize]| group.iter().map(|s| names[*s]).collect::<Vec<_>>();

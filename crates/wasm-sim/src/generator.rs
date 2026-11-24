@@ -32,6 +32,9 @@ pub struct Request {
     pub think_budget: Option<u32>,
     /// Starts the sampler's random sequence.
     pub seed: u64,
+    /// The project's fixed system prompt, read before the question as the chip runs it.
+    #[serde(default)]
+    pub system: String,
 }
 
 pub struct Generator {
@@ -87,7 +90,7 @@ impl Generator {
 
     /// Frames and tokenizes the prompt and starts from an empty context.
     pub fn start(&mut self, request: Request) -> Result<Value, String> {
-        let (text, add_special) = self.prompt.render(&request.prompt, request.thinking)?;
+        let (text, add_special) = self.prompt.render_with_system(request.system.trim(), &request.prompt, request.thinking)?;
         self.tokenizer.set_add_special(add_special);
         let ids = self.tokenizer.encode(&text)?;
         if ids.is_empty() {

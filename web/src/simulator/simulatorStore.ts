@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { Adaptation } from "../models/modelsStore";
-import { useDesign } from "../store";
+import { systemPrompt, useDesign } from "../store";
 import { addActivity, EMPTY_ACTIVITY, readActivity, readCpuInfo, type ChipStep, type CpuInfo, type StepActivity } from "./activity";
 import { DEMO } from "../demo";
 import { describeModel, forgetModel, keptModels, loadModel, runModel, stopModel } from "./browserChip";
@@ -269,7 +269,7 @@ function generateInBrowser(get: Getter, set: Setter) {
   const { prompt, maxTokens, temperature, topK, thinking, thinkBudget } = get();
   const budget = thinkBudget.trim() === "" ? null : Math.max(0, Math.floor(Number(thinkBudget) || 0));
   set({ ...FRESH_RUN, image: null, draw: false });
-  runModel({ prompt, max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, seed: Math.floor(Math.random() * 2 ** 32) }, (event) => handleEvent(set, event, () => undefined));
+  runModel({ prompt, system: systemPrompt(), max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, seed: Math.floor(Math.random() * 2 ** 32) }, (event) => handleEvent(set, event, () => undefined));
 }
 
 /** A link to the simulator: chooses its model, stories260K if it names none, and runs it if
@@ -451,7 +451,7 @@ export const useSimulator = create<SimulatorState>((set, get) => ({
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${location.host}/api/generate`);
     socket = ws;
-    ws.onopen = () => ws.send(JSON.stringify({ prompt, max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, mtp_depth: mtpDepth, fidelity, image: image && { width: image.width, height: image.height, rgb: image.rgb }, draw }));
+    ws.onopen = () => ws.send(JSON.stringify({ prompt, system: systemPrompt(), max_tokens: maxTokens, temperature, top_k: topK, thinking, think_budget: budget, mtp_depth: mtpDepth, fidelity, image: image && { width: image.width, height: image.height, rgb: image.rgb }, draw }));
     ws.onerror = () => set({ error: "The connection to the engine was lost.", running: false });
     ws.onclose = () => set({ running: false });
     ws.onmessage = (event) => handleEvent(set, JSON.parse(event.data), () => ws.close());

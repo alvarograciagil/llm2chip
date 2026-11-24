@@ -82,7 +82,7 @@ fn a_checkpoint_in_memory_answers_as_one_on_disk() {
                 next = sample(logits.unwrap(), 0.0, 1, &mut 1);
             }
 
-            let start = generator.start(Request { prompt: text.into(), max_tokens: TOKENS, temperature: 0.0, top_k: 1, thinking: false, think_budget: None, seed: 7 }).unwrap();
+            let start = generator.start(Request { prompt: text.into(), max_tokens: TOKENS, temperature: 0.0, top_k: 1, thinking: false, think_budget: None, seed: 7, system: String::new() }).unwrap();
             assert_eq!(start["prompt_tokens"], ids.len(), "{model}: {text:?}");
             let (mut got, mut said) = (Vec::new(), String::new());
             loop {

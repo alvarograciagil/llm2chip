@@ -102,17 +102,60 @@ impl PromptStyle {
     }
 
     /// The text with an image before the question, which the chip reads as one
-    /// `<|image_pad|>` that its tokens replace.
-    pub fn render_with_image(&self, prompt: &str, thinking: bool) -> Result<String, String> {
+    /// `<|image_pad|>` that its tokens replace, after the system prompt when there is one
+    /// (Janus's own when there is not).
+    pub fn render_with_image(&self, system: &str, prompt: &str, thinking: bool) -> Result<String, String> {
         if self.janus {
             // Janus's own framing; the one placeholder becomes as many vectors as the picture has patches.
-            return Ok(format!("{}{JANUS_SYSTEM}\n\n<|User|>: <begin_of_image><image_placeholder><end_of_image>\n{prompt}\n\n<|Assistant|>:", self.bos));
+            return Ok(format!("{}<|User|>: <begin_of_image><image_placeholder><end_of_image>\n{prompt}\n\n<|Assistant|>:", self.image_system(system)?));
         }
         if !self.chatml_thinking {
             return Err("this model does not read images".into());
         }
         let think = if thinking { "<think>\n" } else { "<think>\n\n</think>\n\n" };
-        Ok(format!("<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{prompt}<|im_end|>\n<|im_start|>assistant\n{think}"))
+        Ok(format!("{}<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{prompt}<|im_end|>\n<|im_start|>assistant\n{think}", self.image_system(system)?))
+    }
+
+    /// The framing a question with an image starts with: its system prompt.
+    fn image_system(&self, system: &str) -> Result<String, String> {
+        if self.janus {
+            let system = if system.is_empty() { JANUS_SYSTEM } else { system };
+            return Ok(format!("{}{system}\n\n", self.bos));
+        }
+        if system.is_empty() {
+            return Ok(String::new());
+        }
+        Ok(self.render_conversation(&[("system", system)], false, false)?.0)
+    }
+
+    /// One question after a fixed system prompt (none when it is empty), framed for the
+    /// model's answer: the text to tokenize, and whether the tokenizer must add its special
+    /// tokens.
+    pub fn render_with_system(&self, system: &str, prompt: &str, thinking: bool) -> Result<(String, bool), String> {
+        if system.is_empty() {
+            return self.render(prompt, thinking);
+        }
+        self.render_conversation(&[("system", system), ("user", prompt)], thinking, true)
+    }
+
+    /// Splits `framed`, a conversation that starts with the system prompt `system` (as
+    /// `render_with_system` or `render_with_image` frame it), into the system prompt's
+    /// tokens, which a chip carries and runs before anything else, and the text that
+    /// follows, which the host sends. `encode` tokenizes a text, adding the special tokens
+    /// when asked; they go with the system prompt, at the start. Refuses a template that does
+    /// not put the system prompt ahead of the rest, or a split whose tokens differ from the
+    /// whole conversation's.
+    pub fn split_system(&self, system: &str, framed: &str, image: bool, add_special: bool, encode: impl Fn(&str, bool) -> Result<Vec<u32>, String>) -> Result<(Vec<u32>, String), String> {
+        let prefix = if image { self.image_system(system)? } else { self.render_conversation(&[("system", system)], false, false)?.0 };
+        let Some(rest) = framed.strip_prefix(prefix.as_str()).filter(|_| prefix.contains(system)) else {
+            return Err("this model's chat template does not put the system prompt apart, ahead of the question".into());
+        };
+        let tokens = encode(&prefix, add_special)?;
+        let whole = encode(framed, add_special)?;
+        if whole.len() < tokens.len() || whole[..tokens.len()] != tokens[..] || encode(rest, false)? != whole[tokens.len()..] {
+            return Err("the system prompt's last tokens join the question's first, so the chip cannot carry it apart: end it with a full stop or a new line".into());
+        }
+        Ok((tokens, rest.to_string()))
     }
 
     /// The text to tokenize, and whether the tokenizer must add its special tokens.
@@ -163,8 +206,54 @@ mod tests {
     #[test]
     fn an_image_goes_before_the_question_as_one_placeholder() {
         let qwen = PromptStyle { template: None, bos: String::new(), eos: String::new(), chatml_thinking: true, janus: false, stop: vec![], think: None };
-        assert_eq!(qwen.render_with_image("What is it?", false).unwrap(), "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>What is it?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
-        assert!(style(None, vec![2]).render_with_image("hola", false).is_err());
+        assert_eq!(qwen.render_with_image("", "What is it?", false).unwrap(), "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>What is it?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+        assert!(style(None, vec![2]).render_with_image("", "hola", false).is_err());
+    }
+
+    /// A tokenizer for tests: a token per character, and 1 before them with the special ones.
+    fn by_character(text: &str, special: bool) -> Result<Vec<u32>, String> {
+        Ok(special.then_some(1).into_iter().chain(text.chars().map(|c| c as u32)).collect())
+    }
+
+    #[test]
+    fn a_system_prompt_goes_first_and_the_chip_carries_its_tokens() {
+        let qwen = PromptStyle { template: None, bos: String::new(), eos: String::new(), chatml_thinking: true, janus: false, stop: vec![], think: None };
+        let (framed, special) = qwen.render_with_system("Answer briefly.", "Hi", false).unwrap();
+        assert_eq!(framed, "<|im_start|>system\nAnswer briefly.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+        let (tokens, rest) = qwen.split_system("Answer briefly.", &framed, false, special, by_character).unwrap();
+        assert_eq!(tokens, by_character("<|im_start|>system\nAnswer briefly.<|im_end|>\n", false).unwrap());
+        assert!(rest.starts_with("<|im_start|>user\nHi"));
+        // With an image the system prompt goes before it too.
+        let image = qwen.render_with_image("Answer briefly.", "What is it?", false).unwrap();
+        assert!(image.starts_with("<|im_start|>system\nAnswer briefly.<|im_end|>\n<|im_start|>user\n<|vision_start|>"));
+        assert!(qwen.split_system("Answer briefly.", &image, true, false, by_character).is_ok());
+        // Without one, nothing changes.
+        assert_eq!(qwen.render_with_system("", "Hi", false).unwrap(), qwen.render("Hi", false).unwrap());
+    }
+
+    #[test]
+    fn the_special_tokens_go_with_the_system_prompt() {
+        let plain = style(None, vec![2]);
+        let (framed, special) = plain.render_with_system("Be kind.", "hola", false).unwrap();
+        assert!(special);
+        let (tokens, rest) = plain.split_system("Be kind.", &framed, false, special, by_character).unwrap();
+        assert_eq!(tokens[0], 1);
+        assert_eq!(rest, "\nhola");
+    }
+
+    #[test]
+    fn a_template_that_mixes_the_system_prompt_into_the_question_is_refused() {
+        let llama2 = "{{ bos_token }}{% for m in messages %}{% if m['role'] == 'system' %}{% set s = m['content'] %}{% else %}[INST] {{ s }} {{ m['content'] }} [/INST]{% endif %}{% endfor %}";
+        let mixed = style(Some(llama2), vec![2]);
+        let (framed, special) = mixed.render_with_system("Be kind.", "hola", false).unwrap();
+        assert!(mixed.split_system("Be kind.", &framed, false, special, by_character).is_err());
+    }
+
+    #[test]
+    fn janus_keeps_its_own_system_prompt_unless_the_chip_has_one() {
+        let janus = PromptStyle { template: None, bos: "<s>".into(), eos: String::new(), chatml_thinking: false, janus: true, stop: vec![], think: None };
+        assert!(janus.render_with_image("", "What?", false).unwrap().starts_with(&format!("<s>{JANUS_SYSTEM}\n\n<|User|>")));
+        assert!(janus.render_with_image("Be brief.", "What?", false).unwrap().starts_with("<s>Be brief.\n\n<|User|>"));
     }
 
     fn style(template: Option<&str>, stop: Vec<u32>) -> PromptStyle {

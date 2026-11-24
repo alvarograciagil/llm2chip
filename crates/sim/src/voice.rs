@@ -117,20 +117,26 @@ pub struct Conversation {
     tokens: Vec<u32>,
     pub arithmetic: Arithmetic,
     pub dir: std::path::PathBuf,
+    /// The fixed system prompt it starts with, empty for none.
+    pub system: String,
     /// Times the conversation had to start again from the whole text.
     pub replayed: usize,
 }
 
 impl Conversation {
-    pub fn new(dir: &Path, arithmetic: Arithmetic, token_id: &dyn Fn(&str) -> Option<u32>) -> Result<Self, String> {
+    /// A conversation with the model in `dir` that starts with the fixed `system` prompt, as
+    /// a chip that carries one runs it before the first question (none when it is empty).
+    pub fn new(dir: &Path, arithmetic: Arithmetic, system: &str, token_id: &dyn Fn(&str) -> Option<u32>) -> Result<Self, String> {
         let family = compiler::compile_model(&std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?)?.family;
         let style = PromptStyle::read(&family, |name| std::fs::read_to_string(dir.join(name)).ok(), token_id);
-        Ok(Self { model: Model::open(dir, arithmetic)?, style, messages: Vec::new(), tokens: Vec::new(), arithmetic, dir: dir.to_path_buf(), replayed: 0 })
+        let system = system.trim().to_string();
+        let messages = if system.is_empty() { Vec::new() } else { vec![("system".to_string(), system.clone())] };
+        Ok(Self { model: Model::open(dir, arithmetic)?, style, messages, tokens: Vec::new(), arithmetic, dir: dir.to_path_buf(), system, replayed: 0 })
     }
 
     /// Questions asked so far.
     pub fn turns(&self) -> usize {
-        self.messages.len() / 2
+        (self.messages.len() - usize::from(!self.system.is_empty())) / 2
     }
 
     /// Every token the cache holds, in order.

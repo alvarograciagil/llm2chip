@@ -545,6 +545,17 @@ pub fn link_plan(link: LinkKind, dies: u32, die_area_mm2: f64) -> LinkPlan {
 /// Measured on the generated cell, for words of 64 weight bits.
 const ECC_GATES_PER_CELL: f64 = 430.0;
 pub const TOKENIZER_BITS_PER_TOKEN: f64 = 500.0;
+/// Tokens the chip's description has room for after its own words: 1,008 words, less the
+/// fixed table, sixteen routine parameters of seven words and the stop tokens.
+pub const SYSTEM_PROMPT_ROOM: u32 = 850;
+
+/// Tokens a system prompt takes, estimated as the browser has no tokenizer: four characters
+/// a token, and a few for the template's framing.
+pub fn system_prompt_tokens(text: &str) -> u32 {
+    let text = text.trim();
+    if text.is_empty() { 0 } else { (text.len() as u32).div_ceil(4) + 6 }
+}
+
 /// The CPU's program memory, the firmware's size rounded up to a power of two.
 pub const FIRMWARE_PROGRAM_BYTES: u32 = 1 << 15;
 
@@ -1086,6 +1097,22 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             field: Some("max_params_g"), value: Some(serde_json::json!((included / 1e9 * 100.0).ceil() / 100.0)),
         });
     }
+    let system = system_prompt_tokens(&p.system_prompt);
+    if system > SYSTEM_PROMPT_ROOM {
+        violations.push(Violation {
+            severity: Severity::Error,
+            message: format!("The system prompt takes about {system} tokens and the chip's description holds about {SYSTEM_PROMPT_ROOM}."),
+            fix: "Shorten the system prompt.".into(),
+            field: Some("system_prompt"), value: None,
+        });
+    } else if system as u64 >= p.context_tokens {
+        violations.push(Violation {
+            severity: Severity::Error,
+            message: format!("The system prompt takes about {system} tokens and the context holds {}: no room is left for the question.", p.context_tokens),
+            fix: "Raise the context or shorten the system prompt.".into(),
+            field: Some("context_tokens"), value: None,
+        });
+    }
     if model.max_context > 0 && p.context_tokens > model.max_context {
         violations.push(Violation {
             severity: Severity::Warning,
@@ -1436,6 +1463,13 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
         "Inverse of the time of one token.".into());
     m("prefill_tok_s", "Speed", "Prompt reading", prefill_rate, "tok/s", Assumed,
         "The tokens are already known, so every die works at once.".into());
+    if system > 0 {
+        m("system_prompt_tokens", "Model", "System prompt", system as f64, "tokens", Assumed,
+            if p.weight_backend == WeightBackend::Rom { "About four characters a token, with its framing; the chip carries it in its description, burnt into ROM with the weights: changing it takes a new chip.".into() }
+            else { "About four characters a token, with its framing; the chip carries it in its description, in the image loaded at power-up: changing it takes a new image.".into() });
+        m("system_prompt_ms", "Speed", "System prompt before each question", system as f64 / prefill_rate.max(1e-9) * 1e3, "ms", Assumed,
+            "The chip answers one question per power-up, so it reads the system prompt before each one at the prompt reading speed; it also takes that much of the context.".into());
+    }
     if let (true, Some(vision)) = (p.include_vision, model.vision) {
         // The encoder runs on one die's cells, before the prompt's text.
         let macs = vision.macs_per_image(512, 512) as f64;
@@ -1779,6 +1813,26 @@ mod tests {
         let entries = u16::from_le_bytes(elf[44..46].try_into().unwrap()) as usize;
         let at_address_zero = (0..entries).map(|i| word(28) + 32 * i).find(|at| word(*at) == 1 && word(*at + 8) == 0).unwrap();
         assert!(word(at_address_zero + 16) <= FIRMWARE_PROGRAM_BYTES as usize);
+    }
+
+    #[test]
+    fn a_system_prompt_is_counted_where_the_image_keeps_it() {
+        let plain = estimate(&qwen(), &ChipParams::default()).unwrap();
+        assert!(plain.metric("system_prompt_tokens").is_none());
+        let system = "You are a voice assistant. Answer in one short sentence.".to_string();
+        let p = ChipParams { system_prompt: system.clone(), ..Default::default() };
+        let report = estimate(&qwen(), &p).unwrap();
+        let tokens = report.metric("system_prompt_tokens").unwrap();
+        assert_eq!(tokens, system_prompt_tokens(&system) as f64);
+        let seconds = report.metric("system_prompt_ms").unwrap() / 1e3;
+        assert!((seconds - tokens / report.metric("prefill_tok_s").unwrap()).abs() < 1e-9);
+        let why = |r: &Report| r.metrics.iter().find(|m| m.id == "system_prompt_tokens").unwrap().why.clone();
+        assert!(why(&report).contains("new image"));
+        let rom = estimate(&qwen(), &ChipParams { weight_backend: WeightBackend::Rom, ..p.clone() }).unwrap();
+        assert!(why(&rom).contains("ROM"));
+        // One too long for the description is refused.
+        let long = estimate(&qwen(), &ChipParams { system_prompt: "word ".repeat(1000), ..Default::default() }).unwrap();
+        assert!(long.violations.iter().any(|v| v.field == Some("system_prompt") && v.severity == Severity::Error));
     }
 
     #[test]

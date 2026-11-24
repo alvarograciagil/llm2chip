@@ -128,6 +128,10 @@ pub struct ImageRequest {
     /// How the chips share the model when there are several.
     #[serde(default)]
     pub sharing: Sharing,
+    /// The system prompt's tokens, which the chip carries in its description and runs
+    /// before every question (see `netlist::chip::add_system_prompt`).
+    #[serde(default)]
+    pub system: Vec<u32>,
 }
 
 /// One tensor in the file, written cell by cell: rows `c`, `c + cells`, … for cell `c`.
@@ -229,10 +233,19 @@ fn boot_plans(program: &Program, weights: &Weights, die: DieConfig, request: &Im
     // Each register takes only the vector memory its routines reach, on the chip that needs most.
     let vector_bits = built.iter().flatten().map(|(layout, _)| layout.register_bases().1).max().unwrap_or(1);
     let die = DieConfig { features: features.with_vector_bits(vector_bits), microcode_bits: bits_for(words), ..die };
-    Ok(built
+    built
         .iter()
-        .map(|parts| parts.iter().map(|(layout, code)| ChipPart { info: chip_info(&die, code, layout.logits_register(program), program.vocab as u32, &setup), segments: image_segments(&die, code, layout) }).collect())
-        .collect())
+        .map(|parts| {
+            parts
+                .iter()
+                .map(|(layout, code)| {
+                    let mut info = chip_info(&die, code, layout.logits_register(program), program.vocab as u32, &setup);
+                    netlist::chip::add_system_prompt(&mut info, &request.system)?;
+                    Ok(ChipPart { info, segments: image_segments(&die, code, layout) })
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .collect()
 }
 
 fn io(error: std::io::Error) -> String {

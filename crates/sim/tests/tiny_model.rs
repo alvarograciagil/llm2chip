@@ -680,6 +680,65 @@ fn the_firmware_closes_the_reasoning_when_its_budget_runs_out() {
 }
 
 #[test]
+fn the_firmware_runs_the_chips_system_prompt_before_the_hosts() {
+    use netlist::chip::{add_system_prompt, chip_info, ChipModel, GenerationSetup};
+    use netlist::image::build_image;
+    use netlist::rv32::Rv32Iss;
+    use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
+    use netlist::soc::{FirmwareImage, SocBus, SocConfig};
+    use netlist::Parameter;
+    use sim::chip::{RunnerEngine, FLOW_DRAFT_REGISTER, FLOW_INDEX_BITS, FLOW_REGISTER_BITS};
+
+    let dir = std::env::temp_dir().join(format!("llm2chip-system-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let engine = || Engine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
+    let best = |v: &[f32]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
+    let (system, question, count) = ([3u32, 5, 6, 1], [2u32, 7], 5usize);
+    // The software reads the whole conversation, the system prompt first.
+    let mut software = engine();
+    let whole: Vec<u32> = system.iter().chain(&question).copied().collect();
+    let mut next = 0;
+    for (i, id) in whole.iter().enumerate() {
+        next = software.step(*id, i + 1 == whole.len()).unwrap().0.map_or(next, best);
+    }
+    let mut expected = Vec::new();
+    for _ in 0..count {
+        expected.push(next);
+        next = best(software.step(next, true).unwrap().0.unwrap());
+    }
+
+    // The chip carries the system prompt and the host sends only the question.
+    let firmware = FirmwareImage::from_elf(include_bytes!("../../../firmware/prebuilt/firmware.elf")).unwrap();
+    let die = DieConfig { reg_bits: FLOW_REGISTER_BITS, index_bits: FLOW_INDEX_BITS, microcode_bits: 2, ..die_config() };
+    let code = Microprogram { words: Vec::new(), entries: (0..6).collect(), parameters: vec![Parameter { register: 1, token: 1, position: 0, constant: 0, window_length: 0, window_slot: 0, window: 0 }, Parameter { register: 2, token: 0, position: 1, constant: 0, window_length: 0, window_slot: 0, window: 0 }], group: (0, 0), marks: Vec::new() };
+    let setup = GenerationSetup { max_new: count as u32, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: None, think_budget: u32::MAX };
+    let mut info = chip_info(&die, &code, 1, 8, &setup);
+    let mut full = info.clone();
+    add_system_prompt(&mut info, &system).unwrap();
+    let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
+    let input: Vec<u8> = question.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect();
+    let mut chip_engine = engine();
+    let runner = RunnerEngine::new(&mut chip_engine, 16, 0);
+    let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
+    let mut bus = SocBus::booted_with(SocConfig { program_bits: 14, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
+    let mut cpu = Rv32Iss::default();
+    while !cpu.halted {
+        cpu.step(&mut bus);
+        assert!(cpu.cycle < 200_000_000, "the firmware does not finish");
+    }
+    assert!(bus.peripheral.engine.error.is_none(), "{:?}", bus.peripheral.engine.error);
+    // Every token of the system prompt and the question, and each answer token but the last.
+    assert_eq!(bus.peripheral.engine.steps as usize, whole.len() + count - 1);
+    let tokens: Vec<u32> = bus.tx.as_chunks::<4>().0.iter().map(|t| u32::from_le_bytes(*t)).collect();
+    assert_eq!(tokens, expected);
+
+    // A description with no room left for it refuses the system prompt.
+    assert!(add_system_prompt(&mut full, &vec![1; 1000]).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn the_cpu_profile_adds_up_and_tells_waiting_from_work() {
     use netlist::activity::{ChipActivity, CpuProfile, CpuTask};
     use netlist::chip::{chip_info, ChipModel, GenerationSetup, REG_ENTRY};

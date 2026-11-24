@@ -113,6 +113,35 @@ The "Weights" parameter decides whether the model can be changed. With ROM, each
 
 The biggest saving does not come from the logic but from the density of ROM against SRAM. To synthesize it in a real technology, `llm2chip_rom` must be replaced by the foundry's ROM macro, with each cell's contents.
 
+## A fixed system prompt
+
+A project can give the chip a **system prompt** (`system_prompt`): a fixed text it runs before every question, such as how to answer. A voice assistant needs one to answer in a short sentence.
+
+**Where it lives.** Its tokens go in the chip's description (`netlist::chip::add_system_prompt`): `INFO_SYSTEM` points at a word with their count, followed by the tokens. The description is part of the image, so the system prompt sits wherever the image does:
+- With the weights in ROM, it is burnt in with them, and changing it takes a new chip.
+- Otherwise it is loaded at power-up with the weights, and writing a new image changes it.
+
+The description has 1,008 words. After its own words, that leaves room for roughly 850 tokens, and longer prompts are refused.
+
+**How it runs.** Before reading the host's prompt, the firmware hands each of these tokens to the same path as the prompt's tokens. Their positions, the reasoning budget and the draft head therefore treat them exactly as text the host sent. A chip without one pays a single branch, and the firmware grew by 108 bytes. Chips run by schedules (speech, sound) and Show-o's chips do not read a prompt, so they ignore it.
+
+**What the host sends.** The host frames the conversation with the model's chat template, system prompt first (`PromptStyle::render_with_system`), and splits it there (`split_system`). The system prompt's framed tokens go in the chip, and the rest goes over the host port. The model's special tokens, such as BOS, go with the system prompt, so a chip that tokenizes on the CPU no longer adds them to the question.
+
+A template that does not put the system prompt ahead of the question is refused, rather than sent as different text. Llama 2's, which folds it into the first user turn, is one example. So is a split whose tokens differ from the whole conversation's.
+
+The simulator (local and in the browser), the Listen and Speak views, the voice planner and written chip images all take the project's system prompt.
+
+**What it costs.** The chip answers one question per power-up, so it reads the system prompt before each one. The estimate shows:
+- its tokens (about four characters each, as the browser has no tokenizer);
+- the time it adds before the first token, at the prompt reading speed;
+- that it takes that much of the context.
+
+The voice planner adds its tokens to the language model's prompt, so the time to the first output includes them.
+
+Keeping its cache between questions would avoid reading it again each time, but that needs a firmware that answers several questions without powering up again. It is not built yet.
+
+`the_firmware_runs_the_chips_system_prompt_before_the_hosts` checks it at instruction level with the tiny model. The system prompt goes in the description and the question over the port, and the chip writes the same tokens as the software reading the whole conversation.
+
 ## Why not everything in gates with Qwen
 
 Qwen3.8 has 27 billion weights, and simulating them in gates is not feasible. The strategy is the one that already works for the core:
@@ -163,7 +192,8 @@ A program that is a set of routines rather than a token's pass (an image or spee
 |---|---|
 | `INFO_SCHEDULE` (29) | The schedule's word in data memory; zero for a chip that reads a prompt |
 | `INFO_QUEUE` (30) | The command queue's orders; zero without one |
-| `INFO_PARAMETERS` (31 on) | The parameter registers, seven words each |
+| `INFO_SYSTEM` (31) | Where the system prompt starts in the description; zero without one (see below) |
+| `INFO_PARAMETERS` (32 on) | The parameter registers, seven words each |
 
 The **command queue** (`DieFeatures::queue_bits`) sits between the CPU's writes and the die: writes to a parameter register or to `REG_ENTRY` wait in it, and the die takes one a cycle whenever it is free, an entry starting it. `REG_QUEUE_ROOM` (49) says how many more it takes, and `REG_STATUS` says free once it is empty and the die idle. It is built only on the dies that ask for it, such as voice's, so the CPU orders the next routine while the die runs this one. [voice.md](voice.md#the-chip-runs-its-programs-by-itself) has the records, what each chip's host sends and what the firmware's work costs.
 

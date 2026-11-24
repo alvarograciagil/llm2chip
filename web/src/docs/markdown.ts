@@ -11,6 +11,8 @@ function accepted(field: Field): string {
       return "On or off.";
     case "preset":
       return `Ready-made formats: ${field.sections.map((s) => s.title).join(", ")}.`;
+    case "text":
+      return "Free text.";
   }
 }
 

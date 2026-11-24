@@ -65,7 +65,8 @@ struct Loaded {
     accelerator: Option<String>,
     dir: PathBuf,
     /// The firmware's tokenizer tables, built the first time they are needed.
-    firmware_tables: Option<(u64, Vec<u32>)>,
+    /// The tokenizer's tables, and the context and the special tokens they were built for.
+    firmware_tables: Option<((u64, bool), Vec<u32>)>,
     load_report: Option<LoadReport>,
     prompt: PromptStyle,
     /// The image encoder, opened the first time an image arrives.
@@ -306,7 +307,7 @@ fn run_speed(catalog: &Catalog, request: SpeedRequest) -> Result<serde_json::Val
     let program = compile_model(&entry.config)?;
     let weights = Weights::open(&dir)?;
     let context = request.context_tokens.max(1);
-    let image = ImageRequest { sharing: Default::default(), chips: vec![1], context_tokens: context, cells: request.cells.max(1), activation_bits: request.activation_bits.clamp(8, 24), lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special: false, stop: Vec::new() };
+    let image = ImageRequest { sharing: Default::default(), chips: vec![1], context_tokens: context, cells: request.cells.max(1), activation_bits: request.activation_bits.clamp(8, 24), lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special: false, stop: Vec::new(), system: Vec::new() };
     let die = fitted_die(&program, &weights, &image)?;
     let layout = Layout::for_image(&program, &weights, die, context as usize)?;
     let mut totals: Vec<(String, u64, u32)> = Vec::new();
@@ -364,6 +365,10 @@ struct ImageStart {
     vector_lanes: u32,
     #[serde(default = "one_lane")]
     vector_units: u32,
+    /// The project's fixed system prompt, which the chip carries and runs before every
+    /// question.
+    #[serde(default)]
+    system: String,
 }
 
 async fn image_status(State(app): State<App>) -> Response {
@@ -654,8 +659,17 @@ async fn image_start(State(app): State<App>, Json(request): Json<ImageStart>) ->
             let firmware = FirmwareImage::from_elf(FIRMWARE)?;
             let out = home().join(".llm2chip/images").join(format!("{}.chipimg", entry.name.replace('/', "--")));
             // A chip's image has one framing of the text: with its template, nothing is added.
+            // A system prompt takes the special tokens with it, into the chip's description.
             let add_special = prompt.render("", false)?.1;
-            let image = ImageRequest { chips: request.chips, context_tokens: request.context_tokens.max(1), cells: request.cells.max(1), activation_bits: request.activation_bits, lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special, stop: prompt.stop.clone(), sharing: request.sharing };
+            let system = request.system.trim();
+            let (add_special, system) = if system.is_empty() {
+                (add_special, Vec::new())
+            } else {
+                let (framed, special) = prompt.render_with_system(system, "?", false)?;
+                let encode = |text: &str, special: bool| tokenizer.encode(text, special).map(|e| e.get_ids().to_vec()).map_err(|e| e.to_string());
+                (false, prompt.split_system(system, &framed, false, special, encode)?.0)
+            };
+            let image = ImageRequest { chips: request.chips, context_tokens: request.context_tokens.max(1), cells: request.cells.max(1), activation_bits: request.activation_bits, lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special, stop: prompt.stop.clone(), sharing: request.sharing, system };
             let report = write_chip_image(&dir, &firmware, &image, &out, &job.done, &job.total, &job.cancel)?;
             Ok(serde_json::json!({ "path": out.to_string_lossy(), "bytes": report.bytes, "chips": report.chips, "tensors": report.tensors, "boot_words": report.boot_words, "seconds": report.seconds }))
         });
@@ -753,6 +767,9 @@ async fn load(State(app): State<App>, Json(request): Json<LoadRequest>) -> Respo
 #[derive(Deserialize)]
 struct GenerateRequest {
     prompt: String,
+    /// The project's fixed system prompt, which the chip runs before every question.
+    #[serde(default)]
+    system: String,
     max_tokens: usize,
     temperature: f32,
     top_k: usize,
@@ -928,15 +945,27 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
         think_budget: request.think_budget.unwrap_or(u32::MAX),
     };
     let mut info = chip_info(&die, &code, FLOW_LOGITS_REGISTER, vocabulary as u32, &setup);
+    // The system prompt's tokens go in the chip's description, which runs them first; the
+    // host sends the rest, without the special tokens, which went with them.
+    let system = request.system.trim();
+    let (text, add_special, sent) = if system.is_empty() {
+        (text.to_string(), add_special, ids.to_vec())
+    } else {
+        let tokenizer = &loaded.tokenizer;
+        let encode = |text: &str, special: bool| tokenizer.encode(text, special).map(|e| e.get_ids().to_vec()).map_err(|e| e.to_string());
+        let (tokens, rest) = loaded.prompt.split_system(system, text, picture.is_some(), add_special, encode)?;
+        netlist::chip::add_system_prompt(&mut info, &tokens)?;
+        (rest, false, ids[tokens.len()..].to_vec())
+    };
     if let Some((.., (_, vision))) = &picture {
         netlist::chip::add_vision(&mut info, vision);
     }
     let use_tables = request.fidelity.tokenizer;
     let context = if request.fidelity.context_tokens > 0 { request.fidelity.context_tokens } else { DEFAULT_CONTEXT };
-    if use_tables && loaded.firmware_tables.as_ref().is_none_or(|(built_for, _)| *built_for != context) {
+    if use_tables && loaded.firmware_tables.as_ref().is_none_or(|(built_for, _)| *built_for != (context, add_special)) {
         let mut tables = TokenizerTables::from_file(&loaded.dir.join("tokenizer.json"), context)?;
         tables.set_add_special(add_special);
-        loaded.firmware_tables = Some((context, tables.to_words()));
+        loaded.firmware_tables = Some(((context, add_special), tables.to_words()));
     }
     let tables: &[u32] = match &loaded.firmware_tables {
         Some((_, words)) if use_tables => words,
@@ -946,7 +975,7 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
     let prompt: Vec<u8> = if use_tables {
         text.bytes().chain([0]).collect()
     } else {
-        ids.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect()
+        sent.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect()
     };
     // The image goes first, before the prompt that places it.
     let (input, picture) = match picture {
@@ -1108,8 +1137,8 @@ fn run_generation(app: &App, request: GenerateRequest, sender: &mpsc::Sender<ser
         return run_drawing(loaded, &request, sender, cancelled);
     }
     let (text, add_special) = match request.image {
-        Some(_) => (loaded.prompt.render_with_image(&request.prompt, request.thinking)?, false),
-        None => loaded.prompt.render(&request.prompt, request.thinking)?,
+        Some(_) => (loaded.prompt.render_with_image(request.system.trim(), &request.prompt, request.thinking)?, false),
+        None => loaded.prompt.render_with_system(request.system.trim(), &request.prompt, request.thinking)?,
     };
     let ids = loaded.tokenizer.encode(text.as_str(), add_special).map_err(|e| e.to_string())?.get_ids().to_vec();
     loaded.engine.reset();

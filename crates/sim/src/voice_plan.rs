@@ -111,6 +111,14 @@ pub struct VoiceAsk {
     /// on dies of its own, the estimator's, so its voice dies hold only voice stages.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub text_apart: bool,
+    /// Tokens of the fixed system prompt the chip runs before every question: the language
+    /// model reads them before the question, so they come before the first output.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub system_tokens: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Sets of dies from the frontier for Qwen3.8-27B: 12 dies of 64 × 128 units and 32,768
@@ -122,7 +130,7 @@ fn large_sets() -> Vec<(u32, String, (u32, u32, u32))> {
 
 impl Default for VoiceAsk {
     fn default() -> Self {
-        Self { seconds: 3.0, words: 12, first_output_seconds: 0.5, area_mm2: f64::INFINITY, shapes: vec![(0, 6, 11), (0, 6, 13), (4, 6, 11), (4, 6, 13), (4, 6, 16)], chunks: vec![16, 32, 64], speaker: false, large: large_sets(), text_apart: false }
+        Self { seconds: 3.0, words: 12, first_output_seconds: 0.5, area_mm2: f64::INFINITY, shapes: vec![(0, 6, 11), (0, 6, 13), (4, 6, 11), (4, 6, 13), (4, 6, 16)], chunks: vec![16, 32, 64], speaker: false, large: large_sets(), text_apart: false, system_tokens: 0 }
     }
 }
 
@@ -217,7 +225,7 @@ fn measure_think(dir: &Path, ask: &VoiceAsk, costs: &Costs, question_tokens: u32
     if could_fit_one_die(dir)? {
         for &shape in &ask.shapes {
             progress(format!("the language model on {}", shape_name(shape)));
-            if let Ok(fit) = language_model(dir, costs, (1, Sharing::Layers), shape, 40, question_tokens) {
+            if let Ok(fit) = language_model(dir, costs, (1, Sharing::Layers), shape, 40 + ask.system_tokens, question_tokens) {
                 think.push(fit);
             }
         }
@@ -227,7 +235,7 @@ fn measure_think(dir: &Path, ask: &VoiceAsk, costs: &Costs, question_tokens: u32
         for (chips, sharing, shape) in &ask.large {
             progress(format!("the language model on {chips} dies, {sharing}"));
             let sharing = crate::sizing::parse_sharings(sharing, &[*chips])?.into_iter().next().ok_or("no sharing")?;
-            match language_model(dir, costs, (*chips, sharing), *shape, 40, question_tokens) {
+            match language_model(dir, costs, (*chips, sharing), *shape, 40 + ask.system_tokens, question_tokens) {
                 Ok(fit) => think.push(fit),
                 Err(e) => progress(format!("the language model on {chips} dies: {e}")),
             }

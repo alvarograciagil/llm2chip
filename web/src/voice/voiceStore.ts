@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { ServerModel } from "../simulator/simulatorStore";
-import { useDesign } from "../store";
+import { systemPrompt, useDesign } from "../store";
 
 /** The two views: listening (a spoken question, its text and the answer) and speaking (a
  * text, or the answer to it, said aloud). */
@@ -194,7 +194,7 @@ export const useVoice = create<VoiceState>((set, get) => ({
     const parts = chipParts();
     set({ planning: true, planError: null, plan: null, planDoing: "" });
     // Only the parts the project's chip has.
-    const body = { listen: parts.listens ? listen : null, think, speak: parts.speaks ? speak : null, sound: parts.speaks ? sound : null, first_output_ms: firstOutputMs, seconds: questionSeconds, area_mm2: areaMm2.trim() ? Number(areaMm2) : null, speaker: parts.speaks && speaker };
+    const body = { listen: parts.listens ? listen : null, think, speak: parts.speaks ? speak : null, sound: parts.speaks ? sound : null, first_output_ms: firstOutputMs, seconds: questionSeconds, area_mm2: areaMm2.trim() ? Number(areaMm2) : null, speaker: parts.speaks && speaker, system: systemPrompt() };
     const response = await fetch("/api/voice/plan", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     if (!response.ok) {
       set({ planning: false, planError: await response.text() });
@@ -285,8 +285,8 @@ export const useVoice = create<VoiceState>((set, get) => ({
     const says = mode === "speak" || parts.speaks;
     const body =
       mode === "listen"
-        ? { wav: question!.wav, listen, think, speak: says ? speak : null, sound: says ? sound : null, bits, fresh, speaker: says && speaker }
-        : { text, think: answerFirst ? think : null, speak, sound, bits, fresh, speaker };
+        ? { wav: question!.wav, listen, think, speak: says ? speak : null, sound: says ? sound : null, bits, fresh, speaker: says && speaker, system: systemPrompt() }
+        : { text, think: answerFirst ? think : null, speak, sound, bits, fresh, speaker, system: systemPrompt() };
     set({ asked: mode === "speak" ? text : null });
     const response = await fetch("/api/voice", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     if (!response.ok) {

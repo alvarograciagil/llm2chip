@@ -38,6 +38,12 @@ export function viewShown(view: View, params: ChipParams): boolean {
   return true;
 }
 
+/** The project's fixed system prompt, which the chip reads before every question; empty for
+ * none. */
+export function systemPrompt(): string {
+  return String(useDesign.getState().params.system_prompt ?? "").trim();
+}
+
 export interface SavedDesign {
   name: string;
   model: string;
