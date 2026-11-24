@@ -4136,6 +4136,30 @@ label:hover > .hint-icon {
   margin: 0 0 8px;
 }
 
+/* A card with a capture of the app is as wide as the capture needs to be read. */
+.demo-card:has(.demo-capture) {
+  max-width: 920px;
+}
+
+.demo-capture {
+  margin: 0 0 18px;
+}
+
+.demo-capture img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+  box-shadow: 0 0 0 0.5px var(--separator), 0 6px 24px rgba(0, 0, 0, 0.12);
+}
+
+.demo-capture figcaption {
+  margin-top: 8px;
+  color: var(--label-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .demo-card p {
   margin: 0 0 10px;
   line-height: 1.5;

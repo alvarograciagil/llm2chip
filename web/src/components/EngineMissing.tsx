@@ -1,6 +1,6 @@
 import { DEMO, INSTALL_GUIDE, REPOSITORY } from "../demo";
 import { useT } from "../i18n";
-import type { View } from "../store";
+import { useDesign, type View } from "../store";
 
 /** What a part that needs the engine says when there is none: how to start it, or, in the
  * online demo, that it runs on the app installed on one's own computer. */
@@ -46,12 +46,32 @@ function useWhat(view: View): [string, string] {
   }
 }
 
+/** What each capture of the app shows, under it. */
+const SHOWN: Partial<Record<View, string>> = {
+  images: "Show-o drawing “a lighthouse on a rocky cliff at sunset, oil painting”.",
+  viewer: "A small model on four dies in two groups, every cycle checked against the exact reference.",
+  optimize: "The fastest set of chips for stories260K, chosen among designs measured on their generated circuits.",
+  numeric: "SmolLM2-135M: how far each layer strays from floating point, with the same 17 tokens chosen.",
+  models: "Searching Hugging Face, and what a model needs before downloading it.",
+};
+
 export function DemoStage({ view }: { view: View }) {
   const t = useT();
+  const language = useDesign((s) => s.language);
   const [title, what] = useWhat(view);
+  const shown = SHOWN[view];
+  const capture = `${import.meta.env.BASE_URL}demo/${view}-${language}.webp`;
   return (
     <section className="stage demo-stage">
       <div className="demo-card">
+        {shown && (
+          <figure className="demo-capture">
+            <a href={capture} target="_blank" rel="noreferrer" title={t("Open it full size")}>
+              <img src={capture} alt={`${title}: ${t(shown)}`} width={1600} height={1160} />
+            </a>
+            <figcaption>{t(shown)} {t("Captured from the app on a computer.")}</figcaption>
+          </figure>
+        )}
         <h2>{title}</h2>
         <p>{what}</p>
         <p className="muted-text">{t("It needs llm2chip's engine on your computer, which reads the model's weights and simulates the whole circuit. This online demo runs only what fits in the browser: the floorplan, how it works, the schematic simulated gate by gate, the explorer, the export to Verilog and VHDL, and the simulator with small models.")}</p>
