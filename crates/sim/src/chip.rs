@@ -142,6 +142,53 @@ pub fn firmware_cycles(lean: u64, alone: u64, words: u64) -> u64 {
     lean * FIRMWARE_CYCLES_PER_ROUTINE + alone * FIRMWARE_CYCLES_PER_ROUTINE_ALONE + words * FIRMWARE_CYCLES_PER_WORD
 }
 
+/// Follows `schedule` as the firmware does, on `die`, with the host's `input`: the tokens the
+/// chip sends back, and the scores each was picked from, as values. `logits` is the scores'
+/// first element, their exponent's address and how many there are, in vectors of `bits`
+/// bits; a token of `stops` ends the text. The pick is greedy, the first of the highest.
+pub fn follow_schedule(die: &mut impl DieEngine, schedule: &[netlist::schedule::Record], input: &[u32], logits: (u32, u32, u32), bits: u32, stops: &[u32]) -> Result<(Vec<u32>, Vec<Vec<f32>>), String> {
+    struct Host<'a, E> {
+        die: &'a mut E,
+        input: std::collections::VecDeque<u32>,
+        logits: (u32, u32, u32),
+        bits: u32,
+        stops: &'a [u32],
+        sent: Vec<u32>,
+        scores: Vec<Vec<f32>>,
+    }
+    impl<E: DieEngine> netlist::schedule::Driver for Host<'_, E> {
+        fn receive(&mut self) -> u32 {
+            self.input.pop_front().unwrap_or(0)
+        }
+        fn write(&mut self, address: u32, value: u32) {
+            self.die.write(address, value as i32 as i64);
+        }
+        fn read(&mut self, address: u32) -> u32 {
+            self.die.read(address) as u32
+        }
+        fn run(&mut self, routine: u32, token: u32, position: u32) {
+            self.die.run(routine as usize, token, position);
+        }
+        fn sample(&mut self) -> u32 {
+            let (base, exponent, count) = self.logits;
+            let mantissas: Vec<i64> = (0..count).map(|i| self.die.read(base + i)).collect();
+            let scale = 2f32.powi(self.die.read(exponent) as i32 - self.bits as i32 + 1);
+            self.scores.push(mantissas.iter().map(|m| *m as f32 * scale).collect());
+            mantissas.iter().enumerate().fold((0, i64::MIN), |best, (i, m)| if *m > best.1 { (i, *m) } else { best }).0 as u32
+        }
+        fn stops(&self, token: u32) -> bool {
+            self.stops.contains(&token)
+        }
+        fn send(&mut self, token: u32) {
+            self.sent.push(token);
+        }
+    }
+    let mut host = Host { die, input: input.iter().copied().collect(), logits, bits, stops, sent: Vec::new(), scores: Vec::new() };
+    let words = netlist::schedule::words(schedule);
+    netlist::schedule::expand(&words, &mut host)?;
+    Ok((host.sent, host.scores))
+}
+
 /// A die whose program is a set of routines, run by the exact machine, as a chip's firmware
 /// drives it: each routine by its number in the microprogram `code`, with whether it rotates.
 pub struct RoutinesDie<'a> {

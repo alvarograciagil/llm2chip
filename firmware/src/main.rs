@@ -950,6 +950,20 @@ fn follow(mut at: usize, end: usize, vars: &mut [u32; 16]) -> bool {
                 send_word(die_value(f(1)) as u32);
                 send_word(die_value(f(2)) as u32);
             }
+            9 => {
+                let (body, outer) = (f(1) as usize, var(vars, S_INDEX));
+                let mut times = 0;
+                while receive_word() != 0 {
+                    set(vars, S_INDEX, times);
+                    if !follow(next, next + body, vars) {
+                        return false;
+                    }
+                    times += 1;
+                }
+                set(vars, S_INDEX, outer);
+                set(vars, f(2), times);
+                at = next + body;
+            }
             _ => return false,
         }
     }

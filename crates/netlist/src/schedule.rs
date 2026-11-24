@@ -27,6 +27,9 @@
 //!   any other is sent to the host and becomes the next one.
 //! - `SEND address exponent`: sends the host the die's element at `address` and the exponent
 //!   at `exponent`, each as a word.
+//! - `STREAM body count`: the next `body` records for as long as the host sends a word other
+//!   than zero before each time, the time's index in `INDEX`; how many times in `count`. For
+//!   input that comes while it is being worked on, such as speech.
 //! - `END`.
 
 /// Words in a record.
@@ -40,6 +43,7 @@ pub const CALL: u32 = 5;
 pub const HALVE: u32 = 6;
 pub const GENERATE: u32 = 7;
 pub const SEND: u32 = 8;
+pub const STREAM: u32 = 9;
 
 /// Variables: 0 is always zero; the token and position of `GENERATE`; the repeat's index.
 pub const VARIABLES: usize = 16;
@@ -62,6 +66,7 @@ pub enum Record {
     Halve { count: u32, load: u32, second: u32, add: u32 },
     Generate { body: u32, limit: u32, start: u32 },
     Send { address: u32, exponent: u32 },
+    Stream { body: u32, count: u32 },
     End,
 }
 
@@ -82,6 +87,7 @@ impl Record {
             Record::Halve { count, load, second, add } => w(HALVE, &[count, load, second, add]),
             Record::Generate { body, limit, start } => w(GENERATE, &[body, limit, start]),
             Record::Send { address, exponent } => w(SEND, &[address, exponent]),
+            Record::Stream { body, count } => w(STREAM, &[body, count]),
             Record::End => w(END, &[]),
         }
     }
@@ -98,6 +104,7 @@ impl Record {
             HALVE => Record::Halve { count: a(1), load: a(2), second: a(3), add: a(4) },
             GENERATE => Record::Generate { body: a(1), limit: a(2), start: a(3) },
             SEND => Record::Send { address: a(1), exponent: a(2) },
+            STREAM => Record::Stream { body: a(1), count: a(2) },
             kind => return Err(format!("no record of kind {kind}")),
         })
     }
@@ -190,6 +197,20 @@ pub fn expand(words: &[u32], driver: &mut impl Driver) -> Result<(), String> {
                         }
                         count = half;
                     }
+                }
+                Record::Stream { body, count } => {
+                    let outer = vars[INDEX as usize];
+                    let mut times = 0;
+                    while driver.receive() != 0 {
+                        vars[INDEX as usize] = times;
+                        if !block(at, at + body as usize, vars, read, var, driver)? {
+                            return Ok(false);
+                        }
+                        times += 1;
+                    }
+                    vars[INDEX as usize] = outer;
+                    *vars.get_mut(count as usize).ok_or("no such variable")? = times;
+                    at += body as usize;
                 }
                 Record::Send { address, exponent } => {
                     for at in [address, exponent] {
