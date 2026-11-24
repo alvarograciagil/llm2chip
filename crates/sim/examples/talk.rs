@@ -39,7 +39,7 @@ fn main() -> Result<(), String> {
     let tokenizer = Tokenizer::from_file(think.join("tokenizer.json")).map_err(|e| e.to_string())?;
     let encode = |text: &str, add: bool| tokenizer.encode(text, add).map(|e| e.get_ids().to_vec()).map_err(|e| e.to_string());
     let decode = |tokens: &[u32]| tokenizer.decode(tokens, true).map_err(|e| e.to_string());
-    let said = answer(think, &heard, arithmetic, 60, &encode, &decode, &|t| tokenizer.token_to_id(t))?;
+    let said = answer(think, "You are a voice assistant. Answer in one short sentence.", &heard, arithmetic, 60, &encode, &decode, &|t| tokenizer.token_to_id(t))?;
     println!("2. answered ({:.1} s): “{said}”", started.elapsed().as_secs_f32());
 
     let started = Instant::now();

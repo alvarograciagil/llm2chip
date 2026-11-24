@@ -307,7 +307,7 @@ fn run_speed(catalog: &Catalog, request: SpeedRequest) -> Result<serde_json::Val
     let program = compile_model(&entry.config)?;
     let weights = Weights::open(&dir)?;
     let context = request.context_tokens.max(1);
-    let image = ImageRequest { sharing: Default::default(), chips: vec![1], context_tokens: context, cells: request.cells.max(1), activation_bits: request.activation_bits.clamp(8, 24), lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special: false, stop: Vec::new(), system: Vec::new() };
+    let image = ImageRequest { sharing: Default::default(), chips: vec![1], context_tokens: context, cells: request.cells.max(1), activation_bits: request.activation_bits.clamp(8, 24), lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special: false, stop: Vec::new(), system: Vec::new(), conversation: false };
     let die = fitted_die(&program, &weights, &image)?;
     let layout = Layout::for_image(&program, &weights, die, context as usize)?;
     let mut totals: Vec<(String, u64, u32)> = Vec::new();
@@ -669,7 +669,7 @@ async fn image_start(State(app): State<App>, Json(request): Json<ImageStart>) ->
                 let encode = |text: &str, special: bool| tokenizer.encode(text, special).map(|e| e.get_ids().to_vec()).map_err(|e| e.to_string());
                 (false, prompt.split_system(system, &framed, false, special, encode)?.0)
             };
-            let image = ImageRequest { chips: request.chips, context_tokens: request.context_tokens.max(1), cells: request.cells.max(1), activation_bits: request.activation_bits, lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special, stop: prompt.stop.clone(), sharing: request.sharing, system };
+            let image = ImageRequest { chips: request.chips, context_tokens: request.context_tokens.max(1), cells: request.cells.max(1), activation_bits: request.activation_bits, lane_bits: request.vector_lanes.max(1).ilog2().min(MAX_IMAGE_LANE_BITS), cluster_bits: request.vector_units.max(1).ilog2().min(MAX_UNIT_BITS), add_special, stop: prompt.stop.clone(), sharing: request.sharing, system, conversation: true };
             let report = write_chip_image(&dir, &firmware, &image, &out, &job.done, &job.total, &job.cancel)?;
             Ok(serde_json::json!({ "path": out.to_string_lossy(), "bytes": report.bytes, "chips": report.chips, "tensors": report.tensors, "boot_words": report.boot_words, "seconds": report.seconds }))
         });

@@ -19,7 +19,7 @@ fn a_conversation_goes_on_from_its_cache() {
     let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).unwrap();
     let encode = |text: &str, add: bool| tokenizer.encode(text, add).map(|e| e.get_ids().to_vec()).map_err(|e| e.to_string());
     let decode = |tokens: &[u32]| tokenizer.decode(tokens, true).map_err(|e| e.to_string());
-    let system = "You are a geography tutor.";
+    let system = "You are a geography tutor. Answer in one short sentence.";
     let mut conversation = Conversation::new(&dir, Arithmetic::Float, system, &|t| tokenizer.token_to_id(t)).unwrap();
     let (first, _) = conversation.ask("What is the capital of France?", 30, &encode, &decode).unwrap();
     let (second, logits) = conversation.ask("And of Italy?", 30, &encode, &decode).unwrap();

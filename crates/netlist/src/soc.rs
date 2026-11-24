@@ -24,6 +24,11 @@ pub const LOADER_BEATS: u32 = LOADER_BASE + 20;
 pub const LOADER_START: u32 = LOADER_BASE + 24;
 pub const LOADER_BUSY: u32 = LOADER_BASE + 28;
 pub const LOADER_CRC: u32 = LOADER_BASE + 32;
+/// While it holds 1, the load controller writes zeros instead of reading the image.
+pub const LOADER_FILL: u32 = LOADER_BASE + 36;
+/// The host port's status bit that says the clear pin was raised; writing the status
+/// register forgets it.
+pub const CLEAR_REQUESTED: u32 = 2;
 
 pub const PERIPHERAL_BASE: u32 = 0x4000_0000;
 /// Word of data memory where the image builder places the chip description.
@@ -168,6 +173,8 @@ fn loader(gen: &mut Gen) -> String {
     let beats = l.fresh_bus(3);
     let beat = l.fresh_bus(3);
     let crc = l.fresh_bus(32);
+    // While set, each element's words are zeros and the image is not read.
+    let fill = l.fresh();
     let lanes: Vec<Vec<Bit>> = (0..LOAD_LANES).map(|_| l.fresh_bus(32)).collect();
 
     l.b.group("Control");
@@ -195,7 +202,11 @@ fn loader(gen: &mut Gen) -> String {
 
     l.b.group("Transfer");
     let dma_active = l.any(&[request, wait, emit]);
-    let response = l.and(wait, image_valid);
+    // A fill answers itself, in the cycle the image would.
+    let answered = l.or(image_valid, fill);
+    let response = l.and(wait, answered);
+    let zero_word = constant(0, 32);
+    let word_in = l.mux_bus(fill, &image_data, &zero_word);
     let last_beat = {
         let next_beat: Vec<Bit> = counter_step(&mut l, &beat, Bit::One);
         let same: Vec<Bit> = next_beat.iter().zip(&beats).map(|(a, b)| { let d = l.xor(*a, *b); l.not(d) }).collect();
@@ -225,7 +236,7 @@ fn loader(gen: &mut Gen) -> String {
         l.and(t, keep)
     };
     let hold_wait = {
-        let no = l.not(image_valid);
+        let no = l.not(answered);
         l.and(wait, no)
     };
     let next_wait = {
@@ -334,6 +345,13 @@ fn loader(gen: &mut Gen) -> String {
     next_count = l.mux_bus(got_header, &next_count, &image_data);
     l.connect_flops(&next_count, &count);
 
+    let next_fill = {
+        let stored = store(&mut l, 9, &[fill], &reg_data[..1])[0];
+        let keep = l.not(reset);
+        l.and(stored, keep)
+    };
+    l.connect_flops(&[next_fill], &[fill]);
+
     let mut next_beats = store(&mut l, 5, &beats, &reg_data[..3]);
     let one_beat = constant(1, 3);
     next_beats = l.mux_bus(got_header, &next_beats, &one_beat);
@@ -347,7 +365,7 @@ fn loader(gen: &mut Gen) -> String {
 
     l.b.group("CRC");
     let terms = crc_terms();
-    let inputs: Vec<Bit> = crc.iter().chain(&image_data).copied().collect();
+    let inputs: Vec<Bit> = crc.iter().chain(&word_in).copied().collect();
     let crc_step: Vec<Bit> = terms
         .iter()
         .map(|mask| {
@@ -367,7 +385,7 @@ fn loader(gen: &mut Gen) -> String {
     for (index, lane) in lanes.iter().enumerate() {
         let selected = l.equals(&beat, index as u32);
         let enable = l.and(response, selected);
-        let next = l.mux_bus(enable, lane, &image_data);
+        let next = l.mux_bus(enable, lane, &word_in);
         l.connect_flops(&next, lane);
     }
     for (index, to) in write_data.iter().enumerate() {
@@ -385,7 +403,9 @@ fn loader(gen: &mut Gen) -> String {
     }
 
     l.b.group("Image request");
-    let any_request = l.or(request, header_request);
+    let not_fill = l.not(fill);
+    let reads = l.and(request, not_fill);
+    let any_request = l.or(reads, header_request);
     l.b.or_to(any_request, Bit::Zero, image_req);
     let one = constant(1, 32);
     let two = constant(2, 32);
@@ -406,6 +426,9 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     let mut b = Builder::new("soc_control", "Control system", "Control CPU, program and data memories and host port, joined by the internal bus.");
     let reset = b.input("reset", 1)[0];
     let cpu_hold = b.input("cpu_hold", 1)[0];
+    // Clears the conversation: the firmware sees it in the host port's status, and the
+    // bytes the host had sent are dropped.
+    let clear = b.input("clear", 1)[0];
     let host_rx_valid = b.input("host_rx_valid", 1)[0];
     let host_rx_data = b.input("host_rx_data", 8);
     let host_tx_ready = b.input("host_tx_ready", 1)[0];
@@ -536,6 +559,18 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         let status_rx = l.fresh();
         let status_tx = l.fresh();
         let (status_rx_now, status_tx_now) = (rx_not_empty, tx_not_full);
+        // The clear pin stays requested until the firmware writes the status register.
+        let requested = l.fresh();
+        let next_requested = {
+            let forget = l.and(host_write, reg_rx_status);
+            let kept = l.not(forget);
+            let held = l.and(requested, kept);
+            let raised = l.or(held, clear);
+            let keep = l.not(reset);
+            l.and(raised, keep)
+        };
+        l.connect_flops(&[next_requested], &[requested]);
+        let status_clear = l.fresh();
         let want_rx_data = l.and(host_read, reg_rx_data);
         let want_rx_status = l.and(host_read, reg_rx_status);
         let want_tx_status = l.and(host_read, reg_tx_status);
@@ -550,9 +585,9 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         let (pick_busy, pick_crc, busy_seen) = (l.fresh(), l.fresh(), l.fresh());
         let pick_peripheral = l.fresh();
         l.connect_flops(&[read_peripheral], &[pick_peripheral]);
-        l.connect_flops(&[is_ram, want_rx_data, want_rx_status, want_tx_status, status_rx_now, status_tx_now, want_busy, want_crc, loader_busy], &[pick_ram, pick_rx_data, pick_rx_status, pick_tx_status, status_rx, status_tx, pick_busy, pick_crc, busy_seen]);
+        l.connect_flops(&[is_ram, want_rx_data, want_rx_status, want_tx_status, status_rx_now, status_tx_now, want_busy, want_crc, loader_busy, requested], &[pick_ram, pick_rx_data, pick_rx_status, pick_tx_status, status_rx, status_tx, pick_busy, pick_crc, busy_seen, status_clear]);
         let rx_word: Vec<Bit> = rx_out.iter().copied().chain(std::iter::repeat_n(Bit::Zero, 24)).collect();
-        let rx_status_word: Vec<Bit> = std::iter::once(status_rx).chain(std::iter::repeat_n(Bit::Zero, 31)).collect();
+        let rx_status_word: Vec<Bit> = [status_rx, status_clear].into_iter().chain(std::iter::repeat_n(Bit::Zero, 30)).collect();
         let tx_status_word: Vec<Bit> = std::iter::once(status_tx).chain(std::iter::repeat_n(Bit::Zero, 31)).collect();
         let zero = constant(0, 32);
         let mut value = l.mux_bus(pick_ram, &zero, &ram_data);
@@ -585,7 +620,9 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
 
     b.group("Host port");
     let rx_head_valid = b.wire("rx_head_valid", 1);
-    b.inst("rx_queue", &queue, &[("reset", vec![reset]), ("push", vec![host_rx_valid]), ("data_in", host_rx_data), ("pop", vec![rx_pop]), ("data_out", rx_out), ("not_empty", vec![rx_not_empty]), ("not_full", vec![rx_not_full]), ("valid", rx_head_valid)]);
+    let rx_reset = b.wire("rx_reset", 1)[0];
+    b.or_to(reset, clear, rx_reset);
+    b.inst("rx_queue", &queue, &[("reset", vec![rx_reset]), ("push", vec![host_rx_valid]), ("data_in", host_rx_data), ("pop", vec![rx_pop]), ("data_out", rx_out), ("not_empty", vec![rx_not_empty]), ("not_full", vec![rx_not_full]), ("valid", rx_head_valid)]);
     b.inst("tx_queue", &queue, &[("reset", vec![reset]), ("push", vec![tx_push]), ("data_in", dmem_wdata[..8].to_vec()), ("pop", vec![tx_taken]), ("data_out", tx_out), ("not_empty", tx_not_empty), ("not_full", vec![tx_not_full]), ("valid", vec![tx_valid])]);
     gen.add(b.finish())
 }
@@ -672,6 +709,10 @@ pub struct SocBus<P = NoPeripheral> {
     pub image: Vec<u32>,
     pub writes: Vec<LoadWrite>,
     registers: [u32; 6],
+    /// The load controller writes zeros instead of reading the image.
+    fill: bool,
+    /// The clear pin was raised and the firmware has not yet forgotten it.
+    clear_requested: bool,
     now: u64,
     busy_until: Option<u64>,
     crc: u32,
@@ -692,7 +733,7 @@ impl<P: Peripheral> SocBus<P> {
         image[..program.len()].copy_from_slice(program);
         let mut ram = vec![0; 1 << config.data_bits];
         ram[..data.len()].copy_from_slice(data);
-        Self { program: image, ram, rx: input.iter().copied().collect(), tx: Vec::new(), image: Vec::new(), writes: Vec::new(), registers: [0; 6], now: 0, busy_until: None, crc: 0, peripheral, last_access: None }
+        Self { program: image, ram, rx: input.iter().copied().collect(), tx: Vec::new(), image: Vec::new(), writes: Vec::new(), registers: [0; 6], fill: false, clear_requested: false, now: 0, busy_until: None, crc: 0, peripheral, last_access: None }
     }
 
     /// The state right after the load controller has copied the firmware from `image`.
@@ -708,13 +749,26 @@ impl<P: Peripheral> SocBus<P> {
         Ok(bus)
     }
 
-    /// Copies a segment and notes when the controller becomes free again.
+    /// Raises the clear pin: the bytes the host had sent and the chip had not read are
+    /// dropped, and the firmware sees the request in the port's status.
+    pub fn clear(&mut self) {
+        self.rx.clear();
+        self.clear_requested = true;
+    }
+
+    /// The host sends more bytes.
+    pub fn send(&mut self, bytes: &[u8]) {
+        self.rx.extend(bytes);
+    }
+
+    /// Copies a segment, or fills it with zeros, and notes when the controller becomes free
+    /// again.
     fn start_transfer(&mut self) {
         let [source, target, unit, address, count, beats] = self.registers;
         self.crc = u32::MAX;
         for element in 0..count {
-            let first = (source + element * beats) as usize;
-            let words = self.image[first..first + beats as usize].to_vec();
+            let first = (source.wrapping_add(element * beats)) as usize;
+            let words = if self.fill { vec![0; beats as usize] } else { self.image[first..first + beats as usize].to_vec() };
             for word in &words {
                 self.crc = crate::image::crc32_word(self.crc, *word);
             }
@@ -757,7 +811,7 @@ impl<P: Peripheral> SocBus<P> {
             1 => self.ram[(address as usize / 4) & (self.ram.len() - 1)],
             2 => match address & 0xC {
                 0 => self.rx.pop_front().unwrap_or(0) as u32,
-                4 => !self.rx.is_empty() as u32,
+                4 => !self.rx.is_empty() as u32 | if self.clear_requested { CLEAR_REQUESTED } else { 0 },
                 12 => 1,
                 _ => 0,
             },
@@ -782,9 +836,11 @@ impl<P: Peripheral> SocBus<P> {
                 }
             }
             2 if address & 0xC == 8 => self.tx.push(data as u8),
+            2 if address & 0xC == 4 => self.clear_requested = false,
             3 => match (address >> 2) & 15 {
                 index @ 0..=5 => self.registers[index as usize] = data,
                 6 => self.start_transfer(),
+                9 => self.fill = data & 1 == 1,
                 _ => {}
             },
             4 => self.peripheral.write((address >> 2) & ((1 << PERIPHERAL_BITS) - 1), data, self.now),

@@ -56,7 +56,7 @@ The chip also speaks: a speech writer (OuteTTS) and a sound decoder (DAC) say th
 
 ### System prompt (`system_prompt`)
 
-A fixed text the chip reads before every question, such as how it should answer; a voice assistant needs one to answer briefly. It goes in the chip's description, in the image: burnt into ROM with the weights, or loaded with them at power-up, where a new image changes it. The chip answers one question per power-up, so it reads it before each one: it adds that time to the first token and takes that much of the context. Empty, there is none.
+A fixed text the chip reads before every question, such as how it should answer; a voice assistant needs one to answer briefly. It goes in the chip's description, in the image: burnt into ROM with the weights, or loaded with them at power-up, where a new image changes it. The chip reads it when a conversation starts, after power-up or the clear pin, while it waits for the first question; the turns after go on from its cache, and it takes that much of the context. Empty, there is none.
 
 *Free text.*
 

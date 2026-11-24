@@ -81,13 +81,15 @@ pub fn listen(dir: &Path, clip: &Clip, arithmetic: Arithmetic) -> Result<String,
     Ok(String::from_utf8_lossy(&text).trim().to_string())
 }
 
-/// The language model in `dir`'s answer to `question`, in one short sentence and without
-/// reasoning, greedily, at most `limit` tokens. `encode` cuts a text into tokens (and adds
-/// the special ones when told to), `decode` joins them back and `token_id` names one.
-pub fn answer(dir: &Path, question: &str, arithmetic: Arithmetic, limit: usize, encode: &Encode, decode: &Decode, token_id: &dyn Fn(&str) -> Option<u32>) -> Result<String, String> {
+/// The language model in `dir`'s answer to `question` after the fixed `system` prompt (none
+/// when empty; a voice project's asks for one short sentence), without reasoning, greedily,
+/// at most `limit` tokens. `encode` cuts a text into tokens (and adds the special ones when
+/// told to), `decode` joins them back and `token_id` names one.
+#[allow(clippy::too_many_arguments)]
+pub fn answer(dir: &Path, system: &str, question: &str, arithmetic: Arithmetic, limit: usize, encode: &Encode, decode: &Decode, token_id: &dyn Fn(&str) -> Option<u32>) -> Result<String, String> {
     let family = compiler::compile_model(&std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?)?.family;
     let style = PromptStyle::read(&family, |name| std::fs::read_to_string(dir.join(name)).ok(), token_id);
-    let (framed, add) = style.render(&format!("{question}\nAnswer in one short sentence."), false)?;
+    let (framed, add) = style.render_with_system(system.trim(), question, false)?;
     let mut model = Model::open(dir, arithmetic)?;
     let mut logits = Vec::new();
     for token in encode(&framed, add)? {
@@ -144,11 +146,12 @@ impl Conversation {
         &self.tokens
     }
 
-    /// The answer to `question` in one short sentence, without reasoning, greedily, at most
-    /// `limit` tokens, after every earlier question and answer; with the next token's scores.
+    /// The answer to `question`, without reasoning, greedily, at most `limit` tokens, after the
+    /// system prompt and every earlier question and answer; with the next token's scores. How
+    /// long it is, the system prompt says.
     pub fn ask(&mut self, question: &str, limit: usize, encode: &Encode, decode: &Decode) -> Result<(String, Vec<f32>), String> {
         let earlier: Vec<(&str, &str)> = self.messages.iter().map(|(r, c)| (r.as_str(), c.as_str())).collect();
-        let asked = format!("{question}\nAnswer in one short sentence.");
+        let asked = question.to_string();
         let mut messages = earlier.clone();
         messages.push(("user", &asked));
         let (framed, add) = self.style.render_conversation(&messages, false, true)?;

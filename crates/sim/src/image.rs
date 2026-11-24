@@ -132,6 +132,11 @@ pub struct ImageRequest {
     /// before every question (see `netlist::chip::add_system_prompt`).
     #[serde(default)]
     pub system: Vec<u32>,
+    /// The chip holds a conversation, a turn after another over the same cache, until its
+    /// clear pin is raised (see `netlist::chip::add_conversation`); otherwise it answers one
+    /// question per power-up.
+    #[serde(default)]
+    pub conversation: bool,
 }
 
 /// One tensor in the file, written cell by cell: rows `c`, `c + cells`, … for cell `c`.
@@ -241,6 +246,9 @@ fn boot_plans(program: &Program, weights: &Weights, die: DieConfig, request: &Im
                 .map(|(layout, code)| {
                     let mut info = chip_info(&die, code, layout.logits_register(program), program.vocab as u32, &setup);
                     netlist::chip::add_system_prompt(&mut info, &request.system)?;
+                    if request.conversation {
+                        netlist::chip::add_conversation(&mut info, request.context_tokens as u32, &layout.conversation_state(program))?;
+                    }
                     Ok(ChipPart { info, segments: image_segments(&die, code, layout) })
                 })
                 .collect::<Result<Vec<_>, String>>()

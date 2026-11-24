@@ -545,6 +545,9 @@ pub fn link_plan(link: LinkKind, dies: u32, die_area_mm2: f64) -> LinkPlan {
 /// Measured on the generated cell, for words of 64 weight bits.
 const ECC_GATES_PER_CELL: f64 = 430.0;
 pub const TOKENIZER_BITS_PER_TOKEN: f64 = 500.0;
+/// Cycles the load controller takes to write each element of zeros when clearing the cache.
+pub const CLEAR_CYCLES_PER_ELEMENT: f64 = 3.0;
+
 /// Tokens the chip's description has room for after its own words: 1,008 words, less the
 /// fixed table, sixteen routine parameters of seven words and the stop tokens.
 pub const SYSTEM_PROMPT_ROOM: u32 = 850;
@@ -1467,9 +1470,14 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
         m("system_prompt_tokens", "Model", "System prompt", system as f64, "tokens", Assumed,
             if p.weight_backend == WeightBackend::Rom { "About four characters a token, with its framing; the chip carries it in its description, burnt into ROM with the weights: changing it takes a new chip.".into() }
             else { "About four characters a token, with its framing; the chip carries it in its description, in the image loaded at power-up: changing it takes a new image.".into() });
-        m("system_prompt_ms", "Speed", "System prompt before each question", system as f64 / prefill_rate.max(1e-9) * 1e3, "ms", Assumed,
-            "The chip answers one question per power-up, so it reads the system prompt before each one at the prompt reading speed; it also takes that much of the context.".into());
+        m("system_prompt_ms", "Speed", "System prompt at the start of a conversation", system as f64 / prefill_rate.max(1e-9) * 1e3, "ms", Assumed,
+            "The chip reads it after power-up and after each clear, at the prompt reading speed, while it waits for the first question; the turns after go on from its cache. It also takes that much of the context.".into());
     }
+    // The clear pin zeros the rows of the cache the conversation used, an element every
+    // three cycles on each die at once, then reads the system prompt again.
+    let clear_ms = model.state.kv_values_per_token as f64 * context / d * CLEAR_CYCLES_PER_ELEMENT / (freq * 1e9) * 1e3 + system as f64 / prefill_rate.max(1e-9) * 1e3;
+    m("clear_ms", "Speed", "Clearing a full conversation", clear_ms, "ms", Assumed,
+        "The clear pin zeros the rows of the cache the conversation used, an element every three cycles on each die at once, and reads the system prompt again: here after a conversation that filled the context, a shorter one takes less.".into());
     if let (true, Some(vision)) = (p.include_vision, model.vision) {
         // The encoder runs on one die's cells, before the prompt's text.
         let macs = vision.macs_per_image(512, 512) as f64;
@@ -1830,6 +1838,10 @@ mod tests {
         assert!(why(&report).contains("new image"));
         let rom = estimate(&qwen(), &ChipParams { weight_backend: WeightBackend::Rom, ..p.clone() }).unwrap();
         assert!(why(&rom).contains("ROM"));
+        // Clearing takes the cache's rows and the system prompt again, longer with a longer context.
+        assert!(report.metric("clear_ms").unwrap() > report.metric("system_prompt_ms").unwrap());
+        let long_context = estimate(&qwen(), &ChipParams { context_tokens: p.context_tokens * 4, ..p.clone() }).unwrap();
+        assert!(long_context.metric("clear_ms").unwrap() > 2.0 * report.metric("clear_ms").unwrap());
         // One too long for the description is refused.
         let long = estimate(&qwen(), &ChipParams { system_prompt: "word ".repeat(1000), ..Default::default() }).unwrap();
         assert!(long.violations.iter().any(|v| v.field == Some("system_prompt") && v.severity == Severity::Error));

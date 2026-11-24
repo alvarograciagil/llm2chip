@@ -68,6 +68,8 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
     let mut b = Builder::new("llm2chip_top", "Complete chip", "Control CPU, memories, load controller, inference die and sampling unit, with the host and image ports as the only contacts with the outside.");
     let reset = b.input("reset", 1)[0];
     let cpu_hold = b.input("cpu_hold", 1)[0];
+    // Clears the conversation without reloading the image (see `INFO_CONVERSATION`).
+    let clear = b.input("clear", 1);
     let host_rx_valid = b.input("host_rx_valid", 1);
     let host_rx_data = b.input("host_rx_data", 8);
     let host_tx_ready = b.input("host_tx_ready", 1);
@@ -165,6 +167,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         ("reset", vec![internal_reset]),
         ("debug_pc", cpu_pc.clone()),
         ("cpu_hold", vec![cpu_hold]),
+        ("clear", clear),
         ("host_rx_valid", host_rx_valid),
         ("host_rx_data", host_rx_data),
         ("host_tx_ready", host_tx_ready),
@@ -831,7 +834,11 @@ pub const INFO_QUEUE: usize = 30;
 /// tokens, which the firmware runs before the host's prompt on every power-up; zero if the
 /// chip has none.
 pub const INFO_SYSTEM: usize = 31;
-pub const INFO_PARAMETERS: usize = 32;
+/// Where the conversation table is in data memory (see `image::Conversation`): a chip with
+/// one holds a conversation, a turn after another, until its clear pin is raised; zero
+/// answers one question and stops.
+pub const INFO_CONVERSATION: usize = 32;
+pub const INFO_PARAMETERS: usize = 33;
 
 /// What the firmware needs to run the image encoder a chip carries, in the order of its
 /// words: see `VisionInfo`.
@@ -915,6 +922,35 @@ pub fn add_system_prompt(info: &mut Vec<u32>, tokens: &[u32]) -> Result<(), Stri
     info[INFO_SYSTEM] = info.len() as u32;
     info.push(tokens.len() as u32);
     info.extend_from_slice(tokens);
+    Ok(())
+}
+
+/// What a conversation leaves in the die and the clear pin empties: registers of vector
+/// memory from `address`, `registers` of them `step` apart, each reaching `extent`
+/// elements. When the cache's rows follow one another, `row` is the elements of one
+/// position's, and only the rows the conversation used are cleared; zero clears it whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClearEntry {
+    pub address: u32,
+    pub registers: u32,
+    pub step: u32,
+    pub extent: u32,
+    pub row: u32,
+}
+
+/// Makes a chip hold a conversation (`INFO_CONVERSATION`): it answers a turn after another
+/// over the same cache, `capacity` positions at most, and its clear pin empties what
+/// `entries` say and reloads the vector memory's first contents.
+pub fn add_conversation(info: &mut Vec<u32>, capacity: u32, entries: &[ClearEntry]) -> Result<(), String> {
+    let room = crate::soc::PLAN_DIRECTORY_WORD - crate::soc::CONFIG_WORD;
+    if info.len() + 2 + 5 * entries.len() > room {
+        return Err(format!("the conversation's table takes {} words and the chip's description has room for {}", 2 + 5 * entries.len(), room.saturating_sub(info.len())));
+    }
+    info[INFO_CONVERSATION] = info.len() as u32;
+    info.extend([capacity, entries.len() as u32]);
+    for e in entries {
+        info.extend([e.address, e.registers, e.step, e.extent, e.row]);
+    }
     Ok(())
 }
 

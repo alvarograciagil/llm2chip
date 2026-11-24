@@ -2,4 +2,5 @@
 target = "riscv32im-unknown-none-elf"
 
 [target.riscv32im-unknown-none-elf]
-rustflags = ["-C", "link-arg=-Tlink.x"]
+# Inlining kept low so the program fits its 32 KB and stays as fast as before.
+rustflags = ["-C", "link-arg=-Tlink.x", "-C", "llvm-args=-inline-threshold=25"]

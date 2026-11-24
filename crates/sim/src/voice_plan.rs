@@ -111,8 +111,9 @@ pub struct VoiceAsk {
     /// on dies of its own, the estimator's, so its voice dies hold only voice stages.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub text_apart: bool,
-    /// Tokens of the fixed system prompt the chip runs before every question: the language
-    /// model reads them before the question, so they come before the first output.
+    /// Tokens of the fixed system prompt: the chip reads them when a conversation starts,
+    /// while it waits for the first question, so they take context but no time before the
+    /// first output.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub system_tokens: u32,
 }
@@ -175,9 +176,11 @@ fn could_fit_one_die(dir: &Path) -> Result<bool, String> {
 }
 
 /// A language model on `chips` dies of `shape` shared as `sharing`, after a prompt of
-/// `prompt` tokens, with a context long enough for it and its answer.
-fn language_model(dir: &Path, costs: &Costs, (chips, sharing): (u32, Sharing), shape: (u32, u32, u32), prompt: u32, needs: u32) -> Result<Fit, String> {
-    let context = (prompt + 512).next_power_of_two().max(1024);
+/// `prompt` tokens that follows `before` already in its cache (a system prompt read while it
+/// waited), with a context long enough for them and its answer.
+#[allow(clippy::too_many_arguments)]
+fn language_model(dir: &Path, costs: &Costs, (chips, sharing): (u32, Sharing), shape: (u32, u32, u32), before: u32, prompt: u32, needs: u32) -> Result<Fit, String> {
+    let context = (before + prompt + 512).next_power_of_two().max(1024);
     let program = compiler::compile_model(&std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?)?;
     let per_token = crate::system::macs(&program.ops, &program.buffers);
     let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: vec![chips], clock_hz: CLOCK, process: N6, context, lane_bits: shape.1..=shape.1, cluster_bits: shape.0..=shape.0, cell_bits: shape.2..=shape.2, sharing: vec![sharing] };
@@ -225,7 +228,7 @@ fn measure_think(dir: &Path, ask: &VoiceAsk, costs: &Costs, question_tokens: u32
     if could_fit_one_die(dir)? {
         for &shape in &ask.shapes {
             progress(format!("the language model on {}", shape_name(shape)));
-            if let Ok(fit) = language_model(dir, costs, (1, Sharing::Layers), shape, 40 + ask.system_tokens, question_tokens) {
+            if let Ok(fit) = language_model(dir, costs, (1, Sharing::Layers), shape, ask.system_tokens, 40, question_tokens) {
                 think.push(fit);
             }
         }
@@ -235,7 +238,7 @@ fn measure_think(dir: &Path, ask: &VoiceAsk, costs: &Costs, question_tokens: u32
         for (chips, sharing, shape) in &ask.large {
             progress(format!("the language model on {chips} dies, {sharing}"));
             let sharing = crate::sizing::parse_sharings(sharing, &[*chips])?.into_iter().next().ok_or("no sharing")?;
-            match language_model(dir, costs, (*chips, sharing), *shape, 40 + ask.system_tokens, question_tokens) {
+            match language_model(dir, costs, (*chips, sharing), *shape, ask.system_tokens, 40, question_tokens) {
                 Ok(fit) => think.push(fit),
                 Err(e) => progress(format!("the language model on {chips} dies: {e}")),
             }
@@ -320,7 +323,7 @@ fn measure_speak(dir: &Path, ask: &VoiceAsk, costs: &Costs, progress: &mut dyn F
     let mut speak = Vec::new();
     for &shape in &ask.shapes {
         progress(format!("OuteTTS on {}", shape_name(shape)));
-        if let Ok(fit) = language_model(dir, costs, (1, Sharing::Layers), shape, prompt, ask.words) {
+        if let Ok(fit) = language_model(dir, costs, (1, Sharing::Layers), shape, 0, prompt, ask.words) {
             speak.push(fit);
         }
     }

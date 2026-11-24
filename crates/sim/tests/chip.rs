@@ -2,7 +2,7 @@
 //! a fixed microprogram, the die and the sampling unit.
 
 use compiler::compile_qwen3_5;
-use netlist::chip::{chip_design, chip_info, ChipConfig, ChipModel, GenerationSetup, DEBUG_CPU_PC, DEBUG_CYCLES, DEBUG_DIE_BUSY, DEBUG_SAMPLER_BUSY};
+use netlist::chip::{chip_design, chip_info, ChipConfig, ChipModel, DieEngine, GenerationSetup, DEBUG_CPU_PC, DEBUG_CYCLES, DEBUG_DIE_BUSY, DEBUG_SAMPLER_BUSY};
 use netlist::image::build_image;
 use netlist::rv32::Rv32Iss;
 use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
@@ -342,6 +342,248 @@ fn any_token_on_the_stop_list_ends_the_answer() {
     assert!(generate(vec![100, 200, 300, token]).is_empty(), "the fourth on the list also stops");
     assert_eq!(generate(vec![100, 200, 300]), free);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A chip that holds a conversation, at instruction level on the die's exact machine.
+struct Talk {
+    bus: SocBus<ChipModel<VmEngine>>,
+    cpu: Rv32Iss,
+}
+
+impl Talk {
+    /// Runs until the chip has ended `answers` answers in all, raw tokens each ending in
+    /// `u32::MAX`: the tokens of each.
+    fn until(&mut self, answers: usize) -> Vec<Vec<u32>> {
+        let split = |tx: &[u8]| -> Vec<Vec<u32>> {
+            let words: Vec<u32> = tx.iter().copied().filter(|b| *b != b'.').collect::<Vec<u8>>().as_chunks::<4>().0.iter().map(|w| u32::from_le_bytes(*w)).collect();
+            words.split(|w| *w == u32::MAX).map(<[u32]>::to_vec).collect()
+        };
+        while split(&self.bus.tx).len() <= answers {
+            self.cpu.step(&mut self.bus);
+            assert!(!self.cpu.halted && self.cpu.cycle < 200_000_000, "the chip stopped or never answered");
+        }
+        split(&self.bus.tx)[..answers].to_vec()
+    }
+
+    fn say(&mut self, tokens: &[u32]) {
+        let bytes: Vec<u8> = tokens.iter().chain(&[u32::MAX]).flat_map(|t| t.to_le_bytes()).collect();
+        self.bus.send(&bytes);
+    }
+}
+
+/// The chip answers a turn after another over the same cache, as if it had been given the
+/// whole conversation at once, and the clear pin empties the cache and the recurrent state,
+/// whether it waits or answers, so the next conversation starts as the first did.
+#[test]
+fn a_conversation_goes_on_over_its_cache_until_the_clear_pin() {
+    // A die that keeps each column of the cache's tokens together clears it whole.
+    let state = conversation_on(netlist::DieConfig { microcode_bits: 15, ..cell_die_config() }, "columns");
+    assert!(state.iter().all(|e| e.row == 0));
+}
+
+/// The same on a die that keeps each token's row of the cache together: it clears only the
+/// rows the conversation used.
+#[test]
+fn a_die_with_the_cache_by_rows_clears_only_the_rows_used() {
+    // Without the wide sums a die keeps the cache a token's row after another.
+    let die = netlist::DieConfig { microcode_bits: 15, features: netlist::DieFeatures::without_register_windows(), ..cell_die_config() };
+    let state = conversation_on(die, "rows");
+    assert!(state.iter().any(|e| e.row > 0), "{state:?}");
+}
+
+fn conversation_on(die: netlist::DieConfig, tag: &str) -> Vec<netlist::chip::ClearEntry> {
+    let Some(firmware) = build_firmware() else { return Vec::new() };
+    let dir = std::env::temp_dir().join(format!("llm2chip-talk-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+    let sampler = SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 };
+    let soc = SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 };
+    let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, 16).unwrap();
+    let code = layout.microprogram(&program).unwrap();
+    let state = layout.conversation_state(&program);
+    assert!(!state.is_empty());
+    let segments = [image_segments(&die, &code, &layout), cell_segments(&die, &layout, &Weights::open(&dir).unwrap()).unwrap()].concat();
+    let start = |conversation: Option<&[netlist::chip::ClearEntry]>, first: &[u32]| {
+        let setup = GenerationSetup { max_new: 3, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
+        let mut info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
+        if let Some(entries) = conversation {
+            netlist::chip::add_conversation(&mut info, 16, entries).unwrap();
+        }
+        let image = build_image(&firmware.program, &firmware.data, &info, &[], &segments).unwrap();
+        let engine = VmEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), die, 16).unwrap();
+        let model = ChipModel::new(engine, code.clone(), SamplerModel { config: sampler, rng: 0, table: exponential_table() });
+        let mut talk = Talk { bus: SocBus::booted_with(soc, &image, &[], model).unwrap(), cpu: Rv32Iss::default() };
+        talk.say(first);
+        talk
+    };
+    // One question with the whole conversation, on a chip that answers once.
+    let once = |tokens: &[u32]| {
+        let mut chip = start(None, tokens);
+        while !chip.cpu.halted {
+            chip.cpu.step(&mut chip.bus);
+        }
+        chip.bus.tx.iter().copied().filter(|b| *b != b'.').collect::<Vec<u8>>().as_chunks::<4>().0.iter().map(|w| u32::from_le_bytes(*w)).collect::<Vec<u32>>()
+    };
+    let (first, second) = ([3u32, 5, 1], [2u32, 6]);
+    let mut talk = start(Some(&state), &first);
+    let answers = talk.until(1);
+    assert_eq!(answers[0], once(&first));
+    talk.say(&second);
+    let answers = talk.until(2);
+    let whole: Vec<u32> = first.iter().chain(&answers[0]).chain(&second).copied().collect();
+    assert_eq!(answers[1], once(&whole), "the second turn goes on from the first");
+
+    // The clear pin while the chip waits: the cache and the state are zeros again.
+    talk.bus.clear();
+    for _ in 0..200_000 {
+        talk.cpu.step(&mut talk.bus);
+    }
+    let engine = &mut talk.bus.peripheral.engine;
+    for entry in &state {
+        for register in 0..entry.registers {
+            let base = entry.address + register * entry.step;
+            assert!((0..entry.extent).all(|i| engine.read(base + i) == 0), "register at {base:#x} is cleared");
+        }
+    }
+    talk.say(&first);
+    assert_eq!(talk.until(3)[2], answers[0], "a new conversation starts as the first did");
+
+    // And in the middle of an answer.
+    talk.say(&second);
+    let before = talk.bus.tx.len();
+    while talk.bus.tx.len() < before + 4 {
+        talk.cpu.step(&mut talk.bus);
+    }
+    talk.bus.clear();
+    talk.say(&first);
+    let after = talk.until(5);
+    assert_eq!(after[4], answers[0], "the cut answer ends, and the next conversation starts afresh");
+
+    // Without clearing the recurrent state the next conversation would start from the old.
+    let mut dirty = start(Some(&[]), &first);
+    dirty.until(1);
+    dirty.bus.clear();
+    for _ in 0..200_000 {
+        dirty.cpu.step(&mut dirty.bus);
+    }
+    let left = state.iter().filter(|e| e.row == 0).any(|e| (0..e.extent).any(|i| dirty.bus.peripheral.engine.read(e.address + i) != 0));
+    assert!(left, "the model's recurrent state needs the clear");
+    std::fs::remove_dir_all(dir).unwrap();
+    state
+}
+
+/// The clear pin and the load controller's fills in gates: a chip holding a conversation
+/// answers, is cleared while it waits, and answers the same question again, writing what the
+/// instruction-level chip writes, byte for byte and cycle for cycle.
+#[test]
+fn the_clear_pin_works_in_gates_as_at_instruction_level() {
+    let Some(firmware) = build_firmware() else { return };
+    let dir = std::env::temp_dir().join(format!("llm2chip-clear-gates-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+    let base = netlist::DieConfig { microcode_bits: 15, ..cell_die_config() };
+    let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), base, CHIP_TOKENS).unwrap();
+    let code = layout.microprogram(&program).unwrap();
+    let die = sim::chip::with_code_dictionary(sim::chip::compact_die(base, &layout), &code);
+    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let setup = GenerationSetup { max_new: 2, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
+    let mut info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
+    netlist::chip::add_conversation(&mut info, CHIP_TOKENS as u32, &layout.conversation_state(&program)).unwrap();
+    let segments = [image_segments(&die, &code, &layout), cell_segments(&die, &layout, &Weights::open(&dir).unwrap()).unwrap()].concat();
+    let image = build_image(&firmware.program, &firmware.data, &info, &[], &segments).unwrap();
+    let question: Vec<u8> = [3u32, 5, u32::MAX].iter().flat_map(|t| t.to_le_bytes()).collect();
+    let marker = u32::MAX.to_le_bytes();
+    let answers = |output: &[u8]| output.windows(4).filter(|w| *w == marker).count();
+
+    // At instruction level: the cycle each answer ends, and the cycle the pin is raised.
+    let engine = VmEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
+    let model = ChipModel::new(engine, code.clone(), SamplerModel { config: config.sampler, rng: 0, table: exponential_table() });
+    let mut bus = SocBus::booted_with(config.soc, &image, &question, model).unwrap();
+    let mut cpu = Rv32Iss::default();
+    while answers(&bus.tx) < 1 {
+        cpu.step(&mut bus);
+        assert!(cpu.cycle < 50_000_000);
+    }
+    let first = cpu.cycle;
+    // The pin a while after the answer, while the chip waits.
+    let clear_at = first + 500;
+    while cpu.cycle < clear_at {
+        cpu.step(&mut bus);
+    }
+    let raised = cpu.cycle;
+    bus.clear();
+    bus.send(&question);
+    while answers(&bus.tx) < 2 {
+        cpu.step(&mut bus);
+        assert!(cpu.cycle < 100_000_000);
+    }
+    let second = cpu.cycle;
+    let expected = bus.tx.clone();
+    let after_boot = expected.iter().position(|b| *b != b'.').unwrap();
+    let half = (expected.len() - after_boot) / 2;
+    assert_eq!(expected[after_boot..after_boot + half], expected[after_boot + half..], "the same question again after the clear");
+
+    // In gates, with the pin raised at the same cycle and the question sent after it.
+    let mut sim = Simulator::new(&chip_design(config)).unwrap();
+    sim.set("reset", 1).unwrap();
+    sim.set("cpu_hold", 1).unwrap();
+    sim.tick();
+    sim.set("reset", 0).unwrap();
+    for _ in 0..=netlist::chip::RESET_RELEASE {
+        sim.tick();
+    }
+    let mut pending = None;
+    let serve = |sim: &mut Simulator, pending: &mut Option<u32>| {
+        sim.set("image_resp_valid", pending.is_some() as u64).unwrap();
+        sim.set("image_resp_data", pending.unwrap_or(0) as u64).unwrap();
+        sim.settle();
+        *pending = (sim.get("image_req_valid").unwrap() == 1).then(|| image[sim.get("image_req_addr").unwrap() as usize]);
+    };
+    let mut to_send: std::collections::VecDeque<u8> = question.iter().copied().collect();
+    loop {
+        sim.set("host_rx_valid", !to_send.is_empty() as u64).unwrap();
+        sim.set("host_rx_data", to_send.front().copied().unwrap_or(0) as u64).unwrap();
+        serve(&mut sim, &mut pending);
+        if !to_send.is_empty() && sim.get("host_rx_ready").unwrap() == 1 {
+            to_send.pop_front();
+        }
+        if sim.get("booting").unwrap() == 0 {
+            break;
+        }
+        sim.tick();
+    }
+    sim.set("cpu_hold", 0).unwrap();
+    sim.set("host_tx_ready", 1).unwrap();
+    let (mut output, mut ends) = (Vec::new(), Vec::new());
+    for cycle in 0..second + 4096 {
+        sim.set("clear", (cycle + 1 == raised) as u64).unwrap();
+        if cycle == raised {
+            to_send.extend(&question);
+        }
+        sim.set("host_rx_valid", !to_send.is_empty() as u64).unwrap();
+        sim.set("host_rx_data", to_send.front().copied().unwrap_or(0) as u64).unwrap();
+        serve(&mut sim, &mut pending);
+        if !to_send.is_empty() && sim.get("host_rx_ready").unwrap() == 1 {
+            to_send.pop_front();
+        }
+        if sim.get("host_tx_valid").unwrap() == 1 {
+            output.push(sim.get("host_tx_data").unwrap() as u8);
+            if answers(&output) > ends.len() {
+                ends.push(cycle + 1);
+            }
+        }
+        if ends.len() == 2 {
+            break;
+        }
+        sim.tick();
+    }
+    assert_eq!(output, expected);
+    // A byte leaves the pins two cycles after the CPU writes it, through the output queue;
+    // between the answers, the clear and its fills take as long as at instruction level.
+    assert_eq!(ends, [first + 2, second + 2], "cycles");
+    std::fs::remove_dir_all(dir).ok();
 }
 
 /// A real model, stories260K, through the whole chip as the FPGA example builds it: the

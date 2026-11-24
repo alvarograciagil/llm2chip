@@ -72,7 +72,15 @@ const INFO_ROTATION_COLS: usize = 28;
 const INFO_SCHEDULE: usize = 29;
 const INFO_QUEUE: usize = 30;
 const INFO_SYSTEM: usize = 31;
-const INFO_PARAMETERS: usize = 32;
+/// Where the conversation table is in the description: zero answers one question and stops.
+const INFO_CONVERSATION: usize = 32;
+const INFO_PARAMETERS: usize = 33;
+/// The load controller writes zeros instead of reading the image while this is set.
+const LOADER_FILL: usize = 9;
+/// The order along the chain to clear the conversation, with the positions it used.
+const CLEAR_ROUTINE: u32 = u32::MAX;
+/// The host port's status bit that says the clear pin was raised.
+const CLEAR_REQUESTED: u32 = 2;
 const TARGET_VECTOR: u32 = 3;
 
 /// The tokenizer's tables, which the image builder leaves after the segment table.
@@ -125,6 +133,12 @@ _start:
 static mut INFO_WORD: usize = DEFAULT_INFO;
 static mut TABLE_WORD: usize = DEFAULT_SEGMENT_TABLE;
 static mut CHIPS: u32 = 1;
+/// The clear pin was raised: what is being read or written is dropped.
+static mut ABORT: bool = false;
+
+fn aborted() -> bool {
+    unsafe { ABORT }
+}
 
 fn data_word(word: usize) -> u32 {
     unsafe { read_volatile(DATA_MEMORY.add(word)) }
@@ -146,10 +160,77 @@ fn peripheral_read(register: usize) -> u32 {
     unsafe { read_volatile(PERIPHERALS.add(register)) }
 }
 
+/// The next byte from the host; 0 once the clear pin has been raised, and from then on.
+#[inline(always)]
 fn receive() -> u8 {
     unsafe {
-        while read_volatile(HOST_RX_STATUS) == 0 {}
-        read_volatile(HOST_RX_DATA) as u8
+        loop {
+            // A byte waiting and no clear, the usual case, costs what it did before the pin.
+            let status = read_volatile(HOST_RX_STATUS);
+            if status == 1 {
+                return read_volatile(HOST_RX_DATA) as u8;
+            }
+            if status & CLEAR_REQUESTED != 0 {
+                ABORT = true;
+                return 0;
+            }
+        }
+    }
+}
+
+/// Has the load controller move `count` elements, or write zeros when `fill`, and waits.
+fn transfer(fill: bool, [source, target, unit, address, count, beats]: [u32; 6]) {
+    if count == 0 {
+        return;
+    }
+    unsafe {
+        write_volatile(LOADER.add(LOADER_FILL), fill as u32);
+        for (register, value) in [source, target, unit, address, count, beats].iter().enumerate() {
+            write_volatile(LOADER.add(register), *value);
+        }
+        write_volatile(LOADER.add(LOADER_START), 1);
+        while read_volatile(LOADER.add(LOADER_BUSY)) != 0 {}
+    }
+}
+
+/// Empties what a conversation left in the die: the vector memory's first contents again,
+/// as the boot left them, and zeros over the cache and the recurrent state, as the
+/// description's conversation table says. Its entries are a first address, how many
+/// registers from it and the step between them, how far each reaches, and the elements of a
+/// position's row when the cache's rows follow one another: then only the first `rows`.
+fn clear_state(rows: u32) {
+    let at = info(INFO_CONVERSATION) as usize;
+    if at == 0 {
+        return;
+    }
+    let table = unsafe { TABLE_WORD };
+    for index in 0..data_word(table) as usize {
+        let field = |i: usize| data_word(table + 1 + index * SEGMENT_FIELDS + i);
+        if field(1) == TARGET_VECTOR {
+            transfer(false, [field(0), field(1), field(2), field(3), field(4), field(5)]);
+        }
+    }
+    for entry in 0..info(at + 1) as usize {
+        let field = |i: usize| info(at + 2 + 5 * entry + i);
+        let count = if field(4) != 0 { rows.wrapping_mul(field(4)).min(field(3)) } else { field(3) };
+        for register in 0..field(1) {
+            transfer(true, [0, TARGET_VECTOR, 0, field(0).wrapping_add(register.wrapping_mul(field(2))), count, 1]);
+        }
+    }
+}
+
+/// Clears what the conversation left, on this chip and down the chain, and forgets the
+/// clear pin.
+fn clear_conversation(rows: u32) {
+    if chips() > 1 {
+        chain_send(CLEAR_ROUTINE);
+        chain_send(rows);
+        chain_send(0);
+    }
+    clear_state(rows);
+    unsafe {
+        write_volatile(HOST_RX_STATUS as *mut u32, 0);
+        ABORT = false;
     }
 }
 
@@ -162,19 +243,12 @@ fn send(byte: u8) {
 
 /// Loads every segment of the image; each CRC mismatch is reported to the host.
 fn load_segments() {
-    unsafe {
-        let table = TABLE_WORD;
-        let count = data_word(table) as usize;
-        for index in 0..count {
-            let field = |i: usize| data_word(table + 1 + index * SEGMENT_FIELDS + i);
-            for register in 0..6 {
-                write_volatile(LOADER.add(register), field(register));
-            }
-            write_volatile(LOADER.add(LOADER_START), 1);
-            while read_volatile(LOADER.add(LOADER_BUSY)) != 0 {}
-            let good = read_volatile(LOADER.add(LOADER_CRC)) == field(6);
-            send(if good { b'.' } else { b'E' });
-        }
+    let table = unsafe { TABLE_WORD };
+    for index in 0..data_word(table) as usize {
+        let field = |i: usize| data_word(table + 1 + index * SEGMENT_FIELDS + i);
+        transfer(false, [field(0), field(1), field(2), field(3), field(4), field(5)]);
+        let good = unsafe { read_volatile(LOADER.add(LOADER_CRC)) } == field(6);
+        send(if good { b'.' } else { b'E' });
     }
 }
 
@@ -246,14 +320,7 @@ fn load_row(row: u32, [source, address, count]: [usize; 3]) {
     if cols == 0 {
         return;
     }
-    let fields = [info(source).wrapping_add(row.wrapping_mul(cols)), TARGET_VECTOR, 0, info(address), cols, 1];
-    unsafe {
-        for (register, value) in fields.iter().enumerate() {
-            write_volatile(LOADER.add(register), *value);
-        }
-        write_volatile(LOADER.add(LOADER_START), 1);
-        while read_volatile(LOADER.add(LOADER_BUSY)) != 0 {}
-    }
+    transfer(false, [info(source).wrapping_add(row.wrapping_mul(cols)), TARGET_VECTOR, 0, info(address), cols, 1]);
 }
 
 /// `a · b`, without the multiplier's 33 cycles when `a` is 0 or 1, as most factors are.
@@ -312,6 +379,10 @@ fn serve_chain(id: u32) -> ! {
             chain_send(token);
             chain_send(position);
         }
+        if routine == CLEAR_ROUTINE {
+            clear_state(token);
+            continue;
+        }
         start_die(routine, token, position);
         wait_for_die();
     }
@@ -369,11 +440,11 @@ fn encode_text(length: usize, sink: &mut impl FnMut(u32)) {
     let _ = tokenizer().encode(text, arena, sink);
 }
 
-/// Hands over the system prompt's tokens, which the chip carries, then reads the whole
-/// prompt from the host and hands over its tokens.
-fn read_prompt(sink: &mut impl FnMut(u32)) {
+/// Hands over the system prompt's tokens, which the chip carries, at the start of a
+/// conversation, then reads the whole prompt from the host and hands over its tokens.
+fn read_prompt(first: bool, sink: &mut impl FnMut(u32)) {
     let system = info(INFO_SYSTEM) as usize;
-    if system != 0 {
+    if first && system != 0 {
         for at in system + 1..=system + info(system) as usize {
             sink(info(at));
         }
@@ -384,7 +455,7 @@ fn read_prompt(sink: &mut impl FnMut(u32)) {
             for shift in 0..4 {
                 token |= (receive() as u32) << (8 * shift);
             }
-            if token == END_OF_TOKENS {
+            if token == END_OF_TOKENS || aborted() {
                 return;
             }
             sink(token);
@@ -405,7 +476,7 @@ fn read_prompt(sink: &mut impl FnMut(u32)) {
             None => fits = false,
         }
     }
-    if fits {
+    if fits && !aborted() {
         encode_text(length, sink);
     }
 }
@@ -1018,50 +1089,94 @@ extern "C" fn main() {
         showo_pass();
         return;
     }
-    let (entry_token, entry_logits) = (ROUTINE_TOKEN, ROUTINE_LOGITS);
+    let entry_token = ROUTINE_TOKEN;
     let depth = (info(INFO_DRAFT_DEPTH) as usize).min(MAX_DRAFT_DEPTH);
-    let (mut last, mut position, mut draft_position) = (0, 0, 0u32);
-    let mut reasoning = Reasoning::default();
-    // A chip that carries an image encoder first hears whether an image comes.
-    let mut picture = if info(INFO_VISION) != 0 { read_picture() } else { None };
-    // After an image, the text's rotations run behind the cache by this much.
-    let mut behind = 0u32;
     let rotates = info(INFO_VISION) != 0 && vision(V_ROPE_HALF) != 0;
-    read_prompt(&mut |token| {
-        if let Some(image) = picture.filter(|_| token == vision(V_IMAGE_TOKEN)) {
-            // The image's tokens take the placeholder's place, one by one, and the text
-            // goes on after the longer side of the image.
-            let start = position;
-            for index in 0..image.tokens {
-                run_die(ROUTINE_VISION + 1 + 2 * vision(V_BLOCKS), index, index);
-                if rotates {
-                    rotate_image_token(position, start, index / image.width, index % image.width);
+    let stops = info(INFO_STOP_TABLE) as usize..(info(INFO_STOP_TABLE) + info(INFO_STOP_COUNT)) as usize;
+    // A chip that holds a conversation clears it at power-up, every place of its cache,
+    // and again whenever the clear pin is raised, as far as the conversation went.
+    let conversation = info(INFO_CONVERSATION) as usize;
+    let capacity = if conversation != 0 { info(conversation) } else { u32::MAX };
+    let mut rows = capacity;
+    loop {
+        if conversation != 0 {
+            clear_conversation(rows);
+        }
+        let (mut last, mut position, mut draft_position) = (0, 0, 0u32);
+        let mut reasoning = Reasoning::default();
+        // After an image, the text's rotations run behind the cache by this much.
+        let mut behind = 0u32;
+        let mut first = true;
+        loop {
+            // A chip that carries an image encoder first hears whether an image comes.
+            let mut picture = if info(INFO_VISION) != 0 { read_picture() } else { None };
+            read_prompt(first, &mut |token| {
+                // A full cache takes nothing more until the conversation is cleared.
+                if position >= capacity {
+                    return;
                 }
-                run_die(ROUTINE_TOKEN_FROM_IMAGE, 0, position);
+                if let Some(image) = picture.filter(|_| token == vision(V_IMAGE_TOKEN)) {
+                    // The image's tokens take the placeholder's place, one by one, and the text
+                    // goes on after the longer side of the image.
+                    let start = position;
+                    for index in 0..image.tokens {
+                        run_die(ROUTINE_VISION + 1 + 2 * vision(V_BLOCKS), index, index);
+                        if rotates {
+                            rotate_image_token(position, start, index / image.width, index % image.width);
+                        }
+                        run_die(ROUTINE_TOKEN_FROM_IMAGE, 0, position);
+                        position += 1;
+                    }
+                    behind = image.tokens - image.width.max(image.height);
+                    picture = None;
+                    return;
+                }
+                reasoning.see(token);
+                if rotates && behind > 0 {
+                    rotate_as(position, position - behind);
+                }
+                // The draft head reads the state before each token, to predict the one after it.
+                if depth > 0 && position > 0 {
+                    run_die(ROUTINE_FEED_FROM_MAIN, 0, 0);
+                    run_die(ROUTINE_DRAFT, token, draft_position);
+                    draft_position += 1;
+                }
+                run_die(entry_token, token, position);
+                last = token;
                 position += 1;
+            });
+            first = false;
+            if aborted() {
+                break;
             }
-            behind = image.tokens - image.width.max(image.height);
-            picture = None;
-            return;
+            if position == 0 && conversation == 0 {
+                return;
+            }
+            answer(&mut last, &mut position, &mut draft_position, &mut reasoning, (depth, rotates, behind, stops.clone(), capacity));
+            if conversation == 0 {
+                return;
+            }
+            // The answer's end, and the chip waits for the next turn of the conversation.
+            if info(INFO_RAW_TOKENS) != 0 {
+                emit(END_OF_TOKENS, &mut Decoding::default());
+            } else {
+                send(0);
+            }
+            if aborted() {
+                break;
+            }
         }
-        reasoning.see(token);
-        if rotates && behind > 0 {
-            rotate_as(position, position - behind);
-        }
-        // The draft head reads the state before each token, to predict the one after it.
-        if depth > 0 && position > 0 {
-            run_die(ROUTINE_FEED_FROM_MAIN, 0, 0);
-            run_die(ROUTINE_DRAFT, token, draft_position);
-            draft_position += 1;
-        }
-        run_die(entry_token, token, position);
-        last = token;
-        position += 1;
-    });
-    if position == 0 {
+        rows = position;
+    }
+}
+
+/// Writes the answer after the prompt, from `last` at `position`, until a stop token, a
+/// loop, the most new tokens, a full cache or the clear pin.
+fn answer(last: &mut u32, position: &mut u32, draft_position: &mut u32, reasoning: &mut Reasoning, (depth, rotates, behind, stops, capacity): (usize, bool, u32, core::ops::Range<usize>, u32)) {
+    if *position == 0 {
         return;
     }
-    let stops = info(INFO_STOP_TABLE) as usize..(info(INFO_STOP_TABLE) + info(INFO_STOP_COUNT)) as usize;
+    let (entry_token, entry_logits) = (ROUTINE_TOKEN, ROUTINE_LOGITS);
     // Raw mode has no tokenizer in memory to ask.
     let mut decoding = if info(INFO_RAW_TOKENS) != 0 { Decoding::default() } else { tokenizer().decoding() };
     let mut pending = [(0u32, [0u32; MAX_DRAFT_DEPTH]); MAX_DRAFT_DEPTH + 1];
@@ -1069,9 +1184,13 @@ extern "C" fn main() {
     // A model that never writes its end token stops once it repeats itself.
     let mut watch = LoopWatch::default();
     for _ in 0..info(INFO_MAX_NEW) {
-        run_die(entry_logits, last, position - 1);
-        last = reasoning.steer(sample());
-        if stops.clone().any(|at| info(at) == last) {
+        if unsafe { read_volatile(HOST_RX_STATUS) } & CLEAR_REQUESTED != 0 {
+            unsafe { ABORT = true };
+            return;
+        }
+        run_die(entry_logits, *last, *position - 1);
+        *last = reasoning.steer(sample());
+        if stops.clone().any(|at| info(at) == *last) {
             return;
         }
         if depth > 0 {
@@ -1090,11 +1209,11 @@ extern "C" fn main() {
                     }
                 }
                 waiting = kept;
-                let mut guess = last;
+                let mut guess = *last;
                 let mut guesses = [0u32; MAX_DRAFT_DEPTH];
                 run_die(ROUTINE_FEED_FROM_MAIN, 0, 0);
                 for (step, slot) in guesses.iter_mut().enumerate().take(depth) {
-                    run_die(ROUTINE_DRAFT_LOGITS, guess, draft_position + step as u32);
+                    run_die(ROUTINE_DRAFT_LOGITS, guess, *draft_position + step as u32);
                     guess = sample_draft();
                     *slot = guess;
                     run_die(ROUTINE_FEED_FROM_DRAFT, 0, 0);
@@ -1105,20 +1224,20 @@ extern "C" fn main() {
                 }
             }
             run_die(ROUTINE_FEED_FROM_MAIN, 0, 0);
-            run_die(ROUTINE_DRAFT, last, draft_position);
-            draft_position += 1;
+            run_die(ROUTINE_DRAFT, *last, *draft_position);
+            *draft_position += 1;
         }
-        emit(last, &mut decoding);
-        if watch.push(last) {
+        emit(*last, &mut decoding);
+        if watch.push(*last) || *position >= capacity {
             return;
         }
         if rotates && behind > 0 {
-            rotate_as(position, position - behind);
+            rotate_as(*position, *position - behind);
         }
-        run_die(entry_token, last, position);
-        position += 1;
+        run_die(entry_token, *last, *position);
+        *position += 1;
         produced += 1;
-        previous = last;
+        previous = *last;
     }
 }
 

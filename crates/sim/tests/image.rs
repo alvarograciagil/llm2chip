@@ -71,7 +71,7 @@ mod chip_image {
     fn an_image_holds_every_chip_count_and_each_cells_weights() {
         let dir = fixture("whole");
         let out = dir.join("model.chipimg");
-        let request = ImageRequest { chips: vec![1, 2], context_tokens: 64, cells: 3, activation_bits: 16, lane_bits: 0, cluster_bits: 0, add_special: false, stop: vec![2], sharing: Default::default(), system: Vec::new() };
+        let request = ImageRequest { chips: vec![1, 2], context_tokens: 64, cells: 3, activation_bits: 16, lane_bits: 0, cluster_bits: 0, add_special: false, stop: vec![2], sharing: Default::default(), system: Vec::new(), conversation: false };
         let (done, total, cancel) = (AtomicU64::new(0), AtomicU64::new(0), AtomicBool::new(false));
         let report = write_chip_image(&dir, &firmware(), &request, &out, &done, &total, &cancel).unwrap();
         assert_eq!(report.chips, [1, 2]);
@@ -113,7 +113,7 @@ mod chip_image {
     fn chips_that_share_rows_each_read_their_slice_of_every_cell() {
         let dir = fixture("rows");
         let out = dir.join("rows.chipimg");
-        let request = ImageRequest { chips: vec![1, 2], context_tokens: 64, cells: 3, activation_bits: 16, lane_bits: 0, cluster_bits: 0, add_special: false, stop: vec![2], sharing: sim::chip::Sharing::Rows, system: Vec::new() };
+        let request = ImageRequest { chips: vec![1, 2], context_tokens: 64, cells: 3, activation_bits: 16, lane_bits: 0, cluster_bits: 0, add_special: false, stop: vec![2], sharing: sim::chip::Sharing::Rows, system: Vec::new(), conversation: false };
         let (done, total, cancel) = (AtomicU64::new(0), AtomicU64::new(0), AtomicBool::new(false));
         write_chip_image(&dir, &firmware(), &request, &out, &done, &total, &cancel).unwrap();
         let mut image = ChipImage::open(&out).unwrap();
@@ -147,7 +147,7 @@ mod chip_image {
     fn damage_to_the_file_is_found() {
         let dir = fixture("damage");
         let out = dir.join("danada.chipimg");
-        let request = ImageRequest { chips: vec![1], context_tokens: 64, cells: 2, activation_bits: 16, lane_bits: 0, cluster_bits: 0, add_special: false, stop: vec![], sharing: Default::default(), system: Vec::new() };
+        let request = ImageRequest { chips: vec![1], context_tokens: 64, cells: 2, activation_bits: 16, lane_bits: 0, cluster_bits: 0, add_special: false, stop: vec![], sharing: Default::default(), system: Vec::new(), conversation: false };
         let (done, total, cancel) = (AtomicU64::new(0), AtomicU64::new(0), AtomicBool::new(false));
         write_chip_image(&dir, &firmware(), &request, &out, &done, &total, &cancel).unwrap();
         let offset = ChipImage::open(&out).unwrap().manifest.tensors[0].offset as usize;

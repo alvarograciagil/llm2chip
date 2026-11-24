@@ -1264,6 +1264,40 @@ impl Layout {
         (bases, bits)
     }
 
+    /// What a conversation leaves in vector memory, for the clear pin to empty: each register
+    /// of the cache's keys and values and of the recurrent and convolution state, with how
+    /// far the routines assembled so far reach into it, and for the cache, when a position's
+    /// row is consecutive elements, how many (zero when its elements are spread out, so the
+    /// register is cleared whole). Gives the entries of a chip's conversation table.
+    pub fn conversation_state(&self, program: &Program) -> Vec<netlist::chip::ClearEntry> {
+        let extents = self.extents.borrow();
+        let width = |slot: usize| all_ops(program).find_map(|inst| match inst.op {
+            Op::KvAppend { slot: s, key, .. } if s == slot => Some(program.buffers[key] as u32),
+            _ => None,
+        });
+        let mut state: Vec<(u32, u32)> = Vec::new();
+        for (slot, (keys, values)) in self.keys.iter().zip(&self.values).enumerate() {
+            let row = if self.key_capacity.is_none() { width(slot).unwrap_or(0) } else { 0 };
+            state.extend([(*keys, row), (*values, row)]);
+        }
+        state.extend(self.delta.iter().flatten().chain(&self.conv).map(|r| (*r, 0)));
+        let mut seen = HashSet::new();
+        let step = 1u32 << self.config.index_bits;
+        let mut entries: Vec<netlist::chip::ClearEntry> = Vec::new();
+        for (register, row) in state {
+            let extent = extents.get(&register).copied().unwrap_or(0);
+            if extent == 0 || !seen.insert(register) {
+                continue;
+            }
+            // Registers one after another with the same reach go as one entry.
+            match entries.last_mut() {
+                Some(e) if e.extent == extent && e.row == row && e.address + e.registers * step == register << self.config.index_bits => e.registers += 1,
+                _ => entries.push(netlist::chip::ClearEntry { address: register << self.config.index_bits, registers: 1, step, extent, row }),
+            }
+        }
+        entries
+    }
+
     /// The registers that reach furthest, for looking into a layout.
     pub fn longest_registers(&self, count: usize) -> Vec<(u32, u32)> {
         let mut list: Vec<(u32, u32)> = self.extents.borrow().iter().map(|(r, e)| (*r, *e)).collect();

@@ -44,6 +44,15 @@ export function systemPrompt(): string {
   return String(useDesign.getState().params.system_prompt ?? "").trim();
 }
 
+/** The system prompt a project gets when it starts to listen or speak without one: a voice
+ * assistant answers briefly. It shows in the panel, where it can be changed. */
+export const VOICE_SYSTEM_PROMPT = "You are a voice assistant. Answer in one short sentence.";
+
+function withVoicePrompt(params: ChipParams, change: Record<string, unknown>): ChipParams {
+  const voiceOn = change.speech_in === true || change.speech_out === true;
+  return voiceOn && !String(params.system_prompt ?? "").trim() ? { ...params, system_prompt: VOICE_SYSTEM_PROMPT } : params;
+}
+
 export interface SavedDesign {
   name: string;
   model: string;
@@ -276,8 +285,8 @@ export const useDesign = create<DesignState>((set, get) => {
       });
     },
 
-    setParam: (key, value) => commit({ ...get().params, [key]: value }, key),
-    setParams: (patch) => commit({ ...get().params, ...patch }, ""),
+    setParam: (key, value) => commit(withVoicePrompt({ ...get().params, [key]: value }, { [key]: value }), key),
+    setParams: (patch) => commit(withVoicePrompt({ ...get().params, ...patch }, patch), ""),
 
     resetParam(key) {
       commit({ ...get().params, [key]: get().defaults[key] }, "");

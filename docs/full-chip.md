@@ -11,6 +11,8 @@ The real chip would have a PCIe or USB PHY. In simulation, that PHY is replaced 
 | `host_rx_*` | Input, byte stream | Commands and UTF-8 text |
 | `host_tx_*` | Output, byte stream | UTF-8 text and status |
 | `image_req_*`, `image_data_*` | Requests for image blocks | Reading the model from the host |
+| `reset` | Input | Starts again from the image: reloads everything, weights included |
+| `clear` | Input | Clears the conversation without reloading the weights (see [below](#a-conversation-and-the-clear-pin)) |
 
 The chip receives bytes of text and returns bytes of text. Tokenizing, inference, sampling and detokenizing happen inside. A chip run by a schedule (a speech recogniser or a sound decoder) exchanges 32-bit words instead: samples or codes in, tokens or samples out ([voice.md](voice.md#what-the-host-sends-and-gets-back)).
 
@@ -95,7 +97,7 @@ At boot, the leader sends a counter along the control chain. Each chip takes its
 | `chain_tx_*`, `chain_rx_*` | Counting at boot and the leader's commands, in a ring |
 | `image_req_*`, `image_resp_*` | Each chip asks for its part of the same image |
 | `follower` | Low on the chip that leads |
-| `reset`, `host_*`, `debug_*` | Reset, host (only used on the leader) and debug |
+| `reset`, `clear`, `host_*`, `debug_*` | Reset, clearing the conversation, host (only used on the leader) and debug |
 
 ### Splits
 
@@ -123,7 +125,7 @@ A project can give the chip a **system prompt** (`system_prompt`): a fixed text 
 
 The description has 1,008 words. After its own words, that leaves room for roughly 850 tokens, and longer prompts are refused.
 
-**How it runs.** Before reading the host's prompt, the firmware hands each of these tokens to the same path as the prompt's tokens. Their positions, the reasoning budget and the draft head therefore treat them exactly as text the host sent. A chip without one pays a single branch, and the firmware grew by 108 bytes. Chips run by schedules (speech, sound) and Show-o's chips do not read a prompt, so they ignore it.
+**How it runs.** At the start of a conversation, before reading the host's prompt, the firmware hands each of these tokens to the same path as the prompt's tokens. Their positions, the reasoning budget and the draft head therefore treat them exactly as text the host sent. A chip without one pays a single branch, and the firmware grew by 108 bytes. Chips run by schedules (speech, sound) and Show-o's chips do not read a prompt, so they ignore it.
 
 **What the host sends.** The host frames the conversation with the model's chat template, system prompt first (`PromptStyle::render_with_system`), and splits it there (`split_system`). The system prompt's framed tokens go in the chip, and the rest goes over the host port. The model's special tokens, such as BOS, go with the system prompt, so a chip that tokenizes on the CPU no longer adds them to the question.
 
@@ -131,16 +133,47 @@ A template that does not put the system prompt ahead of the question is refused,
 
 The simulator (local and in the browser), the Listen and Speak views, the voice planner and written chip images all take the project's system prompt.
 
-**What it costs.** The chip answers one question per power-up, so it reads the system prompt before each one. The estimate shows:
+**What it costs.** A chip that holds a conversation (next section) reads the system prompt once a conversation starts, after power-up or the clear pin, while it waits for the first question. The estimate shows:
 - its tokens (about four characters each, as the browser has no tokenizer);
-- the time it adds before the first token, at the prompt reading speed;
+- the time it takes at the prompt reading speed;
 - that it takes that much of the context.
 
-The voice planner adds its tokens to the language model's prompt, so the time to the first output includes them.
-
-Keeping its cache between questions would avoid reading it again each time, but that needs a firmware that answers several questions without powering up again. It is not built yet.
+The voice planner counts its tokens in the language model's context but not before the first output. A chip that answers once reads it before its only question.
 
 `the_firmware_runs_the_chips_system_prompt_before_the_hosts` checks it at instruction level with the tiny model. The system prompt goes in the description and the question over the port, and the chip writes the same tokens as the software reading the whole conversation.
+
+## A conversation and the clear pin
+
+A chip can **hold a conversation**: after each answer it sends an end mark and waits for the next turn. The turn goes on over the same cache, without reading the earlier turns again. Two pins start again:
+
+| Pin | What it does | Takes |
+|---|---|---|
+| `reset` | Starts from the image: the firmware, the weights, everything | As long as loading the image |
+| `clear` | Clears the conversation: zeros over the cache and the recurrent state, and the vector memory's first contents again; then it reads the system prompt and waits | Milliseconds |
+
+**The end mark** is a `0` byte when the chip tokenizes, or the word `0xFFFFFFFF` when it exchanges raw tokens. The host sends the next turn as its chat template writes it after the answer, as `voice::Conversation` does. A cache that fills up takes nothing more: the chip ends the turn and waits for a clear.
+
+**What the clear zeros.** It zeros what a conversation leaves in the die, and nothing else:
+- **The cache.** On a die that keeps each token's row of keys and values together, only the rows the conversation used are zeroed: what the time takes grows with the conversation, not with the context. A die that keeps each column's tokens together zeros its cache whole.
+- **The recurrent state** (DeltaNet's and the convolutions'). Zeroing it is needed for correctness, not only for privacy: without it, the next conversation starts from the old one's state.
+- **The vector memory's first contents.** The firmware loads every vector segment of the boot again, so anything a conversation rewrote, such as rotation rows for an image, is as it was.
+
+At power-up the firmware zeros the whole cache, since it cannot know what the memory held.
+
+**How it works.**
+- **The pin:** it stays requested until the firmware writes the host port's status register, and the firmware sees it as bit 1 of that status (`CLEAR_REQUESTED`). Raising it drops the bytes the host had sent and the chip had not read. The firmware watches it while it waits for bytes and before each token it writes, so it can cut an answer short.
+- **The load controller** writes the zeros. While its register 9 (`LOADER_FILL`) holds 1, each element's words are zeros and the image is not read. The timing is the same as a read the image answers at once: three cycles an element.
+- **The conversation table** sits in the chip's description (`netlist::chip::add_conversation`). It holds the cache's capacity in positions, then entries of five words: a first address, how many registers from it and the step between them, how far each reaches, and the elements of one position's row (zero when the register is zeroed whole). `Layout::conversation_state` makes it from the die's own layout.
+- **A chain of chips:** the leader sends the clear down the chain as a command with the positions used, and each chip zeros its own layers' part.
+
+The estimate shows how long clearing a conversation that filled the context takes. The chip images the application writes hold a conversation. A chip whose description has no table answers once and stops, as before.
+
+**Checked:**
+- `a_conversation_goes_on_over_its_cache_until_the_clear_pin` and `a_die_with_the_cache_by_rows_clears_only_the_rows_used` run at instruction level on the die's exact machine, on a die that keeps its cache by columns and one that keeps it by rows. A second turn writes what one question with the whole conversation writes. After a clear, raised while the chip waits or in the middle of an answer, the cache and the state read zeros and the same question gets the first answer again. Without the table's entries, the recurrent state is left behind.
+- `the_clear_pin_works_in_gates_as_at_instruction_level` runs the whole chip in gates: an answer, the clear while it waits, and the same question again. It writes the same bytes, and between the answers it takes the same cycles.
+- Clearing a chain of chips is not yet checked in gates.
+
+**The firmware** takes 32,276 of its 32,768 bytes. To make room for the conversation it is built with less inlining (`-inline-threshold=25`, in `firmware/.cargo/config.toml`), which also made it faster at decoding sound. Building it for size instead (`opt-level = "z"`) fits too, but makes the CPU some 8 % slower than the voice planner counts. Reading a byte from the host costs what it did before the pin, since the usual case is checked first.
 
 ## Why not everything in gates with Qwen
 
@@ -193,7 +226,8 @@ A program that is a set of routines rather than a token's pass (an image or spee
 | `INFO_SCHEDULE` (29) | The schedule's word in data memory; zero for a chip that reads a prompt |
 | `INFO_QUEUE` (30) | The command queue's orders; zero without one |
 | `INFO_SYSTEM` (31) | Where the system prompt starts in the description; zero without one (see below) |
-| `INFO_PARAMETERS` (32 on) | The parameter registers, seven words each |
+| `INFO_CONVERSATION` (32) | Where the conversation table starts in the description; zero for a chip that answers once (see below) |
+| `INFO_PARAMETERS` (33 on) | The parameter registers, seven words each |
 
 The **command queue** (`DieFeatures::queue_bits`) sits between the CPU's writes and the die: writes to a parameter register or to `REG_ENTRY` wait in it, and the die takes one a cycle whenever it is free, an entry starting it. `REG_QUEUE_ROOM` (49) says how many more it takes, and `REG_STATUS` says free once it is empty and the die idle. It is built only on the dies that ask for it, such as voice's, so the CPU orders the next routine while the die runs this one. [voice.md](voice.md#the-chip-runs-its-programs-by-itself) has the records, what each chip's host sends and what the firmware's work costs.
 
