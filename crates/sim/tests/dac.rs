@@ -120,6 +120,10 @@ fn dac_s_decoder_on_the_die_s_gates_gives_the_exact_machine_s_sound() {
     let wide = DacChip::new(&dir, 3, sized, true).unwrap();
     wide.microprogram().unwrap();
     let die = sim::chip::with_registers_needed(sized, wide.parts().1);
+    // A die built for this microprogram: with the wrapping shift a general die leaves out.
+    let mut widths = die.features.widths;
+    widths[netlist::die::WRAP_LEFT_FIELD] = 1;
+    let die = DieConfig { features: netlist::DieFeatures { widths, ..die.features }, ..die };
     let mut chip = DacChip::new(&dir, 3, die, true).unwrap();
     let (_, exact) = chip.decode(&codes).unwrap();
     let calls = chip.calls(&codes).unwrap();

@@ -75,7 +75,11 @@ pub struct DieFeatures {
 
 impl Default for DieFeatures {
     fn default() -> Self {
-        Self { ops: u32::MAX, widths: [u8::MAX; FIELD_COUNT], x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0, host_writes: false, group_shift: 0, group_bits: 0 }
+        // A general die has every field but `wrap_left`, which only a die whose microprogram
+        // takes a periodic function's argument round its period is built with.
+        let mut widths = [u8::MAX; FIELD_COUNT];
+        widths[WRAP_LEFT_FIELD] = 0;
+        Self { ops: u32::MAX, widths, x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0, host_writes: false, group_shift: 0, group_bits: 0 }
     }
 }
 
