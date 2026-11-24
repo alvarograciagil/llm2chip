@@ -133,7 +133,7 @@ On the chip (`sim::moonshine_stream_chip`) it listens as the question comes:
 
 The die's arithmetic with 16-bit vectors writes what Transformers writes: "What is the capital of France?" and "Hello, this chip can listen and speak." (`--example listen`). On a toy checkpoint the exact machine's scores are within 0.2 % of floating point for every kind of window (none ahead, some ahead, one wider than the clip, no layers), the gates give the exact machine's scores bit for bit (900,912 cycles), and the firmware, at instruction level, writes the host's tokens (`crates/sim/tests/moonshine_stream.rs`).
 
-In the plan, the recogniser's first token comes **0.4 ms** after the question ends instead of 25.7 ms, and each 20 ms takes much less than 20 ms on any die tried. With the rest as before the system is three dies, 930 mm², and the first sound comes in **458 ms** instead of 483. Moonshine-tiny stays the default; the streaming model is used wherever its folder is given as the recogniser.
+In the plan, the recogniser's work after the question ends takes **1.1 ms** instead of Moonshine-tiny's 33.2 ms on the same die, and each 20 ms takes much less than 20 ms on every die tried. The planner spends that margin on silicon: three dies and 586 mm² instead of 591, the speech writer keeping 2,048 cells, and the first sound in 478 ms. A turn costs 5.7 J. Moonshine-tiny stays the default; the streaming model is used wherever its folder is given as the recogniser.
 
 ## The firmware's schedule
 
@@ -153,9 +153,11 @@ A die whose program is a set of routines (an encoder that runs once per clip, a 
 
 `MoonshineChip::schedule` writes Moonshine's (63 records for Moonshine-tiny, 39 for the tests' toy): the host sends the clip's length, `1 / count` for its GroupNorm and the rows of samples; the firmware works out the lengths as `Lengths::of` does, runs the encoder and writes the tokens greedily until the end token. `DacChip::schedule` writes DAC's (172 records for DAC.speech, 76 for the toy): the host sends each window's codes and which of its samples to keep, and the chip sends back only those, so it skips computing the overlap's. A schedule can be longer than the chip's description has room for (1,008 words), so it goes where a tokenizer's tables would, at word 0x2000 of the data memory: a chip run by a schedule exchanges words, not text, and has none. DAC.speech's takes 1,384 words there, Moonshine-tiny's 512 (`the_real_decoder_s_schedule_fits_its_chip_image`, `the_real_recogniser_s_schedule_fits_its_chip_image`). `netlist::schedule::expand` reads a schedule as the firmware does, so a schedule is checked against the host's own order of routines (for four clip lengths). At instruction level, the firmware driving a die run by the exact machine writes the host's tokens and the host's sound, mantissa for mantissa (`the_firmware_transcribes_a_clip_as_the_host_ordering_the_routines`, `the_firmware_decodes_window_by_window_as_the_host_does`).
 
-**The CPU's time counts.** Starting a routine costs the control CPU (three cycles an instruction, 33 more for a multiplication) about 930 cycles in the general path. DAC's routines are short (225 die cycles on average on the toy) and many: the real decoder runs **360,000 a window of 54 frames**. So the firmware has a lean path for a repeat made only of calls (up to 16 a repeat): it reads the records once, works out each parameter register's first value and its step, and each iteration only writes, adds and starts the die; about **270 cycles a routine**. The planner counts the CPU's cycles on top of the die's (`sim::chip::firmware_cycles`): 300 a routine on the lean path (the encoder's and the decoder's passes), 1,000 a routine started alone (rows of samples, the pairwise sums, each token's routines, each frame's codes, each sample sent back) and 200 a word received or sent (a three-second clip is 48,000 samples). Both firmware tests check the CPU's measured cycles against that count: on the toy decoder, 26 M cycles of the CPU's own (30 M counted) beside 21 M of the die's. The firmware now fills 32.1 of its 32 KB of program memory.
+**The CPU's time counts.** Starting a routine costs the control CPU (three cycles an instruction, 33 more for a multiplication) about 930 cycles in the general path. DAC's routines are short (225 die cycles on average on the toy) and many: the real decoder runs **360,000 a window of 54 frames**. So the firmware has a lean path for a repeat made only of calls (up to 16 a repeat): it reads the records once, works out each parameter register's first value and its step, and each iteration only writes the parameters, starts the die and steps the next values while the die runs; 120 to 250 cycles a routine. The parameters cannot be written while the die runs a routine, though, so the writes still wait for it: for the real decoder that is still some 50 M cycles a window.
 
-A die that ran a repeated routine itself, its token stepping in the die's controller, would take this off the CPU. It would need a counter and an adder per parameter register in every die, so it is not built.
+**A command queue before the die** (`DieFeatures::queue_bits`, built only where asked) takes that wait away. The CPU's writes to the parameters and to the entry wait in it, and the die takes them one a cycle whenever it is free, an entry starting it; the CPU orders the next routine while the die runs this one, and waits only when the queue has no room for a whole routine's orders (`REG_QUEUE_ROOM`). Sixteen orders are 16 × 38 flip-flops and two pointers. The gates take the orders as the instruction-level model does, cycle for cycle: the test model's whole chip (230,439 cycles) and the toy Moonshine's whole chip following its schedule (1,192,263 cycles), the same bytes. On the toy decoder the CPU's own cycles fall from 20.4 M to 12.6 M; on dies whose routines are longer than the CPU's work (300 cycles) they hide behind the die's.
+
+The planner counts the CPU's cycles on top of the die's (`sim::chip::firmware_cycles`, `lean_cycles`): on the lean path, 250 a routine without a queue, and with one a cycle for each order plus whatever of the CPU's 300 the routine before does not hide, routine by routine; 1,000 a routine started alone (rows of samples, the pairwise sums, each token's routines, each frame's codes, each sample sent back) and 200 a word received or sent (a three-second clip is 48,000 samples). Both firmware tests check the CPU's measured cycles against that count, with the queue and without. The firmware now fills 32.3 of its 32 KB of program memory.
 
 ## Where each piece lives
 
@@ -182,6 +184,7 @@ Voice adds files; the core only gains general things.
 | The engine's job and the application's view | `crates/server/src/voice_job.rs`, `web/src/voice/` | Voice |
 | Schedules the firmware follows | `crates/netlist/src/schedule.rs`, `firmware/src/main.rs` (`follow`, `repeat_calls`), `sim::chip::RoutinesDie` | General: any program of routines |
 | Moonshine's and DAC's schedules | `MoonshineChip::schedule`, `DacChip::schedule`, `dac_chip::schedule_input` | Voice |
+| Command queue before the die | `crates/netlist/src/chip.rs` (gates and `ChipModel::with_queue`), `DieFeatures::queue_bits`, `firmware/src/main.rs` (`repeat_calls`) | General: built only where asked |
 | `FN_ASINH` and `Asinh` | `crates/netlist/src/block.rs`, `crates/compiler`, `crates/sim/src/lower.rs`, `crates/sim/src/exec.rs` | General: built only where used |
 | Tables of a program's own rows (`RowPart::tables`) | `crates/compiler` | General |
 | Streaming Moonshine: reference, on the die, tests | `crates/sim/src/moonshine.rs`, `crates/sim/src/moonshine_stream_chip.rs`, `crates/sim/tests/moonshine_stream.rs`, `tools/golden/moonshine_streaming.py` | Voice |
@@ -200,18 +203,19 @@ For a three-second question, a first sentence of 12 tokens and the first sound w
 
 | Grouping | Silicon | First sound |
 |---|---|---|
-| Each stage on its own die | 956 mm² | 491 ms |
-| Recogniser with the language model | 1,025 mm² | 480 ms |
-| Recogniser with the speech writer | 1,025 mm² | 480 ms |
-| **Recogniser with the sound decoder** | **927 mm²** | **483 ms** |
+| Each stage on its own die | 610 mm² | 498 ms |
+| Recogniser with the language model | 658 mm² | 497 ms |
+| Recogniser with the speech writer | 657 mm² | 497 ms |
+| **Recogniser with the sound decoder** | **591 mm²** | **470 ms** |
 | The other eleven | — | stages that run at once |
 
-**Chosen: three dies and 927 mm²**:
+**Chosen: three dies and 591 mm²**:
 
-- **Moonshine and DAC on one die** of 16 units, 2,048 cells and 20-bit vectors (481 mm²), the decoder with windows of 54 frames keeping 32.
-- **Qwen3-0.6B and OuteTTS on a die each** of 16 units and 2,048 cells (222 and 224 mm²): enough for 1,800 tokens a second, so more cells would only add silicon.
+- **Moonshine and DAC on one die** of one unit, 2,048 cells and 20-bit vectors (123 mm²), with a command queue, the decoder with windows of 54 frames keeping 32.
+- **Qwen3-0.6B on a die** of 16 units and 2,048 cells (222 mm²): enough for 1,800 tokens a second, so more cells would only add silicon.
+- **OuteTTS on a die** of 16 units and 8,192 cells (245 mm²), which reads the sentence sooner and leaves the decoder its time.
 
-Before the firmware ordered the routines, and its cycles were left out, the same plan was 569 mm² with Moonshine and DAC on a die of one unit (123 mm²). With the CPU's 122 M cycles a window (108 M of them for the passes' 360,000 routines), that die no longer gives the first sound in time, so the planner takes 16 units, whose maps the units each keep a copy of (436 mm² of vector memory). The planner merges what pays and keeps apart what would wait on itself; with a tighter time or other models it chooses differently.
+Before the firmware ordered the routines, and its cycles were left out, the plan was 569 mm². Counting them without a command queue, the CPU's 122 M cycles a window (108 M for the passes' 360,000 routines) kept the one-unit die from giving the first sound in time, and the planner took 16 units, whose maps each unit keeps a copy of: 927 mm². The queue brings it back to 591. The planner merges what pays and keeps apart what would wait on itself; with a tighter time or other models it chooses differently.
 
 **Energy of a turn** (`voice_plan::turn_energy`, in the Voice view too). Each stage's work is counted as the estimator counts a token's: every product of a weight by a value in the cell (its gates' switching, simulated) and the weight's read from its memory, for the products its routines or its program actually do. Every die leaks the whole turn, none powered off. For a three-second question and an answer of 12 tokens (about four seconds of speech), with the three-word profile:
 
@@ -221,8 +225,8 @@ Before the firmware ordered the routines, and its cycles were left out, the same
 | Language model | 29.6 mJ |
 | Speech writer | 540 mJ |
 | Sound decoder | 342 mJ |
-| Every die's leakage, 7.5 s | 8.15 J |
-| **The turn** | **9.07 J, 1.21 W on average** |
+| Every die's leakage, 7.5 s | 5.99 J |
+| **The turn** | **6.90 J, 0.92 W on average** |
 
 Leakage is most of it: the weights' memories leak for the whole turn while each die works for a fraction of it. Holding the weights in ROM or powering idle dies off would matter far more than any saving in the work; neither is counted here, nor the control CPUs' own work.
 
@@ -230,16 +234,16 @@ Leakage is most of it: the weights' memories leak for the whole turn while each 
 
 When the language model fits no single die within the reticle, the planner measures it on the sets of dies the frontier found for Qwen3.8-27B (`VoiceAsk::large`): 12 dies of 64 × 128 units and 32,768 cells in groups of four, and the fastest ones, 12 dies of 128 × 128 units and 16 of them in groups of eight. Such a stage is a die of its own kind repeated, and never shares a die with another stage. A model whose weights could not fit one die even at four bits (one weight for each product of a token, in the process's densest memory) is not measured on single dies at all. A checkpoint already quantized keeps its own codes, as the frontier keeps them; the others go to 8 bits.
 
-With Qwen3.8-27B (4-bit, 8-bit in places) in place of Qwen3-0.6B, for the same turn:
+With Qwen3.8-27B (4-bit, 8-bit in places) in place of Qwen3-0.6B and the streaming recogniser, for the same turn:
 
 | Dies | What | Silicon |
 |---|---|---|
-| 1 of 16 × 64 units, 2,048 cells | Moonshine and DAC | 481 mm² |
+| 1 of 1 × 64 units, 2,048 cells | Streaming Moonshine and DAC | 140 mm² |
 | **12 of 64 × 128 units, 32,768 cells** | **Qwen3.8-27B, groups of four, 2,518 tokens a second** | **12 × 615 mm²** |
 | 1 of 16 × 64 units, 2,048 cells | OuteTTS | 224 mm² |
-| **14 dies** | **First sound in 474 ms** | **8,082 mm²** |
+| **14 dies** | **First sound in 468 ms** | **7,741 mm²** |
 
-The smallest set is enough: the faster ones only add silicon, since the answer's first sentence is ready long before the sound needs it. Each of these dies is 615 mm² for a context of 1,024 tokens, sized to the prompt; the frontier's 641 mm² are for 8,192 tokens. A turn costs 134 J, almost all of it leakage (132 J): 14 dies of memory leaking for 7.5 s.
+The smallest set is enough: the faster ones only add silicon, since the answer's first sentence is ready long before the sound needs it. Each of these dies is 615 mm² for a context of 1,024 tokens, sized to the prompt; the frontier's 641 mm² are for 8,192 tokens. A turn costs 132 J, almost all of it leakage (130 J): 14 dies of memory leaking for 7.5 s.
 
 Two simplifications: a shared die's cell memories are added as each stage's were measured, though one memory of their sum would have a little less periphery; and a recogniser measured with 16-bit vectors keeps its cycles on the decoder's 20-bit die.
 
@@ -248,7 +252,7 @@ The speech dies are routines over rows: each unit of a die keeps its own copy of
 ## Speaking more naturally
 
 - **Sampling.** OuteTTS draws its tokens as its authors recommend: temperature 0.4, top-k 40, top-p 0.9, min-p 0.05, after a repetition penalty of 1.1 over the last 64 tokens (`speak::Sampling::outetts`, from a seed). Greedy stays for comparisons with Transformers, which it matches token for token.
-- **A voice profile.** OuteTTS speaks more steadily in a given voice: its prompt starts with a sentence said in that voice, word by word with its duration, loudness, brightness, pitch and codes (`SpeechVocabulary::prompt_with`; the profile is `en-female-1-neutral.json` from OuteTTS's package, kept in the model's `speakers/`). The prompt is OuteTTS's to the token: 1,840 tokens for "Hello, I am a chip.", the same as Transformers' tokenizer gives. It costs those tokens before each sentence: with the whole profile no system gives the first sound within 500 ms (within 1,500 ms the planner chooses three dies and 720 mm², and puts the recogniser with the speech writer instead: first sound in 1,310 ms). So the writer reads only the profile's first three words (`voice::PROFILE_WORDS`, `Speaker::first_words`): 197 tokens instead of 1,840, and Moonshine still hears "Hello, I am a chip." With it the plan is three dies, 949 mm², and the first sound in 472 ms, the writer's die taking 8,192 cells to read its prompt sooner.
+- **A voice profile.** OuteTTS speaks more steadily in a given voice: its prompt starts with a sentence said in that voice, word by word with its duration, loudness, brightness, pitch and codes (`SpeechVocabulary::prompt_with`; the profile is `en-female-1-neutral.json` from OuteTTS's package, kept in the model's `speakers/`). The prompt is OuteTTS's to the token: 1,840 tokens for "Hello, I am a chip.", the same as Transformers' tokenizer gives. It costs those tokens before each sentence: with the whole profile no system gives the first sound within 500 ms (within 1,500 ms the planner chooses three dies and 720 mm², and puts the recogniser with the speech writer instead: first sound in 1,310 ms). So the writer reads only the profile's first three words (`voice::PROFILE_WORDS`, `Speaker::first_words`): 197 tokens instead of 1,840, and Moonshine still hears "Hello, I am a chip." With it the plan is three dies, 591 mm², and the first sound in 499 ms, the writer's die of 8,192 cells reading its prompt in 35 ms.
 - **A conversation.** The language model keeps its cache between questions (`voice::Conversation`): on top of it goes what the chat template writes after the last answer (its end) and the new question, so each question costs only its own tokens. With Qwen3-0.6B, "What is the capital of France?" and then "And of Italy?" gives "The capital of Italy is Rome." from the cache, and the scores after it are those of the whole conversation fed from the start (`crates/sim/tests/conversation.rs`). A template that does not write the last answer as it was makes it start again from the whole conversation.
 
 ## In the application
@@ -301,3 +305,4 @@ Before voice, `Program` had two fields named after images: `image` (Janus's head
 | 15 | One real layer of Moonshine-tiny in gates | Done: the stem, the first encoder and decoder layers and 64 rows of the vocabulary with the model's own weights, a two-frame clip and two tokens: 160 routines, 13,568,264 cycles, the gates' scores the exact machine's bit for bit (20 minutes; `LLM2CHIP_REAL_MOONSHINE=1`) |
 | 16 | A language model of several dies in the plan | Done (see "A larger language model") |
 | 17 | Recognising while the question is spoken | Done: streaming Moonshine, the `asinh` table and the `STREAM` record (see "Listening while the question is spoken") |
+| 18 | A command queue before the die | Done: built only where asked, in gates and at instruction level cycle for cycle; the voice plan back to 591 mm² (see "The firmware's schedule") |

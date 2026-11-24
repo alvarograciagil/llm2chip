@@ -36,6 +36,7 @@ The chip receives bytes of text and returns bytes of text. Tokenizing, inference
 | Firmware tokenizer | Follows the rules of each model's `tokenizer.json` through tables: added tokens, normalization, regular expressions, BPE and special-token template | Compared with the `tokenizers` library on synthetic styles and real models; in the ISS with real tables and in gates with tiny ones. Its working memory is sized from the design's context, and the estimator counts it |
 | Token scheduler and MTP | Decides what each die runs, and undoes | In firmware, checked against the software loop |
 | Routine schedules | Orders a program of routines by itself (a speech recogniser, a sound decoder): lengths, loops, sums over rows, tokens, samples back to the host; see [voice.md](voice.md) | In firmware, checked against the host's order and at instruction level |
+| Command queue before the die | The CPU's orders to the die wait there until the die is free, so the CPU orders the next routine while the die runs this one; built only where asked (`DieFeatures::queue_bits`) | In gates and ISS, cycle for cycle |
 | Clock, reset and power management | Reset sequence, clock gates | Reset in gates; clock and power are only estimated, because the simulator has a single clock |
 | Debug and counters | Counters, read port and standard JTAG | In gates |
 
@@ -67,7 +68,7 @@ Every cycle the application shows says whether it was simulated or estimated, de
 
 ## The whole chip in gates
 
-`chip_design` joins the CPU, the memories, the load controller, the die and the sampling unit. With a tiny model, the real firmware receives bytes, loads the image, runs the tokens and returns bytes. The result and the cycles match the instruction level (CPU in the ISS and die on the exact machine): 230,203 cycles in both (`text_goes_through_the_whole_chip_in_gates`).
+`chip_design` joins the CPU, the memories, the load controller, the die and the sampling unit. With a tiny model, the real firmware receives bytes, loads the image, runs the tokens and returns bytes. The result and the cycles match the instruction level (CPU in the ISS and die on the exact machine): 230,144 cycles in both (`text_goes_through_the_whole_chip_in_gates`).
 
 ## The cost of sampling
 
