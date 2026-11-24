@@ -424,3 +424,122 @@ fn a_real_model_writes_the_same_text_through_the_whole_chip() {
     assert_eq!(String::from_utf8_lossy(&output), String::from_utf8_lossy(&bus.tx));
     assert_eq!(cycles, cpu.cycle, "cycles");
 }
+
+/// Boots a chip in gates with `input` sent while it boots, leaving it ready to run.
+fn boot(sim: &mut Simulator, image: &[u32], input: &[u8], pending: &mut Option<u32>) {
+    let serve = |sim: &mut Simulator, pending: &mut Option<u32>| {
+        sim.set("image_resp_valid", pending.is_some() as u64).unwrap();
+        sim.set("image_resp_data", pending.unwrap_or(0) as u64).unwrap();
+        sim.settle();
+        *pending = (sim.get("image_req_valid").unwrap() == 1).then(|| image[sim.get("image_req_addr").unwrap() as usize]);
+    };
+    sim.set("reset", 1).unwrap();
+    sim.set("cpu_hold", 1).unwrap();
+    sim.tick();
+    sim.set("reset", 0).unwrap();
+    for _ in 0..=netlist::chip::RESET_RELEASE {
+        sim.tick();
+    }
+    for byte in input {
+        sim.set("host_rx_valid", 1).unwrap();
+        sim.set("host_rx_data", *byte as u64).unwrap();
+        serve(sim, pending);
+        sim.tick();
+    }
+    sim.set("host_rx_valid", 0).unwrap();
+    while {
+        serve(sim, pending);
+        sim.get("booting").unwrap() == 1
+    } {
+        sim.tick();
+    }
+    sim.set("cpu_hold", 0).unwrap();
+}
+
+/// Two chips in a chain on their pins, as stages of a system are joined: the first's
+/// output (`host_tx_valid`, `host_tx_data`) drives the second's input (`host_rx_valid`,
+/// `host_rx_data`), and the second's `host_rx_ready` holds the first back when it is full.
+/// Between them only the first's boot report (a dot for each segment it loaded) is left
+/// out and, once the first halts, a zero closes the second's prompt. The second writes what
+/// it writes when its prompt is the first's answer, given by a host.
+#[test]
+#[ignore = "slow: two whole chips in gates, one after the other and then in a chain"]
+fn two_chips_in_a_chain_pass_their_text_on_their_pins() {
+    if build_firmware().is_none() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("llm2chip-chip-chain-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+    let base = netlist::DieConfig { microcode_bits: 15, ..cell_die_config() };
+    let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), base, CHIP_TOKENS).unwrap();
+    let code = layout.microprogram(&program).unwrap();
+    let die = sim::chip::with_code_dictionary(sim::chip::compact_die(base, &layout), &code);
+    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let design = chip_design(config);
+    let (image, input) = image_and_input(config, &layout, &code, CONFIG, &dir);
+    const LIMIT: u64 = 20_000_000;
+
+    // Each alone, the second given the first's answer by a host.
+    let (first, _, _) = run_gates(&design, &image, &input, LIMIT);
+    let answer: Vec<u8> = first.iter().copied().skip_while(|b| *b == b'.').collect();
+    assert!(!answer.is_empty(), "the first chip answers");
+    let prompt: Vec<u8> = answer.iter().copied().chain([0]).collect();
+    let (expected, _, _) = run_gates(&design, &image, &prompt, LIMIT);
+    eprintln!("alone: the first answers {:?}, the second {:?}", String::from_utf8_lossy(&answer), String::from_utf8_lossy(&expected));
+
+    // In a chain.
+    let (mut a, mut b) = (Simulator::new(&design).unwrap(), Simulator::new(&design).unwrap());
+    let (mut pending_a, mut pending_b) = (None, None);
+    boot(&mut a, &image, &input, &mut pending_a);
+    boot(&mut b, &image, &[], &mut pending_b);
+    b.set("host_tx_ready", 1).unwrap();
+    let (mut reporting, mut closed, mut passed, mut output) = (true, false, Vec::new(), Vec::new());
+    for cycle in 0.. {
+        assert!(cycle < LIMIT, "the chain does not finish");
+        for (sim, pending) in [(&mut a, &mut pending_a), (&mut b, &mut pending_b)] {
+            sim.set("image_resp_valid", pending.is_some() as u64).unwrap();
+            sim.set("image_resp_data", pending.unwrap_or(0) as u64).unwrap();
+        }
+        // The second's room decides whether the first may send this cycle.
+        b.set("host_rx_valid", 0).unwrap();
+        b.settle();
+        let room = b.get("host_rx_ready").unwrap() == 1;
+        a.set("host_tx_ready", (room || reporting) as u64).unwrap();
+        a.settle();
+        let (valid, byte) = (a.get("host_tx_valid").unwrap() == 1, a.get("host_tx_data").unwrap() as u8);
+        let halted = a.get("halted").unwrap() == 1;
+        let send = if valid && reporting && byte == b'.' {
+            None
+        } else if valid && room {
+            reporting = false;
+            Some(byte)
+        } else if halted && !closed && !valid && room {
+            closed = true;
+            Some(0)
+        } else {
+            None
+        };
+        if let Some(byte) = send.filter(|b| *b != 0) {
+            passed.push(byte);
+        }
+        b.set("host_rx_valid", send.is_some() as u64).unwrap();
+        b.set("host_rx_data", send.unwrap_or(0) as u64).unwrap();
+        b.settle();
+        if b.get("host_tx_valid").unwrap() == 1 {
+            output.push(b.get("host_tx_data").unwrap() as u8);
+        }
+        if b.get("halted").unwrap() == 1 {
+            break;
+        }
+        for (sim, pending) in [(&mut a, &mut pending_a), (&mut b, &mut pending_b)] {
+            *pending = (sim.get("image_req_valid").unwrap() == 1).then(|| image[sim.get("image_req_addr").unwrap() as usize]);
+            sim.tick();
+        }
+    }
+    eprintln!("in a chain: {:?} passed on, the second writes {:?}", String::from_utf8_lossy(&passed), String::from_utf8_lossy(&output));
+    assert_eq!(passed, answer, "what went from one chip to the other");
+    assert_eq!(output, expected, "the second chip's answer");
+    std::fs::remove_dir_all(&dir).ok();
+}
