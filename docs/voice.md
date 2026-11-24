@@ -56,13 +56,15 @@ A strided one-dimensional convolution is the strided two-dimensional one of MAGV
 
 ### Moonshine's decoder
 
-The decoder is a causal language model with one more attention per layer: **cross-attention**, whose queries come from the token and whose keys and values come from the encoder's frames. This needs no new operation:
+The decoder is a causal language model with one more attention per layer: **cross-attention**, whose queries come from the token and whose keys and values come from the encoder's frames. It needs no new operation and no new field:
 
 - **The keys and values:** each encoder frame, once the encoder is done, goes through every layer's cross-attention key and value projections, and `KvAppend` stores them in a key slot of their own, at the frame's index. The routine is called once per frame, as the image encoder's are.
-- **The attention:** `AttnSum` over that slot. The only difference is how far it reads: up to the number of frames, not up to the token's position. That is a new field of `AttnSum` that says where its length comes from (`Span`): the position, a sliding window, or the rows a store holds.
-- **Positions:** RoPE in self-attention only, partial, as Qwen3.5 already has (`rotary` smaller than the head).
+- **The attention:** `AttnSum` over that slot, in a routine of its own that the host runs with the position at the last frame. An attention reads as far as its position, so it reads every frame, as the image encoder's second pass already does. Each decoder layer is then two routines: self-attention at the token's position, and cross-attention with the MLP at the last frame's.
+- **Positions:** RoPE in self-attention only, partial, as Qwen3.5 already has (`rotary` smaller than the head). Moonshine rotates adjacent pairs and the die the two halves of the rotated part: the rows of every query and key projection are reordered alike as they are read, which leaves their products unchanged.
 - **The gated MLP:** `fc1` makes both halves in one product, `Slice` separates them, then SiLU and the product, as the other models' MLP.
-- **LayerNorm without bias:** `LayerNorm` reads `{weight}.bias` only if the checkpoint has it.
+- **LayerNorm without bias:** a bias of zeros is added as the weights are read.
+
+**One limit:** the GroupNorm of the front end divides by how many values the first convolution makes, a constant of the program. A chip is built for clips of one length, as MAGVIT-v2's is for pictures of one side. Taking any length would need the host to write that count, a small change left for later.
 
 ### OuteTTS's language model
 
@@ -99,13 +101,11 @@ Voice adds files; the core only gains general things.
 
 | Piece | Where | Kind |
 |---|---|---|
-| `Span` in `AttnSum` (cross-attention) | `crates/compiler`, `crates/sim/src/lower.rs` | General: any encoder–decoder |
-| `LayerNorm` with no bias | `crates/compiler`, `crates/sim/src/lower.rs` | General |
 | `FN_SIN` table | `crates/netlist`, `crates/sim/src/lower.rs` | General: Snake, periodic activations |
 | Programs with parts (`Program::parts`) | `crates/compiler` | Refactor: what were `image` and `vision` |
 | Systems of stages | `crates/sim/src/system.rs` | General: several programs on several dies |
 | Moonshine: floating-point reference | `crates/sim/src/moonshine.rs` | Voice |
-| Moonshine on the die | `crates/sim/src/moonshine_chip.rs` | Voice |
+| Moonshine on the die: its program, the host's routines, the exact machine | `crates/sim/src/moonshine_chip.rs` | Voice |
 | DAC: reference and on the die | `crates/sim/src/dac.rs`, `crates/sim/src/dac_chip.rs` | Voice |
 | DAC weights to safetensors | `tools/convert/dac.py` | Voice |
 | Demo: a WAV in, a WAV out | `crates/sim/examples/talk.rs` | Voice |
@@ -126,10 +126,10 @@ Before voice, `Program` had two fields named after images: `image` (Janus's head
 |---|---|---|
 | 1 | This document | Done |
 | 2 | Programs with parts, with identical microcode | Done: the 890 microprograms the quick tests lower hash the same before and after |
-| 3 | Cross-attention (`Span`), LayerNorm without bias; exact machine and gates bit for bit on a toy model | Planned |
-| 4 | One-dimensional strided convolution checked with `LoadRows` | Planned |
+| 3 | Cross-attention and LayerNorm without bias | Done, with no change to the die or the compiler: see above |
+| 4 | One-dimensional strided convolution | Done: `LoadRows`, with the host giving the first row read as the token |
 | 5 | Systems of stages: sizing, optimiser, host moving tokens | Planned |
-| 6 | Moonshine: compiler, reference, exact machine and gates on a toy model | Planned |
+| 6 | Moonshine on a toy checkpoint: floating-point reference, exact machine, gates | Done: the exact machine's scores are within 2.6 % of floating point (the die's function tables; the products agree to millionths), and the gates give the exact machine's scores bit for bit: 280 routines, 280,586 cycles for the clip and three tokens (`crates/sim/tests/moonshine.rs`) |
 | 7 | Moonshine with the real weights | Needs a download (108 MB) |
 | 8 | `FN_SIN` and the DAC decoder on a toy model | Planned |
 | 9 | OuteTTS and DAC with the real weights | Needs downloads (about 1.5 GB, and PyTorch for the conversion) |

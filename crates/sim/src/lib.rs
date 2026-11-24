@@ -8,6 +8,8 @@ pub mod image;
 pub mod janus;
 pub mod lower;
 pub mod magvit_chip;
+pub mod moonshine;
+pub mod moonshine_chip;
 pub mod optimize;
 pub mod prompt;
 pub mod showo;
