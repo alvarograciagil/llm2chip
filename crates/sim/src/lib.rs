@@ -24,6 +24,7 @@ pub mod tokenizer;
 pub mod vision;
 pub mod vision_chip;
 pub mod voice;
+pub mod voice_plan;
 mod requant;
 mod vm;
 mod weights;

@@ -138,23 +138,38 @@ Voice adds files; the core only gains general things.
 | OuteTTS and DAC in Transformers, and DAC against it | `tools/golden/speak.py`, `crates/sim/examples/dac_check.rs` | Voice |
 | A spoken turn's stages, shared by the demo and the engine | `crates/sim/src/voice.rs` | Voice |
 | Demo: a WAV in and a WAV out | `crates/sim/examples/talk.rs` | Voice |
-| The system sized | `crates/sim/examples/voice_system.rs`; `sizing::routines_die` | Voice; general |
+| The system planned | `crates/sim/src/system.rs` (`plan`), `sizing::routines_die`; `crates/sim/src/voice_plan.rs`, `crates/sim/examples/voice_system.rs` | General; voice |
 | The engine's job and the application's view | `crates/server/src/voice_job.rs`, `web/src/voice/` | Voice |
 
-## The system, sized
+## The system, planned
 
-`cargo run --release -p sim --example voice_system -- MOONSHINE LLM OUTETTS DAC` sizes the four stages in N6 with the optimiser's own counts, each on a die of its own, every number from the stage's microprogram: a three-second question, an answer whose first sentence is 12 tokens, and the speech decoded half a second at a time. Weights are 8-bit codes.
+`cargo run --release -p sim --example voice_system -- MOONSHINE LLM OUTETTS DAC [FIRST_SOUND_MS]` plans the chip as a system. Each stage is measured on a few shapes of die (1 or 16 units of 64 lanes, 2,048 to 65,536 cells), from its own microprogram and with the optimiser's counts in N6. The decoder is also measured with windows keeping 16, 32 or 64 frames. Then `system::plan` weighs every way of grouping the stages on dies (15 for four stages):
 
-| Stage | Die | Silicon | First output | Then |
-|---|---|---|---|---|
-| Speech to text (Moonshine-tiny) | 1 unit × 32 lanes, 2,048 cells | 88 mm² | 16.7 ms after the question | 6,118 tokens/s |
-| Language model (Qwen3-0.6B) | 16 units × 64 lanes, 65,536 cells | 508 mm² | 5.0 ms after a 40-token prompt | 4,068 tokens/s |
-| Speech writer (OuteTTS-1.0-0.6B) | the same | 510 mm² | 5.0 ms | 4,063 tokens/s |
-| Sound decoder (DAC, 20-bit vectors) | 1 unit × 64 lanes, 2,048 cells | 224 mm² | 233 ms for half a second of sound | about 4 such chunks a second |
+- **A shared die** has its logic once, the cells and microcode of every stage on it, the vector memory of the one that needs most, and the slowest clock.
+- **Stages that run at once never share a die.** Within a turn the recogniser runs alone, before the rest; the language model, the speech writer and the decoder run at once, each taking the one before's first sentence or window while it goes on. So only the recogniser may share, with any one of the others.
+- **Each die must fit the reticle, each stage must keep up** (the writer 180 tokens a second, the decoder 75 frames: real time), and the first sound must come in time.
+- **Of what meets all that, the least silicon wins**, then the fewest dies, then the soonest sound.
 
-**Four dies and 1,330 mm²; the first sound comes 286 ms after the question ends**, well inside the half second a conversation needs, and every stage keeps ahead of the speech it feeds: the writer needs 180 tokens a second for real time and makes 4,000.
+For a three-second question, a first sentence of 12 tokens and the first sound within 500 ms:
 
-The two speech dies are routines over rows, which keep whole maps in vector memory (59 and 153 mm² of them) and are sized here with one unit: on a die of several, every unit holds a copy. Decoding the sound a few frames at a time instead of half a second at a time would shrink the decoder's maps; it is not done. The sine's table and `wrap_left` are left out of the decoder's logic count (a 4,096-word table and a mux).
+| Grouping | Silicon | First sound |
+|---|---|---|
+| Each stage on its own die | 589 mm² | 456 ms |
+| Recogniser with the language model | 658 mm² | 445 ms |
+| Recogniser with the speech writer | 657 mm² | 445 ms |
+| **Recogniser with the sound decoder** | **569 mm²** | **457 ms** |
+| The other eleven | — | stages that run at once |
+
+**Chosen: three dies and 569 mm²**:
+
+- **Moonshine and DAC on one die** of one unit, 2,048 cells and 20-bit vectors (123 mm²), the decoder with windows of 54 frames keeping 32.
+- **Qwen3-0.6B and OuteTTS on a die each** of 16 units and 2,048 cells (222 and 224 mm²): enough for 1,800 tokens a second, so more cells would only add silicon.
+
+The planner merges what pays and keeps apart what would wait on itself; with a tighter time or other models it chooses differently.
+
+Two simplifications: a shared die's cell memories are added as each stage's were measured, though one memory of their sum would have a little less periphery; and a recogniser measured with 16-bit vectors keeps its cycles on the decoder's 20-bit die.
+
+The speech dies are routines over rows: each unit of a die keeps its own copy of the maps. Splitting them among the units would need writes only the owning unit makes and reads from a unit chosen as it runs, new datapaths across units, and would not make the products faster, since they run in the cells; so the planner weighs the copies against the speed instead.
 
 ## The demo
 
@@ -195,6 +210,6 @@ Before voice, `Program` had two fields named after images: `image` (Janus's head
 | 8 | `FN_SIN`, `wrap_left` and the DAC decoder | Done: the reference gives Transformers' sound sample for sample; on toy decoders the exact machine is 36 to 62 dB below floating point with 20-bit vectors, and the gates give its sound bit for bit (322 routines, 70,624 cycles, the microprogram's count the gates' cycle for cycle); the real decoder as in the table above |
 | 9 | OuteTTS with the real weights | Done: in floating point the same prompt and the same 317 tokens as Transformers for "Hello, I am a chip.", scores within 0.0005 %; in the die's arithmetic with 20-bit vectors the first 91 tokens match, and the sound the die's DAC makes of them is heard as the same sentence (`--example speak`) |
 | 10 | The demo: a question spoken in, the answer spoken out | Done in floating point and in the die's arithmetic (`--example talk`, below) |
-| 11 | The system sized: dies, silicon and the time to the first sound | Done from the command line (`--example voice_system`, above) |
+| 11 | The system planned: which stages share a die, at which shape, and the time to the first sound | Done (`sim::system::plan`, `sim::voice_plan`, `--example voice_system`, above) |
 | 12 | Voice in the application | Done: a Voice view records a question with the microphone (or opens a recording), runs the turn in the engine (`/api/voice`) in floating point or in the die's arithmetic, and plays the answer; the Models list says which folders listen, speak and make the sound |
 | 13 | Voice in the optimiser and the project assistant | Not done: the optimiser and the assistant still design one model's dies; a voice system is sized from the command line |
