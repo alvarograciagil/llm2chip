@@ -27,6 +27,7 @@ export function floorplanSvg(report: Report): string {
       parts.push(box(block.rect, CATEGORY_FILL[info?.category ?? "system"] ?? "#ccc", info?.label ?? block.id));
     }
   }
+  for (const v of plan.voice ?? []) parts.push(box(v.rect, v.parts.includes("listen") ? "#ffcc80" : "#ff9eb0", `Die ${v.index}: ${v.stages.join(" + ")}${v.reference ? " (reference)" : ""}`));
   for (const memory of plan.memory) parts.push(box(memory.rect, "#dfe4ea", memory.label));
   parts.push("</svg>");
   return parts.join("\n");
@@ -36,7 +37,10 @@ const databaseUnits = (mm: number) => Math.round(mm * 1000 * 1000);
 
 /** The blocks as a DEF placement, one database unit per nanometre, for layout tools. */
 export function floorplanDef(plan: Floorplan, name: string): string {
-  const components = plan.dies.flatMap((die) => die.blocks.map((block) => ({ name: `die${die.index}_${block.id}`, rect: block.rect })));
+  const components = [
+    ...plan.dies.flatMap((die) => die.blocks.map((block) => ({ name: `die${die.index}_${block.id}`, rect: block.rect }))),
+    ...(plan.voice ?? []).map((v) => ({ name: `die${v.index}_${v.stages.join("_").replace(/\W+/g, "_")}`, rect: v.rect })),
+  ];
   const lines = [
     "VERSION 5.8 ;",
     `DESIGN ${name.replace(/\W+/g, "_")} ;`,
