@@ -18,6 +18,7 @@ pub mod prompt;
 pub mod showo;
 pub mod showo_chip;
 pub mod sizing;
+pub mod speak;
 pub mod system;
 pub mod tokenizer;
 pub mod vision;
