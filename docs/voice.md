@@ -64,7 +64,7 @@ The decoder is a causal language model with one more attention per layer: **cros
 - **The gated MLP:** `fc1` makes both halves in one product, `Slice` separates them, then SiLU and the product, as the other models' MLP.
 - **LayerNorm without bias:** a bias of zeros is added as the weights are read.
 
-**One limit:** the GroupNorm of the front end divides by how many values the first convolution makes, a constant of the program. A chip is built for clips of one length, as MAGVIT-v2's is for pictures of one side. Taking any length would need the host to write that count, a small change left for later.
+**Any length:** a chip is built for clips of up to some length and takes any shorter one. Its stores are sized for the longest, the host runs as many rows as the clip has, and the front end's GroupNorm, whose mean is over every value of the clip, has its totals multiplied by `1 / count`, which the host writes for each clip, before a GroupNorm of one value. A chip for longer clips scores a shorter one bit for bit as one built for exactly that clip, in the exact machine and in gates (`crates/sim/tests/moonshine.rs`).
 
 ### OuteTTS's language model
 

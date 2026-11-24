@@ -138,13 +138,13 @@ fn moonshine_in_the_die_s_arithmetic_scores_as_floating_point_does() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-#[test]
-#[ignore = "slow: the toy Moonshine on the die's gates"]
-fn moonshine_on_the_die_s_gates_gives_the_exact_machine_s_scores() {
+/// The toy on the die's gates, for clips of up to `SAMPLES` samples, given a clip of
+/// `length`: the scores of three tokens, which must be the exact machine's.
+fn on_gates(length: usize) {
     use netlist::demo::read_block_value;
     use netlist::{die_design, DieConfig, Simulator};
-    let dir = toy("gates");
-    let clip = test_clip(SAMPLES);
+    let dir = toy(&format!("gates-{length}"));
+    let clip = test_clip(length);
     let tokens = [1u32, 7, 12];
     let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
     // Cells as deep as the weights need, each a mantissa of the vectors' width, as many
@@ -152,17 +152,22 @@ fn moonshine_on_the_die_s_gates_gives_the_exact_machine_s_scores() {
     let base = cell_die_config();
     let roomy = DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, weight_bits: base.cell.activation_bits, ..base.cell }, features: base.features.with_key_shift(6), ..base };
     let places = 32;
-    let probe = MoonshineChip::new(&dir, SAMPLES, roomy, Some(places)).unwrap();
+    let mut probe = MoonshineChip::new(&dir, SAMPLES, roomy, Some(places)).unwrap();
+    probe.clip(length).unwrap();
     let (program, layout, _) = probe.parts();
     let (depth, groups) = layout.cell_depths();
     let addr_bits = bits_for(depth.max(2 * groups));
     let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1)).max(addr_bits);
     let sized = DieConfig { index_bits, cell: netlist::CellConfig { addr_bits, ..roomy.cell }, ..roomy };
-    // Every routine the host runs, in order, with the samples it writes before some.
+    // Every routine the host runs, in order, with what it writes before some: each row of
+    // samples, and the clip's `1 / count` before the encoder.
+    type Write = Option<(u32, sim::moonshine_chip::Vector)>;
     let schedule = |chip: &MoonshineChip| {
-        let (_, rows) = chip.sample_rows(&clip).unwrap();
-        let mut calls: Vec<(Option<sim::moonshine_chip::Vector>, sim::moonshine_chip::Call)> = rows.into_iter().enumerate().map(|(r, row)| (Some(row), chip.store_samples_call(r))).collect();
-        calls.extend(chip.encoder_calls().into_iter().map(|c| (None, c)));
+        let (register, rows) = chip.sample_rows(&clip).unwrap();
+        let mut calls: Vec<(Write, sim::moonshine_chip::Call)> = rows.into_iter().enumerate().map(|(r, row)| (Some((register, row)), chip.store_samples_call(r))).collect();
+        let mut encoder = chip.encoder_calls().into_iter();
+        calls.push((Some(chip.inverse_write()), encoder.next().unwrap()));
+        calls.extend(encoder.map(|c| (None, c)));
         for (position, token) in tokens.iter().enumerate() {
             calls.extend(chip.token_calls(*token, position).into_iter().map(|c| (None, c)));
         }
@@ -177,7 +182,6 @@ fn moonshine_on_the_die_s_gates_gives_the_exact_machine_s_scores() {
     microprogram(&wide);
     let die = sim::chip::with_registers_needed(sized, wide.parts().1);
     let mut chip = MoonshineChip::new(&dir, SAMPLES, die, Some(places)).unwrap();
-    let (register, _) = chip.sample_rows(&clip).unwrap();
 
     // The exact machine's scores after each token.
     chip.encode(&clip).unwrap();
@@ -220,11 +224,10 @@ fn moonshine_on_the_die_s_gates_gives_the_exact_machine_s_scores() {
     let logits = chip.logits_register();
     let (mut cycles, mut gates) = (0, Vec::new());
     for (write, call) in &calls {
-        if let Some((mantissas, exponent)) = write {
-            let exponent = *exponent;
-            // The host writes the samples while the die is idle, as the firmware does.
-            let mut values: std::collections::HashMap<(u32, u32), i64> = mantissas.iter().enumerate().map(|(i, m)| ((register, i as u32), *m)).collect();
-            values.insert((exponents, register), exponent);
+        if let Some((register, (mantissas, exponent))) = write {
+            // The host writes while the die is idle, as the firmware does.
+            let mut values: std::collections::HashMap<(u32, u32), i64> = mantissas.iter().enumerate().map(|(i, m)| ((*register, i as u32), *m)).collect();
+            values.insert((exponents, *register), *exponent);
             load_assembly(&mut sim, &die, &values);
         }
         let index = routines.iter().position(|(r, _)| *r == call.routine).unwrap();
@@ -233,11 +236,46 @@ fn moonshine_on_the_die_s_gates_gives_the_exact_machine_s_scores() {
             gates.push((0..VOCAB as u32).map(|i| read_block_value(&mut sim, die, logits, i).0).collect::<Vec<i64>>());
         }
     }
-    eprintln!("toy Moonshine in gates: {} routines, {cycles} cycles", calls.len());
+    eprintln!("toy Moonshine in gates, a clip of {length} samples: {} routines, {cycles} cycles", calls.len());
     assert_eq!(gates, exact, "scores");
     // The microprogram's own count is the gates' cycle for cycle, which a system's sizing uses.
     assert_eq!(chip.cycles(&only).unwrap(), cycles);
     let stage = chip.stage(1, 1.0, 1e9).unwrap();
     assert!(stage.output_cycles > 0 && stage.first_cycles + 2 * stage.output_cycles >= cycles / 2 && stage.first_cycles < cycles);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+#[ignore = "slow: the toy Moonshine on the die's gates"]
+fn moonshine_on_the_die_s_gates_gives_the_exact_machine_s_scores() {
+    on_gates(SAMPLES);
+}
+
+#[test]
+#[ignore = "slow: the toy Moonshine on the die's gates, a shorter clip"]
+fn a_chip_for_longer_clips_takes_a_shorter_one_on_its_gates() {
+    on_gates(1800);
+}
+
+/// A chip built for clips of up to `SAMPLES` scores a shorter clip as one built for exactly
+/// that clip does, bit for bit: the stores are longer, the rows run are the clip's.
+#[test]
+fn a_chip_for_longer_clips_scores_a_shorter_one_as_one_built_for_it() {
+    let dir = toy("lengths");
+    let clip = test_clip(1800);
+    assert_eq!(MoonshineConfig::frames(1800), 3);
+    let mut long = MoonshineChip::exact(&dir, SAMPLES, 16).unwrap();
+    let mut exact = MoonshineChip::exact(&dir, 1800, 16).unwrap();
+    long.encode(&clip).unwrap();
+    exact.encode(&clip).unwrap();
+    for (position, token) in [1u32, 7, 12].iter().enumerate() {
+        assert_eq!(long.step(*token, position).unwrap().1, exact.step(*token, position).unwrap().1, "token {position}");
+    }
+    // And the same chip goes back to the longest clip.
+    let longest = test_clip(SAMPLES);
+    long.encode(&longest).unwrap();
+    let mut again = MoonshineChip::exact(&dir, SAMPLES, 16).unwrap();
+    again.encode(&longest).unwrap();
+    assert_eq!(long.step(1, 0).unwrap().1, again.step(1, 0).unwrap().1);
     std::fs::remove_dir_all(&dir).ok();
 }

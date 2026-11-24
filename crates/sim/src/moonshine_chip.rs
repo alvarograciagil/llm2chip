@@ -25,8 +25,10 @@
 //! the rows of every query and key projection are reordered alike, which leaves their
 //! products as they were; and its LayerNorms, which have no bias, get one of zeros.
 //!
-//! The GroupNorm divides by how many values the first convolution makes, which the program
-//! fixes: a chip is built for clips of one length, as MAGVIT-v2's for pictures of one side.
+//! A chip is built for clips of up to some length and takes any shorter one: the stores are
+//! sized for the longest, the host runs as many rows as the clip has, and the GroupNorm's
+//! totals are multiplied by `1 / count`, which the host writes for each clip, before a
+//! GroupNorm of one value.
 
 use crate::lower::Layout;
 use crate::moonshine::{argmax, MoonshineConfig};
@@ -195,7 +197,29 @@ struct DecoderRoutines {
     logits: Range<usize>,
 }
 
-/// Moonshine as the chip's program, for clips of a fixed length, and what the host runs.
+/// How long a clip is, in samples, rows of samples, outputs of the first and second
+/// convolutions, and frames.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lengths {
+    pub samples: usize,
+    pub sample_rows: usize,
+    pub first: usize,
+    pub second: usize,
+    pub frames: usize,
+}
+
+impl Lengths {
+    pub fn of(samples: usize) -> Result<Self, String> {
+        let frames = MoonshineConfig::frames(samples);
+        if frames == 0 {
+            return Err("the clip is too short for one frame".into());
+        }
+        let first = (samples - 127) / 64 + 1;
+        Ok(Self { samples, sample_rows: first + 1, first, second: (first - 7) / 3 + 1, frames })
+    }
+}
+
+/// Moonshine as the chip's program, for clips of up to some length, and what the host runs.
 pub struct MoonshineChip {
     pub config: MoonshineConfig,
     program: Program,
@@ -204,13 +228,12 @@ pub struct MoonshineChip {
     exponents: u32,
     bits: u32,
     weights: Arc<Weights>,
-    samples: usize,
-    /// Rows of the waveform, outputs of the first and second convolutions, and frames.
-    sample_rows: usize,
-    first: usize,
-    second: usize,
-    frames: usize,
+    /// The longest clip it takes, and the one it is taking.
+    capacity: Lengths,
+    now: Lengths,
     input: Buf,
+    /// Where the host writes `1 / count` for the GroupNorm of the clip it is taking.
+    inverse: Buf,
     store_samples: Range<usize>,
     conv1: Range<usize>,
     sums: Range<usize>,
@@ -226,7 +249,7 @@ pub struct MoonshineChip {
 }
 
 impl MoonshineChip {
-    /// The checkpoint in `dir` for clips of `samples` samples, on a die like `die` with
+    /// The checkpoint in `dir` for clips of up to `samples` samples, on a die like `die` with
     /// vectors of its activation bits; with the weights in its cells and caches for
     /// `tokens` places when `tokens` is given, as a chip holds them.
     pub fn new(dir: &Path, samples: usize, die: DieConfig, tokens: Option<usize>) -> Result<Self, String> {
@@ -244,13 +267,8 @@ impl MoonshineChip {
         if config.rope_dim != config.rotary {
             return Err("RoPE over an odd number of values is not taken to the die".into());
         }
-        let frames = MoonshineConfig::frames(samples);
-        if frames == 0 {
-            return Err("the clip is too short for one frame".into());
-        }
-        let first = (samples - 127) / 64 + 1;
-        let second = (first - 7) / 3 + 1;
-        let sample_rows = first + 1;
+        let capacity = Lengths::of(samples)?;
+        let Lengths { sample_rows, first, second, frames, .. } = capacity;
         let (h, heads, head_dim, rotary) = (config.hidden, config.heads, config.head_dim, config.rotary);
         let mut b = Builder { weights: &weights, buffers: Vec::new(), ops: Vec::new(), derived: Vec::new() };
         let p = |n: &str| format!("model.encoder.{n}");
@@ -310,18 +328,21 @@ impl MoonshineChip {
             b.op("store squares", Op::StoreRow { src: e2, store: square_store });
             Ok(())
         })?;
-        let (total, total_squares) = (b.buf(1), b.buf(1));
+        // The totals over this clip's values: times `1 / count`, which the host writes.
+        let inverse = b.buf(1);
+        let (total, total_squares, mean, mean_square) = (b.buf(1), b.buf(1), b.buf(1), b.buf(1));
         let totals = b.routine(|b| {
             b.op("read totals", Op::LoadRow { store: sum_store, dst: total });
             b.op("read totals", Op::LoadRow { store: square_store, dst: total_squares });
+            b.op("mean", Op::MulElem { a: total, b: inverse, dst: mean });
+            b.op("mean of squares", Op::MulElem { a: total_squares, b: inverse, dst: mean_square });
             Ok(())
         })?;
-        let count = first * h;
         let normalize = b.routine(|b| {
             let x = b.buf(h);
             b.op("read", Op::LoadRow { store: a1, dst: x });
             let y = b.buf(h);
-            b.op("GroupNorm", Op::GroupNorm { src: x, sums: total, squares: total_squares, count, weight: p("groupnorm"), groups: 1, dst: y });
+            b.op("GroupNorm", Op::GroupNorm { src: x, sums: mean, squares: mean_square, count: 1, weight: p("groupnorm"), groups: 1, dst: y });
             b.op("store", Op::StoreRow { src: y, store: a1 });
             Ok(())
         })?;
@@ -488,12 +509,10 @@ impl MoonshineChip {
             exponents: exponent_register(&die),
             bits: die.cell.activation_bits,
             weights,
-            samples,
-            sample_rows,
-            first,
-            second,
-            frames,
+            capacity,
+            now: capacity,
             input,
+            inverse,
             store_samples,
             conv1,
             sums,
@@ -509,13 +528,29 @@ impl MoonshineChip {
         })
     }
 
-    /// Samples in the clips it takes, and the frames they make.
+    /// Samples in the longest clip it takes.
     pub fn samples(&self) -> usize {
-        self.samples
+        self.capacity.samples
     }
 
+    /// The frames of the clip it is taking.
     pub fn frames(&self) -> usize {
-        self.frames
+        self.now.frames
+    }
+
+    /// Takes a clip of `samples` samples from now on: what the host runs follows its length.
+    pub fn clip(&mut self, samples: usize) -> Result<(), String> {
+        if samples > self.capacity.samples {
+            return Err(format!("this chip takes clips of up to {} samples", self.capacity.samples));
+        }
+        self.now = Lengths::of(samples)?;
+        Ok(())
+    }
+
+    /// What the host writes before the encoder runs: `1 / count` of this clip's GroupNorm.
+    pub fn inverse_write(&self) -> (u32, Vector) {
+        let count = (self.now.first * self.config.hidden) as f64;
+        (self.layout.register_of(self.inverse), encode_vector(&[1.0 / count], self.bits))
     }
 
     /// The program, its layout and its weights, to run it elsewhere, such as on gates.
@@ -530,10 +565,10 @@ impl MoonshineChip {
     /// Where the host writes a row of samples, and the rows in the die's format: the
     /// clip padded with zeros to whole rows.
     pub fn sample_rows(&self, samples: &[f32]) -> Result<(u32, Vec<Vector>), String> {
-        if samples.len() != self.samples {
-            return Err(format!("this chip takes clips of {} samples", self.samples));
+        if samples.len() != self.now.samples {
+            return Err(format!("the clip has {} samples and the chip takes {} now: call clip first", samples.len(), self.now.samples));
         }
-        let rows = (0..self.sample_rows)
+        let rows = (0..self.now.sample_rows)
             .map(|r| {
                 let row: Vec<f64> = (0..SAMPLES_PER_ROW).map(|i| samples.get(r * SAMPLES_PER_ROW + i).copied().unwrap_or(0.0) as f64).collect();
                 encode_vector(&row, self.bits)
@@ -555,13 +590,14 @@ impl MoonshineChip {
     /// values for the decoder's cross-attention.
     pub fn encoder_calls(&self) -> Vec<Call> {
         let mut calls = Vec::new();
-        let last = self.frames - 1;
-        for t in 0..self.first {
+        let Lengths { first, second, frames, .. } = self.now;
+        let last = frames - 1;
+        for t in 0..first {
             calls.push(Self::call(&self.conv1, t, 0, false));
             calls.push(Self::call(&self.sums, t, 0, false));
         }
         let (load, load_second, add) = &self.reduce;
-        let mut count = self.first;
+        let mut count = first;
         while count > 1 {
             let half = count / 2;
             for i in 0..half {
@@ -577,26 +613,26 @@ impl MoonshineChip {
             count = half;
         }
         calls.push(Self::call(&self.totals, 0, 0, false));
-        for t in 0..self.first {
+        for t in 0..first {
             calls.push(Self::call(&self.normalize, t, 0, false));
         }
-        for u in 0..self.second {
+        for u in 0..second {
             calls.push(Self::call(&self.conv2.0, 3 * u, 0, false));
             calls.push(Self::call(&self.conv2.1, u, 0, false));
         }
-        for t in 0..self.frames {
+        for t in 0..frames {
             calls.push(Self::call(&self.conv3.0, 2 * t, 0, false));
             calls.push(Self::call(&self.conv3.1, t, 0, false));
         }
         for (project, rest) in &self.blocks {
-            for t in 0..self.frames {
+            for t in 0..frames {
                 calls.push(Self::call(project, t, t, true));
             }
-            for t in 0..self.frames {
+            for t in 0..frames {
                 calls.push(Self::call(rest, t, last, false));
             }
         }
-        for t in 0..self.frames {
+        for t in 0..frames {
             calls.push(Self::call(&self.cross_keys, t, t, false));
         }
         calls
@@ -608,7 +644,7 @@ impl MoonshineChip {
         let mut calls = vec![Self::call(&d.embed, token as usize, position, false)];
         for (own, cross) in d.own.iter().zip(&d.cross) {
             calls.push(Self::call(own, 0, position, true));
-            calls.push(Self::call(cross, 0, self.frames - 1, false));
+            calls.push(Self::call(cross, 0, self.now.frames - 1, false));
         }
         calls.push(Call { read: true, ..Self::call(&d.logits, 0, position, false) });
         calls
@@ -640,7 +676,7 @@ impl MoonshineChip {
     /// a clip's samples written and encoded, then its first token; then each token, at the
     /// middle of the text it can write.
     pub fn stage(&self, dies: u32, die_mm2: f64, clock_hz: f64) -> Result<crate::system::Stage, String> {
-        let input: Vec<Call> = (0..self.sample_rows).map(|r| self.store_samples_call(r)).collect();
+        let input: Vec<Call> = (0..self.now.sample_rows).map(|r| self.store_samples_call(r)).collect();
         let first = self.cycles(&[input, self.encoder_calls(), self.token_calls(self.config.start, 0)].concat())?;
         let middle = self.limit() / 2;
         let each = self.cycles(&self.token_calls(self.config.start, middle))?;
@@ -649,7 +685,7 @@ impl MoonshineChip {
 
     /// The most tokens it writes for a clip: six a second, as `Moonshine::transcribe`.
     pub fn limit(&self) -> usize {
-        (self.samples * 6 / 16_000 + 1).min(self.config.max_tokens - 1)
+        (self.now.samples * 6 / 16_000 + 1).min(self.config.max_tokens - 1)
     }
 
     fn reset(&mut self) {
@@ -665,8 +701,11 @@ impl MoonshineChip {
 
     /// Writes `samples` in and runs the encoder.
     pub fn encode(&mut self, samples: &[f32]) -> Result<(), String> {
+        self.clip(samples.len())?;
         let (register, rows) = self.sample_rows(samples)?;
         self.reset();
+        let (inverse, (mantissas, exponent)) = self.inverse_write();
+        self.vm.load_mantissas(inverse, &mantissas, exponent);
         for (row, (mantissas, exponent)) in rows.iter().enumerate() {
             self.vm.load_mantissas(register, mantissas, *exponent);
             self.run(&self.store_samples_call(row))?;
