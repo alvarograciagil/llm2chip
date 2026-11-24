@@ -63,6 +63,17 @@ impl Speaker {
     pub fn read(path: &Path) -> Result<Self, String> {
         serde_json::from_str(&std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?).map_err(|e| e.to_string())
     }
+
+    /// Only its first `words` words, the sentence closed after the last: the same voice in
+    /// fewer tokens, which the speech writer reads before each sentence it says.
+    pub fn first_words(&self, words: usize) -> Self {
+        let mut kept: Vec<SpeakerWord> = self.words.iter().take(words.max(1)).cloned().collect();
+        if let Some(last) = kept.last_mut() {
+            last.word = format!("{}.", last.word.trim_end_matches([',', ';', ':', '.', '!', '?']));
+        }
+        let text = kept.iter().map(|w| w.word.as_str()).collect::<Vec<_>>().join(" ");
+        Self { text, words: kept }
+    }
 }
 
 impl SpeechVocabulary {

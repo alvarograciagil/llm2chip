@@ -1,7 +1,7 @@
 //! Text to speech with OuteTTS 1.0 and DAC: in floating point, or with both in the die's
 //! arithmetic, optionally checked against what `tools/golden/speak.py` wrote.
 //!
-//!     cargo run --release -p sim --example speak -- OUTETTS_DIR DAC_DIR "Text." out.wav [golden.json] [die BITS] [speaker FILE]
+//!     cargo run --release -p sim --example speak -- OUTETTS_DIR DAC_DIR "Text." out.wav [golden.json] [die BITS] [speaker FILE [words N]]
 //!
 //! `die BITS` runs the language model and the decoder in the die's arithmetic with vectors
 //! of BITS bits (20 or more for the decoder: see docs/voice.md).
@@ -29,6 +29,14 @@ fn main() -> Result<(), String> {
     tokenizer.set_add_special(false);
     // `speaker FILE` speaks in that voice, as OuteTTS's own profiles do.
     let speaker = rest.iter().position(|r| r == "speaker").and_then(|i| rest.get(i + 1)).map(|p| sim::speak::Speaker::read(Path::new(p))).transpose()?;
+    // `words N` keeps only the profile's first N words.
+    let speaker = match rest.iter().position(|r| r == "words").and_then(|i| rest.get(i + 1)).and_then(|n| n.parse().ok()) {
+        Some(n) => speaker.map(|s| s.first_words(n)),
+        None => speaker,
+    };
+    if let Some(s) = &speaker {
+        println!("speaker: “{}”, {} words", s.text, s.words.len());
+    }
     let prompt = match &speaker {
         Some(speaker) => vocabulary.prompt_with(speaker, text, &|t| tokenizer.encode(t))?,
         None => vocabulary.prompt(&tokenizer.encode(text)?),

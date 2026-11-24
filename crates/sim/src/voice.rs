@@ -195,12 +195,17 @@ pub fn sentences(text: &str) -> Vec<String> {
 /// this plus a frame's reach on both sides (see `DacConfig::windows`).
 pub const CHUNK_FRAMES: usize = 16;
 
-/// The voice OuteTTS imitates, if its folder keeps one: the first profile in `speakers/`.
+/// Words of a speaker profile the speech writer reads before each sentence: OuteTTS's own
+/// profiles have about 26, some 1,800 tokens; the first three keep the voice in about 200.
+pub const PROFILE_WORDS: usize = 3;
+
+/// The voice OuteTTS imitates, if its folder keeps one: the first profile in `speakers/`,
+/// its first `PROFILE_WORDS` words.
 pub fn speaker_of(tts: &Path) -> Result<Option<Speaker>, String> {
     let Ok(entries) = std::fs::read_dir(tts.join("speakers")) else { return Ok(None) };
     let mut profiles: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
     profiles.sort();
-    profiles.first().map(|p| Speaker::read(p)).transpose()
+    Ok(profiles.first().map(|p| Speaker::read(p)).transpose()?.map(|s| s.first_words(PROFILE_WORDS)))
 }
 
 /// `text` said by OuteTTS, in `tts`, and DAC, in `dac`, a sentence at a time, each token
