@@ -85,9 +85,27 @@ fn pj_per_mac(activation_bits: u32) -> f64 {
 
 /// 8-bit codes with a scale and a bias per group of `group` columns: 64 is the chip's
 /// usual; Moonshine's widths (288) need 32, and DAC's codebooks, 8 values wide, need 8.
+/// A checkpoint already quantized keeps its own codes, as the frontier keeps them.
 fn weights(dir: &Path, group: u32) -> Result<Weights, String> {
+    let weights = Weights::open(dir)?;
+    if quantized(dir) {
+        return Ok(weights);
+    }
     let format = WeightFormat { coding: WeightCoding::Affine, bits: 8, exponent_bits: 0, bias: true, group_size: group, fine_scale: false, keep_source: false };
-    Ok(Weights::open(dir)?.with_format(Some(format)))
+    Ok(weights.with_format(Some(format)))
+}
+
+fn quantized(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("config.json")).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).is_some_and(|c| c.get("quantization").is_some() || c.get("quantization_config").is_some())
+}
+
+/// Whether a model's weights could fit one die within the reticle at all: at four bits
+/// each, one weight for each multiplication of a token, in the process's densest memory.
+fn could_fit_one_die(dir: &Path) -> Result<bool, String> {
+    let program = compiler::compile_model(&std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?)?;
+    let weights = crate::system::macs(&program.ops, &program.buffers) as f64;
+    let tech = arch::node("n6").ok_or("no N6")?;
+    Ok(weights * 4.0 < N6.reticle_mm2 * 1e6 / tech.sram_cell_um2)
 }
 
 /// A language model on `chips` dies of `shape` shared as `sharing`, after a prompt of
@@ -126,6 +144,7 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
     };
     let mut listen = Vec::new();
     let mut think = Vec::new();
+    let think_fits_one = could_fit_one_die(&models.think)?;
     let mut speak = Vec::new();
     let mut sound = Vec::new();
     for &shape in &ask.shapes {
@@ -140,12 +159,16 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
                 let ops = &chip.parts().0.rows().expect("the routines").ops;
                 let count = |calls: &[crate::moonshine_chip::Call]| calls.iter().map(|c| crate::system::macs(&ops[c.routine.clone()], &chip.parts().0.buffers)).sum::<u64>();
                 let token = chip.token_calls(listen_config.start, 0);
-                listen.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: stage.first_cycles, output_cycles: stage.output_cycles, needs: 0, variant: String::new(), first_macs: count(&calls), output_macs: count(&token), pj_per_mac: pj_per_mac(16) });
+                // The firmware starts every routine: its cycles come on top of the die's.
+                let firmware = |calls: usize| calls as u64 * crate::chip::FIRMWARE_CYCLES_PER_ROUTINE;
+                listen.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: stage.first_cycles + firmware(calls.len()), output_cycles: stage.output_cycles + firmware(token.len()), needs: 0, variant: String::new(), first_macs: count(&calls), output_macs: count(&token), pj_per_mac: pj_per_mac(16) });
             }
         }
-        progress(format!("the language model on {name}"));
-        if let Ok(fit) = language_model(&models.think, &costs, (1, Sharing::Layers), shape, 40, question_tokens) {
-            think.push(fit);
+        if think_fits_one {
+            progress(format!("the language model on {name}"));
+            if let Ok(fit) = language_model(&models.think, &costs, (1, Sharing::Layers), shape, 40, question_tokens) {
+                think.push(fit);
+            }
         }
         progress(format!("OuteTTS on {name}"));
         if let Ok(fit) = language_model(&models.speak, &costs, (1, Sharing::Layers), shape, writer_prompt, ask.words) {
@@ -158,7 +181,8 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
             let Ok(code) = chip.microprogram() else { continue };
             let calls = chip.calls(&vec![vec![0; frames]; sound_config.codebooks])?;
             let (parts, clock) = routines_die(chip.parts().1, &code, &wide_costs, &N6, shape, CLOCK);
-            let cycles = chip.cycles(&calls)?;
+            // The die's cycles, and the firmware's to start each routine.
+            let cycles = chip.cycles(&calls)? + calls.len() as u64 * crate::chip::FIRMWARE_CYCLES_PER_ROUTINE;
             let needs = (frames as f64 * TOKENS_PER_FRAME).ceil() as u32;
             let window_macs: u64 = calls.iter().map(|c| crate::system::macs(&chip.routines()[c.routine], &chip.parts().0.buffers)).sum();
             sound.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: cycles, output_cycles: cycles / chunk as u64, needs, variant: format!("windows of {frames} frames, {chunk} kept"), first_macs: window_macs, output_macs: window_macs / chunk as u64, pj_per_mac: pj_per_mac(20) });
@@ -191,6 +215,9 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
 /// as measured.
 pub type Planned = (Option<Plan>, Vec<Weighed>, Vec<StagePlan>);
 
+/// Changes when the way stages are measured changes, so plans kept from before are not used.
+const PLAN_VERSION: u32 = 2;
+
 /// The system planned for `ask`: the plan chosen, if any meets it, every grouping weighed,
 /// and the stages as measured.
 pub fn plan_voice(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn FnMut(String)) -> Result<Planned, String> {
@@ -203,7 +230,7 @@ pub fn plan_voice(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn FnMut
 /// `plan_voice`, kept in `dir` for the same models, question and engine: measuring every
 /// stage on every shape takes a minute or two.
 pub fn plan_voice_cached(dir: &Path, models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn FnMut(String)) -> Result<Planned, String> {
-    let key = serde_json::to_string(&(models, ask)).map_err(|e| e.to_string())?;
+    let key = serde_json::to_string(&(PLAN_VERSION, models, ask)).map_err(|e| e.to_string())?;
     let path = crate::optimize::cache_path(dir, &format!("voice plan {key}"));
     if let Some(planned) = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Planned>(&text).ok()) {
         return Ok(planned);
