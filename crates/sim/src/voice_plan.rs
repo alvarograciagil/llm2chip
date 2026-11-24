@@ -64,6 +64,14 @@ pub const TOKENS_PER_FRAME: f64 = 2.4;
 const FRAMES_PER_SECOND: f64 = 75.0;
 const TOKENS_PER_SECOND_SPOKEN: f64 = 3.0;
 
+/// A product's energy in N6, picojoules: an 8-bit weight by an `activation_bits`-bit value
+/// in the cell, as the estimator simulates it, and the weight's read from its memory.
+fn pj_per_mac(activation_bits: u32) -> f64 {
+    let tech = arch::node("n6").expect("N6");
+    let cell = netlist::CellConfig { activation_bits, accumulator_bits: 2 * activation_bits + 16, ..reference_die(8).cell };
+    arch::mac_energy_pj(tech, cell) + 8.0 * tech.e_sram_fj_bit / 1e3
+}
+
 /// 8-bit codes with a scale and a bias per group of `group` columns: 64 is the chip's
 /// usual; Moonshine's widths (288) need 32, and DAC's codebooks, 8 values wide, need 8.
 fn weights(dir: &Path, group: u32) -> Result<Weights, String> {
@@ -76,9 +84,10 @@ fn weights(dir: &Path, group: u32) -> Result<Weights, String> {
 fn language_model(dir: &Path, costs: &Costs, shape: (u32, u32, u32), prompt: u32, needs: u32) -> Result<Fit, String> {
     let context = (prompt + 512).next_power_of_two().max(1024);
     let program = compiler::compile_model(&std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?)?;
+    let per_token = crate::system::macs(&program.ops, &program.buffers);
     let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: vec![1], clock_hz: CLOCK, process: N6, context, lane_bits: shape.1..=shape.1, cluster_bits: shape.0..=shape.0, cell_bits: shape.2..=shape.2, sharing: vec![Sharing::Layers] };
     let c = measure(&program, &weights(dir, 64)?, reference_die(8), costs, &target, Sharing::Layers, (1, shape.0, shape.1, shape.2))?;
-    Ok(Fit { shape, dies: c.chips, parts_mm2: c.parts_mm2, clock_hz: c.clock_hz, first_cycles: (c.prompt_seconds * c.clock_hz).round() as u64, output_cycles: c.cycles, needs, variant: String::new() })
+    Ok(Fit { shape, dies: c.chips, parts_mm2: c.parts_mm2, clock_hz: c.clock_hz, first_cycles: (c.prompt_seconds * c.clock_hz).round() as u64, output_cycles: c.cycles, needs, variant: String::new(), first_macs: per_token * prompt as u64, output_macs: per_token, pj_per_mac: pj_per_mac(16) })
 }
 
 /// Each stage measured on every shape of `ask` it can be built on, saying what it is doing.
@@ -117,7 +126,10 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
             if let Ok((_, code)) = chip.microprogram(&calls) {
                 let (parts, clock) = routines_die(chip.parts().1, &code, &costs, &N6, shape, CLOCK);
                 let stage = chip.stage(1, parts.iter().sum(), clock)?;
-                listen.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: stage.first_cycles, output_cycles: stage.output_cycles, needs: 0, variant: String::new() });
+                let ops = &chip.parts().0.rows().expect("the routines").ops;
+                let count = |calls: &[crate::moonshine_chip::Call]| calls.iter().map(|c| crate::system::macs(&ops[c.routine.clone()], &chip.parts().0.buffers)).sum::<u64>();
+                let token = chip.token_calls(listen_config.start, 0);
+                listen.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: stage.first_cycles, output_cycles: stage.output_cycles, needs: 0, variant: String::new(), first_macs: count(&calls), output_macs: count(&token), pj_per_mac: pj_per_mac(16) });
             }
         }
         progress(format!("the language model on {name}"));
@@ -137,7 +149,8 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
             let (parts, clock) = routines_die(chip.parts().1, &code, &wide_costs, &N6, shape, CLOCK);
             let cycles = chip.cycles(&calls)?;
             let needs = (frames as f64 * TOKENS_PER_FRAME).ceil() as u32;
-            sound.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: cycles, output_cycles: cycles / chunk as u64, needs, variant: format!("windows of {frames} frames, {chunk} kept") });
+            let window_macs: u64 = calls.iter().map(|c| crate::system::macs(&chip.routines()[c.routine], &chip.parts().0.buffers)).sum();
+            sound.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: cycles, output_cycles: cycles / chunk as u64, needs, variant: format!("windows of {frames} frames, {chunk} kept"), first_macs: window_macs, output_macs: window_macs / chunk as u64, pj_per_mac: pj_per_mac(20) });
         }
     }
     let stages = vec![
@@ -180,4 +193,37 @@ pub fn plan_voice_cached(dir: &Path, models: &VoiceModels, ask: &VoiceAsk, progr
         }
     }
     Ok(planned)
+}
+
+/// What a spoken turn costs in energy on a planned system: each stage's work, and every
+/// die's leakage while the turn lasts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TurnEnergy {
+    /// Joules each stage spends working, in the stages' order.
+    pub stages_j: Vec<f64>,
+    /// Joules every die leaks while the turn lasts.
+    pub leakage_j: f64,
+    /// The turn: the question, the wait and the answer said, seconds.
+    pub seconds: f64,
+    pub total_j: f64,
+}
+
+/// The energy of a turn on `plan`: a question of `ask.seconds`, an answer of `ask.words`
+/// tokens, said at about three tokens a second. Leakage is counted on every die for the
+/// whole turn, none powered off, with every memory bit leaking as N6's do; the work is the
+/// products of weights by values and the weights' reads, as the estimator counts a token.
+pub fn turn_energy(plan: &Plan, ask: &VoiceAsk) -> TurnEnergy {
+    let tech = arch::node("n6").expect("N6");
+    let question_tokens = (ask.seconds * TOKENS_PER_SECOND_SPOKEN).ceil() as u64;
+    let answer_seconds = ask.words as f64 / TOKENS_PER_SECOND_SPOKEN;
+    let frames = (answer_seconds * FRAMES_PER_SECOND).ceil() as u64;
+    let outputs = [question_tokens, ask.words as u64, (frames as f64 * TOKENS_PER_FRAME) as u64, frames];
+    let stages_j: Vec<f64> = plan.fits.iter().zip(outputs).map(|(f, n)| (f.first_macs + n.saturating_sub(1) * f.output_macs) as f64 * f.pj_per_mac * 1e-12).collect();
+    let seconds = ask.seconds + plan.first_output_seconds + answer_seconds;
+    let leak_w: f64 = plan.dies.iter().map(|d| {
+        let memory_mm2 = d.parts_mm2[1] + d.parts_mm2[2] + d.parts_mm2[3];
+        (memory_mm2 * 1e6 / tech.sram_cell_um2 * tech.sram_leak_pw_bit * 1e-12 + d.parts_mm2[0] * tech.logic_leak_w_mm2) * d.count as f64
+    }).sum();
+    let leakage_j = leak_w * seconds;
+    TurnEnergy { total_j: stages_j.iter().sum::<f64>() + leakage_j, stages_j, leakage_j, seconds }
 }

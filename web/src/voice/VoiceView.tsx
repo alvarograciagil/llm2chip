@@ -110,6 +110,9 @@ function SystemPlanView({ plan }: { plan: SystemPlan }) {
           <p>
             {chosen.dies.reduce((n, d) => n + d.count, 0)} {t("dies")}, {formatNumber(Math.round(chosen.area_mm2))} mm², {t("first sound after")} {formatNumber(Math.round(chosen.first_sound_ms))} ms
           </p>
+          <p className="muted-text">
+            {t("A turn of")} {formatNumber(chosen.energy.seconds)} s: {formatNumber(chosen.energy.total_j)} J ({formatNumber(chosen.energy.leakage_j)} J {t("of leakage")}), {formatNumber(chosen.energy.total_j / chosen.energy.seconds)} W {t("on average")}
+          </p>
           <ul className="voice-dies">
             {chosen.dies.map((d, i) => (
               <li key={i}>

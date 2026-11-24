@@ -1256,6 +1256,9 @@ const ES: Record<string, string> = {
   "New conversation": "Nueva conversación",
   "OuteTTS reads a sentence said in that voice, with its codes, before each of its own: about 1,800 tokens more, which the chip reads before its first sound.": "OuteTTS lee una frase dicha con esa voz, con sus códigos, antes de cada una de las suyas: unos 1.800 tokens más, que el chip lee antes de su primer sonido.",
   "In the voice of the speaker profile": "Con la voz del perfil de hablante",
+  "A turn of": "Un turno de",
+  "of leakage": "de fugas",
+  "on average": "de media",
 };
 
 

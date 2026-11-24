@@ -9,7 +9,7 @@
 //! (500), `SECONDS` the longest question (3) and `WORDS` the tokens of the answer's first
 //! sentence (12).
 
-use sim::voice_plan::{plan_voice, VoiceAsk, VoiceModels};
+use sim::voice_plan::{plan_voice, turn_energy, VoiceAsk, VoiceModels};
 use std::path::PathBuf;
 
 fn main() -> Result<(), String> {
@@ -44,8 +44,10 @@ fn main() -> Result<(), String> {
         let names: Vec<&str> = die.stages.iter().map(|s| stages[*s].name.as_str()).collect();
         println!("  {} die(s) of {} at {:.0} MHz, {:.0} mm² (logic {:.0}, cells {:.0}, vectors {:.0}): {}", die.count, shape(die.shape), die.clock_hz / 1e6, die.mm2(), die.parts_mm2[0], die.parts_mm2[1], die.parts_mm2[2], names.join(" + "));
     }
-    for ((stage, timing), variant) in stages.iter().zip(&plan.stages).zip(&plan.variants) {
-        println!("  {}: first output after {:.1} ms, then {:.0} a second{}", stage.name, timing.seconds_to(1) * 1e3, timing.outputs_per_second(), if variant.is_empty() { String::new() } else { format!(" ({variant})") });
+    let energy = turn_energy(&plan, &ask);
+    for (((stage, timing), variant), joules) in stages.iter().zip(&plan.stages).zip(&plan.variants).zip(&energy.stages_j) {
+        println!("  {}: first output after {:.1} ms, then {:.0} a second{}; {:.1} mJ a turn", stage.name, timing.seconds_to(1) * 1e3, timing.outputs_per_second(), if variant.is_empty() { String::new() } else { format!(" ({variant})") }, joules * 1e3);
     }
+    println!("a turn ({:.1} s): {:.2} J, {:.2} J of it leakage; {:.2} W on average", energy.seconds, energy.total_j, energy.leakage_j, energy.total_j / energy.seconds);
     Ok(())
 }

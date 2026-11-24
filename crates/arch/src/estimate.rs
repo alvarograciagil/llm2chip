@@ -279,6 +279,12 @@ thread_local! {
     static CELL_SWITCHING: RefCell<HashMap<String, f64>> = RefCell::new(HashMap::new());
 }
 
+/// Energy of one multiplication in a cell of `config`, picojoules: its gates' switching,
+/// simulated with random data, as the estimator counts it for a model's tokens.
+pub fn mac_energy_pj(tech: &TechNode, config: CellConfig) -> f64 {
+    cell_switching(config, zero_fraction(config.weight_bits)) * SWITCHING_TO_FULL_ADDERS * tech.e_fa_pj
+}
+
 /// Gates that toggle per multiplication, simulated on the cell with random data.
 fn cell_switching(config: CellConfig, zeros: f64) -> f64 {
     let key = format!("{config:?}{zeros}");

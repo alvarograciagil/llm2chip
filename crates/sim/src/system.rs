@@ -107,6 +107,22 @@ pub struct Fit {
     pub needs: u32,
     /// What else sets this way of running it apart, such as the windows a decoder takes.
     pub variant: String,
+    /// Products of a weight by a value to the first output and for each after, and what
+    /// each costs, weight read included, picojoules: the energy the stage spends working.
+    #[serde(default)]
+    pub first_macs: u64,
+    #[serde(default)]
+    pub output_macs: u64,
+    #[serde(default)]
+    pub pj_per_mac: f64,
+}
+
+/// Products of a weight by a value in `ops`, from the sizes of their buffers.
+pub fn macs(ops: &[compiler::Inst], buffers: &[usize]) -> u64 {
+    ops.iter().map(|i| match &i.op {
+        compiler::Op::Matvec { src, dst, .. } => (buffers[*src] * buffers[*dst]) as u64,
+        _ => 0,
+    }).sum()
 }
 
 /// A stage as the planner sees it: what it costs on each shape and way of running it
@@ -156,6 +172,9 @@ pub struct Plan {
     /// Each stage's timing on its die, and the way it runs, in the stages' order.
     pub stages: Vec<Stage>,
     pub variants: Vec<String>,
+    /// What each stage was measured as, on its die.
+    #[serde(default)]
+    pub fits: Vec<Fit>,
 }
 
 /// A grouping that was weighed, and why it was or was not chosen.
@@ -270,7 +289,7 @@ pub fn plan(stages: &[StagePlan], overlaps: &[(usize, usize)], limits: Limits) -
             } else if area > limits.area_mm2 {
                 why = format!("{area:.0} mm² is more than allowed");
             } else {
-                let plan = Plan { dies: dies.iter().map(|(d, _)| d.clone()).collect(), area_mm2: area, first_output_seconds: first, stages: timing, variants: fits.iter().map(|f| f.variant.clone()).collect() };
+                let plan = Plan { dies: dies.iter().map(|(d, _)| d.clone()).collect(), area_mm2: area, first_output_seconds: first, stages: timing, variants: fits.iter().map(|f| f.variant.clone()).collect(), fits: fits.clone() };
                 if found.as_ref().is_none_or(|f| better(&plan, f)) {
                     found = Some(plan);
                 }
@@ -308,7 +327,7 @@ mod tests {
     }
 
     fn fit(shape: (u32, u32, u32), parts: [f64; 4], first: u64, each: u64) -> Fit {
-        Fit { shape, dies: 1, parts_mm2: parts, clock_hz: 1e9, first_cycles: first, output_cycles: each, needs: 5, variant: String::new() }
+        Fit { shape, dies: 1, parts_mm2: parts, clock_hz: 1e9, first_cycles: first, output_cycles: each, needs: 5, variant: String::new(), first_macs: 0, output_macs: 0, pj_per_mac: 0.0 }
     }
 
     fn limits() -> Limits {

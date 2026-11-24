@@ -169,6 +169,19 @@ For a three-second question, a first sentence of 12 tokens and the first sound w
 
 The planner merges what pays and keeps apart what would wait on itself; with a tighter time or other models it chooses differently.
 
+**Energy of a turn** (`voice_plan::turn_energy`, in the Voice view too). Each stage's work is counted as the estimator counts a token's: every product of a weight by a value in the cell (its gates' switching, simulated) and the weight's read from its memory, for the products its routines or its program actually do. Every die leaks the whole turn, none powered off. For a three-second question and an answer of 12 tokens (about four seconds of speech), with the three-word profile:
+
+| Stage | Work |
+|---|---|
+| Speech to text | 1.4 mJ |
+| Language model | 29.6 mJ |
+| Speech writer | 540 mJ |
+| Sound decoder | 342 mJ |
+| Every die's leakage, 7.4 s | 5.94 J |
+| **The turn** | **6.86 J, 0.92 W on average** |
+
+Leakage is most of it: the weights' memories leak for the whole turn while each die works for a fraction of it. Holding the weights in ROM or powering idle dies off would matter far more than any saving in the work; neither is counted here.
+
 Two simplifications: a shared die's cell memories are added as each stage's were measured, though one memory of their sum would have a little less periphery; and a recogniser measured with 16-bit vectors keeps its cycles on the decoder's 20-bit die.
 
 The speech dies are routines over rows: each unit of a die keeps its own copy of the maps. Splitting them among the units would need writes only the owning unit makes and reads from a unit chosen as it runs, new datapaths across units, and would not make the products faster, since they run in the cells; so the planner weighs the copies against the speed instead.

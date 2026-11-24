@@ -143,7 +143,7 @@ pub struct PlanJob {
 /// The system planned, as the view shows it: the dies chosen with their stages' names, each
 /// stage's timing, and every grouping weighed.
 pub fn run_plan(start: &PlanStart, job: &PlanJob, home: &Path) -> Result<Value, String> {
-    use sim::voice_plan::{plan_voice_cached, VoiceAsk, VoiceModels};
+    use sim::voice_plan::{plan_voice_cached, turn_energy, VoiceAsk, VoiceModels};
     let models = VoiceModels { listen: start.listen.clone().into(), think: start.think.clone().into(), speak: start.speak.clone().into(), sound: start.sound.clone().into() };
     if !(0.5..=30.0).contains(&start.seconds) {
         return Err("the question must last between half a second and 30 seconds".into());
@@ -153,7 +153,9 @@ pub fn run_plan(start: &PlanStart, job: &PlanJob, home: &Path) -> Result<Value, 
     let names: Vec<&str> = stages.iter().map(|s| s.name.as_str()).collect();
     let named = |group: &[usize]| group.iter().map(|s| names[*s]).collect::<Vec<_>>();
     let plan = best.map(|p| {
+        let energy = turn_energy(&p, &ask);
         json!({
+            "energy": { "total_j": energy.total_j, "leakage_j": energy.leakage_j, "seconds": energy.seconds, "stages_j": energy.stages_j },
             "area_mm2": p.area_mm2,
             "first_sound_ms": p.first_output_seconds * 1e3,
             "dies": p.dies.iter().map(|d| json!({ "stages": named(&d.stages), "count": d.count, "units": 1u32 << d.shape.0, "lanes": 1u32 << d.shape.1, "cells": 1u64 << d.shape.2, "mm2": d.mm2(), "parts_mm2": d.parts_mm2, "clock_mhz": d.clock_hz / 1e6 })).collect::<Vec<_>>(),

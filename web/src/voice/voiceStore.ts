@@ -38,6 +38,8 @@ export interface SystemPlan {
   plan: {
     area_mm2: number;
     first_sound_ms: number;
+    /** A turn's energy: each stage's work and every die's leakage while it lasts. */
+    energy: { total_j: number; leakage_j: number; seconds: number; stages_j: number[] };
     dies: PlannedDie[];
     stages: { name: string; first_ms: number; per_second: number; variant: string }[];
   } | null;
