@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 compiler = { path = "../compiler" }
 netlist = { path = "../netlist" }
-sim = { path = "../sim" }
+sim = { path = "../sim", default-features = false }
 tokenizer-rt = { path = "../tokenizer-rt" }
 serde.workspace = true
 serde_json.workspace = true

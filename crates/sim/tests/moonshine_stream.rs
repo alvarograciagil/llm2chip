@@ -1,6 +1,7 @@
 //! Streaming Moonshine taken to the chip on a toy checkpoint: the exact machine following
 //! the schedule against the floating-point reference, and the firmware following it at
 //! instruction level against the host.
+#![cfg(feature = "listen")]
 
 mod common;
 use common::*;

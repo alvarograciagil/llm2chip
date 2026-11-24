@@ -1,12 +1,14 @@
 //! Executes a compiled microprogram on real weights.
 
 pub mod accel;
+#[cfg(any(feature = "listen", feature = "speak"))]
 pub mod audio;
 pub mod chip;
 mod exact;
 mod exec;
 pub mod image;
 pub mod janus;
+#[cfg(feature = "listen")]
 pub mod listen;
 pub mod lower;
 pub mod magvit_chip;
@@ -15,12 +17,15 @@ pub mod prompt;
 pub mod showo;
 pub mod showo_chip;
 pub mod sizing;
+#[cfg(feature = "speak")]
 pub mod speak;
 pub mod system;
 pub mod tokenizer;
 pub mod vision;
 pub mod vision_chip;
+#[cfg(any(feature = "listen", feature = "speak"))]
 pub mod voice;
+#[cfg(any(feature = "listen", feature = "speak"))]
 pub mod voice_plan;
 mod requant;
 mod vm;

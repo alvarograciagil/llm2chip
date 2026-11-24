@@ -1,6 +1,7 @@
 //! DAC's decoder, codes to sound, taken to the chip on toy checkpoints: the die's exact
 //! arithmetic against the floating-point reference of `sim::dac`, and the die's gates
 //! against the exact machine.
+#![cfg(feature = "speak")]
 
 mod common;
 #[allow(unused_imports)]

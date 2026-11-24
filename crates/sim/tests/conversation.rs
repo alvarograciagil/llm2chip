@@ -1,6 +1,7 @@
 //! A spoken conversation keeps the language model's cache between questions: the second
 //! question is fed on top of the first and its answer, and the scores after it are those of
 //! the whole conversation fed from the start. With a real model, when it is on disk.
+#![cfg(any(feature = "listen", feature = "speak"))]
 
 use sim::voice::{Arithmetic, Conversation, Model};
 use std::path::PathBuf;

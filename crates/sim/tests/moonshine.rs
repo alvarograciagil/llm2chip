@@ -1,6 +1,7 @@
 //! Moonshine, speech to text, taken to the chip on a toy checkpoint: the die's exact
 //! arithmetic against the floating-point reference of `sim::moonshine`, and the die's gates
 //! against the exact machine.
+#![cfg(feature = "listen")]
 
 mod common;
 use common::*;

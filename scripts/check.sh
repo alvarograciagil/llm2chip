@@ -11,5 +11,10 @@ slow=()
 [ "${1:-}" = "--full" ] && slow=(-- --include-ignored)
 cargo test --release --workspace --exclude llm2chip-wasm ${slow[@]+"${slow[@]}"}
 cargo clippy --release --workspace --all-targets -- -D warnings
+# Voice is two optional parts, listening and speaking: the engine builds with either alone
+# and with neither, as a workspace build that unifies features never shows.
+for features in "" listen speak; do
+  cargo clippy --release -p sim -p server --no-default-features --features "$features" --all-targets -- -D warnings
+done
 npm --prefix web run build
 npm --prefix web test

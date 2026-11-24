@@ -36,6 +36,13 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-metal = "0.3"
 
+# Voice, two parts apart: speech to text (`listen`) and text to speech (`speak`). Without
+# either, nothing of voice is built.
+[features]
+default = ["listen", "speak"]
+listen = []
+speak = []
+
 [[example]]
 name = "generate"
 
@@ -44,6 +51,26 @@ name = "numeric"
 
 [[example]]
 name = "mtp"
+
+[[example]]
+name = "listen"
+required-features = ["listen"]
+
+[[example]]
+name = "speak"
+required-features = ["speak"]
+
+[[example]]
+name = "dac_check"
+required-features = ["speak"]
+
+[[example]]
+name = "talk"
+required-features = ["listen", "speak"]
+
+[[example]]
+name = "voice_system"
+required-features = ["listen", "speak"]
 
 [dev-dependencies]
 chip-trace = { path = "../trace" }

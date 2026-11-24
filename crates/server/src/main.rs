@@ -7,6 +7,7 @@ mod optimizer;
 mod trace_job;
 mod prompt;
 mod retouch;
+#[cfg(any(feature = "listen", feature = "speak"))]
 mod voice_job;
 
 use axum::{
@@ -88,9 +89,12 @@ struct App {
     optimize: Arc<Mutex<Option<Arc<optimizer::OptimizeJob>>>>,
     trace: Arc<Mutex<Option<Arc<trace_job::TraceJob>>>>,
     replay: Arc<Mutex<Option<trace_job::Replayed>>>,
+    #[cfg(any(feature = "listen", feature = "speak"))]
     voice: Arc<Mutex<Option<Arc<voice_job::VoiceJob>>>>,
+    #[cfg(any(feature = "listen", feature = "speak"))]
     voice_plan: Arc<Mutex<Option<Arc<voice_job::PlanJob>>>>,
     /// The spoken conversation going on, its language model's cache kept between turns.
+    #[cfg(any(feature = "listen", feature = "speak"))]
     conversation: Arc<Mutex<Option<sim::voice::Conversation>>>,
     painter: retouch::Painter,
     chip_painter: retouch::ChipPainter,
@@ -391,10 +395,12 @@ async fn layout_start(State(app): State<App>, Json(request): Json<layout::Layout
     StatusCode::ACCEPTED.into_response()
 }
 
+#[cfg(any(feature = "listen", feature = "speak"))]
 /// What the spoken turn is doing, or what it gave.
 async fn voice_status(State(app): State<App>) -> Response {
     let job = app.voice.lock().unwrap().clone();
-    let Some(job) = job else { return Json(serde_json::json!({ "state": "idle" })).into_response() };
+    // What this engine was built to do: listen, speak, or both.
+    let Some(job) = job else { return Json(serde_json::json!({ "state": "idle", "listen": cfg!(feature = "listen"), "speak": cfg!(feature = "speak") })).into_response() };
     let outcome = job.outcome.lock().unwrap().clone();
     Json(match outcome {
         None => serde_json::json!({ "state": "running", "phase": job.phase.lock().unwrap().clone(), "partial": job.partial.lock().unwrap().clone() }),
@@ -404,15 +410,18 @@ async fn voice_status(State(app): State<App>) -> Response {
     .into_response()
 }
 
-/// Starts a spoken turn: hear the clip, answer, say the answer. One at a time, and only
-/// with models of the known folders.
+#[cfg(any(feature = "listen", feature = "speak"))]
+/// Starts a spoken turn: hear the clip or take the text, answer, say the answer, as far as
+/// the chip listens and speaks. One at a time, and only with models of the known folders.
 async fn voice_start(State(app): State<App>, Json(start): Json<voice_job::VoiceStart>) -> Response {
     let running = app.voice.lock().unwrap().as_ref().is_some_and(|job| job.outcome.lock().unwrap().is_none());
     if running {
         return refused("a spoken turn is already running".into());
     }
-    let roles = [(&start.listen, Some("listens")), (&start.think, None), (&start.speak, Some("speaks")), (&start.sound, Some("sounds"))];
-    for (path, role) in roles {
+    if let Some(why) = start.refusal() {
+        return refused(why);
+    }
+    for (path, role) in start.models() {
         let Some(entry) = app.catalog.find(path) else { return refused("a model is not in the known folders".into()) };
         if role.is_some() && entry.voice != role {
             return refused(format!("{} does not do that part of a spoken turn", entry.name));
@@ -431,6 +440,7 @@ async fn voice_start(State(app): State<App>, Json(start): Json<voice_job::VoiceS
     StatusCode::ACCEPTED.into_response()
 }
 
+#[cfg(any(feature = "listen", feature = "speak"))]
 /// What the voice system's planning is doing, or what it chose.
 async fn voice_plan_status(State(app): State<App>) -> Response {
     let job = app.voice_plan.lock().unwrap().clone();
@@ -444,14 +454,16 @@ async fn voice_plan_status(State(app): State<App>) -> Response {
     .into_response()
 }
 
-/// Plans a chip that listens, answers and speaks: one at a time, with models of the known
-/// folders.
+#[cfg(any(feature = "listen", feature = "speak"))]
+/// Plans a chip that listens, speaks or both, with its language model: one at a time, with
+/// models of the known folders.
 async fn voice_plan_start(State(app): State<App>, Json(start): Json<voice_job::PlanStart>) -> Response {
     let running = app.voice_plan.lock().unwrap().as_ref().is_some_and(|job| job.outcome.lock().unwrap().is_none());
     if running {
         return refused("a plan is already being made".into());
     }
-    let roles = [(&start.listen, Some("listens")), (&start.think, None), (&start.speak, Some("speaks")), (&start.sound, Some("sounds"))];
+    let named = [(&start.listen, Some("listens")), (&start.speak, Some("speaks")), (&start.sound, Some("sounds"))];
+    let roles = named.into_iter().filter_map(|(path, role)| path.as_deref().map(|p| (p, role))).chain([(start.think.as_str(), None)]);
     for (path, role) in roles {
         let Some(entry) = app.catalog.find(path) else { return refused("a model is not in the known folders".into()) };
         if role.is_some() && entry.voice != role {
@@ -1355,8 +1367,21 @@ fn session_token() -> String {
 
 #[tokio::main]
 async fn main() {
-    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)), layout: Arc::new(Mutex::new(None)), retouch: Arc::new(Mutex::new(None)), optimize: Arc::new(Mutex::new(None)), trace: Arc::new(Mutex::new(None)), replay: Arc::new(Mutex::new(None)), voice: Arc::new(Mutex::new(None)), voice_plan: Arc::new(Mutex::new(None)), conversation: Arc::new(Mutex::new(None)), painter: Arc::new(Mutex::new(None)), chip_painter: Arc::new(Mutex::new(None)) };
-    let routes = Router::new()
+    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)), layout: Arc::new(Mutex::new(None)), retouch: Arc::new(Mutex::new(None)), optimize: Arc::new(Mutex::new(None)), trace: Arc::new(Mutex::new(None)), replay: Arc::new(Mutex::new(None)), painter: Arc::new(Mutex::new(None)), chip_painter: Arc::new(Mutex::new(None)),
+        #[cfg(any(feature = "listen", feature = "speak"))]
+        voice: Arc::new(Mutex::new(None)),
+        #[cfg(any(feature = "listen", feature = "speak"))]
+        voice_plan: Arc::new(Mutex::new(None)),
+        #[cfg(any(feature = "listen", feature = "speak"))]
+        conversation: Arc::new(Mutex::new(None)),
+    };
+    let routes = Router::new();
+    // Voice only in an engine built with listening, speaking or both.
+    #[cfg(any(feature = "listen", feature = "speak"))]
+    let routes = routes
+        .route("/api/voice", get(voice_status).post(voice_start).layer(axum::extract::DefaultBodyLimit::max(16 << 20)))
+        .route("/api/voice/plan", get(voice_plan_status).post(voice_plan_start));
+    let routes = routes
         .route("/api/models", get(models))
         .route("/api/status", get(status))
         .route("/api/settings", get(read_settings).put(write_settings))
@@ -1371,8 +1396,6 @@ async fn main() {
         .route("/api/image/cancel", post(image_cancel))
         .route("/api/layout", get(layout_status).post(layout_start))
         .route("/api/optimize", get(optimize_status).post(optimize_start))
-        .route("/api/voice", get(voice_status).post(voice_start).layer(axum::extract::DefaultBodyLimit::max(16 << 20)))
-        .route("/api/voice/plan", get(voice_plan_status).post(voice_plan_start))
         .route("/api/optimize/cancel", post(optimize_cancel))
         .route("/api/trace", get(trace_status).post(trace_start))
         .route("/api/trace/design", post(trace_design))

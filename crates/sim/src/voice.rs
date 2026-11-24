@@ -1,14 +1,21 @@
-//! A spoken turn's three stages, as the talk example and the application run them: hear a
-//! clip with Moonshine, answer with a language model, and say the answer with OuteTTS and
-//! DAC. Each runs in floating point or in the die's arithmetic; only text goes from one to
-//! the next.
+//! A spoken turn's stages, as the talk example and the application run them: hear a clip
+//! with Moonshine (`listen`, with the `listen` feature), answer with a language model
+//! (`answer`, `Conversation`), and say the answer with OuteTTS and DAC (`speak`, with the
+//! `speak` feature). Each runs in floating point or in the die's arithmetic; only text goes
+//! from one to the next. A chip may listen, speak or both: each stage stands alone.
 
+#[cfg(any(feature = "listen", feature = "speak"))]
 use crate::audio::Clip;
-use crate::speak::dac::{Dac, DacConfig};
+#[cfg(feature = "listen")]
 use crate::listen::moonshine::Moonshine;
+#[cfg(feature = "listen")]
 use crate::listen::moonshine_chip::MoonshineChip;
 use crate::prompt::PromptStyle;
+#[cfg(feature = "speak")]
+use crate::speak::dac::{Dac, DacConfig};
+#[cfg(feature = "speak")]
 use crate::speak::outetts::{write_sampled, Sampling, Speaker, SpeechVocabulary};
+#[cfg(any(feature = "listen", feature = "speak"))]
 use crate::tokenizer::TokenizerTables;
 use crate::{Engine, ExactEngine, Numeric, Weights};
 use std::path::Path;
@@ -56,6 +63,7 @@ impl Model {
     }
 }
 
+#[cfg(feature = "listen")]
 /// The text Moonshine, in `dir`, hears in `clip`.
 pub fn listen(dir: &Path, clip: &Clip, arithmetic: Arithmetic) -> Result<String, String> {
     let mut samples = clip.resampled(16_000).samples;
@@ -87,7 +95,7 @@ pub fn answer(dir: &Path, question: &str, arithmetic: Arithmetic, limit: usize, 
     }
     let mut reply = Vec::new();
     for _ in 0..limit {
-        let next = crate::listen::moonshine::argmax(&logits);
+        let next = argmax(&logits);
         if style.stop.contains(&next) {
             break;
         }
@@ -162,7 +170,7 @@ impl Conversation {
         self.tokens.extend(&new);
         let mut reply = Vec::new();
         for _ in 0..limit {
-            let next = crate::listen::moonshine::argmax(&logits);
+            let next = argmax(&logits);
             if self.style.stop.contains(&next) {
                 break;
             }
@@ -175,6 +183,11 @@ impl Conversation {
         self.messages.push(("assistant".into(), said.clone()));
         Ok((said, logits))
     }
+}
+
+/// The highest score's token, the first of equals: a greedy pick.
+fn argmax(values: &[f32]) -> u32 {
+    values.iter().enumerate().fold((0, f32::NEG_INFINITY), |best, (i, v)| if *v > best.1 { (i, *v) } else { best }).0 as u32
 }
 
 /// The sentences of `text`, each with its closing mark: what the speech writer takes one at
@@ -197,14 +210,17 @@ pub fn sentences(text: &str) -> Vec<String> {
     out
 }
 
+#[cfg(feature = "speak")]
 /// Frames the sound decoder keeps from each window it decodes, on the die: a window is
 /// this plus a frame's reach on both sides (see `DacConfig::windows`).
 pub const CHUNK_FRAMES: usize = 16;
 
+#[cfg(feature = "speak")]
 /// Words of a speaker profile the speech writer reads before each sentence: OuteTTS's own
 /// profiles have about 26, some 1,800 tokens; the first three keep the voice in about 200.
 pub const PROFILE_WORDS: usize = 3;
 
+#[cfg(feature = "speak")]
 /// The voice OuteTTS imitates, if its folder keeps one: the first profile in `speakers/`,
 /// its first `PROFILE_WORDS` words.
 pub fn speaker_of(tts: &Path) -> Result<Option<Speaker>, String> {
@@ -214,6 +230,7 @@ pub fn speaker_of(tts: &Path) -> Result<Option<Speaker>, String> {
     Ok(profiles.first().map(|p| Speaker::read(p)).transpose()?.map(|s| s.first_words(PROFILE_WORDS)))
 }
 
+#[cfg(feature = "speak")]
 /// `text` said by OuteTTS, in `tts`, and DAC, in `dac`, a sentence at a time, each token
 /// chosen by `sampling`, in `speaker`'s voice if given (its sentence and codes go before
 /// each sentence's: about 1,800 tokens more to read); on the die, the decoder takes a window

@@ -4,6 +4,12 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 
+# Voice, two parts apart: speech to text (`listen`) and text to speech (`speak`).
+[features]
+default = ["listen", "speak"]
+listen = ["sim/listen"]
+speak = ["sim/speak"]
+
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 chip-trace = { path = "../trace" }
@@ -16,7 +22,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
-sim = { path = "../sim" }
+sim = { path = "../sim", default-features = false }
 tokenizer-rt = { path = "../tokenizer-rt" }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 tokio = { version = "1", features = ["fs", "macros", "io-util", "rt-multi-thread", "sync", "time"] }
