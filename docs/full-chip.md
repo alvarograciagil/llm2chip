@@ -35,6 +35,7 @@ The chip receives bytes of text and returns bytes of text. Tokenizing, inference
 | Sampling unit and RNG | Top-k and temperature on the logits, with a multi-lane filter | In gates and as a model, connected to the die |
 | Firmware tokenizer | Follows the rules of each model's `tokenizer.json` through tables: added tokens, normalization, regular expressions, BPE and special-token template | Compared with the `tokenizers` library on synthetic styles and real models; in the ISS with real tables and in gates with tiny ones. Its working memory is sized from the design's context, and the estimator counts it |
 | Token scheduler and MTP | Decides what each die runs, and undoes | In firmware, checked against the software loop |
+| Routine schedules | Orders a program of routines by itself (a speech recogniser, a sound decoder): lengths, loops, sums over rows, tokens, samples back to the host; see [voice.md](voice.md) | In firmware, checked against the host's order and at instruction level |
 | Clock, reset and power management | Reset sequence, clock gates | Reset in gates; clock and power are only estimated, because the simulator has a single clock |
 | Debug and counters | Counters, read port and standard JTAG | In gates |
 
