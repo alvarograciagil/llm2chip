@@ -647,7 +647,7 @@ impl MoonshineChip {
         Ok(crate::system::Stage { name: "speech to text".into(), dies, area_mm2: dies as f64 * die_mm2, clock_hz, first_cycles: first, output_cycles: each })
     }
 
-    /// The most tokens it writes for a clip: Moonshine's six a second.
+    /// The most tokens it writes for a clip: six a second, as `Moonshine::transcribe`.
     pub fn limit(&self) -> usize {
         (self.samples * 6 / 16_000 + 1).min(self.config.max_tokens - 1)
     }

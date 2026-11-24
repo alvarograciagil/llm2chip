@@ -294,7 +294,7 @@ impl Moonshine {
         let mut decoder = self.decoder(&frames)?;
         let mut token = self.config.start;
         let mut text = Vec::new();
-        // Moonshine's own rule: about six tokens a second of audio at most.
+        // A limit of this reference's own, well above speech: six tokens a second of audio.
         let limit = (samples.len() * 6 / 16_000 + 1).min(self.config.max_tokens - 1);
         for _ in 0..limit {
             token = argmax(&decoder.step(token)?);
