@@ -169,17 +169,9 @@ fn moonshine_on_the_die_s_gates_gives_the_exact_machine_s_scores() {
         calls
     };
     let calls = schedule(&probe);
-    let mut routines: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
-    for (_, call) in &calls {
-        if !routines.iter().any(|(r, _)| *r == call.routine) {
-            routines.push((call.routine.clone(), call.rope));
-        }
-    }
-    let microprogram = |chip: &MoonshineChip| {
-        let (program, layout, _) = chip.parts();
-        let lists: Vec<Vec<compiler::Inst>> = routines.iter().map(|(r, _)| program.rows().unwrap().ops[r.clone()].to_vec()).collect();
-        layout.routines_microprogram(program, &lists.iter().zip(&routines).map(|(l, (_, rope))| (l.as_slice(), *rope)).collect::<Vec<_>>()).unwrap()
-    };
+    let routines = probe.microprogram(&calls.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>()).unwrap().0;
+    let only: Vec<sim::moonshine_chip::Call> = calls.iter().map(|(_, c)| c.clone()).collect();
+    let microprogram = |chip: &MoonshineChip| chip.microprogram(&only).unwrap().1;
     // The routines assembled once on a die with room, to know how many registers they reach.
     let wide = MoonshineChip::new(&dir, SAMPLES, sized, Some(places)).unwrap();
     microprogram(&wide);
@@ -243,5 +235,9 @@ fn moonshine_on_the_die_s_gates_gives_the_exact_machine_s_scores() {
     }
     eprintln!("toy Moonshine in gates: {} routines, {cycles} cycles", calls.len());
     assert_eq!(gates, exact, "scores");
+    // The microprogram's own count is the gates' cycle for cycle, which a system's sizing uses.
+    assert_eq!(chip.cycles(&only).unwrap(), cycles);
+    let stage = chip.stage(1, 1.0, 1e9).unwrap();
+    assert!(stage.output_cycles > 0 && stage.first_cycles + 2 * stage.output_cycles >= cycles / 2 && stage.first_cycles < cycles);
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -13,7 +13,7 @@ The guiding rule is the same as for images: **the die does not know what voice i
                                     text tokens         codes, + DAC decoder)
 ```
 
-Each stage is a program of its own on dies of its own. Between stages only token ids travel: a few bytes per second, far below what the links between dies already carry. So splitting the stages over dies costs nothing measurable in latency, and each stage's dies can have their own shape.
+Each stage is a program of its own on dies of its own. Between stages only text travels, as bytes: a few dozen a second, far below what any link carries. Each chip already reads and writes UTF-8 bytes through its host port, with its own tokenizer, so a recogniser and a language model with different vocabularies join without translating token ids. Splitting the stages over dies costs nothing measurable in latency, and each stage's dies can have their own shape.
 
 In a conversation what matters is not tokens per second but **how long until the first sound**, which should stay below about half a second. It adds up three things:
 
@@ -89,8 +89,9 @@ Weight normalisation (`weight_norm`) is folded into plain weights when the check
 
 Until now all the dies of a design ran parts of one program: layers in sequence, heads in parallel, or both. Voice needs dies that run **different programs**: some the speech recogniser, some the language model, some the synthesiser. That capability is general:
 
-- **A system is a list of stages**, each one a program with its own dies, shape and split. Its area is the sum; its speed is each stage's; its latency is the sum along the path of one answer.
-- **Between stages only tokens travel.** In this first step the host moves them, as it moves the prompt and the generated text today. A hardware handoff would need a token port between dies of different stages: a small queue of token ids on the link, and the receiving stage's firmware reading it as if it were the host's input. Nothing more, because the vectors never leave a stage.
+- **A system is a list of stages** (`sim::system`), each one a program with its own dies, shape and split. Its area is the sum; its speed is each stage's; its latency is the sum along the chain of how long each stage takes to give the next what it needs to start: the whole utterance for the recogniser, the first sentence for the synthesiser (`System::first_output_seconds`).
+- **A stage's cycles come from its microprogram.** A language model's stage comes from its sizing (`Stage::from_candidate`), and the recogniser's from the cycles of its own routines (`MoonshineChip::stage`), which on the toy checkpoint are the gates' cycle for cycle.
+- **Between stages only text travels, as bytes.** In the simulation the host passes them on. In hardware, one chip's output port feeds the next one's input port: the chips already speak bytes, so the handoff needs no new port, and the vectors never leave a stage.
 - **Other uses:** speculative decoding with a small model drafting tokens that a large model checks (the large one checks several at once, so the answer comes faster); a model that reads images whose encoder runs on dies of its own; or several small models in a chain.
 
 Speculative decoding with a separate draft model is not built yet. The MTP head (`DraftProgram`) is its cousin inside one model.
@@ -128,7 +129,7 @@ Before voice, `Program` had two fields named after images: `image` (Janus's head
 | 2 | Programs with parts, with identical microcode | Done: the 890 microprograms the quick tests lower hash the same before and after |
 | 3 | Cross-attention and LayerNorm without bias | Done, with no change to the die or the compiler: see above |
 | 4 | One-dimensional strided convolution | Done: `LoadRows`, with the host giving the first row read as the token |
-| 5 | Systems of stages: sizing, optimiser, host moving tokens | Planned |
+| 5 | Systems of stages | Done for sizing and latency (`sim::system`). The optimiser and the application do not offer it yet |
 | 6 | Moonshine on a toy checkpoint: floating-point reference, exact machine, gates | Done: the exact machine's scores are within 2.6 % of floating point (the die's function tables; the products agree to millionths), and the gates give the exact machine's scores bit for bit: 280 routines, 280,586 cycles for the clip and three tokens (`crates/sim/tests/moonshine.rs`) |
 | 7 | Moonshine with the real weights | Needs a download (108 MB) |
 | 8 | `FN_SIN` and the DAC decoder on a toy model | Planned |

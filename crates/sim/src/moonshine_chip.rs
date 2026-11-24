@@ -39,6 +39,9 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
+/// A routine's operations and whether it loads the rotation of its position first.
+pub type Routine = (Range<usize>, bool);
+
 /// A routine that computes and one that stores what it computed.
 type Pair = (Range<usize>, Range<usize>);
 
@@ -611,6 +614,44 @@ impl MoonshineChip {
         calls
     }
 
+    /// The routines `calls` run, each once, and the microprogram with an entry for each,
+    /// as a chip's firmware would have it.
+    pub fn microprogram(&self, calls: &[Call]) -> Result<(Vec<Routine>, netlist::Microprogram), String> {
+        let mut routines: Vec<Routine> = Vec::new();
+        for call in calls {
+            if !routines.iter().any(|(r, _)| *r == call.routine) {
+                routines.push((call.routine.clone(), call.rope));
+            }
+        }
+        let part = self.program.rows().ok_or("the routines are missing")?;
+        let lists: Vec<&[Inst]> = routines.iter().map(|(r, _)| &part.ops[r.clone()]).collect();
+        let code = self.layout.routines_microprogram(&self.program, &lists.iter().zip(&routines).map(|(l, (_, rope))| (*l, *rope)).collect::<Vec<_>>())?;
+        Ok((routines, code))
+    }
+
+    /// The die's cycles for `calls`, counted from the microprogram.
+    pub fn cycles(&self, calls: &[Call]) -> Result<u64, String> {
+        let (routines, code) = self.microprogram(calls)?;
+        let config = self.layout.config();
+        Ok(calls.iter().map(|call| code.cycles(&config, routines.iter().position(|(r, _)| *r == call.routine).unwrap(), call.token, call.position)).sum())
+    }
+
+    /// This recogniser as a stage of a system of `dies` dies of `die_mm2` at `clock_hz`:
+    /// a clip's samples written and encoded, then its first token; then each token, at the
+    /// middle of the text it can write.
+    pub fn stage(&self, dies: u32, die_mm2: f64, clock_hz: f64) -> Result<crate::system::Stage, String> {
+        let input: Vec<Call> = (0..self.sample_rows).map(|r| self.store_samples_call(r)).collect();
+        let first = self.cycles(&[input, self.encoder_calls(), self.token_calls(self.config.start, 0)].concat())?;
+        let middle = self.limit() / 2;
+        let each = self.cycles(&self.token_calls(self.config.start, middle))?;
+        Ok(crate::system::Stage { name: "speech to text".into(), dies, area_mm2: dies as f64 * die_mm2, clock_hz, first_cycles: first, output_cycles: each })
+    }
+
+    /// The most tokens it writes for a clip: Moonshine's six a second.
+    pub fn limit(&self) -> usize {
+        (self.samples * 6 / 16_000 + 1).min(self.config.max_tokens - 1)
+    }
+
     fn reset(&mut self) {
         self.vm.clear();
         crate::chip::load_initial(&mut self.vm, &self.layout.setup().initial, self.exponents);
@@ -652,8 +693,7 @@ impl MoonshineChip {
         self.encode(samples)?;
         let mut token = self.config.start;
         let mut text = Vec::new();
-        let limit = (samples.len() * 6 / 16_000 + 1).min(self.config.max_tokens - 1);
-        for position in 0..limit {
+        for position in 0..self.limit() {
             token = argmax(&self.step(token, position)?.0);
             if token == self.config.end {
                 break;
