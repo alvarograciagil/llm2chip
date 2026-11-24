@@ -120,6 +120,32 @@ cargo run --release -p sim --example showo_fill_compare -- <showo folder> out/ 1
 cargo run --release -p sim --example showo_formats -- <showo folder>                # loss by weight format
 ```
 
+## Voice
+
+The models and how to get them are in [voice.md](voice.md#getting-them): Moonshine-tiny or streaming Moonshine to listen, any language model to answer, OuteTTS-1.0-0.6B to write the speech and DAC.speech, converted with `tools/convert/dac.py`, to make the sound.
+
+**A spoken turn:** a WAV question in, a WAV answer out. With `die 20` every stage runs in the die's arithmetic with 20-bit vectors (about five minutes); `sample SEED` draws the speech as OuteTTS does; `voice` speaks in the profile kept with OuteTTS.
+
+```bash
+cargo run --release -p sim --example talk -- <moonshine folder> <language model folder> <outetts folder> <dac folder> question.wav answer.wav die 20
+```
+
+**Each stage on its own**, against Transformers when given a reference from `tools/golden/` (see [voice.md](voice.md#references-against-transformers)):
+
+```bash
+cargo run --release -p sim --example listen -- <moonshine folder> clip.wav [golden.json] [bits]
+cargo run --release -p sim --example speak -- <outetts folder> <dac folder> "Hello, I am a chip." out.wav [golden.json] [die 20] [speaker speakers/en-female-1-neutral.json words 3]
+cargo run --release -p sim --example dac_check -- <dac folder> golden.json 20 out.wav
+```
+
+`listen` runs a streaming model as its firmware would, listening as the speech comes.
+
+**Plan a chip that listens and speaks:** every way of putting the four stages on dies, the shapes, the first sound and the energy of a turn. The numbers after the folders are the first sound's limit in milliseconds, the longest question in seconds and the tokens of the answer's first sentence; `voice` has the writer read a speaker's profile.
+
+```bash
+cargo run --release -p sim --example voice_system -- <moonshine folder> <language model folder> <outetts folder> <dac folder> 500 3 12
+```
+
 ## Hardware
 
 **Export a compute cell** in Verilog, in any format and multiplier:
@@ -197,5 +223,7 @@ Open `http://localhost:5173`:
 9. **Numerics:** run a model in floating point and in the chip's arithmetic side by side. Here, SmolLM2-135M at 16 bits: the error per layer grows from 0.07 % to 1 %, and all 17 tokens match.
 
    ![Numerics lab](screenshots/numeric.png)
+
+10. **Voice:** record a question with the microphone or open a recording, and hear the chip's answer, every stage in floating point or in the die's arithmetic; the conversation goes on until *New conversation*. The panel plans the chip that would do it: the dies, the time to the first sound and the energy of a turn. The wizard's *A voice assistant* starts there.
 
 The screenshots were taken with the app as it is in the repository, on an Apple M2 Max with 64 GB.

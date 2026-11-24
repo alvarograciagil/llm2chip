@@ -23,7 +23,7 @@ During development, Vite serves the interface on port 5173 and forwards `/api` t
 | [Icarus Verilog](https://steveicarus.github.io/iverilog/) | Simulating the exported Verilog | Optional. Used by the exported projects and the `LLM2CHIP_ICARUS` test. |
 | [OSS CAD Suite](https://github.com/YosysHQ/oss-cad-suite-build) (Yosys, nextpnr) | FPGA synthesis | Optional. Expected in `~/.llm2chip/tools/oss-cad-suite`, or where `OSS_CAD_SUITE` points. |
 | [Tauri CLI](https://tauri.app) 2 | Building the desktop application | Optional. `cargo install tauri-cli --version "^2"` |
-| [uv](https://docs.astral.sh/uv/) with Python | The floating-point references in `tools/golden` | Optional. Only to regenerate reference data. |
+| [uv](https://docs.astral.sh/uv/) with Python | The floating-point references in `tools/golden`, converting DAC.speech | Optional. Only to regenerate reference data and for the voice decoder's weights. |
 
 Memory: the engine maps weights from disk instead of copying them, but running a model still needs roughly its size in RAM. Qwen3.8-27B at 4 bits (about 20 GB) runs on a 64 GB machine; small models such as Qwen3-0.6B or SmolLM2-135M run anywhere.
 
@@ -102,6 +102,12 @@ The tiny llama2.c models (stories260K, 15M, 110M) are converted from their `.bin
 ```bash
 python3 tools/convert/llama2c.py stories260K.bin tok512.bin ~/.llm2chip/models/stories260K
 python3 tools/convert/llama2c.py stories260K.bin tok512.bin ~/.llm2chip/models/stories260K-q8 --affine 8
+```
+
+For voice, download Moonshine (`UsefulSensors/moonshine-tiny`, or `moonshine-ai/moonshine-streaming-tiny` to listen while the question is spoken) and `OuteAI/OuteTTS-1.0-0.6B` like any other model. DAC.speech comes as a PyTorch checkpoint and is converted to safetensors, its pickle read with `weights_only` so that no code in it runs ([voice.md](voice.md#getting-them)):
+
+```bash
+uv run tools/convert/dac.py weights_24khz_1.5kbps_v1.0.pth ~/.llm2chip/models/dac-speech-24khz-1.5kbps
 ```
 
 ## Other ways to run it

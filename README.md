@@ -100,6 +100,7 @@ More in the [walk through the application](docs/examples.md#the-application).
 |---|---|---|
 | Runs | Qwen3.5 (dense and MoE), Llama (including Llama 3 RoPE), Mistral, Qwen2, Qwen3, Gemma 1, 2 and 3, DeepSeek V3 and R1 | Design their chip and run their real weights |
 | Images | Show-o (with MAGVIT-v2), Janus-Pro, the Qwen3.5 vision encoder | Run them in the chip's arithmetic |
+| Voice | Moonshine and streaming Moonshine (speech to text), OuteTTS-1.0 with the DAC.speech decoder (text to speech) | Run a spoken turn in the chip's arithmetic and plan a chip that listens and speaks ([voice](docs/voice.md)) |
 | Approximate design | Phi-3, Granite | Estimate their chip from the shape of their layers; their activation and extra norms are not modelled |
 
 A `config.json` is enough to design a chip, so a model on Hugging Face can be evaluated without downloading its weights. If a model needs something the chip lacks, the application says what. The firmware tokenizes with each model's own rules; Unigram and WordPiece models and the Precompiled, BERT and NMT normalizers are not supported, as the usual generation models do not use them.
@@ -150,6 +151,7 @@ The most used options:
 - **Real models.** Real Qwen3.8-27B runs end to end with the chip's firmware. Real Qwen3-0.6B matches `mlx-lm` in floating point: 24 of 24 tokens. Every supported architecture, with tiny random weights, gives the same logits as `mlx-lm`, token by token.
 - **Tokenizer.** The firmware's tokenizer is compiled from each model's `tokenizer.json` and matches the reference library on thousands of difficult texts, including the real files of Llama 3.2, Mistral 7B, Mistral Nemo and DeepSeek V3.
 - **Images.** The real Show-o runs on the die as the chip addresses it, with its weights in 8-bit cells: in one pass, 61 of 64 masked places get the same best code as floating point. MAGVIT-v2 runs in the chip's arithmetic with 49.6 dB PSNR (decoder) and 99.3 % of bits equal (encoder).
+- **Voice.** Moonshine, streaming Moonshine and OuteTTS with DAC match Transformers on their real weights, and in the chip's arithmetic a spoken question is heard and answered aloud. Toy versions of all three run in gates bit for bit, Moonshine's whole chip included: its firmware orders the die's routines through a command queue, the same bytes in the same 1.19 million cycles as the instruction level ([voice](docs/voice.md)).
 - **Formats and export.** Every weight format and multiplier is checked against reference arithmetic, and the exported Verilog and VHDL run in external simulators.
 - **Physical design.** The compute cell and a tile with a real SRAM macro go through OpenROAD on open PDKs, which calibrates the estimator; the FPGA version of the chip is synthesized with Yosys and placed and routed with nextpnr at 35.4 MHz on an ECP5.
 
@@ -162,6 +164,7 @@ From [`docs/benchmarks.md`](docs/benchmarks.md), where each figure says whether 
 - **Qwen3.8-27B, default design (estimated):** 13 dies of 806 mm² in TSMC N6, 1.77 million weight multipliers, about 3,750 tok/s for one user at 240 W. Weight memory is 89 % of the silicon. Counted on the real microprogram with an 8,192-token context full, a token takes 534,000 cycles: about 1,870 tok/s at 1 GHz. Sized from the generated circuit so every die fits the reticle, it reaches about 3,220 tok/s on 12 dies today, in groups of four that share each layer, and about 4,050 on 16 dies in groups of eight ([why](docs/benchmarks.md#dies-sized-from-the-circuit)).
 - **Quality on the real weights (measured):** the chip's 16-bit block floating point picks the same token as floating point in 29 of 30 steps on Qwen3.8-27B and 11 of 12 on Qwen3.6-35B-A3B. DeltaNet's state holds at 16 and even 12 bits; plain fixed point does not.
 - **Images (measured):** Qwen3.8-27B's vision encoder runs in the die's arithmetic within 1.5 % of floating point; Show-o on 8-bit cells picks the same code as floating point in 61 of 64 places; MAGVIT-v2 decodes at 49.6 dB PSNR from floating point.
+- **A chip that listens and speaks (estimated from the circuit):** Moonshine-tiny, Qwen3-0.6B, OuteTTS and DAC on three dies and 591 mm² in N6, the first sound 474 ms after a three-second question ends, about 7 J a turn, most of it leakage; with Qwen3.8-27B, 14 dies and 7,741 mm² ([voice](docs/voice.md#the-system-planned)).
 - **FPGA (measured in synthesis):** the smallest complete chip takes 11,166 LUT6 on Xilinx 7 series or 17,872 LUT4 on ECP5, and routes at 35.4 MHz on an ECP5-85F.
 
 ## Limits
@@ -174,6 +177,7 @@ This is an architecture and logic design, not a manufacturable layout: there is 
 - **The circuit-sized dies are slower than the estimate:** on Qwen3.8-27B the dies that fit the reticle reach about 3,220 tok/s on 12 dies instead of the estimated 3,750 on 13, mostly because attention at full context takes about a quarter of their cycles ([benchmarks](docs/benchmarks.md#dies-sized-from-the-circuit)).
 - **Dies with fewer vector units than heads** take the heads in rounds: the program repeats each loop over heads once a round, and each unit keeps a copy of its heads' cache for every round. Folding the layers into one loop, which would shrink the program to one layer's and matter on FPGAs, is still to be done ([full chip](docs/full-chip.md#a-fixed-microprogram)).
 - **Manufacturing tests are not complete:** there are memory self-test, JTAG, scan chains in the chip for manufacturing and ATPG patterns per block with their STIL files, but no patterns for the whole chip's main chain, the chains have pins of their own rather than the JTAG port, and there are no at-speed delay faults.
+- **The voice chips are joined by the host in the simulation:** each runs by itself on its firmware, but the four have not been chained pin to pin, and a die that speaks needs 20-bit vectors ([voice](docs/voice.md#limits-and-what-is-next)).
 - **Nothing has run on physical hardware.** The FPGA flow, board recommendations and the expected speed are in [`docs/fpga.md`](docs/fpga.md).
 - **The Windows and Linux packages and the Vulkan backend** have not been run on those systems yet.
 
@@ -188,7 +192,7 @@ This is an architecture and logic design, not a manufacturable layout: there is 
 | [`docs/full-chip.md`](docs/full-chip.md) | The whole chip: blocks, simulation levels, several chips, the fixed microprogram |
 | [`docs/parameters.md`](docs/parameters.md) | Every parameter of the design, as the application explains it |
 | [`docs/vision.md`](docs/vision.md) | Images on the chip: the vision encoder, Janus-Pro and Show-o |
-| [`docs/voice.md`](docs/voice.md) | Voice on the chip: speech to text (Moonshine), text to speech (OuteTTS and DAC) and several programs on several dies |
+| [`docs/voice.md`](docs/voice.md) | Voice on the chip: speech to text (Moonshine, also while it is spoken), text to speech (OuteTTS and DAC), the firmware's schedules and command queue, and several programs on several dies |
 | [`docs/fpga.md`](docs/fpga.md) | Taking the chip to an FPGA: synthesis, boards, expected speed |
 | [`docs/asic.md`](docs/asic.md) | Layout with OpenROAD and calibration of the estimator |
 | [`docs/manufacturing.md`](docs/manufacturing.md) | What is verified, board rules, scan and ATPG, what manufacturing still needs |

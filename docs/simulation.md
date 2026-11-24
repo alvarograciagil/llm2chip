@@ -42,6 +42,8 @@ The exact machine runs at software speed and can use the GPU. What it gives is t
 
 The chip's CPU is an RV32IM core. Its firmware (`firmware/`, Rust, `no_std`) boots, checks the image, tokenizes, orders the die's routines, waits for them, starts the sampling unit, turns tokens into bytes and talks to the host. At instruction level, the firmware runs on an instruction-set simulator that matches the gate-level CPU cycle for cycle (fetch, decode, execute; loads one more cycle; multiply and divide 33 more). The die is the exact machine, reached through the same memory-mapped registers.
 
+A die whose program is a set of routines (a speech recogniser, a sound decoder) is ordered by a schedule in the chip's image, which the firmware follows: the same schedule can be run on the host against the exact machine (`sim::chip::follow_schedule`), so the firmware's order is checked against the host's. Where the die has a command queue, the instruction level models it cycle for cycle ([voice.md](voice.md#the-chip-runs-its-programs-by-itself)).
+
 This level gives the real flow: the bytes that come out of the chip, the cycles the CPU spends on each task (`netlist::activity`: receiving, tokenizing, fetching rows from the image, commanding the die, waiting, sampling, detokenizing, sending) and the cycles of each die routine.
 
 ### Gates
@@ -54,6 +56,7 @@ What runs in gates:
 - **stories260K through the whole chip:** the same text and cycles as the instruction level, and the same logits as the exact machine.
 - **Several chips on a board:** two or four chips with delays and flipped bits on their links, split by layers, by rows or both, give the same logits as one die.
 - **Images:** a toy Show-o filling an image through the firmware (12.45 M cycles), the MAGVIT-v2 toy encoder and decoder (2.65 M cycles for the decoder), and the Qwen-style vision encoder, patch by patch.
+- **Voice:** toy Moonshine (280,614 cycles), streaming Moonshine (900,912) and DAC (70,624) on the die bit for bit, Moonshine's whole chip following its schedule through a command queue (1,192,263 cycles, the same bytes as the instruction level), and one layer of the real Moonshine-tiny on the die (13.6 M cycles, `LLM2CHIP_REAL_MOONSHINE=1`).
 - **Reliability:** ECC with injected faults, spare rows, the memory self-test, JTAG, scan chains with ATPG patterns.
 
 Gates are also exported to Verilog and VHDL, and the exported chip runs in Icarus Verilog with its firmware, giving the same bytes and cycles (`LLM2CHIP_ICARUS=1`, close to an hour).
@@ -94,6 +97,8 @@ For each token it shows the simulated cycles, the time the chip would take and w
 | Firmware at instruction level against gates, same bytes and cycles | `crates/sim/tests/chip.rs`, `multichip.rs` |
 | Exported Verilog in Icarus (close to an hour) | `LLM2CHIP_ICARUS=1 cargo test -p sim --release --test chip -- --ignored` |
 | Images in chip arithmetic and in gates | `vision_chip.rs`, `showo_chip.rs`, `magvit_chip.rs` |
+| Voice in chip arithmetic, in gates and through the firmware; the command queue in gates | `moonshine.rs`, `moonshine_stream.rs`, `dac.rs`, `conversation.rs`, `chip.rs` ([voice.md](voice.md#tests)) |
+| Speech models against Transformers | `tools/golden/*.py`, `listen`, `speak`, `dac_check` |
 | Tokenizer against the reference library | `crates/sim/tests/tokenizer.rs` |
 | Every weight format and multiplier against reference arithmetic | `crates/netlist/tests` |
 | Estimator against OpenROAD layouts and published chips | `tests/golden/asic.json`, `docs/asic.md`, `docs/research.md` |

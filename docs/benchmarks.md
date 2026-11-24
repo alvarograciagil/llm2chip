@@ -274,12 +274,43 @@ Times are simulation times on the Mac, not chip times.
 
 The chip follows the integer sampler seed by seed. The gap to floating point is within the spread between seeds, and three other texts ("a green apple", "an orange", "a blue ball") show no systematic difference ([vision.md](vision.md#quality-of-the-integer-fill)).
 
+## Voice
+
+Speech to text, an answer and speech, on the real weights ([voice.md](voice.md)). Measured:
+
+| What | Result | Command |
+|---|---|---|
+| Moonshine-tiny, floating point, against Transformers | Frames within 0.0002 %, scores within 0.0001 %, the same tokens | `listen ... golden.json` |
+| Moonshine-tiny in the die's arithmetic, 16-bit vectors | The same text: "Hello, this chip can listen and speak." | `listen` |
+| Streaming Moonshine, floating point, against Transformers | Frames within 0.0003 %, scores within 0.0001 %, the same tokens | `listen ... golden.json` |
+| Streaming Moonshine as its firmware runs it, 16-bit vectors | The same text as Transformers: "What is the capital of France?", "Hello, this chip can listen and speak." | `listen` |
+| OuteTTS-1.0-0.6B, floating point, against Transformers | The same prompt and 317 tokens for "Hello, I am a chip.", scores within 0.0005 % | `speak ... golden.json` |
+| OuteTTS in the die's arithmetic, 20-bit vectors | The first 91 tokens match; the die's sound is heard as the same sentence | `speak ... die 20` |
+| DAC.speech, floating point, against Transformers | The same samples | `dac_check` |
+| DAC.speech in the die's arithmetic | 20.2 dB below the signal at 16 bits (heard as "chiff"), 27.0 at 20, 32.2 at 24 | `dac_check ... 16/20/24` |
+| A spoken turn, every stage in the die's arithmetic at 20 bits | "What is the capital of France?" heard, "The capital of France is Paris." answered and heard back from the die's speech (about five minutes) | `talk ... die 20` |
+
+A chip that listens and speaks, sized from its circuits and its firmware's cycles (estimated, N6), for a three-second question and the first sound within 500 ms:
+
+| Recogniser and language model | Dies | Silicon | First sound | A turn |
+|---|---|---|---|---|
+| Moonshine-tiny, Qwen3-0.6B | 3 | 591 mm² | 474 ms | 6.8 J |
+| Streaming Moonshine, Qwen3-0.6B | 3 | 586 mm² | 482 ms | 5.7 J |
+| Streaming Moonshine, Qwen3.8-27B | 14 | 7,741 mm² | 472 ms | 132 J |
+
+`voice_system`. Most of a turn's energy is the weights' memories leaking.
+
 ## Gate-level runs
 
 Bit and cycle exact against the instruction level and the exact machine ([simulation.md](simulation.md)):
 
 | Run | Cycles |
 |---|---|
+| Toy Moonshine's whole chip, its firmware following the schedule through a command queue | 1,192,263 |
+| One layer of the real Moonshine-tiny on the die (`LLM2CHIP_REAL_MOONSHINE=1`, about 20 minutes) | 13,568,264 |
+| Toy streaming Moonshine on the die | 900,912 |
+| Toy Moonshine on the die, three tokens | 280,614 |
+| Toy DAC decoder on the die | 70,624 |
 | Toy Show-o filling an image through the whole chip (CPU, firmware, die) | 12.45 M |
 | Toy Show-o transformer on the die | 3.1 M |
 | Toy MAGVIT-v2 decoder, 664 routines | 2.65 M |

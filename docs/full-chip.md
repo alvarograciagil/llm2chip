@@ -12,7 +12,7 @@ The real chip would have a PCIe or USB PHY. In simulation, that PHY is replaced 
 | `host_tx_*` | Output, byte stream | UTF-8 text and status |
 | `image_req_*`, `image_data_*` | Requests for image blocks | Reading the model from the host |
 
-The chip receives bytes of text and returns bytes of text. Tokenizing, inference, sampling and detokenizing happen inside.
+The chip receives bytes of text and returns bytes of text. Tokenizing, inference, sampling and detokenizing happen inside. A chip run by a schedule (a speech recogniser or a sound decoder) exchanges 32-bit words instead: samples or codes in, tokens or samples out ([voice.md](voice.md#what-the-host-sends-and-gets-back)).
 
 ## Blocks
 
@@ -68,7 +68,7 @@ Every cycle the application shows says whether it was simulated or estimated, de
 
 ## The whole chip in gates
 
-`chip_design` joins the CPU, the memories, the load controller, the die and the sampling unit. With a tiny model, the real firmware receives bytes, loads the image, runs the tokens and returns bytes. The result and the cycles match the instruction level (CPU in the ISS and die on the exact machine): 230,144 cycles in both (`text_goes_through_the_whole_chip_in_gates`).
+`chip_design` joins the CPU, the memories, the load controller, the die and the sampling unit. With a tiny model, the real firmware receives bytes, loads the image, runs the tokens and returns bytes. The result and the cycles match the instruction level (CPU in the ISS and die on the exact machine): 230,144 cycles in both (`text_goes_through_the_whole_chip_in_gates`). With a command queue before the die, 230,439 (`text_goes_through_a_chip_with_a_command_queue_in_gates`); a toy Moonshine's whole chip following its schedule through the queue, 1,192,263.
 
 ## The cost of sampling
 
@@ -154,6 +154,18 @@ The program grows with the layers each chip holds and, on a die with fewer vecto
 | 1 | 64 | 222,802 | 55 Mbit |
 
 The memory is the fewer bits of the words one after another and of a dictionary of distinct words with an index, which only works up to 2^16 words. Even all of Qwen3.8 on one chip takes a millimetre or two in N6, far below what its vector memory takes, and the sizing now counts it. Folding the layers into one loop would make the program as small as one layer, which matters on an FPGA, whose block RAM is small; it needs every layer's registers and weights laid out the same way, and is still to be done.
+
+## Programs of routines
+
+A program that is a set of routines rather than a token's pass (an image or speech encoder, a sound decoder) is ordered by a **schedule**: records the firmware follows (`netlist::schedule`), kept at word 0x2000 of the data memory, where a tokenizer's tables would be. Words of the chip's description say where it is and how deep the command queue is:
+
+| Word | What |
+|---|---|
+| `INFO_SCHEDULE` (29) | The schedule's word in data memory; zero for a chip that reads a prompt |
+| `INFO_QUEUE` (30) | The command queue's orders; zero without one |
+| `INFO_PARAMETERS` (31 on) | The parameter registers, seven words each |
+
+The **command queue** (`DieFeatures::queue_bits`) sits between the CPU's writes and the die: writes to a parameter register or to `REG_ENTRY` wait in it, and the die takes one a cycle whenever it is free, an entry starting it. `REG_QUEUE_ROOM` (49) says how many more it takes, and `REG_STATUS` says free once it is empty and the die idle. It is built only on the dies that ask for it, such as voice's, so the CPU orders the next routine while the die runs this one. [voice.md](voice.md#the-chip-runs-its-programs-by-itself) has the records, what each chip's host sends and what the firmware's work costs.
 
 ## Phases
 
