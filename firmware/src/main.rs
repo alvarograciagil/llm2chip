@@ -806,6 +806,57 @@ fn field(at: usize, word: usize) -> u32 {
     info(info(INFO_SCHEDULE) as usize + at * RECORD_WORDS + word)
 }
 
+/// The most calls in a repeat that `repeat_calls` takes.
+const FAST_CALLS: usize = 8;
+
+/// A repeat whose body is only calls, run lean on a single chip: each call's entry and the
+/// value of each parameter register at the first iteration are worked out once, with how
+/// much each grows from one iteration to the next, so an iteration only writes and adds.
+/// False, having run nothing, when the repeat is not of that kind; the general way then
+/// runs it.
+fn repeat_calls(first: usize, body: usize, count: u32, vars: &[u32; 16]) -> bool {
+    let parameters = info(INFO_PARAMETER_COUNT) as usize;
+    if body > FAST_CALLS || chips() > 1 || info(INFO_TABLE_COLS) != 0 || info(INFO_ROTATION_COLS) != 0 || parameters > 16 {
+        return false;
+    }
+    for p in 0..parameters {
+        if info(INFO_PARAMETERS + 7 * p + 6) != 0 {
+            return false;
+        }
+    }
+    let mut entries = [0u32; FAST_CALLS];
+    let mut values = [[0u32; 16]; FAST_CALLS];
+    let mut steps = [[0u32; 16]; FAST_CALLS];
+    for k in 0..body {
+        let f = |word| field(first + k, word);
+        if f(0) != 5 {
+            return false;
+        }
+        entries[k] = info(info(INFO_ENTRIES) as usize + f(1) as usize);
+        let (token, position) = (f(3).wrapping_add(vars[(f(4) & 15) as usize]), f(6).wrapping_add(vars[(f(7) & 15) as usize]));
+        for p in 0..parameters {
+            let at = INFO_PARAMETERS + 7 * p;
+            values[k][p] = times(info(at + 1), token).wrapping_add(times(info(at + 2), position)).wrapping_add(info(at + 3));
+            steps[k][p] = times(info(at + 1), f(2)).wrapping_add(times(info(at + 2), f(5)));
+        }
+    }
+    let mut registers = [0usize; 16];
+    for (p, register) in registers.iter_mut().enumerate().take(parameters) {
+        *register = info(INFO_PARAMETERS + 7 * p) as usize;
+    }
+    for _ in 0..count {
+        for k in 0..body {
+            for p in 0..parameters {
+                peripheral_write(registers[p], values[k][p]);
+                values[k][p] = values[k][p].wrapping_add(steps[k][p]);
+            }
+            peripheral_write(REG_ENTRY, entries[k]);
+            wait_for_die();
+        }
+    }
+    true
+}
+
 /// Follows the schedule's records from `at` to `end`; false once it meets its end.
 fn follow(mut at: usize, end: usize, vars: &mut [u32; 16]) -> bool {
     while at < end {
@@ -840,7 +891,12 @@ fn follow(mut at: usize, end: usize, vars: &mut [u32; 16]) -> bool {
             }
             4 => {
                 let (body, outer) = (f(1) as usize, var(vars, S_INDEX));
-                for i in 0..var(vars, f(2)) + f(3) {
+                let count = var(vars, f(2)) + f(3);
+                if repeat_calls(next, body, count, vars) {
+                    at = next + body;
+                    continue;
+                }
+                for i in 0..count {
                     set(vars, S_INDEX, i);
                     if !follow(next, next + body, vars) {
                         return false;
