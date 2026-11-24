@@ -8,7 +8,16 @@ The idea is to take specialization all the way: instead of a general accelerator
 
 > **Status.** llm2chip is a research project. Everything below runs in simulation: the generated netlists are simulated gate by gate and checked against the software models, but nothing has been built on an FPGA board or in silicon yet. Area, power and cost figures for modern nodes are estimates. See [What is verified](#what-is-verified) and [Limits](#limits).
 
-**[Try it in the browser](https://alvarograciagil.github.io/llm2chip/):** size a chip for a model, look at its floorplan, follow a token through it, simulate its circuit gate by gate, and run small models on its arithmetic in the browser, with nothing to install. Larger models, the chip's firmware and the rest need the application on your computer: see [Installing](docs/install.md).
+## Try it online
+
+**[alvarograciagil.github.io/llm2chip](https://alvarograciagil.github.io/llm2chip/)** runs in the browser, with nothing to install: size a chip for a model, look at its floorplan, follow a token through it, simulate its circuit gate by gate, and run small models on its arithmetic. Some places to start:
+
+- [Run a model on the chip](https://alvarograciagil.github.io/llm2chip/#simulator): stories260K, generated token by token with the chip's integer arithmetic.
+- [The schematic, simulated gate by gate](https://alvarograciagil.github.io/llm2chip/#schematic).
+- [How it works](https://alvarograciagil.github.io/llm2chip/#logic): a token's way through the chip.
+- [The explorer](https://alvarograciagil.github.io/llm2chip/#explorer): what each weight format costs in area, speed and power.
+
+Larger models, images, the optimiser, the 3D view of the chip at work and the rest need the application on your computer: in the demo those views show captures of what they look like. See [Installing](docs/install.md).
 
 ## What it is for
 
@@ -108,6 +117,8 @@ Downloads take only safetensors and metadata, never pickle files or code from th
 Acceleration uses Metal on macOS and Vulkan on Windows and Linux. Full gate-by-gate simulation is reserved for tiny models.
 
 ## Getting started
+
+To look around first, the [online demo](https://alvarograciagil.github.io/llm2chip/) needs nothing installed. To run it on your computer:
 
 You need Rust with the `wasm32-unknown-unknown` target, `wasm-pack` and Node 22.12 or newer. A Metal or Vulkan GPU speeds up the simulation; Docker, Icarus Verilog and OSS CAD Suite are optional. The [installation guide](docs/install.md) has the steps for macOS, Linux and Windows, every start-up option and the troubleshooting.
 

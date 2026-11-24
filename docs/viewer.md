@@ -5,8 +5,8 @@ through the layers, the KV cache filling up, the links between chips and where t
 stalls. It is meant both to show the project and to debug it, so everything it draws comes
 from a simulation of the circuit, never from an animation made up beside it.
 
-Work happens on the `chip-viewer` branch, one commit per phase, and reaches `main` only
-once it is agreed.
+It needs the engine, so the [online demo](https://alvarograciagil.github.io/llm2chip/#viewer)
+shows only a capture of it.
 
 ## Optional by construction
 
