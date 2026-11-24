@@ -1066,6 +1066,9 @@ export const ENGINE_TEXT: [string, string][] = [
   ["OuteTTS on {n} units × {n} lanes, {n} cells", "OuteTTS en {0} unidades × {1} carriles, {2} celdas"],
   ["DAC on {n} units × {n} lanes, {n} cells, windows of {n} frames", "DAC en {0} unidades × {1} carriles, {2} celdas, ventanas de {3} fotogramas"],
   ["windows of {n} frames, {n} kept", "ventanas de {0} fotogramas, {1} conservados"],
+  ["listening as the question is spoken", "escuchando mientras se formula la pregunta"],
+  ["the language model on {n} dies, {s}", "el modelo de lenguaje en {0} dies, {1}"],
+  ["the language model on {n} dies: {s}", "el modelo de lenguaje en {0} dies: {1}"],
 ];
 
 const NUMBER = "(-?[\\d.,]+)";

@@ -239,7 +239,7 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
 pub type Planned = (Option<Plan>, Vec<Weighed>, Vec<StagePlan>);
 
 /// Changes when the way stages are measured changes, so plans kept from before are not used.
-const PLAN_VERSION: u32 = 3;
+const PLAN_VERSION: u32 = 4;
 
 /// The system planned for `ask`: the plan chosen, if any meets it, every grouping weighed,
 /// and the stages as measured.

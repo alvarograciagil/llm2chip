@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12,<3.14"
-# dependencies = ["torch", "transformers @ git+https://github.com/huggingface/transformers", "safetensors", "numpy"]
+# dependencies = ["torch", "transformers==5.24.0", "safetensors", "numpy"]
 # ///
 """What Transformers' streaming Moonshine makes of a clip: the reference the Rust one is checked against.
 

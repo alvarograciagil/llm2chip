@@ -147,14 +147,20 @@ pub fn firmware_cycles(lean: u64, alone: u64, words: u64) -> u64 {
 /// (`DieFeatures::queue_bits`), done while the die runs the routines before it.
 pub const FIRMWARE_CYCLES_PER_QUEUED_ROUTINE: u64 = 300;
 
+/// The die's idle cycles between two queued routines beyond a cycle for each parameter:
+/// the entry's, the start's and the queue noticing the die free, measured at 16 or so on the
+/// toy decoder whose routines are longer than the CPU's work.
+pub const QUEUED_GAP: u64 = 20;
+
 /// The CPU's cycles beyond the die's for `calls` routines of the lean path, each of `die`
 /// cycles, with `parameters` parameter registers. Without a command queue each costs
-/// `FIRMWARE_CYCLES_PER_ROUTINE`; with one, the die takes each order in a cycle of its own,
+/// `FIRMWARE_CYCLES_PER_ROUTINE`; with one, the die waits `QUEUED_GAP` cycles and one for
+/// each parameter between routines,
 /// and the CPU's work shows where the routine before is shorter: the queue holds only a
 /// few routines' orders, so a long routine's slack does not carry far.
 pub fn lean_cycles(calls: u64, die: u64, parameters: u64, queued: bool) -> u64 {
     if queued {
-        calls * (parameters + 1).max(FIRMWARE_CYCLES_PER_QUEUED_ROUTINE.saturating_sub(die))
+        calls * (parameters + QUEUED_GAP).max(FIRMWARE_CYCLES_PER_QUEUED_ROUTINE.saturating_sub(die))
     } else {
         calls * FIRMWARE_CYCLES_PER_ROUTINE
     }

@@ -211,7 +211,10 @@ fn the_firmware_decodes_window_by_window_as_the_host_does() {
     use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
     use netlist::soc::{SocBus, SocConfig};
     let Some(firmware) = common::firmware() else { return };
-    let dir = toy("firmware", 8, &[3, 2]);
+    // Routines about as short as the CPU's work for each (8 channels), and longer (64), as
+    // the real decoder's are.
+    for channels in [8, 64] {
+    let dir = toy(&format!("firmware-{channels}"), channels, &[3, 2]);
     let config = sim::dac::DacConfig::read(&dir).unwrap();
     let (reach, chunk) = (config.reach_frames(), 4);
     let frames = 2 * reach + 9;
@@ -244,7 +247,7 @@ fn the_firmware_decodes_window_by_window_as_the_host_does() {
     }
     let start = bus.tx.iter().position(|b| *b != b'.').unwrap_or(bus.tx.len());
     let words: Vec<i64> = bus.tx[start..].chunks(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as i64).collect();
-    eprintln!("queue of {}: {} cycles of the CPU, {} of the die, {} routines run, {} samples", 1 << queue, cpu.cycle, bus.peripheral.die_busy, bus.peripheral.routines.iter().map(|r| r.0).sum::<u64>(), words.len() / 2);
+    eprintln!("{channels} channels, queue of {}: {} cycles of the CPU, {} of the die, {} routines run, {} samples", 1 << queue, cpu.cycle, bus.peripheral.die_busy, bus.peripheral.routines.iter().map(|r| r.0).sum::<u64>(), words.len() / 2);
     // What the planner counts for the firmware: each window's, and the count of windows.
     let windows = config.windows(frames, chunk).len() as u64;
     let firmware = cpu.cycle - bus.peripheral.die_busy;
@@ -257,6 +260,7 @@ fn the_firmware_decodes_window_by_window_as_the_host_does() {
     assert!(first.is_none(), "the die's mantissas differ from sample {first:?} of {}, windows of {} samples", expected.len(), chip_samples);
     }
     std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 /// The real decoder's chip image holds its description and its schedule, for windows of
