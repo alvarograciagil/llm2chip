@@ -30,10 +30,11 @@ import { readLanguage, writeLanguage, type Language } from "./i18n";
 import { LINK } from "./link";
 
 /** Whether a view belongs to the design: Listen only when the chip listens, Speak only when it
- * speaks. A chip that does neither shows nothing of voice. */
+ * speaks, Images only when it draws. A chip that does none shows nothing of them. */
 export function viewShown(view: View, params: ChipParams): boolean {
   if (view === "listen") return params.speech_in === true;
   if (view === "speak") return params.speech_out === true;
+  if (view === "images") return params.draw_images === true;
   return true;
 }
 

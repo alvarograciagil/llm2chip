@@ -1,4 +1,4 @@
-import type { Floorplan, Rect, Report } from "./engine";
+import type { Floorplan, Rect, Report, SideDiePlan } from "./engine";
 
 const CATEGORY_FILL: Record<string, string> = {
   memory: "#4f8cff",
@@ -27,7 +27,8 @@ export function floorplanSvg(report: Report): string {
       parts.push(box(block.rect, CATEGORY_FILL[info?.category ?? "system"] ?? "#ccc", info?.label ?? block.id));
     }
   }
-  for (const v of plan.voice ?? []) parts.push(box(v.rect, v.parts.includes("listen") ? "#ffcc80" : "#ff9eb0", `Die ${v.index}: ${v.stages.join(" + ")}${v.reference ? " (reference)" : ""}`));
+  const fill = (v: SideDiePlan) => (v.parts.includes("draw") ? "#b3e5fc" : v.parts.includes("listen") ? "#ffcc80" : "#ff9eb0");
+  for (const v of plan.side ?? []) parts.push(box(v.rect, fill(v), `Die ${v.index}: ${v.stages.join(" + ")}${v.reference ? " (reference)" : ""}`));
   for (const memory of plan.memory) parts.push(box(memory.rect, "#dfe4ea", memory.label));
   parts.push("</svg>");
   return parts.join("\n");
@@ -39,7 +40,7 @@ const databaseUnits = (mm: number) => Math.round(mm * 1000 * 1000);
 export function floorplanDef(plan: Floorplan, name: string): string {
   const components = [
     ...plan.dies.flatMap((die) => die.blocks.map((block) => ({ name: `die${die.index}_${block.id}`, rect: block.rect }))),
-    ...(plan.voice ?? []).map((v) => ({ name: `die${v.index}_${v.stages.join("_").replace(/\W+/g, "_")}`, rect: v.rect })),
+    ...(plan.side ?? []).map((v) => ({ name: `die${v.index}_${v.stages.join("_").replace(/\W+/g, "_")}`, rect: v.rect })),
   ];
   const lines = [
     "VERSION 5.8 ;",

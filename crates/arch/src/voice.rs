@@ -3,18 +3,8 @@
 //! in gates on several shapes of die and groups the stages that never run at once. Until a
 //! project is planned with its own models, reference dies from measured plans stand in.
 
-use crate::tech::node;
+use crate::side::{die, CountedDie, Part, SideDie};
 use serde::{Deserialize, Serialize};
-
-/// What a die is for. Text is the language model; a die may hold several parts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Part {
-    Text,
-    Vision,
-    Listen,
-    Speak,
-}
 
 /// The voice planner's names for its stages, and the part each belongs to.
 pub const LISTEN_STAGES: [&str; 1] = ["speech to text"];
@@ -30,52 +20,18 @@ pub fn part_of_stage(stage: &str) -> Option<Part> {
     }
 }
 
-/// A kind of die the voice planner chose: the stages on it and its shape.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct VoiceDie {
-    /// The stages, by the planner's names (`speech to text`, `speech writer`, `sound decoder`).
-    pub stages: Vec<String>,
-    /// Dies of this kind.
-    pub count: u32,
-    pub units: u32,
-    pub lanes: u32,
-    pub cells: u64,
-    /// Area of one die by part: logic, cell memory, vector memory and microcode, mm².
-    pub parts_mm2: [f64; 4],
-    pub clock_mhz: f64,
-}
-
 /// The voice planner's dies for a project, and the parts the project had when it planned
 /// them: they count only while it still has the same ones.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VoicePlanned {
     pub listens: bool,
     pub speaks: bool,
-    pub dies: Vec<VoiceDie>,
-}
-
-/// A voice die as the estimate counts it.
-#[derive(Clone, Debug, Serialize)]
-pub struct CountedVoiceDie {
-    pub die: VoiceDie,
-    pub parts: Vec<Part>,
-    /// Taken from a measured plan of other models, not planned for this project's.
-    pub reference: bool,
-}
-
-impl CountedVoiceDie {
-    pub fn mm2(&self) -> f64 {
-        self.die.parts_mm2.iter().sum()
-    }
-}
-
-fn die(stages: &[&str], units: u32, cells: u64, parts_mm2: [f64; 4], clock_mhz: f64) -> VoiceDie {
-    VoiceDie { stages: stages.iter().map(|s| s.to_string()).collect(), count: 1, units, lanes: 64, cells, parts_mm2, clock_mhz }
+    pub dies: Vec<SideDie>,
 }
 
 /// Dies from the plans measured with Moonshine-tiny, Qwen3-0.6B, OuteTTS and DAC
 /// (docs/voice.md): the recogniser shares a die with the decoder when the chip does both.
-pub fn reference_dies(listens: bool, speaks: bool) -> Vec<VoiceDie> {
+pub fn reference_dies(listens: bool, speaks: bool) -> Vec<SideDie> {
     match (listens, speaks) {
         (true, true) => vec![
             die(&["speech to text", "sound decoder"], 1, 2048, [3.71, 92.3, 27.22, 0.11], 936.0),
@@ -92,7 +48,7 @@ pub fn reference_dies(listens: bool, speaks: bool) -> Vec<VoiceDie> {
 
 /// The voice dies a project with these parts counts: its own plan when it was made for the
 /// same parts and holds only voice stages, the reference dies otherwise.
-pub fn counted(listens: bool, speaks: bool, planned: Option<&VoicePlanned>) -> Vec<CountedVoiceDie> {
+pub fn counted(listens: bool, speaks: bool, planned: Option<&VoicePlanned>) -> Vec<CountedDie> {
     let own = planned.filter(|p| {
         p.listens == listens
             && p.speaks == speaks
@@ -108,18 +64,9 @@ pub fn counted(listens: bool, speaks: bool, planned: Option<&VoicePlanned>) -> V
             let mut parts: Vec<Part> = die.stages.iter().filter_map(|s| part_of_stage(s)).collect();
             parts.sort();
             parts.dedup();
-            CountedVoiceDie { die, parts, reference }
+            CountedDie { die, parts, reference }
         })
         .collect()
-}
-
-/// Watts a voice die leaks: its logic, and its memories at the density of small macros. The
-/// planner sizes them in N6.
-pub fn leakage_w(d: &CountedVoiceDie) -> f64 {
-    let n6 = node("n6").expect("the N6 process");
-    let [logic, cells, vectors, microcode] = d.die.parts_mm2;
-    let bits = (cells + vectors + microcode) * n6.sram_density(64.0) * 1e6;
-    d.die.count as f64 * (logic * n6.logic_leak_w_mm2 + bits * n6.sram_leak_pw_bit * 1e-12)
 }
 
 #[cfg(test)]
@@ -154,7 +101,7 @@ mod tests {
 
     #[test]
     fn voice_dies_leak_a_little() {
-        let leak: f64 = counted(true, true, None).iter().map(leakage_w).sum();
+        let leak: f64 = counted(true, true, None).iter().map(crate::side::leakage_w).sum();
         assert!(leak > 0.1 && leak < 20.0, "{leak}");
     }
 }

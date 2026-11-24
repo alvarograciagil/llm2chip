@@ -20,7 +20,7 @@ const shape = (text: string) => text.replace(/\{[^}]*\}/g, "{}");
 describe("engine texts in Spanish", () => {
   it("cover every text the engine writes", () => {
     const known = new Set(ENGINE_TEXT.map(([english]) => shape(english)));
-    const missing = ["estimate.rs", "fpga.rs", "feasibility.rs", "optim.rs", "floorplan.rs", "voice.rs"].flatMap(engineStrings).filter((s) => !known.has(shape(s)));
+    const missing = ["estimate.rs", "fpga.rs", "feasibility.rs", "optim.rs", "floorplan.rs", "voice.rs", "side.rs", "drawing.rs"].flatMap(engineStrings).filter((s) => !known.has(shape(s)));
     expect(missing).toEqual([]);
   });
 

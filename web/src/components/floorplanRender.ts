@@ -1,5 +1,5 @@
 import { locale } from "../format";
-import type { BlockArea, DiePlan, Floorplan, Part, Rect, Report, VoiceDiePlan } from "../engine";
+import type { BlockArea, DiePlan, Floorplan, Part, Rect, Report, SideDiePlan } from "../engine";
 import type { Overlay, Selection } from "../store";
 
 export interface Camera {
@@ -14,7 +14,7 @@ export type Hit =
   | { kind: "block"; die: number; id: string; rect: Rect; label: string }
   | { kind: "cell"; die: number; row: number; col: number; rect: Rect; label: string }
   | { kind: "memory"; rect: Rect; label: string }
-  | { kind: "voice"; die: number; rect: Rect; label: string };
+  | { kind: "side"; die: number; rect: Rect; label: string };
 
 export interface Theme {
   canvas: string;
@@ -77,13 +77,13 @@ export function readTheme(el: Element): Theme {
       state: get("--cat-state"),
       system: get("--cat-system"),
     },
-    parts: { text: get("--part-text"), vision: get("--part-vision"), listen: get("--part-listen"), speak: get("--part-speak") },
+    parts: { text: get("--part-text"), vision: get("--part-vision"), listen: get("--part-listen"), speak: get("--part-speak"), draw: get("--part-draw") },
     heatLow: get("--heat-low"),
     heatHigh: get("--heat-high"),
   };
 }
 
-export const PART_LABEL: Record<Part, string> = { text: "Text", vision: "Vision", listen: "Listening", speak: "Speaking" };
+export const PART_LABEL: Record<Part, string> = { text: "Text", vision: "Vision", listen: "Listening", speak: "Speaking", draw: "Image drawing" };
 const SPEAKING = ["speech writer", "sound decoder"];
 
 /** What a die is for, in words: "Text + Vision", or "Listening + Speaking (sound decoder)"
@@ -98,11 +98,12 @@ export function partsLabel(parts: Part[], stages: string[], t: (text: string) =>
     .join(" + ");
 }
 
-/** A voice die in a line: its number, parts, size and shape. */
-export function voiceLabel(v: VoiceDiePlan, t: (text: string) => string = String): string {
+/** A die beside the language model's in a line: its number, parts, size and shape. */
+export function sideLabel(v: SideDiePlan, t: (text: string) => string = String): string {
   const mm2 = v.parts_mm2.reduce((a, b) => a + b, 0);
   const shape = `${v.units} × ${v.lanes} ${t("units")}, ${v.cells.toLocaleString(locale())} ${t("cells")}, ${Math.round(v.clock_mhz)} MHz`;
-  const reference = v.reference ? ` · ${t("reference dies: plan them with your models")}` : "";
+  const note = v.parts.includes("draw") ? "reference die, measured with Show-o" : "reference dies: plan them with your models";
+  const reference = v.reference ? ` · ${t(note)}` : "";
   return `${t("Die")} ${v.index} · ${partsLabel(v.parts, v.stages, t)} · ${Math.round(mm2).toLocaleString(locale())} mm² · ${shape}${reference}`;
 }
 
@@ -416,9 +417,9 @@ const VOICE_PARTS: [number, BlockArea["category"], string][] = [
   [3, "system", "Microcode"],
 ];
 
-/** A die of listening or speaking: its parts of silicon in bands, or its parts of the chip
- * side by side; dashed while it is a reference die. */
-function drawVoiceDie(ctx: CanvasRenderingContext2D, scene: Scene, v: VoiceDiePlan, room: number) {
+/** A die beside the language model's: its parts of silicon in bands, or its parts of the
+ * chip side by side; dashed while it is a reference die. */
+function drawSideDie(ctx: CanvasRenderingContext2D, scene: Scene, v: SideDiePlan, room: number) {
   const { camera, width, height, theme, overlay } = scene;
   const t = scene.t ?? String;
   const s = toScreen(camera, v.rect);
@@ -510,8 +511,8 @@ export function draw(ctx: CanvasRenderingContext2D, scene: Scene) {
 
   drawLinks(ctx, scene);
   for (const die of plan.dies) drawDie(ctx, scene, die);
-  const voice = plan.voice ?? [];
-  voice.forEach((v, i) => drawVoiceDie(ctx, scene, v, (voice[i + 1]?.rect.x ?? plan.width) - v.rect.x));
+  const side = plan.side ?? [];
+  side.forEach((v, i) => drawSideDie(ctx, scene, v, (side[i + 1]?.rect.x ?? plan.width) - v.rect.x));
 
   for (const memory of plan.memory) {
     const s = toScreen(camera, memory.rect);
@@ -535,8 +536,8 @@ export function hitTest(report: Report, wx: number, wy: number, cameraK: number,
   for (const memory of plan.memory) {
     if (inside(memory.rect)) return { kind: "memory", rect: memory.rect, label: memory.label };
   }
-  for (const v of plan.voice ?? []) {
-    if (inside(v.rect)) return { kind: "voice", die: v.index, rect: v.rect, label: voiceLabel(v, t) };
+  for (const v of plan.side ?? []) {
+    if (inside(v.rect)) return { kind: "side", die: v.index, rect: v.rect, label: sideLabel(v, t) };
   }
   for (const die of plan.dies) {
     if (!inside(die.rect)) continue;

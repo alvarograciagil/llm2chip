@@ -34,6 +34,7 @@
   --part-vision: #28a745;
   --part-listen: #ff9500;
   --part-speak: #ff2d55;
+  --part-draw: #30b0c7;
   --heat-low: #d6e8ff;
   --heat-high: #004ea8;
 }
@@ -75,6 +76,7 @@
     --part-vision: #30d158;
     --part-listen: #ff9f0a;
     --part-speak: #ff375f;
+    --part-draw: #40c8e0;
     --heat-low: #17304f;
     --heat-high: #8cc4ff;
   }
@@ -115,6 +117,7 @@
   --part-vision: #30d158;
   --part-listen: #ff9f0a;
   --part-speak: #ff375f;
+  --part-draw: #40c8e0;
   --heat-low: #17304f;
   --heat-high: #8cc4ff;
 }
@@ -879,6 +882,7 @@ button.link-row {
 .part-vision { background: var(--part-vision); }
 .part-listen { background: var(--part-listen); }
 .part-speak { background: var(--part-speak); }
+.part-draw { background: var(--part-draw); }
 
 .zoom {
   display: inline-flex;

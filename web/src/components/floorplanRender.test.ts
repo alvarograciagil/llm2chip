@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Report, VoiceDiePlan } from "../engine";
-import { fitCamera, hitTest, mix, partsLabel } from "./floorplanRender";
+import type { Report, SideDiePlan } from "../engine";
+import { fitCamera, hitTest, mix, partsLabel, sideLabel } from "./floorplanRender";
 
 describe("fitCamera", () => {
   const rect = { x: 0, y: 0, w: 100, h: 50 };
@@ -32,13 +32,19 @@ describe("parts of the chip", () => {
     expect(partsLabel(["speak"], ["speech writer", "sound decoder"])).toBe("Speaking");
   });
 
-  it("finds a voice die under the pointer", () => {
-    const voice: VoiceDiePlan = { index: 4, rect: { x: 10, y: 50, w: 8, h: 8 }, parts: ["listen"], stages: ["speech to text"], units: 1, lanes: 64, cells: 2048, parts_mm2: [3, 26, 16, 0], clock_mhz: 1000, reference: true };
-    const report = { floorplan: { width: 60, height: 60, num_layers: 1, dies: [], voice: [voice], memory: [] }, blocks: [] } as unknown as Report;
+  it("finds a die beside the language model's under the pointer", () => {
+    const voice: SideDiePlan = { index: 4, rect: { x: 10, y: 50, w: 8, h: 8 }, parts: ["listen"], stages: ["speech to text"], units: 1, lanes: 64, cells: 2048, parts_mm2: [3, 26, 16, 0], clock_mhz: 1000, reference: true };
+    const report = { floorplan: { width: 60, height: 60, num_layers: 1, dies: [], side: [voice], memory: [] }, blocks: [] } as unknown as Report;
     const hit = hitTest(report, 12, 52, 1);
-    expect(hit?.kind).toBe("voice");
+    expect(hit?.kind).toBe("side");
     expect(hit?.label).toContain("Die 4 · Listening · 45 mm²");
     expect(hit?.label).toContain("reference");
     expect(hitTest(report, 30, 30, 1)).toBeNull();
+  });
+
+  it("says the drawing die was measured with Show-o", () => {
+    const draw: SideDiePlan = { index: 2, rect: { x: 0, y: 0, w: 20, h: 20 }, parts: ["draw"], stages: ["image drawer"], units: 16, lanes: 64, cells: 4096, parts_mm2: [6.285, 314.376, 109.599, 1.83], clock_mhz: 1000, reference: true };
+    expect(sideLabel(draw)).toContain("Die 2 · Image drawing · 432 mm²");
+    expect(sideLabel(draw)).toContain("reference die, measured with Show-o");
   });
 });

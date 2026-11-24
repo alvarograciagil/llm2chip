@@ -24,7 +24,7 @@ In the language model each token has three positions (time, row, column) for RoP
 - **Language model with images** (`Engine::step_embedding`, `set_mrope`, `continue_text_at`): image tokens go in as vectors with their three positions, and the following text carries on where it should.
 - **With the chip's arithmetic** (`ExactEngine`, the same): each vector is loaded in the die's format where the embedding row would go, and its rotation is a row of its own in the RoPE table for that cache position, composed from its three positions (time, row and column) according to the M-RoPE sections. On the chip, the host writes those rows into the table the die already reads by position, just as it brings the embedding rows; the text following the image is rotated from its own position. A test compares this with floating point on a toy model with the whole head rotated.
 - **Example** `cargo run --release -p sim --example see -- <model> red`: draws a coloured shape, shows it to the real Qwen and asks what colour it is.
-- **Estimator:** with "Include vision", the area counts all the encoder's weights (blocks, embeddings and merger), and the time to process a 512×512 image on one die's multipliers is shown.
+- **Estimator:** with "Vision (image analysis)", the area counts all the encoder's weights (blocks, embeddings and merger), and the time to process a 512×512 image on one die's multipliers is shown.
 
 ## How it is taken to the circuit
 
@@ -143,6 +143,26 @@ The **Images** screen uses the Show-o it finds in the model folders:
 The panel sets the steps, the guidance and the seed; the same seed, text and region give the same result.
 
 The engine runs it in the background (`/api/retouch`), one job at a time, with its progress step by step, and it can be stopped between steps.
+
+### In the floorplan
+
+Drawing is a part of the chip of its own, apart from vision: vision *reads* images (the encoder above, the *Vision (image analysis)* option), drawing *makes* them. The *Draws images (text to image)* option (`draw_images`, off by default) turns it on. With it off, nothing of drawing is in the project: the Images screen is not shown and no die is counted.
+
+With it on, the floorplan draws a die of its own in the row below the language model's, after the voice dies, coloured *Image drawing* in the *Part* layer and dashed as a reference die. The estimate adds it to the *Total area*, with *Drawing* apart, and its leakage as a metric of its own (not in the power while generating text). The reference die (`arch::drawing`) is Show-o's transformer, guided in the die, on the die its firmware addresses (see "The real Show-o on the addressed die"). It has 8-bit affine weights in groups of 64, on 16 units of 64 lanes with 4,096 cells, measured in N6 as the voice planner measures its stages:
+
+| | mm² |
+|---|---|
+| Logic | 6.3 |
+| Cell memory | 314.4 |
+| Vector memory | 109.6 |
+| Microcode | 1.8 |
+| **Die** | **432.1**, at 1 GHz |
+
+Two things stay off the die, and the estimate says so:
+- **The embedding table,** 120 M elements (240 MB at the die's 16 bits). It sits in external memory, which the floorplan draws as *External DRAM*, and the loader brings each token's row.
+- **MAGVIT-v2** runs on the host. It keeps whole maps of the picture in the vector memory: about 1,500 mm² for the encoder and 1,750 mm² for the decoder, more than a reticle (858 mm²). On the die it would need its maps in external memory, a tile at a time.
+
+`cargo run --release -p sim --example draw_dies -- <Show-o folder> [shapes]` measures both on other shapes.
 
 ### In the chip's arithmetic
 

@@ -170,7 +170,7 @@ const ES: Record<string, string> = {
   "Context": "Contexto",
   "MTP support": "Soporte MTP",
   "MTP depth": "Profundidad MTP",
-  "Include vision": "Incluir visión",
+  "Vision (image analysis)": "Visión (análisis de imagen)",
   "Target speed": "Velocidad objetivo",
   "Frequency": "Frecuencia",
   "Die type": "Tipo de dies",
@@ -1293,6 +1293,9 @@ const ES: Record<string, string> = {
   "Side by side: a die the parts share": "Lado a lado: un die que comparten las partes",
   "Dashed: reference dies": "Discontinuos: dies de referencia",
   "The floorplan and the estimate count these dies.": "El plano y la estimación cuentan estos dies.",
+  "Draws images (text to image)": "Dibuja imágenes (de texto a imagen)",
+  "Image drawing": "Dibujo",
+  "reference die, measured with Show-o": "die de referencia, medido con Show-o",
 };
 
 

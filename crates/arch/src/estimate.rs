@@ -1363,12 +1363,16 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
         b.bytes_token = bytes;
         b.why = why;
     }
-    // Listening and speaking, on dies of their own.
+    // Listening, speaking and drawing, on dies of their own.
     let voice = crate::voice::counted(p.speech_in, p.speech_out, p.voice_plan.as_ref());
-    let voice_area: f64 = voice.iter().map(|v| v.mm2() * v.die.count as f64).sum();
-    let voice_dies: u32 = voice.iter().map(|v| v.die.count).sum();
-    let voice_leak: f64 = voice.iter().map(crate::voice::leakage_w).sum();
-    let floorplan = build_floorplan(model, p, &blocks, dies, die_area, &voice);
+    let drawing = crate::drawing::counted(p.draw_images);
+    let area_of = |dies: &[crate::side::CountedDie]| dies.iter().map(|v| v.mm2() * v.die.count as f64).sum::<f64>();
+    let dies_of = |dies: &[crate::side::CountedDie]| dies.iter().map(|v| v.die.count).sum::<u32>();
+    let leak_of = |dies: &[crate::side::CountedDie]| dies.iter().map(crate::side::leakage_w).sum::<f64>();
+    let (voice_area, voice_dies, voice_leak) = (area_of(&voice), dies_of(&voice), leak_of(&voice));
+    let (draw_area, draw_dies, draw_leak) = (area_of(&drawing), dies_of(&drawing), leak_of(&drawing));
+    let side: Vec<_> = voice.iter().chain(&drawing).cloned().collect();
+    let floorplan = build_floorplan(model, p, &blocks, dies, die_area, &side);
 
     let mut metrics = Vec::new();
     let mut m = |id, section, label, value, unit, confidence, why: String| {
@@ -1388,13 +1392,19 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     m("dies", "Silicon", "Dies", d, "", Assumed, "The fewest that meet the maximum area per die.".into());
     m("packages", "Silicon", "Packages", plan.packages as f64, "", Assumed, format!("Up to {PACKAGE_MAX_MM2:.0} mm² of silicon in each."));
     m("die_area_mm2", "Silicon", "Area per die", die_area, "mm²", Assumed, "Sum of the die's blocks.".into());
-    if voice.is_empty() {
+    if side.is_empty() {
         m("total_area_mm2", "Silicon", "Total area", total_area, "mm²", Assumed, "Area per die times the number of dies.".into());
     } else {
-        let reference = voice.iter().any(|v| v.reference);
-        m("total_area_mm2", "Silicon", "Total area", total_area + voice_area, "mm²", Assumed,
-            format!("{total_area:.0} mm² of text (the language model) and {voice_area:.0} mm² of listening and speaking."));
+        let why = match (voice.is_empty(), drawing.is_empty()) {
+            (false, true) => format!("{total_area:.0} mm² of text (the language model) and {voice_area:.0} mm² of listening and speaking."),
+            (true, false) => format!("{total_area:.0} mm² of text (the language model) and {draw_area:.0} mm² of drawing."),
+            _ => format!("{total_area:.0} mm² of text (the language model), {voice_area:.0} mm² of listening and speaking and {draw_area:.0} mm² of drawing."),
+        };
+        m("total_area_mm2", "Silicon", "Total area", total_area + voice_area + draw_area, "mm²", Assumed, why);
         m("text_area_mm2", "Silicon", "Text (language model)", total_area, "mm²", Assumed, "Area per die times the number of dies.".into());
+    }
+    if !voice.is_empty() {
+        let reference = voice.iter().any(|v| v.reference);
         let parts = match (p.speech_in, p.speech_out) {
             (true, true) => "Listening and speaking",
             (true, false) => "Listening",
@@ -1405,6 +1415,12 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
             else { format!("{voice_dies} dies planned in N6 with your models, in the Listen or Speak view.") });
         m("voice_leakage_w", "Energy", "Leakage of listening and speaking", voice_leak, "W", Assumed,
             format!("{voice_dies} dies while they are on; not in the power while generating text."));
+    }
+    if !drawing.is_empty() {
+        m("draw_area_mm2", "Silicon", "Image drawing", draw_area, "mm²", Assumed,
+            format!("{draw_dies} die of reference, measured with Show-o's transformer in N6; its embedding table, {:.0} MB, stays in external memory, and MAGVIT-v2 runs on the host.", crate::drawing::OUTSIDE_TABLE_BYTES / 1e6));
+        m("draw_leakage_w", "Energy", "Leakage of drawing", draw_leak, "W", Assumed,
+            format!("{draw_dies} die while it is on; not in the power while generating text."));
     }
     m("macs_total", "Silicon", "Weight multipliers in total", n * d, "", Derived,
         "With a single user only one die's work at a time.".into());

@@ -63,9 +63,9 @@ export interface CellPlan {
   segments: { label: string; layer: number | null; part: Part; fraction: number }[];
 }
 
-/** What a die is for: text (the language model), vision (the image encoder), listening or
- * speaking. A die may hold several. */
-export type Part = "text" | "vision" | "listen" | "speak";
+/** What a die is for: text (the language model), vision (the image encoder), listening,
+ * speaking or drawing. A die may hold several. */
+export type Part = "text" | "vision" | "listen" | "speak" | "draw";
 
 export interface DiePlan {
   index: number;
@@ -80,12 +80,12 @@ export interface DiePlan {
   cells: CellPlan;
 }
 
-/** A die of listening or speaking, numbered after the language model's. */
-export interface VoiceDiePlan {
+/** A die beside the language model's (listening, speaking or drawing), numbered after its. */
+export interface SideDiePlan {
   index: number;
   rect: Rect;
   parts: Part[];
-  /** The voice planner's stages on it: "speech to text", "speech writer", "sound decoder". */
+  /** The stages on it: "speech to text", "speech writer", "sound decoder", "image drawer". */
   stages: string[];
   units: number;
   lanes: number;
@@ -102,7 +102,7 @@ export interface Floorplan {
   height: number;
   num_layers: number;
   dies: DiePlan[];
-  voice: VoiceDiePlan[];
+  side: SideDiePlan[];
   memory: { label: string; rect: Rect }[];
 }
 

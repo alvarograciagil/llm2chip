@@ -3,7 +3,7 @@
 
 use crate::estimate::BlockArea;
 use crate::params::{ChipParams, KvBackend, WeightBackend};
-use crate::voice::{CountedVoiceDie, Part};
+use crate::side::{CountedDie, Part};
 use model_ir::{Block, ModelGraph};
 use serde::Serialize;
 
@@ -81,15 +81,15 @@ pub struct MemoryStack {
     pub rect: Rect,
 }
 
-/// A die of listening or speaking, drawn at its size in a row of its own below the
-/// language model's dies.
+/// A die beside the language model's (listening, speaking or drawing), drawn at its size in a
+/// row of its own below the language model's dies.
 #[derive(Clone, Debug, Serialize)]
-pub struct VoiceDiePlan {
+pub struct SideDiePlan {
     /// Numbered after the language model's dies.
     pub index: u32,
     pub rect: Rect,
     pub parts: Vec<Part>,
-    /// The voice planner's stages on it: `speech to text`, `speech writer`, `sound decoder`.
+    /// The stages on it: `speech to text`, `speech writer`, `sound decoder`, `image drawer`.
     pub stages: Vec<String>,
     pub units: u32,
     pub lanes: u32,
@@ -107,7 +107,7 @@ pub struct Floorplan {
     pub height: f64,
     pub num_layers: u32,
     pub dies: Vec<DiePlan>,
-    pub voice: Vec<VoiceDiePlan>,
+    pub side: Vec<SideDiePlan>,
     pub memory: Vec<MemoryStack>,
 }
 
@@ -240,7 +240,7 @@ pub(crate) fn build_floorplan(
     blocks: &[BlockArea],
     dies: u32,
     die_area: f64,
-    voice: &[CountedVoiceDie],
+    apart: &[CountedDie],
 ) -> Floorplan {
     let side = die_area.sqrt();
     let is_array = |b: &BlockArea| ARRAY_BLOCKS.contains(&b.id);
@@ -322,15 +322,16 @@ pub(crate) fn build_floorplan(
         })
         .collect();
 
-    // Listening and speaking: each die at its own size, in a row below the language model's.
-    let mut voice_out = Vec::new();
+    // Listening, speaking and drawing: each die at its own size, in a row below the language
+    // model's.
+    let mut side_out = Vec::new();
     let mut x = package_margin;
     let mut tallest = 0.0f64;
-    for counted in voice {
+    for counted in apart {
         let side = counted.mm2().sqrt();
         for _ in 0..counted.die.count {
-            voice_out.push(VoiceDiePlan {
-                index: dies + voice_out.len() as u32,
+            side_out.push(SideDiePlan {
+                index: dies + side_out.len() as u32,
                 rect: Rect { x, y: height, w: side, h: side },
                 parts: counted.parts.clone(),
                 stages: counted.die.stages.clone(),
@@ -345,7 +346,7 @@ pub(crate) fn build_floorplan(
             tallest = tallest.max(side);
         }
     }
-    if !voice_out.is_empty() {
+    if !side_out.is_empty() {
         width = width.max(x - gap + package_margin);
         height += tallest + package_margin;
     }
@@ -356,7 +357,8 @@ pub(crate) fn build_floorplan(
         Some(("HBM4", p.hbm_stacks, HBM_STACK_MM))
     } else if p.weight_backend == WeightBackend::ExternalDdr {
         Some(("External memory", 1, side * 0.5))
-    } else if p.has("state_checkpoints") || p.has("external_embedding") {
+    } else if p.has("state_checkpoints") || p.has("external_embedding") || p.draw_images {
+        // The drawer's embedding table is kept outside its die too.
         Some(("External DRAM", 1, side * 0.35))
     } else {
         None
@@ -378,7 +380,7 @@ pub(crate) fn build_floorplan(
         height,
         num_layers: model.num_layers,
         dies: dies_out,
-        voice: voice_out,
+        side: side_out,
         memory,
     }
 }
@@ -484,24 +486,42 @@ mod tests {
     #[test]
     fn listening_and_speaking_dies_are_counted_and_drawn_below() {
         let plain = estimate(&qwen(), &ChipParams::default()).unwrap();
-        assert!(plain.floorplan.voice.is_empty() && plain.metric("voice_area_mm2").is_none());
+        assert!(plain.floorplan.side.is_empty() && plain.metric("voice_area_mm2").is_none());
         for (listens, speaks) in [(true, false), (false, true), (true, true)] {
             let p = ChipParams { speech_in: listens, speech_out: speaks, ..Default::default() };
             let report = estimate(&qwen(), &p).unwrap();
             let plan = &report.floorplan;
-            assert!(!plan.voice.is_empty());
-            let voice: f64 = plan.voice.iter().map(|v| v.rect.w * v.rect.h).sum();
+            assert!(!plan.side.is_empty());
+            let voice: f64 = plan.side.iter().map(|v| v.rect.w * v.rect.h).sum();
             assert!((report.metric("voice_area_mm2").unwrap() - voice).abs() < 1e-6);
             assert!((report.metric("total_area_mm2").unwrap() - plain.total_area_mm2 - voice).abs() < 1e-6);
             let bottom = plan.dies.iter().map(|d| d.rect.y + d.rect.h).fold(0.0, f64::max);
-            for (i, v) in plan.voice.iter().enumerate() {
+            for (i, v) in plan.side.iter().enumerate() {
                 assert_eq!(v.index, plan.dies.len() as u32 + i as u32);
                 assert!(v.rect.y >= bottom && v.rect.x + v.rect.w <= plan.width && v.rect.y + v.rect.h <= plan.height);
                 assert!(v.reference);
             }
-            assert_eq!(plan.voice.iter().any(|v| v.parts.contains(&Part::Listen)), listens);
-            assert_eq!(plan.voice.iter().any(|v| v.parts.contains(&Part::Speak)), speaks);
+            assert_eq!(plan.side.iter().any(|v| v.parts.contains(&Part::Listen)), listens);
+            assert_eq!(plan.side.iter().any(|v| v.parts.contains(&Part::Speak)), speaks);
         }
+    }
+
+    #[test]
+    fn the_drawing_die_is_counted_apart_with_its_table_outside() {
+        let plain = estimate(&qwen(), &ChipParams::default()).unwrap();
+        assert!(plain.metric("draw_area_mm2").is_none() && plain.floorplan.memory.is_empty());
+        let p = ChipParams { draw_images: true, speech_out: true, ..Default::default() };
+        let report = estimate(&qwen(), &p).unwrap();
+        let plan = &report.floorplan;
+        let area = |part: Part| plan.side.iter().filter(|v| v.parts.contains(&part)).map(|v| v.rect.w * v.rect.h).sum::<f64>();
+        assert!((report.metric("draw_area_mm2").unwrap() - area(Part::Draw)).abs() < 1e-6);
+        assert!((report.metric("voice_area_mm2").unwrap() - area(Part::Speak)).abs() < 1e-6);
+        assert!((report.metric("total_area_mm2").unwrap() - plain.total_area_mm2 - area(Part::Draw) - area(Part::Speak)).abs() < 1e-6);
+        assert!(report.metric("draw_leakage_w").unwrap() > 0.0);
+        // Drawing comes after speaking, numbered on from it, and no die holds both.
+        assert!(plan.side.iter().all(|v| v.parts == [Part::Draw] || !v.parts.contains(&Part::Draw)));
+        assert_eq!(plan.side.last().unwrap().parts, [Part::Draw]);
+        assert_eq!(plan.memory.len(), 1);
     }
 
     #[test]

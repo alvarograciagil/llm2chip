@@ -49,10 +49,10 @@ function Legend({ report, overlay }: { report: Report; overlay: Overlay }) {
   }
   if (overlay === "part") {
     const plan = report.floorplan;
-    const all = [...plan.dies.flatMap((d) => d.parts), ...(plan.voice ?? []).flatMap((v) => v.parts)];
+    const all = [...plan.dies.flatMap((d) => d.parts), ...(plan.side ?? []).flatMap((v) => v.parts)];
     const used = (Object.keys(PART_LABEL) as Part[]).filter((p) => all.includes(p));
-    const shared = (plan.voice ?? []).some((v) => v.parts.length > 1);
-    const reference = (plan.voice ?? []).some((v) => v.reference);
+    const shared = (plan.side ?? []).some((v) => v.parts.length > 1);
+    const reference = (plan.side ?? []).some((v) => v.reference);
     return (
       <div className="legend">
         {used.map((p) => (
@@ -61,7 +61,7 @@ function Legend({ report, overlay }: { report: Report; overlay: Overlay }) {
             {t(PART_LABEL[p])}
           </span>
         ))}
-        {(plan.voice ?? []).map((v) => (
+        {(plan.side ?? []).map((v) => (
           <span key={v.index}>
             {t("Die")} {v.index}: {partsLabel(v.parts, v.stages, t)}
           </span>
@@ -307,7 +307,7 @@ export function FloorplanView() {
   const drag = useRef<{ x: number; y: number; moved: boolean } | null>(null);
 
   const select = (hit: Hit | null) => {
-    if (!hit || hit.kind === "memory" || hit.kind === "voice") return setSelection(null);
+    if (!hit || hit.kind === "memory" || hit.kind === "side") return setSelection(null);
     if (hit.kind === "die") return setSelection({ kind: "die", die: hit.die });
     if (hit.kind === "array") return setSelection({ kind: "array", die: hit.die });
     if (hit.kind === "block") return setSelection({ kind: "block", die: hit.die, id: hit.id });

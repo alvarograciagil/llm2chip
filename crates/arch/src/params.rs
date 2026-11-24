@@ -114,6 +114,9 @@ pub struct ChipParams {
     /// The voice dies the Listen or Speak view planned for this project's models. None, or a
     /// plan made for other parts: reference dies from measured plans.
     pub voice_plan: Option<crate::voice::VoicePlanned>,
+    /// The chip draws: a model that draws and retouches pictures from a text (the Images
+    /// view), on a die of its own that the estimate and the floorplan count (`drawing`).
+    pub draw_images: bool,
 
     /// 0 lets the estimator pick the smallest number that fits.
     pub dies: u32,
@@ -217,6 +220,7 @@ impl Default for ChipParams {
             speech_in: false,
             speech_out: false,
             voice_plan: None,
+            draw_images: false,
             dies: 0,
             die_max_mm2: 815.0,
             macs_per_die: 136_000,

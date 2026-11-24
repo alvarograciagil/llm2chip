@@ -1088,6 +1088,13 @@ export const ENGINE_TEXT: [string, string][] = [
   ["{n} dies of reference, from plans measured with Moonshine-tiny, OuteTTS and DAC in N6: plan them with your models in the Listen or Speak view.", "{0} dies de referencia, de planes medidos con Moonshine-tiny, OuteTTS y DAC en N6: planifícalos con tus modelos en la vista Escuchar o Hablar."],
   ["{n} dies planned in N6 with your models, in the Listen or Speak view.", "{0} dies planificados en N6 con tus modelos, en la vista Escuchar o Hablar."],
   ["{n} dies while they are on; not in the power while generating text.", "{0} dies mientras están encendidos; no entra en la potencia al generar texto."],
+  ["{n} mm² of text (the language model) and {n} mm² of drawing.", "{0} mm² de texto (el modelo de lenguaje) y {1} mm² de dibujo."],
+  ["{n} mm² of text (the language model), {n} mm² of listening and speaking and {n} mm² of drawing.", "{0} mm² de texto (el modelo de lenguaje), {1} mm² de escucha y habla y {2} mm² de dibujo."],
+  ["Image drawing", "Dibujo"],
+  ["Leakage of drawing", "Fuga del dibujo"],
+  ["image drawer", "dibujante de imágenes"],
+  ["{n} die of reference, measured with Show-o's transformer in N6; its embedding table, {n} MB, stays in external memory, and MAGVIT-v2 runs on the host.", "{0} die de referencia, medido con el transformador de Show-o en N6; su tabla de embedding, {1} MB, queda en la memoria externa, y MAGVIT-v2 se ejecuta en el host."],
+  ["{n} die while it is on; not in the power while generating text.", "{0} die mientras está encendido; no entra en la potencia al generar texto."],
 ];
 
 const NUMBER = "(-?[\\d.,]+)";

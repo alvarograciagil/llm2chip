@@ -30,9 +30,15 @@ How many tokens the MTP head runs ahead each round. More depth gives more tokens
 
 *From 1 to 3.*
 
-### Include vision (`include_vision`)
+### Vision (image analysis) (`include_vision`)
 
-Reserves area for the image encoder (a ViT of about 400 M parameters in Qwen) that turns each image into tokens for the language model.
+The chip reads images: reserves area for the image encoder (a ViT of about 400 M parameters in Qwen) that turns each image into tokens for the language model, so it can describe them or answer about them. It does not draw: that is Draws images.
+
+*On or off.*
+
+### Draws images (text to image) (`draw_images`)
+
+The chip also draws: a model (Show-o) draws and retouches pictures from a text, on a die of its own. It is not vision, which analyses images. The floorplan and the estimate count it: a reference die measured with Show-o's transformer, its embedding table in external memory and MAGVIT-v2 on the host. Off, nothing of drawing is in the chip or the app.
 
 *On or off.*
 
