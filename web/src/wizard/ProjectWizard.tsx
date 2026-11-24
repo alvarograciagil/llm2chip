@@ -14,7 +14,7 @@ const STARTS: { id: Start; title: string; text: string }[] = [
   { id: "chip", title: "A single chip", text: "Everything on one die: choose the process, the area and the speed, and see which models fit." },
   { id: "model", title: "A model", text: "Choose the LLM; the number of chips and how they share it follow from the speed you ask for." },
   { id: "custom", title: "Custom", text: "The default parameters with the model you choose, to tune everything yourself." },
-  { id: "voice", title: "A voice assistant", text: "A chip that listens, answers and speaks: which stages share a die, how much silicon, and how soon the answer sounds." },
+  { id: "voice", title: "A voice assistant", text: "A chip that listens, speaks or both: which stages share a die, how much silicon, and how soon it answers." },
 ];
 
 type Step = "start" | "board" | "questions" | "model" | "name" | "voice";
@@ -33,7 +33,7 @@ const STEP_TITLES: Record<Step, string> = {
   questions: "A few questions",
   model: "Which model?",
   name: "Summary",
-  voice: "A chip that listens, answers and speaks",
+  voice: "A chip that listens, speaks or both",
 };
 
 interface Row {
@@ -339,18 +339,27 @@ function Summary({ report, model, board }: { report: Report | null; model: Model
   );
 }
 
-/** What a voice chip is planned for: how soon the answer must sound and how long a question
- * can be. The Voice view measures the stages and plans the dies. */
-function VoiceQuestions() {
+/** What a voice chip does and is planned for: whether it listens, speaks or both, how soon it
+ * must answer and how long a question can be. The Listen and Speak views measure the stages
+ * and plan the dies. */
+function VoiceQuestions({ parts, setParts }: { parts: { listens: boolean; speaks: boolean }; setParts: (parts: { listens: boolean; speaks: boolean }) => void }) {
   const t = useT();
   const v = useVoice();
   return (
     <div className="wizard-questions">
-      <p>{t("It is planned in the Voice view, with the models on your computer: Moonshine listens, a language model answers, OuteTTS and DAC speak. Each stage is measured on several shapes of die, and stages that never run at once can share one when that saves silicon.")}</p>
+      <p>{t("Listening and speaking are two separate parts: a chip may have either or both. They are planned with the models on your computer: Moonshine listens, the project's language model answers, OuteTTS and DAC speak. Each stage is measured on several shapes of die, and stages that never run at once can share one when that saves silicon.")}</p>
+      <label className="check">
+        <input type="checkbox" checked={parts.listens} onChange={(e) => setParts({ ...parts, listens: e.target.checked })} />
+        {t("It listens: speech to text")}
+      </label>
+      <label className="check">
+        <input type="checkbox" checked={parts.speaks} onChange={(e) => setParts({ ...parts, speaks: e.target.checked })} />
+        {t("It speaks: text to speech")}
+      </label>
       <label>
-        {t("First sound within")}
+        {t(parts.speaks ? "First sound within" : "First answer token within")}
         <span className="opt-amount">
-          <input type="number" min={100} step={50} value={v.firstSoundMs} onChange={(e) => v.set({ firstSoundMs: Number(e.target.value) })} />
+          <input type="number" min={10} step={10} value={v.firstOutputMs} onChange={(e) => v.set({ firstOutputMs: Number(e.target.value) })} />
           <span className="muted-text">ms</span>
         </span>
       </label>
@@ -376,6 +385,7 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
   const setDraft = useOptimize((s) => s.setDraft);
   const [answers, setAnswers] = useState<Answers>({ ...DEFAULT_ANSWERS, model: models[0]?.id ?? "" });
   const [step, setStep] = useState(0);
+  const [voiceParts, setVoiceParts] = useState({ listens: true, speaks: true });
   const [name, setName] = useState("");
   const dialog = useRef<HTMLDivElement>(null);
   const set = (patch: Partial<Answers>) => setAnswers((a) => ({ ...a, ...patch }));
@@ -457,7 +467,7 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
               ))}
             </div>
           )}
-          {current === "voice" && <VoiceQuestions />}
+          {current === "voice" && <VoiceQuestions parts={voiceParts} setParts={setVoiceParts} />}
           {current === "board" && <BoardPicker board={answers.board} choose={(board) => set({ board })} />}
           {current === "questions" && <Questions answers={answers} set={set} />}
           {busy && <p className="wizard-empty">{t("Estimating each design…")}</p>}
@@ -479,9 +489,12 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
           {current === "voice" ? (
             <button
               className="primary"
+              disabled={!voiceParts.listens && !voiceParts.speaks}
               onClick={() => {
+                // The project's chip gains the parts asked for; the view of the first plans it.
+                useDesign.getState().setParams({ speech_in: voiceParts.listens, speech_out: voiceParts.speaks });
                 useVoice.getState().set({ planOnOpen: true });
-                setView("voice");
+                setView(voiceParts.listens ? "listen" : "speak");
                 onClose();
               }}
             >

@@ -1,5 +1,16 @@
 import { create } from "zustand";
 import type { ServerModel } from "../simulator/simulatorStore";
+import { useDesign } from "../store";
+
+/** The two views: listening (a spoken question, its text and the answer) and speaking (a
+ * text, or the answer to it, said aloud). */
+export type Mode = "listen" | "speak";
+
+/** The parts the project's chip has. */
+export function chipParts(): { listens: boolean; speaks: boolean } {
+  const params = useDesign.getState().params;
+  return { listens: params.speech_in === true, speaks: params.speech_out === true };
+}
 
 /** What each stage of a spoken turn gave, as the engine reports it. */
 export interface Stage {
@@ -37,13 +48,14 @@ export interface PlannedDie {
 export interface SystemPlan {
   plan: {
     area_mm2: number;
-    first_sound_ms: number;
+    /** The first sound, or the answer's first token when the chip only listens. */
+    first_output_ms: number;
     /** A turn's energy: each stage's work and every die's leakage while it lasts. */
     energy: { total_j: number; leakage_j: number; seconds: number; stages_j: number[] };
     dies: PlannedDie[];
     stages: { name: string; first_ms: number; per_second: number; variant: string }[];
   } | null;
-  weighed: { groups: string[][]; area_mm2: number | null; first_sound_ms: number | null; reason: string | null }[];
+  weighed: { groups: string[][]; area_mm2: number | null; first_output_ms: number | null; reason: string | null }[];
 }
 
 /** Where the stages run: floating point, or the die's arithmetic with vectors of so many bits. */
@@ -51,6 +63,8 @@ export type Arithmetic = "float" | "16" | "20" | "24";
 
 interface VoiceState {
   online: boolean | null;
+  /** The parts the engine was built with, once known. */
+  built: { listen: boolean; speak: boolean } | null;
   models: ServerModel[];
   listen: string;
   think: string;
@@ -59,6 +73,11 @@ interface VoiceState {
   arithmetic: Arithmetic;
   /** The question, a 16 kHz WAV, and how long it is. */
   question: { wav: string; seconds: number } | null;
+  /** The Speak view's text, and whether the language model answers it first. */
+  text: string;
+  answerFirst: boolean;
+  /** The text the Speak view's last turn took. */
+  asked: string | null;
   recording: boolean;
   running: boolean;
   phase: string;
@@ -70,7 +89,7 @@ interface VoiceState {
   /** Speak in the voice of the profile kept with OuteTTS. */
   speaker: boolean;
   /** The system's planning: what it must meet, what it is doing and what it chose. */
-  firstSoundMs: number;
+  firstOutputMs: number;
   questionSeconds: number;
   areaMm2: string;
   planning: boolean;
@@ -85,7 +104,7 @@ interface VoiceState {
   record: () => Promise<void>;
   stop: () => void;
   open: (file: File) => Promise<void>;
-  start: () => Promise<void>;
+  start: (mode: Mode) => Promise<void>;
 }
 
 const RATE = 16_000;
@@ -141,6 +160,7 @@ function pick(models: ServerModel[], chosen: string, keep: (m: ServerModel) => b
 
 export const useVoice = create<VoiceState>((set, get) => ({
   online: null,
+  built: null,
   models: [],
   listen: "",
   think: "",
@@ -148,6 +168,9 @@ export const useVoice = create<VoiceState>((set, get) => ({
   sound: "",
   arithmetic: "float",
   question: null,
+  text: "",
+  answerFirst: true,
+  asked: null,
   recording: false,
   running: false,
   phase: "",
@@ -156,7 +179,7 @@ export const useVoice = create<VoiceState>((set, get) => ({
   history: [],
   fresh: true,
   speaker: true,
-  firstSoundMs: 500,
+  firstOutputMs: 500,
   questionSeconds: 3,
   areaMm2: "",
   planning: false,
@@ -167,9 +190,11 @@ export const useVoice = create<VoiceState>((set, get) => ({
   set: (partial) => set(partial),
 
   startPlan: async () => {
-    const { listen, think, speak, sound, firstSoundMs, questionSeconds, areaMm2, speaker } = get();
+    const { listen, think, speak, sound, firstOutputMs, questionSeconds, areaMm2, speaker } = get();
+    const parts = chipParts();
     set({ planning: true, planError: null, plan: null, planDoing: "" });
-    const body = { listen, think, speak, sound, first_sound_ms: firstSoundMs, seconds: questionSeconds, area_mm2: areaMm2.trim() ? Number(areaMm2) : null, speaker };
+    // Only the parts the project's chip has.
+    const body = { listen: parts.listens ? listen : null, think, speak: parts.speaks ? speak : null, sound: parts.speaks ? sound : null, first_output_ms: firstOutputMs, seconds: questionSeconds, area_mm2: areaMm2.trim() ? Number(areaMm2) : null, speaker: parts.speaks && speaker };
     const response = await fetch("/api/voice/plan", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     if (!response.ok) {
       set({ planning: false, planError: await response.text() });
@@ -197,15 +222,26 @@ export const useVoice = create<VoiceState>((set, get) => ({
     try {
       const models = (await (await fetch("/api/models")).json()) as ServerModel[];
       const s = get();
+      // The language model is the project's own, when its weights are on this computer.
+      const own = useDesign.getState().model?.path;
+      const answers = (m: ServerModel) => m.supported && !m.voice;
+      const think = own && models.some((m) => m.path === own && answers(m)) ? own : pick(models, s.think, answers);
       set({
         online: true,
         models,
         listen: pick(models, s.listen, (m) => m.voice === "listens"),
-        think: pick(models, s.think, (m) => m.supported && !m.voice),
+        think,
         speak: pick(models, s.speak, (m) => m.voice === "speaks"),
         sound: pick(models, s.sound, (m) => m.voice === "sounds"),
       });
-      const status = await (await fetch("/api/voice")).json();
+      const reply = await fetch("/api/voice");
+      // An engine built with neither part has no voice at all.
+      if (!reply.ok) {
+        set({ built: { listen: false, speak: false } });
+        return;
+      }
+      const status = await reply.json();
+      if (status.state === "idle") set({ built: { listen: status.listen !== false, speak: status.speak !== false } });
       if (status.state === "running" && !get().running) {
         set({ running: true });
         poll(set);
@@ -232,13 +268,24 @@ export const useVoice = create<VoiceState>((set, get) => ({
 
   open: async (file) => set({ question: await toQuestion(await file.arrayBuffer()), error: null }),
 
-  start: async () => {
-    const { question, listen, think, speak, sound, arithmetic, fresh, result, speaker } = get();
-    if (!question) return;
+  start: async (mode) => {
+    const { question, text, answerFirst, listen, think, speak, sound, arithmetic, fresh, result, speaker } = get();
+    const parts = chipParts();
+    if (mode === "listen" && !question) return;
+    if (mode === "speak" && !text.trim()) return;
     // The last turn joins the conversation's history before the next is asked.
-    const last = !fresh && result?.heard?.text && result.answer?.text ? [{ heard: result.heard.text, answer: result.answer.text }] : [];
-    set({ running: true, error: null, result: null, phase: "listening", history: fresh ? [] : [...get().history, ...last] });
-    const body = { wav: question.wav, listen, think, speak, sound, bits: arithmetic === "float" ? null : Number(arithmetic), fresh, speaker };
+    const asked = result?.heard?.text ?? get().asked;
+    const last = !fresh && asked && result?.answer?.text ? [{ heard: asked, answer: result.answer.text }] : [];
+    set({ running: true, error: null, result: null, phase: mode === "listen" ? "listening" : answerFirst ? "thinking" : "speaking", history: fresh ? [] : [...get().history, ...last] });
+    const bits = arithmetic === "float" ? null : Number(arithmetic);
+    // Listening: the clip, heard and answered, and said too when the chip also speaks.
+    // Speaking: the text, answered first if asked, and said.
+    const says = mode === "speak" || parts.speaks;
+    const body =
+      mode === "listen"
+        ? { wav: question!.wav, listen, think, speak: says ? speak : null, sound: says ? sound : null, bits, fresh, speaker: says && speaker }
+        : { text, think: answerFirst ? think : null, speak, sound, bits, fresh, speaker };
+    set({ asked: mode === "speak" ? text : null });
     const response = await fetch("/api/voice", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     if (!response.ok) {
       set({ running: false, error: await response.text() });

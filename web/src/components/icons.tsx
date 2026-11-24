@@ -47,11 +47,18 @@ const ICONS = {
       <path d="M3.5 14 8 9.5l3.5 3.5 2-2 3 3" {...line} />
     </>
   ),
-  // A microphone on its stand, for the spoken turn.
-  voice: (
+  // A microphone on its stand, for listening.
+  listen: (
     <>
       <rect x="7.5" y="2.5" width="5" height="9" rx="2.5" {...line} />
       <path d="M4.5 9.5a5.5 5.5 0 0 0 11 0M10 15v2.5M7 17.5h6" {...line} />
+    </>
+  ),
+  // A loudspeaker with its sound, for speaking.
+  speak: (
+    <>
+      <path d="M3.5 7.5h3l4-3.5v12l-4-3.5h-3z" {...line} />
+      <path d="M13.5 7a4 4 0 0 1 0 6M15.5 5a7 7 0 0 1 0 10" {...line} />
     </>
   ),
   // A curve over axes, what the sweeps draw.

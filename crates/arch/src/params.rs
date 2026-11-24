@@ -105,6 +105,12 @@ pub struct ChipParams {
     pub mtp_enabled: bool,
     pub mtp_depth: u32,
     pub include_vision: bool,
+    /// The chip listens: a speech recogniser turns a spoken question into text. Its dies are
+    /// planned apart, in the Listen view; the estimate does not count them.
+    pub speech_in: bool,
+    /// The chip speaks: a speech writer and a sound decoder say the answer. Their dies are
+    /// planned apart, in the Speak view; the estimate does not count them.
+    pub speech_out: bool,
 
     /// 0 lets the estimator pick the smallest number that fits.
     pub dies: u32,
@@ -205,6 +211,8 @@ impl Default for ChipParams {
             mtp_enabled: false,
             mtp_depth: 3,
             include_vision: false,
+            speech_in: false,
+            speech_out: false,
             dies: 0,
             die_max_mm2: 815.0,
             macs_per_die: 136_000,

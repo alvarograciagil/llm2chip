@@ -100,7 +100,7 @@ More in the [walk through the application](docs/examples.md#the-application).
 |---|---|---|
 | Runs | Qwen3.5 (dense and MoE), Llama (including Llama 3 RoPE), Mistral, Qwen2, Qwen3, Gemma 1, 2 and 3, DeepSeek V3 and R1 | Design their chip and run their real weights |
 | Images | Show-o (with MAGVIT-v2), Janus-Pro, the Qwen3.5 vision encoder | Run them in the chip's arithmetic |
-| Voice | Moonshine and streaming Moonshine (speech to text), OuteTTS-1.0 with the DAC.speech decoder (text to speech) | Run a spoken turn in the chip's arithmetic and plan a chip that listens and speaks ([voice](docs/voice.md)) |
+| Voice | Moonshine and streaming Moonshine (speech to text), OuteTTS-1.0 with the DAC.speech decoder (text to speech) | Two optional parts, each off unless the project asks for it: run them in the chip's arithmetic and plan a chip that listens, speaks or both ([voice](docs/voice.md)) |
 | Approximate design | Phi-3, Granite | Estimate their chip from the shape of their layers; their activation and extra norms are not modelled |
 
 A `config.json` is enough to design a chip, so a model on Hugging Face can be evaluated without downloading its weights. If a model needs something the chip lacks, the application says what. The firmware tokenizes with each model's own rules; Unigram and WordPiece models and the Precompiled, BERT and NMT normalizers are not supported, as the usual generation models do not use them.

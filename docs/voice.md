@@ -2,10 +2,13 @@
 
 A chip that listens and speaks: speech goes in, the language model answers, and the answer comes out as speech. This document describes how llm2chip does it: which models it uses, what each part needs from the die, how the chip runs those programs by itself, how a voice system is planned, how to run all of it, how it is tested, and what is still missing.
 
+**Listening and speaking are two separate parts,** and both are optional: a chip may listen (speech to text, answering in text), speak (text to speech, taking its question as text) or both, and a chip that does neither has nothing of voice (see [Two parts, each optional](#two-parts-each-optional)).
+
 The guiding rule is the same as for images: **the die does not know what voice is.** It gains general operations and capabilities that any model may use. Speech recognition and speech synthesis are just more models compiled onto dies, and the pipeline that joins them is a general way of running several programs on several dies. Removing voice from the project should only remove files (see [Where each piece lives](#where-each-piece-lives)).
 
 **Contents**
 
+- [Two parts, each optional](#two-parts-each-optional)
 - [The pipeline](#the-pipeline)
 - [The models](#the-models)
 - [What each stage needs from the die](#what-each-stage-needs-from-the-die)
@@ -19,6 +22,26 @@ The guiding rule is the same as for images: **the die does not know what voice i
 - [Where each piece lives](#where-each-piece-lives)
 - [Limits and what is next](#limits-and-what-is-next)
 - [History](#history)
+
+## Two parts, each optional
+
+| Part | What it adds | Project option | Build feature | View |
+|---|---|---|---|---|
+| **Listening** | A recogniser (Moonshine or streaming Moonshine) that turns a spoken question into text for the language model | *Listens* (`speech_in`) | `listen` | Listen |
+| **Speaking** | A speech writer (OuteTTS) and a sound decoder (DAC) that say the answer, or a text | *Speaks* (`speech_out`) | `speak` | Speak |
+
+**In a project** both options are off by default, next to *Include vision*. With both off nothing of voice shows: no Listen or Speak view, no voice planning, no voice dies. The project wizard's *A voice assistant* asks which of the two the chip has. The floorplan does not count the voice dies: they are planned in the Listen and Speak views, as dies of their own beside the language model's.
+
+**In the planner and the engine** the stages come from the parts the chip has (`voice_plan::Role`): listening alone is the recogniser and the language model, and its target is the answer's first token; speaking alone is the language model, the writer and the decoder, its question taken as text, and its target is the first sound; both is the whole spoken turn. A turn in the engine takes its question as a clip or as text, and the language model, the writer and the decoder are each optional, so the Speak view can also read a text aloud without answering it.
+
+**In the code** each part is a folder of its own and a Cargo feature of its own: `sim::listen` (Moonshine, its chip, the streaming chip) and `sim::speak` (OuteTTS, DAC, DAC's chip), the features `listen` and `speak` of `sim` and `server`, both on by default. Built without one, nothing of it is compiled: its modules, the turn's and the planner's stage, the catalogue's role, its tests and examples; built with neither, the engine has no voice routes at all. The browser build never carries voice. `scripts/check.sh` builds and lints the engine with neither, with listening alone and with speaking alone, so the separation cannot rot.
+
+```bash
+cargo build --release -p server --no-default-features --features listen    # an engine that only listens
+cargo build --release -p server --no-default-features                      # one with no voice at all
+```
+
+**What stays in every chip** is general, not voice: the die's sine and `asinh` tables, `wrap_left` and the command queue are built only on dies whose programs use them, but the firmware's schedule interpreter (the records and their lean path, about 2 KB of its program memory) is in every chip's firmware, since any program of routines can use it, and the chip's description keeps its two words for a schedule and a queue.
 
 ## The pipeline
 
@@ -220,7 +243,7 @@ Until voice, all the dies of a design ran parts of one program: layers in sequen
 
 ## The system, planned
 
-`voice_plan::plan_voice` (the `voice_system` example, the Voice view's panel, `/api/voice/plan`) plans the chip as a system:
+`voice_plan::plan_voice` (the `voice_system` example, the Listen and Speak views' panel, `/api/voice/plan`) plans the chip as a system, with the stages of the parts it has:
 
 1. **Each stage is measured on a few shapes of die** (1 or 16 units of 64 lanes, 2,048 to 65,536 cells), from its own microprogram, its firmware's cycles and the optimiser's counts in N6. The decoder is also measured with windows keeping 16, 32 or 64 frames. Dies run by routines get a command queue of 16 orders.
 2. **`system::plan` weighs every way of grouping the stages on dies** (15 for four stages):
@@ -262,12 +285,14 @@ For a three-second question, a first sentence of 12 tokens and the first sound w
 
 The planner merges what pays and keeps apart what would wait on itself; with a tighter time or other models it chooses differently:
 
-| Recogniser and language model | Dies | Silicon | First sound | A turn |
-|---|---|---|---|---|
-| Moonshine-tiny, Qwen3-0.6B | 3 | 591 mm² | 474 ms | 6.8 J |
-| The same, the writer reading a three-word profile | 3 | 612 mm² | 493 ms | 8.1 J |
-| Streaming Moonshine, Qwen3-0.6B | 3 | 586 mm² | 482 ms | 5.7 J |
-| Streaming Moonshine, Qwen3.8-27B | 14 | 7,741 mm² | 472 ms | 132 J |
+| Parts | Models | Dies | Silicon | First output | A turn |
+|---|---|---|---|---|---|
+| Listening and speaking | Moonshine-tiny, Qwen3-0.6B, OuteTTS, DAC | 3 | 591 mm² | 474 ms (sound) | 6.8 J |
+| The same, the writer reading a three-word profile | | 3 | 612 mm² | 493 ms (sound) | 8.1 J |
+| Listening and speaking | Streaming Moonshine, Qwen3-0.6B, OuteTTS, DAC | 3 | 586 mm² | 482 ms (sound) | 5.7 J |
+| Listening and speaking | Streaming Moonshine, Qwen3.8-27B, OuteTTS, DAC | 14 | 7,741 mm² | 472 ms (sound) | 132 J |
+| Listening only | Moonshine-tiny, Qwen3-0.6B | 2 | 267 mm² | 46 ms (first token) | 1.0 J |
+| Speaking only | Qwen3-0.6B, OuteTTS, DAC | 3 | 543 mm² | 479 ms (sound) | 3.6 J |
 
 With the streaming recogniser, its work after the question ends takes 1.1 ms instead of Moonshine-tiny's 33.2 ms on the same die. The planner spends that margin on silicon, the writer keeping 2,048 cells, rather than on an earlier sound.
 
@@ -341,7 +366,7 @@ With `die 20` the turn goes the same way: the same question heard, the same answ
 | `listen MODEL_DIR clip.wav [golden.json] [bits]` | Speech to text in floating point and in the die's arithmetic (a streaming model as its firmware would run it), checked against a reference from `tools/golden` |
 | `speak OUTETTS_DIR DAC_DIR "Text." out.wav [golden.json] [die BITS] [speaker FILE [words N]]` | Text to speech, optionally against Transformers' tokens and scores; `PROMPT_IDS=file` writes the prompt's tokens |
 | `dac_check DAC_DIR golden.json [bits] [out.wav]` | DAC's decoder against Transformers' sound, and in the die's arithmetic (`ACCUMULATOR=bits` for another accumulator) |
-| `voice_system MOONSHINE LLM OUTETTS DAC [FIRST_SOUND_MS] [SECONDS] [WORDS] [voice]` | The system planned, with every grouping weighed and the energy of a turn |
+| `voice_system MOONSHINE LLM OUTETTS DAC [FIRST_OUTPUT_MS] [SECONDS] [WORDS] [voice]` | The system planned, with every grouping weighed and the energy of a turn; `-` for Moonshine plans a chip that only speaks, `-` for OuteTTS and DAC one that only listens |
 
 Each runs as `cargo run --release -p sim --example NAME -- ARGS`.
 
@@ -359,24 +384,29 @@ Each runs with `uv run`, which installs its dependencies (PyTorch, Transformers)
 
 ### In the application
 
-The **Voice** view records a question with the microphone or opens a recording, runs the turn in the engine with every stage in floating point or in the die's arithmetic, and plays the answer; the conversation goes on until "New conversation". Its panel plans the chip: the first sound's limit, the longest question and the most silicon; it shows the dies chosen, each stage's timing, the energy of a turn and every grouping weighed, with why. The project wizard's "A voice assistant" leads there. The Models list says which folders listen, speak and make the sound.
+Each part has a view, shown only when the project's chip has it:
+
+- **Listen** records a question with the microphone or opens a recording, and shows what Moonshine heard and the language model's answer; when the chip also speaks, the answer is said too, a whole spoken turn.
+- **Speak** takes a text, and says it, or first has the language model answer it and says the answer.
+
+Each runs its stages in floating point or in the die's arithmetic, and the conversation goes on until "New conversation". The language model is the project's own when its weights are on this computer. The side panel chooses the models of the parts the chip has and plans the chip: the limit on the first output (the first sound, or the answer's first token when it only listens), the longest question and the most silicon; it shows the dies chosen, each stage's timing, the energy of a turn and every grouping weighed, with why. The project wizard's "A voice assistant" asks which parts the chip has and leads there. The Models list says which folders listen, speak and make the sound.
 
 The engine's API behind it:
 
 | Endpoint | Body | Gives |
 |---|---|---|
-| `POST /api/voice` | `wav` (base64), `listen`, `think`, `speak`, `sound` (folders), `bits` (or null for floating point), `fresh` (a new conversation), `speaker` | Starts a turn; one at a time |
-| `GET /api/voice` | | `state` (`running` with `phase` and what each stage gave so far, `done` with the result, `error`) |
-| `POST /api/voice/plan` | the four folders, `first_sound_ms`, `seconds`, `area_mm2`, `speaker` | Starts a plan |
-| `GET /api/voice/plan` | | `state`, and when done the plan (`dies`, `stages`, `energy`, `first_sound_ms`) and every grouping weighed |
+| `POST /api/voice` | The question as `wav` (base64, with the recogniser `listen`) or as `text`; `think` (the language model, if it answers), `speak` and `sound` (both, if the answer is said); `bits` (or null for floating point), `fresh` (a new conversation), `speaker` | Starts a turn; one at a time |
+| `GET /api/voice` | | `state` (`running` with `phase` and what each stage gave so far, `done` with the result, `error`); when idle, which parts the engine was built with (`listen`, `speak`) |
+| `POST /api/voice/plan` | `think`, and `listen` and/or `speak` with `sound`; `first_output_ms`, `seconds`, `area_mm2`, `speaker` | Starts a plan |
+| `GET /api/voice/plan` | | `state`, and when done the plan (`dies`, `stages`, `energy`, `first_output_ms`), every grouping weighed and which parts it has |
 
-A folder must be in the catalogue and do its part of the turn: listen (Moonshine), speak (a language model that writes speech codes) or sound (a converted DAC).
+A folder must be in the catalogue and do its part of the turn: listen (Moonshine), speak (a language model that writes speech codes) or sound (a converted DAC). A turn that cannot be (a clip with no recogniser, a writer without a decoder, a written question with nothing to say, a part the engine was built without) is refused with why. The routes exist only in an engine built with listening, speaking or both.
 
 **On an FPGA** none of the voice models fits today. The chip keeps its weights in its cells' memory, and Moonshine-tiny alone has 27 million (about 108 Mbit in 4-bit codes), against 3.9 Mbit of internal memory in the largest Cyclone IV (EP4CE115) and 0.41 in the catalogue's EP4CE10, whose logic is also too small for the smallest chip (54,000 logic elements against 10,300). Larger boards fall short too: the Kria KV260 has 23.1 Mbit. Only a toy recogniser like the tests' fits.
 
 ## Tests
 
-The quick suite (`scripts/check.sh`) runs the unmarked ones; `--full` adds those marked slow; two need a switch as well. Tests that read a real model skip themselves when it is not in `~/.llm2chip/models`.
+Each test file needs the part it tests (`#![cfg(feature = "listen")]` or `"speak"`). The quick suite (`scripts/check.sh`) runs the unmarked ones and builds the engine with neither part, with listening alone and with speaking alone; `--full` adds those marked slow; two need a switch as well. Tests that read a real model skip themselves when it is not in `~/.llm2chip/models`.
 
 | Test | What it checks | When |
 |---|---|---|
@@ -424,10 +454,12 @@ Voice adds files; the core only gains general things.
 | Sound in and out, WAV | `crates/sim/src/audio.rs` | Voice |
 | A spoken turn's stages, the conversation | `crates/sim/src/voice.rs` | Voice |
 | The voice system planned | `crates/sim/src/voice_plan.rs` | Voice |
-| Examples | `crates/sim/examples/{talk, listen, speak, dac_check, voice_system}.rs` | Voice |
+| Examples | `crates/sim/examples/{talk, listen, speak, dac_check, voice_system}.rs`, each with the features it needs (`required-features`) | Voice |
 | Tests | `crates/sim/tests/{moonshine, moonshine_stream, dac, conversation}.rs` | Voice |
 | References and conversion | `tools/golden/{moonshine, moonshine_streaming, speak, speaker_prompt}.py`, `tools/convert/dac.py` | Voice |
-| The engine's jobs and the application's view | `crates/server/src/voice_job.rs`, `crates/server/src/catalog.rs` (`voice_role`), `web/src/voice/` | Voice |
+| The engine's jobs and the application's views | `crates/server/src/voice_job.rs`, `crates/server/src/catalog.rs` (`voice_role`), `web/src/voice/` (Listen and Speak) | Voice |
+| The project's options | `ChipParams::{speech_in, speech_out}` (`crates/arch`), `web/src/params.ts`, `viewShown` in `web/src/store.ts` | Voice |
+| Build features | `[features]` of `crates/sim` and `crates/server`; the combinations in `scripts/check.sh` | Voice |
 
 ## Limits and what is next
 
@@ -463,3 +495,4 @@ Voice adds files; the core only gains general things.
 | 16 | A language model of several dies in the plan | Done |
 | 17 | Recognising while the question is spoken | Done: streaming Moonshine, the `asinh` table and the `STREAM` record; with 16-bit vectors it writes what Transformers writes |
 | 18 | A command queue before the die | Done: in gates and at instruction level cycle for cycle; the plan back to 591 mm² |
+| 19 | Listening and speaking, two optional parts | Done: project options, views, planner, API and build features of their own; a chip with neither has nothing of voice |

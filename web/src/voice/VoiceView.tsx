@@ -4,56 +4,107 @@ import { formatNumber } from "../format";
 import { useDesign } from "../store";
 import { useT } from "../i18n";
 import type { ServerModel } from "../simulator/simulatorStore";
-import { useVoice, type Arithmetic, type SystemPlan } from "./voiceStore";
+import { useVoice, type Arithmetic, type Mode, type SystemPlan } from "./voiceStore";
 
 const PHASES: Record<string, string> = { listening: "Listening…", thinking: "Thinking of an answer…", speaking: "Speaking…" };
 
-export function VoiceView() {
-  const t = useT();
-  const s = useVoice();
-  const ready = s.question !== null && s.listen !== "" && s.think !== "" && s.speak !== "" && s.sound !== "" && !s.running && !s.recording;
-  const stage = (label: string, text: string | undefined, seconds: number | undefined) => (
+/** The parts the project's chip has. */
+function useParts() {
+  const params = useDesign((d) => d.params);
+  return { listens: params.speech_in === true, speaks: params.speech_out === true };
+}
+
+/** A stage's output; `label` comes translated. */
+function Stage({ label, text, seconds }: { label: string; text: string | undefined; seconds: number | undefined }) {
+  return (
     <div className="voice-stage">
-      <h3>{t(label)}</h3>
+      <h3>{label}</h3>
       <p className={text ? "" : "muted-text"}>{text ? `“${text}”` : " "}</p>
       {seconds !== undefined && <span className="muted-text">{formatNumber(seconds)} s</span>}
     </div>
   );
+}
+
+/** The answer said: the sound, how long it is and how it was made. `label` comes translated. */
+function Said({ label }: { label: string }) {
+  const t = useT();
+  const s = useVoice();
+  return (
+    <div className="voice-stage">
+      <h3>{label}</h3>
+      {s.result?.spoken ? (
+        <>
+          <audio controls autoPlay src={s.result.spoken.audio} />
+          <span className="muted-text">
+            {formatNumber(s.result.spoken.duration)} s {t("of speech")}, {s.result.spoken.tokens} {t("tokens")}, {formatNumber(s.result.spoken.seconds)} s
+          </span>
+        </>
+      ) : (
+        <p className="muted-text">{s.running ? t(PHASES[s.phase] ?? "Working…") : " "}</p>
+      )}
+    </div>
+  );
+}
+
+function History() {
+  const s = useVoice();
+  if (s.history.length === 0) return null;
+  return (
+    <ol className="voice-dies muted-text">
+      {s.history.map((turn, i) => (
+        <li key={i}>
+          “{turn.heard}” → “{turn.answer}”
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function Failure() {
+  const t = useT();
+  const s = useVoice();
+  if (!s.error) return null;
+  return (
+    <div className="issue error" role="alert">
+      <span className="issue-icon" aria-hidden="true">!</span>
+      <div>
+        <strong>{t(s.error)}</strong>
+      </div>
+    </div>
+  );
+}
+
+function NewConversation() {
+  const t = useT();
+  const s = useVoice();
+  if (s.fresh || s.running) return null;
+  return (
+    <button className="pill" title={t("Forget the conversation: the next question starts a new one")} onClick={() => s.set({ fresh: true, history: [], result: null, asked: null })}>
+      {t("New conversation")}
+    </button>
+  );
+}
+
+/** Listening: a question spoken in, its text, the language model's answer, and the answer said
+ * too when the chip also speaks. */
+export function ListenView() {
+  const t = useT();
+  const s = useVoice();
+  const parts = useParts();
+  const ready = s.question !== null && s.listen !== "" && s.think !== "" && (!parts.speaks || (s.speak !== "" && s.sound !== "")) && !s.running && !s.recording;
   return (
     <section className="stage sim-stage">
       <div className="images-column">
-        <p className="muted-text">{t("A spoken turn through three programs, as three dies would run them: speech to text, an answer, text to speech. Only text passes from one to the next.")}</p>
-        {s.history.length > 0 && (
-          <ol className="voice-dies muted-text">
-            {s.history.map((turn, i) => (
-              <li key={i}>
-                “{turn.heard}” → “{turn.answer}”
-              </li>
-            ))}
-          </ol>
-        )}
-        {stage("1. Heard", s.result?.heard?.text, s.result?.heard?.seconds)}
-        {stage("2. Answer", s.result?.answer?.text, s.result?.answer?.seconds)}
-        <div className="voice-stage">
-          <h3>{t("3. Said")}</h3>
-          {s.result?.spoken ? (
-            <>
-              <audio controls autoPlay src={s.result.spoken.audio} />
-              <span className="muted-text">
-                {formatNumber(s.result.spoken.duration)} s {t("of speech")}, {s.result.spoken.tokens} {t("tokens")}, {formatNumber(s.result.spoken.seconds)} s
-              </span>
-            </>
-          ) : (
-            <p className="muted-text">{s.running ? t(PHASES[s.phase] ?? "Working…") : " "}</p>
-          )}
-        </div>
+        <p className="muted-text">
+          {t(parts.speaks ? "A spoken turn through three programs, as three dies would run them: speech to text, an answer, text to speech. Only text passes from one to the next." : "A spoken question through two programs, as two dies would run them: speech to text and an answer. Only text passes from one to the next.")}
+        </p>
+        <History />
+        <Stage label={t("1. Heard")} text={s.result?.heard?.text} seconds={s.result?.heard?.seconds} />
+        <Stage label={t("2. Answer")} text={s.result?.answer?.text} seconds={s.result?.answer?.seconds} />
+        {parts.speaks && <Said label={t("3. Said")} />}
+        {!parts.speaks && s.running && <p className="muted-text">{t(PHASES[s.phase] ?? "Working…")}</p>}
         {s.plan && <SystemPlanView plan={s.plan} />}
-        {s.error && (
-          <div className="issue error" role="alert">
-            <span className="issue-icon" aria-hidden="true">!</span>
-            <div><strong>{t(s.error)}</strong></div>
-          </div>
-        )}
+        <Failure />
         <div className="composer">
           {s.recording ? (
             <button className="pill primary-pill" onClick={() => s.stop()}>
@@ -83,14 +134,50 @@ export function VoiceView() {
             />
           </label>
           <span className="muted-text">{s.question ? `${t("Question")}: ${formatNumber(s.question.seconds)} s` : t("Record a question or open one.")}</span>
-          <button className="pill primary-pill" disabled={!ready} onClick={() => void s.start()}>
+          <button className="pill primary-pill" disabled={!ready} onClick={() => void s.start("listen")}>
             {t(s.fresh ? "Ask" : "Ask again")}
           </button>
-          {!s.fresh && !s.running && (
-            <button className="pill" title={t("Forget the conversation: the next question starts a new one")} onClick={() => s.set({ fresh: true, history: [], result: null })}>
-              {t("New conversation")}
-            </button>
-          )}
+          <NewConversation />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/** Speaking: a text said aloud, or the language model's answer to it. */
+export function SpeakView() {
+  const t = useT();
+  const s = useVoice();
+  const ready = s.text.trim() !== "" && s.speak !== "" && s.sound !== "" && (!s.answerFirst || s.think !== "") && !s.running;
+  return (
+    <section className="stage sim-stage">
+      <div className="images-column">
+        <p className="muted-text">{t(s.answerFirst ? "A written question through three programs, as three dies would run them: an answer, the speech written, the sound decoded. Only text passes to the speech writer." : "A text said through two programs, as two dies would run them: the speech written and the sound decoded.")}</p>
+        <History />
+        <Stage label={s.answerFirst ? t("1. Question") : t("1. Text")} text={s.asked ?? undefined} seconds={undefined} />
+        {s.answerFirst && <Stage label={t("2. Answer")} text={s.result?.answer?.text} seconds={s.result?.answer?.seconds} />}
+        <Said label={s.answerFirst ? t("3. Said") : t("2. Said")} />
+        {s.plan && <SystemPlanView plan={s.plan} />}
+        <Failure />
+        <div className="composer">
+          <input
+            type="text"
+            className="voice-text"
+            value={s.text}
+            disabled={s.running}
+            placeholder={t(s.answerFirst ? "A question to answer aloud" : "A text to say")}
+            aria-label={t(s.answerFirst ? "A question to answer aloud" : "A text to say")}
+            onChange={(e) => s.set({ text: e.target.value })}
+            onKeyDown={(e) => e.key === "Enter" && ready && void s.start("speak")}
+          />
+          <label className="check">
+            <input type="checkbox" checked={s.answerFirst} disabled={s.running} onChange={(e) => s.set({ answerFirst: e.target.checked })} />
+            {t("Answer it first")}
+          </label>
+          <button className="pill primary-pill" disabled={!ready} onClick={() => void s.start("speak")}>
+            {t(s.answerFirst ? (s.fresh ? "Ask" : "Ask again") : "Say it")}
+          </button>
+          {s.answerFirst && <NewConversation />}
         </div>
       </div>
     </section>
@@ -101,6 +188,7 @@ export function VoiceView() {
  * groupings weighed with why the others were not chosen. */
 function SystemPlanView({ plan }: { plan: SystemPlan }) {
   const t = useT();
+  const parts = useParts();
   const chosen = plan.plan;
   return (
     <div className="voice-stage">
@@ -108,7 +196,7 @@ function SystemPlanView({ plan }: { plan: SystemPlan }) {
       {chosen ? (
         <>
           <p>
-            {chosen.dies.reduce((n, d) => n + d.count, 0)} {t("dies")}, {formatNumber(Math.round(chosen.area_mm2))} mm², {t("first sound after")} {formatNumber(Math.round(chosen.first_sound_ms))} ms
+            {chosen.dies.reduce((n, d) => n + d.count, 0)} {t("dies")}, {formatNumber(Math.round(chosen.area_mm2))} mm², {t(parts.speaks ? "first sound after" : "first answer token after")} {formatNumber(Math.round(chosen.first_output_ms))} ms
           </p>
           <p className="muted-text">
             {t("A turn of")} {formatNumber(chosen.energy.seconds)} s: {formatNumber(chosen.energy.total_j)} J ({formatNumber(chosen.energy.leakage_j)} J {t("of leakage")}), {formatNumber(chosen.energy.total_j / chosen.energy.seconds)} W {t("on average")}
@@ -138,7 +226,7 @@ function SystemPlanView({ plan }: { plan: SystemPlan }) {
         <ul className="voice-dies muted-text">
           {plan.weighed.map((w, i) => (
             <li key={i}>
-              {w.groups.map((g) => `[${g.map((n) => t(n)).join(" + ")}]`).join(" ")}: {w.area_mm2 !== null ? `${formatNumber(Math.round(w.area_mm2))} mm², ${formatNumber(Math.round(w.first_sound_ms ?? 0))} ms` : t(w.reason ?? "")}
+              {w.groups.map((g) => `[${g.map((n) => t(n)).join(" + ")}]`).join(" ")}: {w.area_mm2 !== null ? `${formatNumber(Math.round(w.area_mm2))} mm², ${formatNumber(Math.round(w.first_output_ms ?? 0))} ms` : t(w.reason ?? "")}
             </li>
           ))}
         </ul>
@@ -167,42 +255,50 @@ function Choose({ label, value, models, onChange, disabled }: { label: string; v
   );
 }
 
-export function VoicePanel() {
+/** The models, the arithmetic and the chip planned, for the parts the project's chip has: the
+ * recogniser when it listens, the writer and the decoder when it speaks. */
+export function VoicePanel({ mode }: { mode: Mode }) {
   const t = useT();
   const s = useVoice();
+  const parts = useParts();
   const setView = useDesign((d) => d.setView);
   const { connect } = s;
   useEffect(() => {
     void connect();
   }, [connect]);
-  // The project wizard asks for a plan: made as soon as the four models are known, whether
-  // this panel was open already or not.
+  const listens = parts.listens;
+  const says = parts.speaks;
+  // The project wizard asks for a plan: made as soon as the models are known, whether this
+  // panel was open already or not.
   const { planOnOpen, listen, think, speak, sound, planning, startPlan } = s;
+  const known = think !== "" && (!listens || listen !== "") && (!says || (speak !== "" && sound !== ""));
   useEffect(() => {
-    if (planOnOpen && listen && think && speak && sound && !planning) {
+    if (planOnOpen && known && !planning) {
       useVoice.getState().set({ planOnOpen: false });
       void startPlan();
     }
-  }, [planOnOpen, listen, think, speak, sound, planning, startPlan]);
+  }, [planOnOpen, known, planning, startPlan]);
   const of = (role: string) => s.models.filter((m) => m.voice === role);
-  const missing = of("listens").length === 0 || of("speaks").length === 0 || of("sounds").length === 0;
+  const missing = (listens && of("listens").length === 0) || (says && (of("speaks").length === 0 || of("sounds").length === 0));
+  const unbuilt = s.built !== null && ((listens && !s.built.listen) || (says && !s.built.speak));
   return (
     <aside className="inspector">
-      <h2 className="detail-title">{t("Voice")}</h2>
-      <p className="detail-sub">{t("Ask aloud and hear the answer: Moonshine listens, a language model answers, OuteTTS and DAC speak.")}</p>
+      <h2 className="detail-title">{t(mode === "listen" ? "Listen" : "Speak")}</h2>
+      <p className="detail-sub">{t(mode === "listen" ? "Ask aloud: Moonshine turns the question into text and the language model answers." : "OuteTTS writes the speech and DAC makes its sound, from a text or from the language model's answer.")}</p>
       {s.online === false ? (
         <EngineMissing />
       ) : (
         <>
+          {unbuilt && <p className="muted-text">{t("This engine was built without that part of voice: see docs/voice.md for its build features.")}</p>}
           <h3>{t("Models")}</h3>
           <div className="inset padded form">
-            <Choose label={t("Listens")} value={s.listen} models={of("listens")} disabled={s.running} onChange={(listen) => s.set({ listen })} />
+            {listens && <Choose label={t("Listens")} value={s.listen} models={of("listens")} disabled={s.running} onChange={(listen) => s.set({ listen })} />}
             <Choose label={t("Answers")} value={s.think} models={s.models.filter((m) => m.supported && !m.voice)} disabled={s.running} onChange={(think) => s.set({ think })} />
-            <Choose label={t("Writes the speech")} value={s.speak} models={of("speaks")} disabled={s.running} onChange={(speak) => s.set({ speak })} />
-            <Choose label={t("Makes the sound")} value={s.sound} models={of("sounds")} disabled={s.running} onChange={(sound) => s.set({ sound })} />
+            {says && <Choose label={t("Writes the speech")} value={s.speak} models={of("speaks")} disabled={s.running} onChange={(speak) => s.set({ speak })} />}
+            {says && <Choose label={t("Makes the sound")} value={s.sound} models={of("sounds")} disabled={s.running} onChange={(sound) => s.set({ sound })} />}
             {missing && (
               <>
-                <p className="muted-text">{t("It needs UsefulSensors/moonshine-tiny, OuteAI/OuteTTS-1.0-0.6B and DAC.speech's decoder converted with tools/convert/dac.py: see docs/voice.md.")}</p>
+                <p className="muted-text">{t(listens && says ? "It needs UsefulSensors/moonshine-tiny, OuteAI/OuteTTS-1.0-0.6B and DAC.speech's decoder converted with tools/convert/dac.py: see docs/voice.md." : listens ? "It needs UsefulSensors/moonshine-tiny or moonshine-ai/moonshine-streaming-tiny: see docs/voice.md." : "It needs OuteAI/OuteTTS-1.0-0.6B and DAC.speech's decoder converted with tools/convert/dac.py: see docs/voice.md.")}</p>
                 <button className="link-button" onClick={() => setView("models")}>
                   {t("See the models…")}
                 </button>
@@ -220,19 +316,21 @@ export function VoicePanel() {
                 <option value="24">{t("the die's arithmetic, 24-bit vectors")}</option>
               </select>
             </label>
-            <p className="muted-text">{t(s.arithmetic === "float" ? "About two minutes for a short answer." : "About five minutes: the simulation goes integer by integer. The sound decoder needs 20 bits or more to be understood.")}</p>
-            <label className="check" title={t("OuteTTS reads a sentence said in that voice, with its codes, before each of its own: about 1,800 tokens more, which the chip reads before its first sound.")}>
-              <input type="checkbox" checked={s.speaker} disabled={s.running || s.planning} onChange={(e) => s.set({ speaker: e.target.checked })} />
-              {t("In the voice of the speaker profile")}
-            </label>
+            <p className="muted-text">{t(s.arithmetic === "float" ? "About two minutes for a short answer." : says ? "About five minutes: the simulation goes integer by integer. The sound decoder needs 20 bits or more to be understood." : "A few minutes: the simulation goes integer by integer.")}</p>
+            {says && (
+              <label className="check" title={t("OuteTTS reads a sentence said in that voice, with its codes, before each of its own: about 1,800 tokens more, which the chip reads before its first sound.")}>
+                <input type="checkbox" checked={s.speaker} disabled={s.running || s.planning} onChange={(e) => s.set({ speaker: e.target.checked })} />
+                {t("In the voice of the speaker profile")}
+              </label>
+            )}
           </div>
           <h3>{t("The chip")}</h3>
           <div className="inset padded form">
-            <p className="muted-text">{t("Measures each stage on several shapes of die and chooses which share a die, for the least silicon that gives the first sound in time.")}</p>
+            <p className="muted-text">{t(says ? "Measures each stage on several shapes of die and chooses which share a die, for the least silicon that gives the first sound in time." : "Measures each stage on several shapes of die and chooses which share a die, for the least silicon that gives the answer's first token in time.")}</p>
             <label>
-              {t("First sound within")}
+              {t(says ? "First sound within" : "First answer token within")}
               <span className="opt-amount">
-                <input type="number" min={100} step={50} value={s.firstSoundMs} disabled={s.planning} onChange={(e) => s.set({ firstSoundMs: Number(e.target.value) })} />
+                <input type="number" min={10} step={10} value={s.firstOutputMs} disabled={s.planning} onChange={(e) => s.set({ firstOutputMs: Number(e.target.value) })} />
                 <span className="muted-text">ms</span>
               </span>
             </label>
@@ -250,7 +348,7 @@ export function VoicePanel() {
                 <span className="muted-text">mm²</span>
               </span>
             </label>
-            <button className="pill primary-pill" disabled={s.planning || missing || !s.think} onClick={() => void s.startPlan()}>
+            <button className="pill primary-pill" disabled={s.planning || missing || !known} onClick={() => void s.startPlan()}>
               {t(s.planning ? "Planning…" : "Plan the chip")}
             </button>
             {s.planning && <p className="muted-text">{t("Measuring")} {t(s.planDoing)}…</p>}

@@ -1531,6 +1531,7 @@ button.link-row {
 }
 
 .composer textarea,
+.composer .voice-text,
 .form input,
 .form select {
   width: 100%;
@@ -1546,6 +1547,13 @@ button.link-row {
 
 .composer .pill {
   padding: 6px 16px;
+}
+
+/* The Speak view's text takes the composer's width. */
+.composer .voice-text {
+  flex: 1;
+  width: auto;
+  align-self: center;
 }
 
 .timeline {

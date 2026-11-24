@@ -28,15 +28,17 @@ export function EngineMissing() {
 }
 
 /** The views that only work with the engine, in the online demo: what they do and where to get them. */
-export const ENGINE_VIEWS = new Set<View>(["images", "voice", "viewer", "optimize", "numeric", "models"]);
+export const ENGINE_VIEWS = new Set<View>(["images", "listen", "speak", "viewer", "optimize", "numeric", "models"]);
 
 function useWhat(view: View): [string, string] {
   const t = useT();
   switch (view) {
     case "images":
       return [t("Images"), t("Draws an image from a text, or retouches a region of one, with Show-o running on the chip's arithmetic.")];
-    case "voice":
-      return [t("Voice"), t("Ask aloud and hear the answer: Moonshine listens, a language model answers and OuteTTS and DAC speak, each in floating point or in the die's arithmetic.")];
+    case "listen":
+      return [t("Listen"), t("Ask aloud: Moonshine turns the question into text and the language model answers, each in floating point or in the die's arithmetic.")];
+    case "speak":
+      return [t("Speak"), t("Hear a text or the language model's answer said by OuteTTS and DAC, in floating point or in the die's arithmetic.")];
     case "viewer":
       return [t("Chip at work"), t("Plays back, in 3D and cycle by cycle, a run of the chip that the engine simulated gate by gate: the dies, the tokens going through the layers, the KV cache and the links between chips.")];
     case "optimize":

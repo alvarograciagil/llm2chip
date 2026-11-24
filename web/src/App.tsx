@@ -8,7 +8,7 @@ import { ColumnResizers } from "./components/ColumnResizer";
 import { CalibrationPanel, ExplorerView } from "./explorer/ExplorerView";
 import { SimulatorPanel, SimulatorView } from "./simulator/SimulatorView";
 import { ImagesPanel, ImagesView } from "./images/ImagesView";
-import { VoicePanel, VoiceView } from "./voice/VoiceView";
+import { ListenView, SpeakView, VoicePanel } from "./voice/VoiceView";
 import { SchematicPanel } from "./schematic/SchematicPanel";
 import { SchematicView } from "./schematic/SchematicView";
 import { ModelsPanel, ModelsView } from "./models/ModelsView";
@@ -16,7 +16,7 @@ import { NumericPanel, NumericView } from "./numeric/NumericView";
 import { ParamDocsView } from "./docs/ParamDocsView";
 import { OptimizePanel, OptimizeView } from "./optimize/OptimizeView";
 import { useCellSim } from "./schematic/simStore";
-import { useDesign } from "./store";
+import { useDesign, viewShown } from "./store";
 import { DEMO } from "./demo";
 import { DemoStage, ENGINE_VIEWS } from "./components/EngineMissing";
 
@@ -64,7 +64,14 @@ export function App() {
 }
 
 function Views() {
-  const view = useDesign((s) => s.view);
+  const asked = useDesign((s) => s.view);
+  const params = useDesign((s) => s.params);
+  const setView = useDesign((s) => s.setView);
+  // A view the design no longer has (its chip stopped listening, say) gives way to the floorplan.
+  const view = viewShown(asked, params) ? asked : "floorplan";
+  useEffect(() => {
+    if (view !== asked) setView(view);
+  }, [view, asked, setView]);
   return (
     <>
         {view === "floorplan" && <FloorplanView />}
@@ -77,8 +84,10 @@ function Views() {
         {view === "simulator" && <SimulatorPanel />}
         {view === "images" && <ImagesView />}
         {view === "images" && <ImagesPanel />}
-        {view === "voice" && <VoiceView />}
-        {view === "voice" && <VoicePanel />}
+        {view === "listen" && <ListenView />}
+        {view === "listen" && <VoicePanel mode="listen" />}
+        {view === "speak" && <SpeakView />}
+        {view === "speak" && <VoicePanel mode="speak" />}
         {view === "explorer" && <ExplorerView />}
         {view === "explorer" && <CalibrationPanel />}
         {view === "optimize" && <OptimizeView />}

@@ -3,7 +3,7 @@
 // start, because the address then carries the design (`#d=…`).
 import type { View } from "./store";
 
-const VIEWS: View[] = ["floorplan", "logic", "schematic", "simulator", "images", "voice", "explorer", "optimize", "models", "numeric", "parameters", "viewer"];
+const VIEWS: View[] = ["floorplan", "logic", "schematic", "simulator", "images", "listen", "speak", "explorer", "optimize", "models", "numeric", "parameters", "viewer"];
 
 export interface Link {
   view: View;
@@ -12,7 +12,9 @@ export interface Link {
 }
 
 export function readLink(hash: string): Link | null {
-  const [view, ...rest] = decodeURIComponent(hash.replace(/^#/, "")).split("/");
+  const [asked, ...rest] = decodeURIComponent(hash.replace(/^#/, "")).split("/");
+  // The voice view that listened and spoke at once is now two: an old link listens.
+  const view = asked === "voice" ? "listen" : asked;
   if (!VIEWS.includes(view as View)) return null;
   const model = rest.join("/").trim();
   return { view: view as View, model: view === "simulator" && model ? model : null };

@@ -290,13 +290,15 @@ Speech to text, an answer and speech, on the real weights ([voice.md](voice.md))
 | DAC.speech in the die's arithmetic | 20.2 dB below the signal at 16 bits (heard as "chiff"), 27.0 at 20, 32.2 at 24 | `dac_check ... 16/20/24` |
 | A spoken turn, every stage in the die's arithmetic at 20 bits | "What is the capital of France?" heard, "The capital of France is Paris." answered and heard back from the die's speech (about five minutes) | `talk ... die 20` |
 
-A chip that listens and speaks, sized from its circuits and its firmware's cycles (estimated, N6), for a three-second question and the first sound within 500 ms:
+A chip that listens, speaks or both, sized from its circuits and its firmware's cycles (estimated, N6), for a three-second question and the first output within 500 ms:
 
 | Recogniser and language model | Dies | Silicon | First sound | A turn |
 |---|---|---|---|---|
 | Moonshine-tiny, Qwen3-0.6B | 3 | 591 mm² | 474 ms | 6.8 J |
 | Streaming Moonshine, Qwen3-0.6B | 3 | 586 mm² | 482 ms | 5.7 J |
 | Streaming Moonshine, Qwen3.8-27B | 14 | 7,741 mm² | 472 ms | 132 J |
+| Listening only: Moonshine-tiny, Qwen3-0.6B (first answer token) | 2 | 267 mm² | 46 ms | 1.0 J |
+| Speaking only: Qwen3-0.6B, OuteTTS, DAC (question as text) | 3 | 543 mm² | 479 ms | 3.6 J |
 
 `voice_system`. Most of a turn's energy is the weights' memories leaking.
 

@@ -1,6 +1,6 @@
 import { DEMO, REPOSITORY } from "../demo";
 import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent } from "react";
-import { useDesign, type Appearance } from "../store";
+import { useDesign, viewShown, type Appearance } from "../store";
 import { datasheet } from "../datasheet";
 import { download } from "../download";
 import { IconButton } from "./controls";
@@ -17,7 +17,8 @@ const VIEWS: [View, string][] = [
   ["simulator", "Simulator"],
   ["viewer", "Chip at work"],
   ["images", "Images"],
-  ["voice", "Voice"],
+  ["listen", "Listen"],
+  ["speak", "Speak"],
   ["explorer", "Explorer"],
   ["numeric", "Numerics"],
   ["models", "Models"],
@@ -199,6 +200,7 @@ export function Toolbar() {
   const canUndo = useDesign((s) => s.past.length > 0);
   const canRedo = useDesign((s) => s.future.length > 0);
   const view = useDesign((s) => s.view);
+  const params = useDesign((s) => s.params);
   const setView = useDesign((s) => s.setView);
   const baseline = useDesign((s) => s.baseline);
   const pinBaseline = useDesign((s) => s.pinBaseline);
@@ -226,7 +228,7 @@ export function Toolbar() {
         {creating && <ProjectWizard onClose={() => setCreating(false)} />}
       </div>
       <div className="segmented views" role="radiogroup" aria-label={t("View")}>
-        {VIEWS.map(([id, label]) => (
+        {VIEWS.filter(([id]) => viewShown(id, params)).map(([id, label]) => (
           <button key={id} role="radio" aria-checked={view === id} aria-label={t(label)} title={t(label)} className={view === id ? "on" : ""} onClick={() => setView(id)}>
             <Icon name={id} />
             <span className="view-label">{t(label)}</span>

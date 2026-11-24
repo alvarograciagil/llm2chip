@@ -24,10 +24,18 @@ export type Selection =
 
 export type Overlay = "function" | "layer" | "activity" | "energy" | "data" | "density";
 export type SidebarTab = "parameters" | "optimizations";
-export type View = "floorplan" | "logic" | "schematic" | "simulator" | "images" | "voice" | "explorer" | "optimize" | "models" | "numeric" | "parameters" | "viewer";
+export type View = "floorplan" | "logic" | "schematic" | "simulator" | "images" | "listen" | "speak" | "explorer" | "optimize" | "models" | "numeric" | "parameters" | "viewer";
 export type Appearance = "auto" | "light" | "dark";
 import { readLanguage, writeLanguage, type Language } from "./i18n";
 import { LINK } from "./link";
+
+/** Whether a view belongs to the design: Listen only when the chip listens, Speak only when it
+ * speaks. A chip that does neither shows nothing of voice. */
+export function viewShown(view: View, params: ChipParams): boolean {
+  if (view === "listen") return params.speech_in === true;
+  if (view === "speak") return params.speech_out === true;
+  return true;
+}
 
 export interface SavedDesign {
   name: string;

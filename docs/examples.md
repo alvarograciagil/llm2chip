@@ -140,7 +140,7 @@ cargo run --release -p sim --example dac_check -- <dac folder> golden.json 20 ou
 
 `listen` runs a streaming model as its firmware would, listening as the speech comes.
 
-**Plan a chip that listens and speaks:** every way of putting the four stages on dies, the shapes, the first sound and the energy of a turn. The numbers after the folders are the first sound's limit in milliseconds, the longest question in seconds and the tokens of the answer's first sentence; `voice` has the writer read a speaker's profile.
+**Plan a chip that listens, speaks or both:** every way of putting its stages on dies, the shapes, the first output and the energy of a turn. A `-` in place of Moonshine plans a chip that only speaks, in place of OuteTTS and DAC one that only listens. The numbers after the folders are the limit on the first output in milliseconds (the first sound, or the answer's first token), the longest question in seconds and the tokens of the answer's first sentence; `voice` has the writer read a speaker's profile.
 
 ```bash
 cargo run --release -p sim --example voice_system -- <moonshine folder> <language model folder> <outetts folder> <dac folder> 500 3 12
@@ -224,6 +224,6 @@ Open `http://localhost:5173`:
 
    ![Numerics lab](screenshots/numeric.png)
 
-10. **Voice:** record a question with the microphone or open a recording, and hear the chip's answer, every stage in floating point or in the die's arithmetic; the conversation goes on until *New conversation*. The panel plans the chip that would do it: the dies, the time to the first sound and the energy of a turn. The wizard's *A voice assistant* starts there.
+10. **Listen and Speak**, when the project's chip listens or speaks (*Listens* and *Speaks* in the parameters, both off by default): *Listen* records a question or opens a recording and shows the text heard and the answer, said aloud too when the chip also speaks; *Speak* says a text, or the answer to it. Every stage runs in floating point or in the die's arithmetic. The panel plans the chip that would do it: the dies, the time to the first output and the energy of a turn. The wizard's *A voice assistant* asks which parts the chip has.
 
 The screenshots were taken with the app as it is in the repository, on an Apple M2 Max with 64 GB.
