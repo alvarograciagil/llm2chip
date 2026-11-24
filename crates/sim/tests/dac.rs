@@ -175,3 +175,26 @@ fn dac_s_decoder_on_the_die_s_gates_gives_the_exact_machine_s_sound() {
     assert_eq!(chip.cycles(&calls).unwrap(), cycles);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Decoding a window at a time, each window as long as the frames it keeps plus the reach
+/// of a frame on both sides, gives the sound decoded whole: in floating point to the last
+/// rounding, and in the die's arithmetic bit for bit, since each row keeps its own exponent.
+#[test]
+fn decoding_window_by_window_gives_the_whole_sound() {
+    let dir = toy("windows", 8, &[3, 2]);
+    let dac = Dac::open(&dir).unwrap();
+    let reach = dac.config.reach_frames();
+    let frames = 2 * reach + 9;
+    let codes = codes(frames);
+    let whole = dac.decode(&codes).unwrap();
+    for chunk in [1, 4, 7] {
+        let chunked = dac.decode_chunked(&codes, chunk).unwrap();
+        assert_eq!(chunked.len(), whole.len());
+        let worst = chunked.iter().zip(&whole).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        assert!(worst < 1e-5, "chunks of {chunk}: {worst}");
+    }
+    let (_, whole) = DacChip::exact(&dir, frames, 20).unwrap().decode(&codes).unwrap();
+    let (_, chunked) = sim::dac_chip::decode_chunked(&dir, &codes, 4, 20).unwrap();
+    assert_eq!(chunked, whole, "the die's mantissas");
+    std::fs::remove_dir_all(&dir).ok();
+}

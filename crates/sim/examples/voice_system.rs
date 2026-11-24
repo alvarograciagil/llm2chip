@@ -7,7 +7,7 @@
 //! `SECONDS` is the question's length (3) and `WORDS` how long the answer's first sentence
 //! is in the language model's tokens (12). The time to the first sound counts the question
 //! heard whole, the answer's first sentence, OuteTTS writing half a second of speech after
-//! its prompt, and DAC decoding it. `LISTEN` and `SPEAK` set the recogniser's and the
+//! its prompt, and DAC decoding its first window. `LISTEN` and `SPEAK` set the recogniser's and the
 //! decoder's dies as `UNITS,LANES,CELLS` in powers of two (`0,5,11` and `0,6,11`).
 
 use netlist::format::{WeightCoding, WeightFormat};
@@ -76,30 +76,34 @@ fn main() -> Result<(), String> {
     let answer = language_model("language model", think, &costs, 1, (4, 6, 16), 40)?;
     let writer = language_model("speech writer", tts, &costs, 1, (4, 6, 16), 40)?;
 
-    // Half a second of speech decoded, on a die with 20-bit vectors.
-    let frames = 38;
+    // The sound decoded a window at a time, on a die with 20-bit vectors: each window keeps
+    // `CHUNK_FRAMES` frames and reaches a frame's reach further on both sides.
+    let config = DacConfig::read(dac)?;
+    let chunk = sim::voice::CHUNK_FRAMES;
+    let frames = chunk + 2 * config.reach_frames();
     let base = reference_die(8);
     let wide = netlist::DieConfig { cell: netlist::CellConfig { activation_bits: 20, accumulator_bits: 2 * 20 + 16, ..base.cell }, ..base };
     let wide_costs = Costs::measure(wide);
     let shape = shape_of("SPEAK", (0, 6, 11));
-    let decoder = DacChip::from_parts(DacConfig::read(dac)?, weights(dac, 8)?, frames, die_of(wide, 32_768, shape), true)?;
+    let decoder = DacChip::from_parts(config.clone(), weights(dac, 8)?, frames, die_of(wide, 32_768, shape), true)?;
     let calls = decoder.calls(&vec![vec![0; frames]; decoder.config.codebooks])?;
     let (parts, clock) = routines_die(decoder.parts().1, &decoder.microprogram()?, &wide_costs, &N6, shape, CLOCK);
-    println!("sound decoder: {} vector words a unit", decoder.parts().1.vector_words_used());
-    println!("sound decoder: logic {:.0}, cells {:.0}, vectors {:.0}, microcode {:.0} mm²", parts[0], parts[1], parts[2], parts[3]);
-    let mm2: f64 = parts.iter().sum();
+    println!("sound decoder: windows of {frames} frames, {chunk} kept; logic {:.0}, cells {:.0}, vectors {:.0}, microcode {:.0} mm²", parts[0], parts[1], parts[2], parts[3]);
     let cycles = decoder.cycles(&calls)?;
-    let speak = Stage { name: "sound decoder".into(), dies: 1, area_mm2: mm2, clock_hz: clock, first_cycles: cycles, output_cycles: cycles };
+    // Its outputs are frames of sound: the first window gives `chunk` of them, as does each after.
+    let speak = Stage { name: "sound decoder".into(), dies: 1, area_mm2: parts.iter().sum(), clock_hz: clock, first_cycles: cycles, output_cycles: cycles / chunk as u64 };
 
     let system = System::new(vec![hear, answer, writer, speak]);
     for stage in &system.stages {
         println!("{:>15}: {} die of {:>5.0} mm² at {:>4.0} MHz, first output after {:>7.1} ms, then {:>6.0} a second", stage.name, stage.dies, stage.area_mm2, stage.clock_hz / 1e6, stage.seconds_to(1) * 1e3, stage.outputs_per_second());
     }
-    // OuteTTS writes about 2.4 tokens per frame of speech (codes, and words' own tokens).
+    // OuteTTS writes about 2.4 tokens per frame of speech (codes, and words' own tokens),
+    // and the decoder's first window needs `frames` of them.
     let speech_tokens = (frames as f64 * 2.4) as u32;
     // The question's text: about three tokens a second of speech.
     let first = system.first_output_seconds(&[(seconds * 3.0).ceil() as u32, words, speech_tokens])?;
     println!("{} dies, {:.0} mm²; first sound {:.0} ms after the question ends", system.dies(), system.area_mm2(), first * 1e3);
-    println!("speech keeps up: {}", system.keeps_up(&[0.0, 0.0, 75.0 * 2.4, 1.0 / 0.5]));
+    // Real time: the writer 75 frames a second at 2.4 tokens each, the decoder 75 frames.
+    println!("speech keeps up: {}", system.keeps_up(&[0.0, 0.0, 75.0 * 2.4, 75.0]));
     Ok(())
 }

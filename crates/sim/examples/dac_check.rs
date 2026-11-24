@@ -16,6 +16,9 @@ fn main() -> Result<(), String> {
     let worst = ours.iter().zip(&audio).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
     println!("{} frames -> {} samples (Transformers {}), {:.1} s; largest difference {:.5} of a peak of {:.3}", codes[0].len(), ours.len(), audio.len(), started.elapsed().as_secs_f32(), worst, largest);
     println!("largest |αx| {:.1}", dac.snake_reach(&codes)?);
+    let chunked = dac.decode_chunked(&codes, 16)?;
+    let apart = chunked.iter().zip(&ours).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+    println!("a window at a time ({} frames each, 16 kept): {} samples, largest difference from the whole {apart:.2e}", dac.config.window_frames(codes[0].len(), 16), chunked.len());
     if let Some(bits) = args.get(2).and_then(|b| b.parse().ok()) {
         let started = std::time::Instant::now();
         let mut chip = sim::dac_chip::DacChip::exact(Path::new(&args[0]), codes[0].len(), bits)?;

@@ -441,6 +441,32 @@ impl DacChip {
     }
 }
 
+/// Decodes `codes[book][frame]` a window at a time (`DacConfig::windows`, `chunk` frames
+/// kept from each) on the exact machine's die with `bits`-bit vectors, built for one window:
+/// what a chip that holds a window and not the whole sound does. The sound and the die's
+/// mantissas.
+pub fn decode_chunked(dir: &Path, codes: &[Vec<u32>], chunk: usize, bits: u32) -> Result<(Vec<f32>, Vec<i64>), String> {
+    let config = DacConfig::read(dir)?;
+    let frames = codes.first().map_or(0, Vec::len);
+    let width = config.window_frames(frames, chunk);
+    let mut chip = DacChip::exact(dir, width, bits)?;
+    let mut mantissas = Vec::new();
+    let sound = crate::dac::stitch(&config, frames, chunk, &mut |start, width| {
+        let (values, raw) = chip.decode(&crate::dac::window(codes, start, width))?;
+        mantissas.push((start, raw));
+        Ok(values)
+    })?;
+    // The same samples as the values kept, from each window's mantissas.
+    let hop = config.hop();
+    let mut kept = Vec::with_capacity(sound.len());
+    for ((start, raw), (_, owned)) in mantissas.iter().zip(config.windows(frames, chunk)) {
+        let from = (owned.start - start) * hop;
+        let to = if owned.end == frames { raw.len() } else { (owned.end - start) * hop };
+        kept.extend_from_slice(&raw[from..to]);
+    }
+    Ok((sound, kept))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

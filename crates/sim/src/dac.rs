@@ -45,6 +45,44 @@ impl DacConfig {
         })
     }
 
+    /// How many frames on each side one frame's sound depends on: the first convolution's
+    /// three, then at each block a row of its input (the transposed convolution) and 39 rows
+    /// of its output (three residual units of kernel 7, dilations 1, 3 and 9), and the last
+    /// convolution's three samples, each in frames at its level's rate, rounded up.
+    pub fn reach_frames(&self) -> usize {
+        let mut rows_per_frame = 1.0;
+        let mut reach = 3.0;
+        for s in &self.rates {
+            reach += 1.0 / rows_per_frame;
+            rows_per_frame *= *s as f64;
+            reach += 39.0 / rows_per_frame;
+        }
+        (reach + 3.0 / rows_per_frame).ceil() as usize
+    }
+
+    /// Samples a frame makes in the middle of the sound: the product of the rates.
+    pub fn hop(&self) -> usize {
+        self.rates.iter().product()
+    }
+
+    /// The windows a sound of `frames` frames is decoded in, `chunk` frames kept from each:
+    /// each window is `chunk + 2 · reach_frames()` long (or the whole sound, if shorter), and
+    /// keeps the frames it owns, at least `reach_frames()` from either of its ends unless
+    /// that end is the sound's. Gives `(first frame of the window, frames it owns)`.
+    pub fn windows(&self, frames: usize, chunk: usize) -> Vec<(usize, std::ops::Range<usize>)> {
+        let (reach, chunk) = (self.reach_frames(), chunk.max(1));
+        let width = (chunk + 2 * reach).min(frames);
+        (0..frames.div_ceil(chunk)).map(|i| {
+            let owned = i * chunk..((i + 1) * chunk).min(frames);
+            (owned.start.saturating_sub(reach).min(frames - width), owned)
+        }).collect()
+    }
+
+    /// Frames in each window of `windows`.
+    pub fn window_frames(&self, frames: usize, chunk: usize) -> usize {
+        (chunk.max(1) + 2 * self.reach_frames()).min(frames)
+    }
+
     /// Samples for `frames` frames: each transposed convolution of rate `s` takes `L` rows
     /// to `s·L + s − 2·⌈s/2⌉`.
     pub fn samples(&self, frames: usize) -> usize {
@@ -178,6 +216,13 @@ impl Dac {
         self.decode_watching(codes, &mut |_, _| {})
     }
 
+    /// The same sound decoded a window at a time (`DacConfig::windows`), as a chip that holds
+    /// only a window does: each keeps the samples of the frames it owns.
+    pub fn decode_chunked(&self, codes: &[Vec<u32>], chunk: usize) -> Result<Vec<f32>, String> {
+        let frames = codes.first().map_or(0, Vec::len);
+        stitch(&self.config, frames, chunk, &mut |start, width| self.decode(&window(codes, start, width)))
+    }
+
     fn decode_watching(&self, codes: &[Vec<u32>], watch: &mut dyn FnMut(&str, &Rows)) -> Result<Vec<f32>, String> {
         let mut x = self.conv("decoder.model.0", &self.latent(codes)?, 7, 1, 3)?;
         for (b, s) in self.config.rates.iter().enumerate() {
@@ -199,4 +244,25 @@ impl Dac {
         let x = self.conv(&format!("decoder.model.{}", last + 1), &x, 7, 1, 3)?;
         Ok(x.iter().map(|row| row[0].tanh()).collect())
     }
+}
+
+/// `codes` from frame `start`, `width` frames.
+pub fn window(codes: &[Vec<u32>], start: usize, width: usize) -> Vec<Vec<u32>> {
+    codes.iter().map(|book| book[start..start + width].to_vec()).collect()
+}
+
+/// A sound of `frames` frames put together from its windows, each decoded by `decode` from
+/// its first frame and its width: from each, the samples of the frames it owns; the last
+/// keeps the sound's end too.
+pub fn stitch(config: &DacConfig, frames: usize, chunk: usize, decode: &mut dyn FnMut(usize, usize) -> Result<Vec<f32>, String>) -> Result<Vec<f32>, String> {
+    let (hop, width, total) = (config.hop(), config.window_frames(frames, chunk), config.samples(frames));
+    let mut sound = Vec::with_capacity(total);
+    for (start, owned) in config.windows(frames, chunk) {
+        let samples = decode(start, width)?;
+        let from = (owned.start - start) * hop;
+        let to = if owned.end == frames { samples.len() } else { (owned.end - start) * hop };
+        sound.extend_from_slice(&samples[from..to]);
+    }
+    debug_assert_eq!(sound.len(), total);
+    Ok(sound)
 }

@@ -5,7 +5,6 @@
 
 use crate::audio::Clip;
 use crate::dac::{Dac, DacConfig};
-use crate::dac_chip::DacChip;
 use crate::moonshine::Moonshine;
 use crate::moonshine_chip::MoonshineChip;
 use crate::prompt::PromptStyle;
@@ -39,6 +38,14 @@ impl Model {
             Arithmetic::Float => Self::Float(Box::new(Engine::new(program, Weights::open(dir)?, Numeric::Float)?)),
             Arithmetic::Die(bits) => Self::Die(Box::new(ExactEngine::new(program, Weights::open(dir)?, bits)?)),
         })
+    }
+
+    /// Back to an empty cache, for a new text.
+    pub fn reset(&mut self) {
+        match self {
+            Self::Float(engine) => engine.reset(),
+            Self::Die(engine) => engine.reset(),
+        }
     }
 
     pub fn step(&mut self, token: u32) -> Result<Vec<f32>, String> {
@@ -84,22 +91,71 @@ pub fn answer(dir: &Path, question: &str, arithmetic: Arithmetic, limit: usize, 
     Ok(decode(&reply)?.trim().to_string())
 }
 
-/// `text` said by OuteTTS, in `tts`, and DAC, in `dac`: the sound, and how many tokens
-/// OuteTTS wrote for it.
+/// The sentences of `text`, each with its closing mark: what the speech writer takes one at
+/// a time, so the first can sound while the next is written.
+pub fn sentences(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        current.push(c);
+        if matches!(c, '.' | '!' | '?') && chars.peek().is_none_or(|n| n.is_whitespace()) {
+            out.push(current.trim().to_string());
+            current.clear();
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current.trim().to_string());
+    }
+    out.retain(|s| !s.is_empty());
+    out
+}
+
+/// Frames the sound decoder keeps from each window it decodes, on the die: a window is
+/// this plus a frame's reach on both sides (see `DacConfig::windows`).
+pub const CHUNK_FRAMES: usize = 16;
+
+/// `text` said by OuteTTS, in `tts`, and DAC, in `dac`, a sentence at a time; on the die,
+/// the decoder takes a window of frames at a time. The sound, and how many tokens OuteTTS
+/// wrote for it.
 pub fn speak(tts: &Path, dac: &Path, text: &str, arithmetic: Arithmetic) -> Result<(Clip, usize), String> {
     let vocabulary = SpeechVocabulary::read(tts)?;
     let mut tokenizer = TokenizerTables::from_file(&tts.join("tokenizer.json"), 1024)?;
     tokenizer.set_add_special(false);
-    let prompt = vocabulary.prompt(&tokenizer.encode(text)?);
     let mut writer = Model::open(tts, arithmetic)?;
-    let written = write(&vocabulary, &prompt, 1500, &mut |token| writer.step(token))?;
-    let codes = vocabulary.codes(&written);
-    if codes[0].is_empty() {
+    let rate = DacConfig::read(dac)?.sampling_rate;
+    let floating = match arithmetic {
+        Arithmetic::Float => Some(Dac::open(dac)?),
+        Arithmetic::Die(_) => None,
+    };
+    let (mut samples, mut tokens) = (Vec::new(), 0);
+    for sentence in sentences(text) {
+        writer.reset();
+        let prompt = vocabulary.prompt(&tokenizer.encode(&sentence)?);
+        let written = write(&vocabulary, &prompt, 1500, &mut |token| writer.step(token))?;
+        tokens += written.len();
+        let codes = vocabulary.codes(&written);
+        if codes[0].is_empty() {
+            continue;
+        }
+        let sound = match (&floating, arithmetic) {
+            (Some(dac), _) => dac.decode(&codes)?,
+            (None, Arithmetic::Die(bits)) => crate::dac_chip::decode_chunked(dac, &codes, CHUNK_FRAMES, bits)?.0,
+            (None, Arithmetic::Float) => unreachable!(),
+        };
+        samples.extend(sound);
+    }
+    if samples.is_empty() {
         return Err("the speech model wrote no sound".into());
     }
-    let samples = match arithmetic {
-        Arithmetic::Float => Dac::open(dac)?.decode(&codes)?,
-        Arithmetic::Die(bits) => DacChip::exact(dac, codes[0].len(), bits)?.decode(&codes)?.0,
-    };
-    Ok((Clip { rate: DacConfig::read(dac)?.sampling_rate, samples }, written.len()))
+    Ok((Clip { rate, samples }, tokens))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_text_splits_into_its_sentences() {
+        assert_eq!(super::sentences("Hello there. It is 3.5 degrees! Is it? yes"), vec!["Hello there.", "It is 3.5 degrees!", "Is it?", "yes"]);
+        assert!(super::sentences("  ").is_empty());
+    }
 }
