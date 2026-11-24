@@ -117,20 +117,37 @@ impl PromptStyle {
 
     /// The text to tokenize, and whether the tokenizer must add its special tokens.
     pub fn render(&self, prompt: &str, thinking: bool) -> Result<(String, bool), String> {
+        self.render_conversation(&[("user", prompt)], thinking, true)
+    }
+
+    /// A conversation, `(role, text)` in order, framed for the model's answer when `answer`
+    /// (the user's turn last), or as it stands; the same as `render` for one question.
+    pub fn render_conversation(&self, messages: &[(&str, &str)], thinking: bool, answer: bool) -> Result<(String, bool), String> {
         if self.chatml_thinking {
             let think = if thinking { "<think>\n" } else { "<think>\n\n</think>\n\n" };
-            return Ok((format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n{think}"), false));
+            let mut text = String::new();
+            for (role, content) in messages {
+                // An earlier answer keeps the closed reasoning it was written after, so the
+                // cache a conversation keeps still matches the text.
+                let lead = if *role == "assistant" { "<think>\n\n</think>\n\n" } else { "" };
+                text.push_str(&format!("<|im_start|>{role}\n{lead}{content}<|im_end|>\n"));
+            }
+            if answer {
+                text.push_str(&format!("<|im_start|>assistant\n{think}"));
+            }
+            return Ok((text, false));
         }
         let Some(template) = &self.template else {
-            return Ok((prompt.to_string(), true));
+            let joined: Vec<&str> = messages.iter().map(|(_, c)| *c).collect();
+            return Ok((joined.join("\n"), true));
         };
         let mut environment = minijinja::Environment::new();
         environment.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
         environment.add_function("raise_exception", |message: String| -> Result<String, minijinja::Error> { Err(minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, message)) });
         environment.add_function("strftime_now", |_format: String| String::new());
         let context = minijinja::context! {
-            messages => vec![minijinja::context! { role => "user", content => prompt }],
-            add_generation_prompt => true,
+            messages => messages.iter().map(|(role, content)| minijinja::context! { role => *role, content => *content }).collect::<Vec<_>>(),
+            add_generation_prompt => answer,
             enable_thinking => thinking,
             bos_token => self.bos.as_str(),
             eos_token => self.eos.as_str(),

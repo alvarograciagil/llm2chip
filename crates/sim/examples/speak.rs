@@ -1,7 +1,7 @@
 //! Text to speech with OuteTTS 1.0 and DAC: in floating point, or with both in the die's
 //! arithmetic, optionally checked against what `tools/golden/speak.py` wrote.
 //!
-//!     cargo run --release -p sim --example speak -- OUTETTS_DIR DAC_DIR "Text." out.wav [golden.json] [die BITS]
+//!     cargo run --release -p sim --example speak -- OUTETTS_DIR DAC_DIR "Text." out.wav [golden.json] [die BITS] [speaker FILE]
 //!
 //! `die BITS` runs the language model and the decoder in the die's arithmetic with vectors
 //! of BITS bits (20 or more for the decoder: see docs/voice.md).
@@ -20,13 +20,22 @@ fn main() -> Result<(), String> {
         return Err("usage: speak OUTETTS_DIR DAC_DIR \"Text.\" out.wav [golden.json] [die BITS]".into());
     };
     let (tts, dac_dir) = (Path::new(tts), Path::new(dac_dir));
-    let golden: Option<serde_json::Value> = rest.iter().find(|r| r.ends_with(".json")).map(|p| std::fs::read_to_string(p).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))).transpose()?;
+    // The reference is the `.json` that is not a speaker's.
+    let golden: Option<serde_json::Value> = rest.iter().enumerate().find(|(i, r)| r.ends_with(".json") && (*i == 0 || rest[i - 1] != "speaker")).map(|(_, r)| r).map(|p| std::fs::read_to_string(p).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))).transpose()?;
     let die: Option<u32> = rest.iter().position(|r| r == "die").and_then(|i| rest.get(i + 1)).and_then(|b| b.parse().ok());
 
     let vocabulary = SpeechVocabulary::read(tts)?;
     let mut tokenizer = TokenizerTables::from_file(&tts.join("tokenizer.json"), 1024)?;
     tokenizer.set_add_special(false);
-    let prompt = vocabulary.prompt(&tokenizer.encode(text)?);
+    // `speaker FILE` speaks in that voice, as OuteTTS's own profiles do.
+    let speaker = rest.iter().position(|r| r == "speaker").and_then(|i| rest.get(i + 1)).map(|p| sim::speak::Speaker::read(Path::new(p))).transpose()?;
+    let prompt = match &speaker {
+        Some(speaker) => vocabulary.prompt_with(speaker, text, &|t| tokenizer.encode(t))?,
+        None => vocabulary.prompt(&tokenizer.encode(text)?),
+    };
+    if let Ok(out) = std::env::var("PROMPT_IDS") {
+        std::fs::write(out, serde_json::to_string(&prompt).unwrap()).map_err(|e| e.to_string())?;
+    }
     if let Some(golden) = &golden {
         let expected: Vec<u32> = serde_json::from_value(golden["prompt"].clone()).map_err(|e| e.to_string())?;
         println!("prompt: {} tokens, {}", prompt.len(), if prompt == expected { "as Transformers'" } else { "NOT as Transformers'" });

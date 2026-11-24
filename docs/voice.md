@@ -100,11 +100,13 @@ Two new operations go with it, microcode only: `Sin` (any argument, in radians) 
 
 | Vectors | Difference below the signal | What Moonshine hears in it |
 |---|---|---|
-| 16 bits | −4.7 dB (as loud as the speech) | "Hello, I am a chiff." |
+| 16 bits | 20.2 dB | "Hello, I am a chiff." |
 | 20 bits | 27.0 dB | "Hello, I am a chip." |
 | 24 bits | 32.2 dB (the 12-bit tables' limit) | "Hello, I am a chip." |
 
-A die that speaks needs vectors of 20 bits or more; one that listens does well with 16.
+A die that speaks needs vectors of 20 bits or more; one that listens does well with 16. Where the 16-bit die loses is not one place: in floating point with only Snake's argument taken as the die takes it, the sound stays 72.6 dB below the signal, and with every row held in the die's format (one exponent per row, 16-bit mantissas) 70.7 dB (`Dac::sine_bits`, `Dac::row_bits`, `--example dac_check`); a wider accumulator changes nothing. It builds up over the decoder's 29 Snakes and convolutions. (A first measurement gave −4.7 dB at 16 bits: the stores were reserved for as many rows as the token's range, and the decoder's addresses overran the index; see "Stores of rows" below.)
+
+**Stores of rows** take only their own rows of vector memory: a routine over rows takes the row as its token, and a store's register was reserved for as many rows as the token can reach (the vocabulary's, the longest map's). Held to its own size, Moonshine-tiny's die went from 88 to 45 mm² and DAC's from 224 to 90, with every program over rows (vision, MAGVIT-v2, Show-o, Moonshine, DAC) giving the same results in gates and the language models' dies unchanged.
 
 ## Several programs on several dies
 
@@ -171,6 +173,16 @@ Two simplifications: a shared die's cell memories are added as each stage's were
 
 The speech dies are routines over rows: each unit of a die keeps its own copy of the maps. Splitting them among the units would need writes only the owning unit makes and reads from a unit chosen as it runs, new datapaths across units, and would not make the products faster, since they run in the cells; so the planner weighs the copies against the speed instead.
 
+## Speaking more naturally
+
+- **Sampling.** OuteTTS draws its tokens as its authors recommend: temperature 0.4, top-k 40, top-p 0.9, min-p 0.05, after a repetition penalty of 1.1 over the last 64 tokens (`speak::Sampling::outetts`, from a seed). Greedy stays for comparisons with Transformers, which it matches token for token.
+- **A voice profile.** OuteTTS speaks more steadily in a given voice: its prompt starts with a sentence said in that voice, word by word with its duration, loudness, brightness, pitch and codes (`SpeechVocabulary::prompt_with`; the profile is `en-female-1-neutral.json` from OuteTTS's package, kept in the model's `speakers/`). The prompt is OuteTTS's to the token: 1,840 tokens for "Hello, I am a chip.", the same as Transformers' tokenizer gives. It costs those tokens before each sentence: the planner counts them, and with the profile no system gives the first sound within 500 ms; within 1,500 ms it chooses three dies and 720 mm², and puts the recogniser with the speech writer instead (first sound in 1,310 ms).
+- **A conversation.** The language model keeps its cache between questions (`voice::Conversation`): on top of it goes what the chat template writes after the last answer (its end) and the new question, so each question costs only its own tokens. With Qwen3-0.6B, "What is the capital of France?" and then "And of Italy?" gives "The capital of Italy is Rome." from the cache, and the scores after it are those of the whole conversation fed from the start (`crates/sim/tests/conversation.rs`). A template that does not write the last answer as it was makes it start again from the whole conversation.
+
+## In the application
+
+The Voice view records a question with the microphone or opens a recording, runs the turn in the engine with every stage in floating point or in the die's arithmetic, and plays the answer; the conversation goes on until "New conversation". Its panel plans the chip (`/api/voice/plan`): the first sound's limit, the longest question and the most silicon, and it shows the dies chosen and every grouping weighed, with why. The project wizard's "A voice assistant" leads there. The Models list says which folders listen, speak and make the sound.
+
 ## The demo
 
 ```bash
@@ -211,5 +223,5 @@ Before voice, `Program` had two fields named after images: `image` (Janus's head
 | 9 | OuteTTS with the real weights | Done: in floating point the same prompt and the same 317 tokens as Transformers for "Hello, I am a chip.", scores within 0.0005 %; in the die's arithmetic with 20-bit vectors the first 91 tokens match, and the sound the die's DAC makes of them is heard as the same sentence (`--example speak`) |
 | 10 | The demo: a question spoken in, the answer spoken out | Done in floating point and in the die's arithmetic (`--example talk`, below) |
 | 11 | The system planned: which stages share a die, at which shape, and the time to the first sound | Done (`sim::system::plan`, `sim::voice_plan`, `--example voice_system`, above) |
-| 12 | Voice in the application | Done: a Voice view records a question with the microphone (or opens a recording), runs the turn in the engine (`/api/voice`) in floating point or in the die's arithmetic, and plays the answer; the Models list says which folders listen, speak and make the sound |
-| 13 | Voice in the optimiser and the project assistant | Not done: the optimiser and the assistant still design one model's dies; a voice system is sized from the command line |
+| 12 | Voice in the application | Done: the Voice view (a turn, a conversation, the chip planned) and the project wizard's "A voice assistant" (see above) |
+| 13 | OuteTTS's sampling, a voice profile, a conversation | Done (see "Speaking more naturally") |

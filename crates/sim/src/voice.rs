@@ -8,7 +8,7 @@ use crate::dac::{Dac, DacConfig};
 use crate::moonshine::Moonshine;
 use crate::moonshine_chip::MoonshineChip;
 use crate::prompt::PromptStyle;
-use crate::speak::{write, SpeechVocabulary};
+use crate::speak::{write_sampled, Sampling, Speaker, SpeechVocabulary};
 use crate::tokenizer::TokenizerTables;
 use crate::{Engine, ExactEngine, Numeric, Weights};
 use std::path::Path;
@@ -91,6 +91,86 @@ pub fn answer(dir: &Path, question: &str, arithmetic: Arithmetic, limit: usize, 
     Ok(decode(&reply)?.trim().to_string())
 }
 
+/// A spoken conversation with a language model: its cache stays between questions, so
+/// each new one costs only its own tokens. What is fed on top of the cache is what the chat
+/// template writes after the last answer's text: its end and the new turn. A template that
+/// does not write the last answer as it was makes it start again from the whole conversation.
+pub struct Conversation {
+    model: Model,
+    style: PromptStyle,
+    messages: Vec<(String, String)>,
+    /// Every token the cache holds.
+    tokens: Vec<u32>,
+    pub arithmetic: Arithmetic,
+    pub dir: std::path::PathBuf,
+    /// Times the conversation had to start again from the whole text.
+    pub replayed: usize,
+}
+
+impl Conversation {
+    pub fn new(dir: &Path, arithmetic: Arithmetic, token_id: &dyn Fn(&str) -> Option<u32>) -> Result<Self, String> {
+        let family = compiler::compile_model(&std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?)?.family;
+        let style = PromptStyle::read(&family, |name| std::fs::read_to_string(dir.join(name)).ok(), token_id);
+        Ok(Self { model: Model::open(dir, arithmetic)?, style, messages: Vec::new(), tokens: Vec::new(), arithmetic, dir: dir.to_path_buf(), replayed: 0 })
+    }
+
+    /// Questions asked so far.
+    pub fn turns(&self) -> usize {
+        self.messages.len() / 2
+    }
+
+    /// Every token the cache holds, in order.
+    pub fn tokens(&self) -> &[u32] {
+        &self.tokens
+    }
+
+    /// The answer to `question` in one short sentence, without reasoning, greedily, at most
+    /// `limit` tokens, after every earlier question and answer; with the next token's scores.
+    pub fn ask(&mut self, question: &str, limit: usize, encode: &Encode, decode: &Decode) -> Result<(String, Vec<f32>), String> {
+        let earlier: Vec<(&str, &str)> = self.messages.iter().map(|(r, c)| (r.as_str(), c.as_str())).collect();
+        let asked = format!("{question}\nAnswer in one short sentence.");
+        let mut messages = earlier.clone();
+        messages.push(("user", &asked));
+        let (framed, add) = self.style.render_conversation(&messages, false, true)?;
+        // On top of the cache: what the template writes after the last answer's text, before
+        // the new question (the answer's end), and the new turn itself. Templates may write
+        // earlier turns otherwise than they wrote them last time (Qwen3 drops an answer's
+        // empty reasoning once a question follows), so only the new framing is read.
+        let on_top = match earlier.last() {
+            Some((_, last)) if !self.tokens.is_empty() && !last.is_empty() => framed.rfind(asked.as_str()).and_then(|question| framed[..question].rfind(last)).map(|at| framed[at + last.len()..].to_string()),
+            _ => None,
+        };
+        let new = match on_top {
+            Some(rest) => encode(&rest, false)?,
+            None => {
+                self.replayed += usize::from(!self.tokens.is_empty());
+                self.model.reset();
+                self.tokens.clear();
+                encode(&framed, add)?
+            }
+        };
+        let mut logits = Vec::new();
+        for token in &new {
+            logits = self.model.step(*token)?;
+        }
+        self.tokens.extend(&new);
+        let mut reply = Vec::new();
+        for _ in 0..limit {
+            let next = crate::moonshine::argmax(&logits);
+            if self.style.stop.contains(&next) {
+                break;
+            }
+            reply.push(next);
+            logits = self.model.step(next)?;
+        }
+        self.tokens.extend(&reply);
+        let said = decode(&reply)?.trim().to_string();
+        self.messages.push(("user".into(), asked));
+        self.messages.push(("assistant".into(), said.clone()));
+        Ok((said, logits))
+    }
+}
+
 /// The sentences of `text`, each with its closing mark: what the speech writer takes one at
 /// a time, so the first can sound while the next is written.
 pub fn sentences(text: &str) -> Vec<String> {
@@ -115,10 +195,19 @@ pub fn sentences(text: &str) -> Vec<String> {
 /// this plus a frame's reach on both sides (see `DacConfig::windows`).
 pub const CHUNK_FRAMES: usize = 16;
 
-/// `text` said by OuteTTS, in `tts`, and DAC, in `dac`, a sentence at a time; on the die,
-/// the decoder takes a window of frames at a time. The sound, and how many tokens OuteTTS
-/// wrote for it.
-pub fn speak(tts: &Path, dac: &Path, text: &str, arithmetic: Arithmetic) -> Result<(Clip, usize), String> {
+/// The voice OuteTTS imitates, if its folder keeps one: the first profile in `speakers/`.
+pub fn speaker_of(tts: &Path) -> Result<Option<Speaker>, String> {
+    let Ok(entries) = std::fs::read_dir(tts.join("speakers")) else { return Ok(None) };
+    let mut profiles: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
+    profiles.sort();
+    profiles.first().map(|p| Speaker::read(p)).transpose()
+}
+
+/// `text` said by OuteTTS, in `tts`, and DAC, in `dac`, a sentence at a time, each token
+/// chosen by `sampling`, in `speaker`'s voice if given (its sentence and codes go before
+/// each sentence's: about 1,800 tokens more to read); on the die, the decoder takes a window
+/// of frames at a time. The sound, and how many tokens OuteTTS wrote for it.
+pub fn speak(tts: &Path, dac: &Path, text: &str, arithmetic: Arithmetic, sampling: Sampling, speaker: Option<&Speaker>) -> Result<(Clip, usize), String> {
     let vocabulary = SpeechVocabulary::read(tts)?;
     let mut tokenizer = TokenizerTables::from_file(&tts.join("tokenizer.json"), 1024)?;
     tokenizer.set_add_special(false);
@@ -131,8 +220,11 @@ pub fn speak(tts: &Path, dac: &Path, text: &str, arithmetic: Arithmetic) -> Resu
     let (mut samples, mut tokens) = (Vec::new(), 0);
     for sentence in sentences(text) {
         writer.reset();
-        let prompt = vocabulary.prompt(&tokenizer.encode(&sentence)?);
-        let written = write(&vocabulary, &prompt, 1500, &mut |token| writer.step(token))?;
+        let prompt = match speaker {
+            Some(speaker) => vocabulary.prompt_with(speaker, &sentence, &|t| tokenizer.encode(t))?,
+            None => vocabulary.prompt(&tokenizer.encode(&sentence)?),
+        };
+        let written = write_sampled(&vocabulary, &prompt, 1500, sampling, &mut |token| writer.step(token))?;
         tokens += written.len();
         let codes = vocabulary.codes(&written);
         if codes[0].is_empty() {

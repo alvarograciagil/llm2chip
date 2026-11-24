@@ -1,7 +1,7 @@
 import type { ChipParams, Report } from "../engine";
 
 /** Where a new project starts from. */
-export type Start = "fpga" | "chip" | "model" | "custom";
+export type Start = "fpga" | "chip" | "model" | "custom" | "voice";
 
 /** An FPGA board the chip can be tried on, as the engine describes it. */
 export interface FpgaBoard {

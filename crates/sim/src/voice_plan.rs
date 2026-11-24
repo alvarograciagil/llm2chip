@@ -42,11 +42,14 @@ pub struct VoiceAsk {
     pub shapes: Vec<(u32, u32, u32)>,
     /// The frames the decoder may keep from each window.
     pub chunks: Vec<usize>,
+    /// The speech writer reads its speaker's profile before each sentence.
+    #[serde(default)]
+    pub speaker: bool,
 }
 
 impl Default for VoiceAsk {
     fn default() -> Self {
-        Self { seconds: 3.0, words: 12, first_sound_seconds: 0.5, area_mm2: f64::INFINITY, shapes: vec![(0, 6, 11), (0, 6, 13), (4, 6, 11), (4, 6, 13), (4, 6, 16)], chunks: vec![16, 32, 64] }
+        Self { seconds: 3.0, words: 12, first_sound_seconds: 0.5, area_mm2: f64::INFINITY, shapes: vec![(0, 6, 11), (0, 6, 13), (4, 6, 11), (4, 6, 13), (4, 6, 16)], chunks: vec![16, 32, 64], speaker: false }
     }
 }
 
@@ -68,9 +71,12 @@ fn weights(dir: &Path, group: u32) -> Result<Weights, String> {
     Ok(Weights::open(dir)?.with_format(Some(format)))
 }
 
+/// A language model on one die of `shape`, after a prompt of `prompt` tokens, with a
+/// context long enough for it and its answer.
 fn language_model(dir: &Path, costs: &Costs, shape: (u32, u32, u32), prompt: u32, needs: u32) -> Result<Fit, String> {
+    let context = (prompt + 512).next_power_of_two().max(1024);
     let program = compiler::compile_model(&std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?)?;
-    let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: vec![1], clock_hz: CLOCK, process: N6, context: 1024, lane_bits: shape.1..=shape.1, cluster_bits: shape.0..=shape.0, cell_bits: shape.2..=shape.2, sharing: vec![Sharing::Layers] };
+    let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: vec![1], clock_hz: CLOCK, process: N6, context, lane_bits: shape.1..=shape.1, cluster_bits: shape.0..=shape.0, cell_bits: shape.2..=shape.2, sharing: vec![Sharing::Layers] };
     let c = measure(&program, &weights(dir, 64)?, reference_die(8), costs, &target, Sharing::Layers, (1, shape.0, shape.1, shape.2))?;
     Ok(Fit { shape, dies: c.chips, parts_mm2: c.parts_mm2, clock_hz: c.clock_hz, first_cycles: (c.prompt_seconds * c.clock_hz).round() as u64, output_cycles: c.cycles, needs, variant: String::new() })
 }
@@ -88,6 +94,16 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
     let context = lengths.sample_rows.max(listen_config.max_tokens).next_power_of_two();
     let sound_config = DacConfig::read(&models.sound)?;
     let question_tokens = (ask.seconds * TOKENS_PER_SECOND_SPOKEN).ceil() as u32;
+    // The writer's prompt: a sentence's, and the profile's sentence and codes before it.
+    let writer_prompt = match crate::voice::speaker_of(&models.speak)?.filter(|_| ask.speaker) {
+        Some(speaker) => {
+            let vocabulary = crate::speak::SpeechVocabulary::read(&models.speak)?;
+            let mut tokenizer = crate::tokenizer::TokenizerTables::from_file(&models.speak.join("tokenizer.json"), 4096)?;
+            tokenizer.set_add_special(false);
+            vocabulary.prompt_with(&speaker, "A sentence of about twelve words, as the answer's first.", &|t| tokenizer.encode(t))?.len() as u32
+        }
+        None => 40,
+    };
     let mut listen = Vec::new();
     let mut think = Vec::new();
     let mut speak = Vec::new();
@@ -109,7 +125,7 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
             think.push(fit);
         }
         progress(format!("OuteTTS on {name}"));
-        if let Ok(fit) = language_model(&models.speak, &costs, shape, 40, ask.words) {
+        if let Ok(fit) = language_model(&models.speak, &costs, shape, writer_prompt, ask.words) {
             speak.push(fit);
         }
         for &chunk in &ask.chunks {
@@ -147,4 +163,21 @@ pub fn plan_voice(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn FnMut
     let limits = Limits { reticle_mm2: N6.reticle_mm2, first_output_seconds: ask.first_sound_seconds, area_mm2: ask.area_mm2 };
     let (best, weighed) = plan(&stages, &AT_ONCE, limits);
     Ok((best, weighed, stages))
+}
+
+/// `plan_voice`, kept in `dir` for the same models, question and engine: measuring every
+/// stage on every shape takes a minute or two.
+pub fn plan_voice_cached(dir: &Path, models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn FnMut(String)) -> Result<Planned, String> {
+    let key = serde_json::to_string(&(models, ask)).map_err(|e| e.to_string())?;
+    let path = crate::optimize::cache_path(dir, &format!("voice plan {key}"));
+    if let Some(planned) = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Planned>(&text).ok()) {
+        return Ok(planned);
+    }
+    let planned = plan_voice(models, ask, progress)?;
+    if std::fs::create_dir_all(dir).is_ok() {
+        if let Ok(text) = serde_json::to_string(&planned) {
+            let _ = std::fs::write(&path, text);
+        }
+    }
+    Ok(planned)
 }

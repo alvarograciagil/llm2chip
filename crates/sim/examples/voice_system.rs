@@ -3,7 +3,7 @@
 //! microprograms, with the optimiser's counts in N6, and the planner choosing which share a
 //! die and at which shape, for the least silicon that gives the first sound in time.
 //!
-//!     cargo run --release -p sim --example voice_system -- MOONSHINE LLM OUTETTS DAC [FIRST_SOUND_MS] [SECONDS] [WORDS]
+//!     cargo run --release -p sim --example voice_system -- MOONSHINE LLM OUTETTS DAC [FIRST_SOUND_MS] [SECONDS] [WORDS] [voice]
 //!
 //! `FIRST_SOUND_MS` is the longest wait from the end of the question to the first sound
 //! (500), `SECONDS` the longest question (3) and `WORDS` the tokens of the answer's first
@@ -18,9 +18,12 @@ fn main() -> Result<(), String> {
         return Err("usage: voice_system MOONSHINE LLM OUTETTS DAC [FIRST_SOUND_MS] [SECONDS] [WORDS]".into());
     };
     let models = VoiceModels { listen: PathBuf::from(listen), think: PathBuf::from(think), speak: PathBuf::from(speak), sound: PathBuf::from(sound) };
-    let number = |i: usize| rest.get(i).and_then(|s| s.parse::<f64>().ok());
     let defaults = VoiceAsk::default();
-    let ask = VoiceAsk { first_sound_seconds: number(0).map_or(defaults.first_sound_seconds, |ms| ms / 1e3), seconds: number(1).unwrap_or(defaults.seconds), words: number(2).map_or(defaults.words, |w| w as u32), ..defaults };
+    // `voice` among the arguments: the writer reads its speaker's profile before each sentence.
+    let speaker = rest.iter().any(|r| r == "voice");
+    let rest: Vec<&String> = rest.iter().filter(|r| *r != "voice").collect();
+    let number = |i: usize| rest.get(i).and_then(|s| s.parse::<f64>().ok());
+    let ask = VoiceAsk { first_sound_seconds: number(0).map_or(defaults.first_sound_seconds, |ms| ms / 1e3), seconds: number(1).unwrap_or(defaults.seconds), words: number(2).map_or(defaults.words, |w| w as u32), speaker, ..defaults };
     let (best, weighed, stages) = plan_voice(&models, &ask, &mut |what| eprintln!("measuring {what}"))?;
     let shape = |s: (u32, u32, u32)| format!("{} × {}, {} cells", 1u32 << s.0, 1u32 << s.1, 1u64 << s.2);
     println!("groupings weighed:");

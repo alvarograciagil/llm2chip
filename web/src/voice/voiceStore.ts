@@ -21,6 +21,29 @@ export interface VoiceResult {
   bits?: number | null;
 }
 
+/** A die of the planned system: the stages on it and its shape. */
+export interface PlannedDie {
+  stages: string[];
+  count: number;
+  units: number;
+  lanes: number;
+  cells: number;
+  mm2: number;
+  parts_mm2: [number, number, number, number];
+  clock_mhz: number;
+}
+
+/** What the planner chose, and every grouping it weighed. */
+export interface SystemPlan {
+  plan: {
+    area_mm2: number;
+    first_sound_ms: number;
+    dies: PlannedDie[];
+    stages: { name: string; first_ms: number; per_second: number; variant: string }[];
+  } | null;
+  weighed: { groups: string[][]; area_mm2: number | null; first_sound_ms: number | null; reason: string | null }[];
+}
+
 /** Where the stages run: floating point, or the die's arithmetic with vectors of so many bits. */
 export type Arithmetic = "float" | "16" | "20" | "24";
 
@@ -39,7 +62,23 @@ interface VoiceState {
   phase: string;
   result: VoiceResult | null;
   error: string | null;
+  /** The conversation's earlier turns, and whether the next question starts a new one. */
+  history: { heard: string; answer: string }[];
+  fresh: boolean;
+  /** Speak in the voice of the profile kept with OuteTTS. */
+  speaker: boolean;
+  /** The system's planning: what it must meet, what it is doing and what it chose. */
+  firstSoundMs: number;
+  questionSeconds: number;
+  areaMm2: string;
+  planning: boolean;
+  planDoing: string;
+  plan: SystemPlan | null;
+  planError: string | null;
+  /** Plan the chip as soon as the models are known: the project wizard asks for it. */
+  planOnOpen: boolean;
   set: (partial: Partial<VoiceState>) => void;
+  startPlan: () => Promise<void>;
   connect: () => Promise<void>;
   record: () => Promise<void>;
   stop: () => void;
@@ -91,6 +130,7 @@ export async function toQuestion(data: ArrayBuffer): Promise<{ wav: string; seco
 
 let recorder: MediaRecorder | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
+let planTimer: ReturnType<typeof setInterval> | null = null;
 
 /** The first model of the role the stage has, keeping the one chosen if it still is there. */
 function pick(models: ServerModel[], chosen: string, keep: (m: ServerModel) => boolean) {
@@ -111,7 +151,45 @@ export const useVoice = create<VoiceState>((set, get) => ({
   phase: "",
   result: null,
   error: null,
+  history: [],
+  fresh: true,
+  speaker: true,
+  firstSoundMs: 500,
+  questionSeconds: 3,
+  areaMm2: "",
+  planning: false,
+  planDoing: "",
+  plan: null,
+  planError: null,
+  planOnOpen: false,
   set: (partial) => set(partial),
+
+  startPlan: async () => {
+    const { listen, think, speak, sound, firstSoundMs, questionSeconds, areaMm2, speaker } = get();
+    set({ planning: true, planError: null, plan: null, planDoing: "" });
+    const body = { listen, think, speak, sound, first_sound_ms: firstSoundMs, seconds: questionSeconds, area_mm2: areaMm2.trim() ? Number(areaMm2) : null, speaker };
+    const response = await fetch("/api/voice/plan", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    if (!response.ok) {
+      set({ planning: false, planError: await response.text() });
+      return;
+    }
+    if (planTimer) clearInterval(planTimer);
+    planTimer = setInterval(async () => {
+      try {
+        const status = await (await fetch("/api/voice/plan")).json();
+        if (status.state === "running") {
+          set({ planDoing: status.doing });
+          return;
+        }
+        if (planTimer) clearInterval(planTimer);
+        planTimer = null;
+        if (status.state === "done") set({ planning: false, plan: status.result });
+        else set({ planning: false, planError: status.error ?? null });
+      } catch {
+        set({ online: false });
+      }
+    }, 1000);
+  },
 
   connect: async () => {
     try {
@@ -153,10 +231,12 @@ export const useVoice = create<VoiceState>((set, get) => ({
   open: async (file) => set({ question: await toQuestion(await file.arrayBuffer()), error: null }),
 
   start: async () => {
-    const { question, listen, think, speak, sound, arithmetic } = get();
+    const { question, listen, think, speak, sound, arithmetic, fresh, result, speaker } = get();
     if (!question) return;
-    set({ running: true, error: null, result: null, phase: "listening" });
-    const body = { wav: question.wav, listen, think, speak, sound, bits: arithmetic === "float" ? null : Number(arithmetic) };
+    // The last turn joins the conversation's history before the next is asked.
+    const last = !fresh && result?.heard?.text && result.answer?.text ? [{ heard: result.heard.text, answer: result.answer.text }] : [];
+    set({ running: true, error: null, result: null, phase: "listening", history: fresh ? [] : [...get().history, ...last] });
+    const body = { wav: question.wav, listen, think, speak, sound, bits: arithmetic === "float" ? null : Number(arithmetic), fresh, speaker };
     const response = await fetch("/api/voice", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     if (!response.ok) {
       set({ running: false, error: await response.text() });
@@ -177,7 +257,7 @@ function poll(set: (partial: Partial<VoiceState>) => void) {
       }
       if (timer) clearInterval(timer);
       timer = null;
-      if (status.state === "done") set({ running: false, result: status.result });
+      if (status.state === "done") set({ running: false, result: status.result, fresh: false });
       else if (status.state === "error") set({ running: false, error: status.error, result: status.partial });
       else set({ running: false });
     } catch {

@@ -6,6 +6,7 @@ import { useDesign } from "../store";
 import { Segmented } from "../components/controls";
 import { useT } from "../i18n";
 import { useOptimize } from "../optimize/optimizeStore";
+import { useVoice } from "../voice/voiceStore";
 import { buildable, chipParams, DEFAULT_ANSWERS, fpgaParams, makers, metric, modelParams, suggested, type Answers, type FpgaBoard, type Start } from "./plan";
 
 const STARTS: { id: Start; title: string; text: string }[] = [
@@ -13,15 +14,17 @@ const STARTS: { id: Start; title: string; text: string }[] = [
   { id: "chip", title: "A single chip", text: "Everything on one die: choose the process, the area and the speed, and see which models fit." },
   { id: "model", title: "A model", text: "Choose the LLM; the number of chips and how they share it follow from the speed you ask for." },
   { id: "custom", title: "Custom", text: "The default parameters with the model you choose, to tune everything yourself." },
+  { id: "voice", title: "A voice assistant", text: "A chip that listens, answers and speaks: which stages share a die, how much silicon, and how soon the answer sounds." },
 ];
 
-type Step = "start" | "board" | "questions" | "model" | "name";
+type Step = "start" | "board" | "questions" | "model" | "name" | "voice";
 
 const STEPS: Record<Start, Step[]> = {
   fpga: ["start", "board", "questions", "model", "name"],
   chip: ["start", "questions", "model", "name"],
   model: ["start", "model", "questions", "name"],
   custom: ["start", "model", "name"],
+  voice: ["start", "voice"],
 };
 
 const STEP_TITLES: Record<Step, string> = {
@@ -30,6 +33,7 @@ const STEP_TITLES: Record<Step, string> = {
   questions: "A few questions",
   model: "Which model?",
   name: "Summary",
+  voice: "A chip that listens, answers and speaks",
 };
 
 interface Row {
@@ -335,6 +339,32 @@ function Summary({ report, model, board }: { report: Report | null; model: Model
   );
 }
 
+/** What a voice chip is planned for: how soon the answer must sound and how long a question
+ * can be. The Voice view measures the stages and plans the dies. */
+function VoiceQuestions() {
+  const t = useT();
+  const v = useVoice();
+  return (
+    <div className="wizard-questions">
+      <p>{t("It is planned in the Voice view, with the models on your computer: Moonshine listens, a language model answers, OuteTTS and DAC speak. Each stage is measured on several shapes of die, and stages that never run at once can share one when that saves silicon.")}</p>
+      <label>
+        {t("First sound within")}
+        <span className="opt-amount">
+          <input type="number" min={100} step={50} value={v.firstSoundMs} onChange={(e) => v.set({ firstSoundMs: Number(e.target.value) })} />
+          <span className="muted-text">ms</span>
+        </span>
+      </label>
+      <label>
+        {t("Longest question")}
+        <span className="opt-amount">
+          <input type="number" min={1} max={30} step={1} value={v.questionSeconds} onChange={(e) => v.set({ questionSeconds: Number(e.target.value) })} />
+          <span className="muted-text">s</span>
+        </span>
+      </label>
+    </div>
+  );
+}
+
 export function ProjectWizard({ onClose }: { onClose: () => void }) {
   const t = useT();
   const models = useDesign((s) => s.models);
@@ -427,6 +457,7 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
               ))}
             </div>
           )}
+          {current === "voice" && <VoiceQuestions />}
           {current === "board" && <BoardPicker board={answers.board} choose={(board) => set({ board })} />}
           {current === "questions" && <Questions answers={answers} set={set} />}
           {busy && <p className="wizard-empty">{t("Estimating each design…")}</p>}
@@ -445,7 +476,18 @@ export function ProjectWizard({ onClose }: { onClose: () => void }) {
           <button onClick={onClose}>{t("Cancel")}</button>
           <span />
           {step > 0 && <button onClick={() => setStep(step - 1)}>{t("Back")}</button>}
-          {current === "name" ? (
+          {current === "voice" ? (
+            <button
+              className="primary"
+              onClick={() => {
+                useVoice.getState().set({ planOnOpen: true });
+                setView("voice");
+                onClose();
+              }}
+            >
+              {t("Plan the chip")}
+            </button>
+          ) : current === "name" ? (
             <>
               {answers.start !== "fpga" && (
                 <button disabled={!model} onClick={optimise} title={t("Create the project and search for the best set of chips, measured on the generated circuits")}>

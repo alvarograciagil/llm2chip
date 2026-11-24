@@ -3,12 +3,13 @@
 //! model of the catalogue), and text to speech (OuteTTS and DAC). Only text passes from
 //! one stage to the next.
 //!
-//!     cargo run --release -p sim --example talk -- MOONSHINE LLM OUTETTS DAC question.wav answer.wav [die BITS]
+//!     cargo run --release -p sim --example talk -- MOONSHINE LLM OUTETTS DAC question.wav answer.wav [die BITS] [sample SEED] [voice]
 //!
 //! With `die BITS` every stage runs in the die's arithmetic with vectors of BITS bits (20
 //! or more for the speech decoder: see docs/voice.md); without it, in floating point.
 
 use sim::audio::Clip;
+use sim::speak::Sampling;
 use sim::voice::{answer, listen, speak, Arithmetic};
 use std::path::Path;
 use std::time::Instant;
@@ -42,7 +43,11 @@ fn main() -> Result<(), String> {
     println!("2. answered ({:.1} s): “{said}”", started.elapsed().as_secs_f32());
 
     let started = Instant::now();
-    let (sound, tokens) = speak(tts, dac, &said, arithmetic)?;
+    // Greedy, so the same question gives the same speech; `sample SEED` draws as OuteTTS does.
+    let sampling = rest.iter().position(|r| r == "sample").and_then(|i| rest.get(i + 1)).and_then(|s| s.parse().ok()).map_or(Sampling::Greedy, Sampling::outetts);
+    // `voice` speaks in the voice of the profile kept in OuteTTS's `speakers/`.
+    let speaker = if rest.iter().any(|r| r == "voice") { sim::voice::speaker_of(tts)? } else { None };
+    let (sound, tokens) = speak(tts, dac, &said, arithmetic, sampling, speaker.as_ref())?;
     sound.write(Path::new(out))?;
     println!("3. spoke ({tokens} tokens, {:.2} s of sound, {:.1} s) to {out}", sound.samples.len() as f32 / sound.rate as f32, started.elapsed().as_secs_f32());
     Ok(())

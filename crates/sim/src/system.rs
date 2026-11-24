@@ -14,10 +14,10 @@
 //! the first sentence for a synthesiser.
 
 use crate::sizing::Candidate;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A program on dies of its own, and what it costs.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Stage {
     pub name: String,
     pub dies: u32,
@@ -56,7 +56,7 @@ impl Stage {
 }
 
 /// Stages in a chain, each fed by the one before.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct System {
     pub stages: Vec<Stage>,
 }
@@ -94,7 +94,7 @@ impl System {
 /// What a stage costs on a die of one shape: what its silicon goes to (logic, the cells'
 /// memories, the vector memories and the microcode, in mm²), how many such dies it takes,
 /// and its timing there.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Fit {
     /// `(log2 units, log2 lanes, log2 cells)`, and how many dies of it the stage takes.
     pub shape: (u32, u32, u32),
@@ -111,7 +111,7 @@ pub struct Fit {
 
 /// A stage as the planner sees it: what it costs on each shape and way of running it
 /// tried, and how many outputs a second it must keep up with.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StagePlan {
     pub name: String,
     pub fits: Vec<Fit>,
@@ -120,7 +120,7 @@ pub struct StagePlan {
 }
 
 /// What a plan must meet.
-#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Limits {
     /// The largest die the process exposes, mm².
     pub reticle_mm2: f64,
@@ -131,7 +131,7 @@ pub struct Limits {
 }
 
 /// Stages on one die, at one shape.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Die {
     pub stages: Vec<usize>,
     pub shape: (u32, u32, u32),
@@ -148,7 +148,7 @@ impl Die {
 }
 
 /// A system's dies and how it does.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Plan {
     pub dies: Vec<Die>,
     pub area_mm2: f64,
@@ -159,7 +159,7 @@ pub struct Plan {
 }
 
 /// A grouping that was weighed, and why it was or was not chosen.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Weighed {
     pub groups: Vec<Vec<usize>>,
     pub best: Option<Plan>,

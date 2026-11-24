@@ -4315,3 +4315,10 @@ a.pill:not(.primary-pill) {
 .voice-stage audio {
   width: 100%;
 }
+
+.voice-dies {
+  margin: 4px 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 2px;
+}
