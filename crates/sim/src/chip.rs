@@ -126,6 +126,12 @@ impl DieEngine for VmEngine {
     }
 }
 
+/// The control CPU's cycles to start each routine of a schedule and wait for it, beyond the
+/// die's own: the firmware's records, the parameters and the entry, at three cycles an
+/// instruction. Measured at instruction level (`the_firmware_decodes_window_by_window_as_the_host_does`
+/// checks it); a die whose routines are short spends more time here than in them.
+pub const FIRMWARE_CYCLES_PER_ROUTINE: u64 = 1_000;
+
 /// A die whose program is a set of routines, run by the exact machine, as a chip's firmware
 /// drives it: each routine by its number in the microprogram `code`, with whether it rotates.
 pub struct RoutinesDie<'a> {

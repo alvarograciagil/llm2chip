@@ -365,6 +365,9 @@ fn the_firmware_s_schedule_runs_what_the_host_runs() {
             self.input.pop_front().expect("the host has sent everything")
         }
         fn write(&mut self, _: u32, _: u32) {}
+        fn read(&mut self, _: u32) -> u32 {
+            0
+        }
         fn run(&mut self, routine: u32, token: u32, position: u32) {
             self.runs.push((routine, token, position));
         }

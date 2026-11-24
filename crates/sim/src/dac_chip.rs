@@ -27,6 +27,8 @@ use compiler::{Buf, Inst, KvShape, Op, Part, Program, RowPart};
 use netlist::block::exponent_register;
 use netlist::DieConfig;
 use std::ops::Range;
+use crate::chip::RoutinesDie;
+use netlist::schedule::{Record, FIRST_FREE, ZERO};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -289,11 +291,23 @@ impl DacChip {
                 b.op("store", Op::StoreRow { src: result, store: out.buf });
                 Ok(())
             })?;
-            // Output row n reads rows q − 1 and q of the input, q = (n + pad) div s, with the
-            // phase's kernel: a pass of its own per output row, as the phase changes.
-            for n in 0..next {
-                let q = (n + pad) / s;
-                passes.push(Pass { rows: 1, steps: vec![(phases[(n + pad) % s], q - 1 + snaked.border, 0), (store, n + out.border, 0)] });
+            // Output row n = s·q + phase − pad reads rows q − 1 and q of the input with the
+            // phase's kernel. Each q gives a row for each phase that falls in the output, in
+            // order; a run of q's that give all `s` is one pass, the others a pass each.
+            let phases_of = |q: usize| (0..s).filter(|p| (s * q + p).checked_sub(pad).is_some_and(|n| n < next)).collect::<Vec<_>>();
+            let step = |q: usize, p: usize, rows: usize| [(phases[p], q + snaked.border - 1, rows.min(1)), (store, s * q + p - pad + out.border, s * rows.min(1))];
+            let last = (next - 1 + pad) / s;
+            let mut q = 0;
+            while q <= last {
+                let here = phases_of(q);
+                let mut end = q;
+                while here.len() == s && end < last && phases_of(end + 1).len() == s {
+                    end += 1;
+                }
+                let rows = end - q + 1;
+                let repeated = usize::from(here.len() == s && rows > 1);
+                passes.push(Pass { rows, steps: here.iter().flat_map(|p| step(q, *p, repeated)).collect() });
+                q = end + 1;
             }
             (x, width, length) = (out, outputs, next);
             // The residual units: Snake, the dilated convolution, Snake, the 1 × 1 one, plus x.
@@ -438,12 +452,73 @@ impl DacChip {
         self.layout.routines_microprogram(&self.program, &lists)
     }
 
+    /// The schedule its firmware follows to decode a sound by itself, a window of this
+    /// chip's frames at a time, with the microprogram it numbers the routines by: the host
+    /// sends how many windows, and for each its codes, frame by frame and codebook by
+    /// codebook, then the first sample it keeps and how many (see `schedule_input`); the
+    /// chip sends back each sample kept, its mantissa and its exponent.
+    pub fn schedule(&self) -> Result<(netlist::Microprogram, Vec<Record>), String> {
+        let code = self.microprogram()?;
+        let [windows, code_var, from, count] = std::array::from_fn(|i| FIRST_FREE + i as u32);
+        let routine = |r: usize| r as u32;
+        let call = |r: usize, token: (u32, u32, u32)| Record::Call { routine: routine(r), token, position: (0, 0, ZERO) };
+        let repeat = |count: u32, add: u32, body: Vec<Record>| [vec![Record::Repeat { body: body.len() as u32, count, add }], body].concat();
+        // As `calls`, for one window.
+        let mut frame = Vec::new();
+        for r in &self.codes_in {
+            frame.push(Record::Receive { var: code_var });
+            frame.push(call(*r, (0, 0, code_var)));
+        }
+        frame.push(call(self.keep_latent, (1, 3, ZERO)));
+        let mut window = repeat(ZERO, self.frames as u32, frame);
+        for pass in &self.passes {
+            window.extend(repeat(ZERO, pass.rows as u32, pass.steps.iter().map(|(r, first, step)| call(*r, (*step as u32, *first as u32, ZERO))).collect()));
+        }
+        window.push(Record::Receive { var: from });
+        window.push(Record::Receive { var: count });
+        let (ib, register) = (self.layout.config().index_bits, self.output_register());
+        let send = Record::Send { address: register << ib, exponent: self.exponents << ib | register };
+        window.extend(repeat(count, 0, vec![call(self.output.0, (1, (BORDER - 3) as u32, from)), send]));
+        Ok((code, [vec![Record::Receive { var: windows }], repeat(windows, 0, window)].concat()))
+    }
+
+    /// The die as its firmware sees it, run by the exact machine, routines numbered as in
+    /// the microprogram `code`.
+    pub fn die_engine(&mut self, code: netlist::Microprogram) -> RoutinesDie<'_> {
+        self.reset();
+        let lists = self.lists.iter().map(|l| (l.clone(), false)).collect();
+        RoutinesDie::new(&self.layout, &self.program, &mut self.vm, lists, code)
+    }
+
+    /// A sample the chip sends, from its mantissa and exponent.
+    pub fn value(&self, mantissa: i64, exponent: i64) -> f32 {
+        mantissa as f32 * 2f32.powi(exponent as i32 - self.layout.config().cell.activation_bits as i32 + 1)
+    }
+
     /// The die's cycles for `calls`, counted from the microprogram.
     pub fn cycles(&self, calls: &[Call]) -> Result<u64, String> {
         let code = self.microprogram()?;
         let config = self.layout.config();
         Ok(calls.iter().map(|call| code.cycles(&config, call.routine, call.token, 0)).sum())
     }
+}
+
+/// What the host sends a chip of `width` frames that follows `DacChip::schedule` for
+/// `codes[book][frame]` in windows keeping `chunk` frames each.
+pub fn schedule_input(config: &DacConfig, codes: &[Vec<u32>], chunk: usize) -> Vec<u32> {
+    let frames = codes.first().map_or(0, Vec::len);
+    let (hop, width) = (config.hop(), config.window_frames(frames, chunk));
+    let windows = config.windows(frames, chunk);
+    let mut words = vec![windows.len() as u32];
+    for (start, owned) in windows {
+        for frame in start..start + width {
+            words.extend(codes.iter().map(|book| book[frame]));
+        }
+        let from = (owned.start - start) * hop;
+        let to = if owned.end == frames { config.samples(width) } else { (owned.end - start) * hop };
+        words.extend([from as u32, (to - from) as u32]);
+    }
+    words
 }
 
 /// Decodes `codes[book][frame]` a window at a time (`DacConfig::windows`, `chunk` frames

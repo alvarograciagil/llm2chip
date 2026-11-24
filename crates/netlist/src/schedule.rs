@@ -25,6 +25,8 @@
 //!   `start`: for each position, the next `body` records run with the token in `TOKEN` and
 //!   the position in `POSITION`, then the die's logits are sampled; a stop token ends it, and
 //!   any other is sent to the host and becomes the next one.
+//! - `SEND address exponent`: sends the host the die's element at `address` and the exponent
+//!   at `exponent`, each as a word.
 //! - `END`.
 
 /// Words in a record.
@@ -37,6 +39,7 @@ pub const REPEAT: u32 = 4;
 pub const CALL: u32 = 5;
 pub const HALVE: u32 = 6;
 pub const GENERATE: u32 = 7;
+pub const SEND: u32 = 8;
 
 /// Variables: 0 is always zero; the token and position of `GENERATE`; the repeat's index.
 pub const VARIABLES: usize = 16;
@@ -58,6 +61,7 @@ pub enum Record {
     Call { routine: u32, token: (u32, u32, u32), position: (u32, u32, u32) },
     Halve { count: u32, load: u32, second: u32, add: u32 },
     Generate { body: u32, limit: u32, start: u32 },
+    Send { address: u32, exponent: u32 },
     End,
 }
 
@@ -77,6 +81,7 @@ impl Record {
             Record::Call { routine, token, position } => w(CALL, &[routine, token.0, token.1, token.2, position.0, position.1, position.2]),
             Record::Halve { count, load, second, add } => w(HALVE, &[count, load, second, add]),
             Record::Generate { body, limit, start } => w(GENERATE, &[body, limit, start]),
+            Record::Send { address, exponent } => w(SEND, &[address, exponent]),
             Record::End => w(END, &[]),
         }
     }
@@ -92,6 +97,7 @@ impl Record {
             CALL => Record::Call { routine: a(1), token: (a(2), a(3), a(4)), position: (a(5), a(6), a(7)) },
             HALVE => Record::Halve { count: a(1), load: a(2), second: a(3), add: a(4) },
             GENERATE => Record::Generate { body: a(1), limit: a(2), start: a(3) },
+            SEND => Record::Send { address: a(1), exponent: a(2) },
             kind => return Err(format!("no record of kind {kind}")),
         })
     }
@@ -107,6 +113,8 @@ pub trait Driver {
     fn receive(&mut self) -> u32;
     /// Writes one element or exponent of the die's vector memory.
     fn write(&mut self, address: u32, value: u32);
+    /// Reads one, as a signed number of the vectors' width.
+    fn read(&mut self, address: u32) -> u32;
     fn run(&mut self, routine: u32, token: u32, position: u32);
     /// The token the die's logits give, after a routine of `GENERATE`'s body.
     fn sample(&mut self) -> u32;
@@ -183,6 +191,12 @@ pub fn expand(words: &[u32], driver: &mut impl Driver) -> Result<(), String> {
                         count = half;
                     }
                 }
+                Record::Send { address, exponent } => {
+                    for at in [address, exponent] {
+                        let value = driver.read(at);
+                        driver.send(value);
+                    }
+                }
                 Record::Generate { body, limit, start } => {
                     vars[TOKEN as usize] = start;
                     for position in 0..var(vars, limit)? {
@@ -225,6 +239,9 @@ mod tests {
         }
         fn write(&mut self, address: u32, value: u32) {
             self.writes.push((address, value));
+        }
+        fn read(&mut self, address: u32) -> u32 {
+            address + 1
         }
         fn run(&mut self, routine: u32, token: u32, position: u32) {
             self.runs.push((routine, token, position));

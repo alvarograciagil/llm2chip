@@ -253,6 +253,15 @@ fn load_row(row: u32, [source, address, count]: [usize; 3]) {
     }
 }
 
+/// `a · b`, without the multiplier's 33 cycles when `a` is 0 or 1, as most factors are.
+fn times(a: u32, b: u32) -> u32 {
+    match a {
+        0 => 0,
+        1 => b,
+        _ => a.wrapping_mul(b),
+    }
+}
+
 /// Starts one routine of this chip's die, without waiting for it.
 fn start_die(routine: u32, token: u32, position: u32) {
     // Only these routines read a token's row of the table: with Show-o, the image's
@@ -269,7 +278,7 @@ fn start_die(routine: u32, token: u32, position: u32) {
         let at = INFO_PARAMETERS + 7 * p;
         let window = info(at + 6);
         let windowed = if window > 0 { info(at + 4).wrapping_mul((position + 1).min(window)).wrapping_add(info(at + 5).wrapping_mul(position % window)) } else { 0 };
-        let value = info(at + 1).wrapping_mul(token).wrapping_add(info(at + 2).wrapping_mul(position)).wrapping_add(info(at + 3)).wrapping_add(windowed);
+        let value = times(info(at + 1), token).wrapping_add(times(info(at + 2), position)).wrapping_add(info(at + 3)).wrapping_add(windowed);
         peripheral_write(info(at) as usize, value);
     }
     peripheral_write(REG_ENTRY, info(info(INFO_ENTRIES) as usize + routine as usize));
@@ -842,8 +851,8 @@ fn follow(mut at: usize, end: usize, vars: &mut [u32; 16]) -> bool {
             }
             5 => {
                 let i = var(vars, S_INDEX);
-                let token = f(2).wrapping_mul(i).wrapping_add(f(3)).wrapping_add(var(vars, f(4)));
-                let position = f(5).wrapping_mul(i).wrapping_add(f(6)).wrapping_add(var(vars, f(7)));
+                let token = times(f(2), i).wrapping_add(f(3)).wrapping_add(var(vars, f(4)));
+                let position = times(f(5), i).wrapping_add(f(6)).wrapping_add(var(vars, f(7)));
                 run_die(f(1), token, position);
             }
             6 => {
@@ -880,6 +889,10 @@ fn follow(mut at: usize, end: usize, vars: &mut [u32; 16]) -> bool {
                     set(vars, S_TOKEN, token);
                 }
                 at = next + body;
+            }
+            8 => {
+                send_word(die_value(f(1)) as u32);
+                send_word(die_value(f(2)) as u32);
             }
             _ => return false,
         }
