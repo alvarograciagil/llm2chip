@@ -7,6 +7,7 @@ mod optimizer;
 mod trace_job;
 mod prompt;
 mod retouch;
+mod voice_job;
 
 use axum::{
     extract::{ws::{Message, WebSocket}, Query, Request, State, WebSocketUpgrade},
@@ -87,6 +88,7 @@ struct App {
     optimize: Arc<Mutex<Option<Arc<optimizer::OptimizeJob>>>>,
     trace: Arc<Mutex<Option<Arc<trace_job::TraceJob>>>>,
     replay: Arc<Mutex<Option<trace_job::Replayed>>>,
+    voice: Arc<Mutex<Option<Arc<voice_job::VoiceJob>>>>,
     painter: retouch::Painter,
     chip_painter: retouch::ChipPainter,
 }
@@ -381,6 +383,45 @@ async fn layout_start(State(app): State<App>, Json(request): Json<layout::Layout
     *app.layout.lock().unwrap() = Some(job.clone());
     tokio::task::spawn_blocking(move || {
         let outcome = layout::run(&request, &job, &home());
+        *job.outcome.lock().unwrap() = Some(outcome);
+    });
+    StatusCode::ACCEPTED.into_response()
+}
+
+/// What the spoken turn is doing, or what it gave.
+async fn voice_status(State(app): State<App>) -> Response {
+    let job = app.voice.lock().unwrap().clone();
+    let Some(job) = job else { return Json(serde_json::json!({ "state": "idle" })).into_response() };
+    let outcome = job.outcome.lock().unwrap().clone();
+    Json(match outcome {
+        None => serde_json::json!({ "state": "running", "phase": job.phase.lock().unwrap().clone(), "partial": job.partial.lock().unwrap().clone() }),
+        Some(Ok(report)) => serde_json::json!({ "state": "done", "result": report }),
+        Some(Err(message)) => serde_json::json!({ "state": "error", "error": message, "partial": job.partial.lock().unwrap().clone() }),
+    })
+    .into_response()
+}
+
+/// Starts a spoken turn: hear the clip, answer, say the answer. One at a time, and only
+/// with models of the known folders.
+async fn voice_start(State(app): State<App>, Json(start): Json<voice_job::VoiceStart>) -> Response {
+    let running = app.voice.lock().unwrap().as_ref().is_some_and(|job| job.outcome.lock().unwrap().is_none());
+    if running {
+        return refused("a spoken turn is already running".into());
+    }
+    let roles = [(&start.listen, Some("listens")), (&start.think, None), (&start.speak, Some("speaks")), (&start.sound, Some("sounds"))];
+    for (path, role) in roles {
+        let Some(entry) = app.catalog.find(path) else { return refused("a model is not in the known folders".into()) };
+        if role.is_some() && entry.voice != role {
+            return refused(format!("{} does not do that part of a spoken turn", entry.name));
+        }
+        if role.is_none() && !entry.supported {
+            return refused(entry.adaptation.reason.unwrap_or_else(|| "this architecture cannot run yet".into()));
+        }
+    }
+    let job = Arc::new(voice_job::VoiceJob::default());
+    *app.voice.lock().unwrap() = Some(job.clone());
+    tokio::task::spawn_blocking(move || {
+        let outcome = voice_job::run(&start, &job);
         *job.outcome.lock().unwrap() = Some(outcome);
     });
     StatusCode::ACCEPTED.into_response()
@@ -1274,7 +1315,7 @@ fn session_token() -> String {
 
 #[tokio::main]
 async fn main() {
-    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)), layout: Arc::new(Mutex::new(None)), retouch: Arc::new(Mutex::new(None)), optimize: Arc::new(Mutex::new(None)), trace: Arc::new(Mutex::new(None)), replay: Arc::new(Mutex::new(None)), painter: Arc::new(Mutex::new(None)), chip_painter: Arc::new(Mutex::new(None)) };
+    let app = App { token: Arc::new(session_token()), loaded: Arc::new(Mutex::new(None)), dist: dist_directory().map(Arc::new), catalog: Arc::new(Catalog::open(home())), hub: Hub::new(home()), image: Arc::new(Mutex::new(None)), layout: Arc::new(Mutex::new(None)), retouch: Arc::new(Mutex::new(None)), optimize: Arc::new(Mutex::new(None)), trace: Arc::new(Mutex::new(None)), replay: Arc::new(Mutex::new(None)), voice: Arc::new(Mutex::new(None)), painter: Arc::new(Mutex::new(None)), chip_painter: Arc::new(Mutex::new(None)) };
     let routes = Router::new()
         .route("/api/models", get(models))
         .route("/api/status", get(status))
@@ -1290,6 +1331,7 @@ async fn main() {
         .route("/api/image/cancel", post(image_cancel))
         .route("/api/layout", get(layout_status).post(layout_start))
         .route("/api/optimize", get(optimize_status).post(optimize_start))
+        .route("/api/voice", get(voice_status).post(voice_start).layer(axum::extract::DefaultBodyLimit::max(16 << 20)))
         .route("/api/optimize/cancel", post(optimize_cancel))
         .route("/api/trace", get(trace_status).post(trace_start))
         .route("/api/trace/design", post(trace_design))

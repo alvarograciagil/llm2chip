@@ -23,6 +23,7 @@ pub mod system;
 pub mod tokenizer;
 pub mod vision;
 pub mod vision_chip;
+pub mod voice;
 mod requant;
 mod vm;
 mod weights;

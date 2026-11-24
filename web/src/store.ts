@@ -24,7 +24,7 @@ export type Selection =
 
 export type Overlay = "function" | "layer" | "activity" | "energy" | "data" | "density";
 export type SidebarTab = "parameters" | "optimizations";
-export type View = "floorplan" | "logic" | "schematic" | "simulator" | "images" | "explorer" | "optimize" | "models" | "numeric" | "parameters" | "viewer";
+export type View = "floorplan" | "logic" | "schematic" | "simulator" | "images" | "voice" | "explorer" | "optimize" | "models" | "numeric" | "parameters" | "viewer";
 export type Appearance = "auto" | "light" | "dark";
 import { readLanguage, writeLanguage, type Language } from "./i18n";
 import { LINK } from "./link";

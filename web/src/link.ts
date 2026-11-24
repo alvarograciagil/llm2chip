@@ -3,7 +3,7 @@
 // start, because the address then carries the design (`#d=…`).
 import type { View } from "./store";
 
-const VIEWS: View[] = ["floorplan", "logic", "schematic", "simulator", "images", "explorer", "optimize", "models", "numeric", "parameters", "viewer"];
+const VIEWS: View[] = ["floorplan", "logic", "schematic", "simulator", "images", "voice", "explorer", "optimize", "models", "numeric", "parameters", "viewer"];
 
 export interface Link {
   view: View;

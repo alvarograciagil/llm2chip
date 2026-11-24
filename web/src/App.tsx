@@ -8,6 +8,7 @@ import { ColumnResizers } from "./components/ColumnResizer";
 import { CalibrationPanel, ExplorerView } from "./explorer/ExplorerView";
 import { SimulatorPanel, SimulatorView } from "./simulator/SimulatorView";
 import { ImagesPanel, ImagesView } from "./images/ImagesView";
+import { VoicePanel, VoiceView } from "./voice/VoiceView";
 import { SchematicPanel } from "./schematic/SchematicPanel";
 import { SchematicView } from "./schematic/SchematicView";
 import { ModelsPanel, ModelsView } from "./models/ModelsView";
@@ -76,6 +77,8 @@ function Views() {
         {view === "simulator" && <SimulatorPanel />}
         {view === "images" && <ImagesView />}
         {view === "images" && <ImagesPanel />}
+        {view === "voice" && <VoiceView />}
+        {view === "voice" && <VoicePanel />}
         {view === "explorer" && <ExplorerView />}
         {view === "explorer" && <CalibrationPanel />}
         {view === "optimize" && <OptimizeView />}

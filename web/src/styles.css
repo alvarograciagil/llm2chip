@@ -4295,3 +4295,23 @@ a.pill:not(.primary-pill) {
     animation: none;
   }
 }
+
+.voice-stage {
+  display: grid;
+  gap: 4px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--separator);
+}
+
+.voice-stage h3 {
+  margin: 0;
+}
+
+.voice-stage p {
+  margin: 0;
+  font-size: 1.05em;
+}
+
+.voice-stage audio {
+  width: 100%;
+}

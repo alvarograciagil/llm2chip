@@ -134,7 +134,10 @@ Voice adds files; the core only gains general things.
 | DAC: reference and on the die | `crates/sim/src/dac.rs`, `crates/sim/src/dac_chip.rs`, `crates/sim/tests/dac.rs` | Voice |
 | DAC weights to safetensors | `tools/convert/dac.py` | Voice |
 | OuteTTS and DAC in Transformers, and DAC against it | `tools/golden/speak.py`, `crates/sim/examples/dac_check.rs` | Voice |
-| Demo, a WAV in and a WAV out (planned) | `crates/sim/examples/talk.rs` | Voice |
+| A spoken turn's stages, shared by the demo and the engine | `crates/sim/src/voice.rs` | Voice |
+| Demo: a WAV in and a WAV out | `crates/sim/examples/talk.rs` | Voice |
+| The system sized | `crates/sim/examples/voice_system.rs`; `sizing::routines_die` | Voice; general |
+| The engine's job and the application's view | `crates/server/src/voice_job.rs`, `web/src/voice/` | Voice |
 
 ## The system, sized
 
@@ -191,4 +194,5 @@ Before voice, `Program` had two fields named after images: `image` (Janus's head
 | 9 | OuteTTS with the real weights | Done: in floating point the same prompt and the same 317 tokens as Transformers for "Hello, I am a chip.", scores within 0.0005 %; in the die's arithmetic with 20-bit vectors the first 91 tokens match, and the sound the die's DAC makes of them is heard as the same sentence (`--example speak`) |
 | 10 | The demo: a question spoken in, the answer spoken out | Done in floating point and in the die's arithmetic (`--example talk`, below) |
 | 11 | The system sized: dies, silicon and the time to the first sound | Done from the command line (`--example voice_system`, above) |
-| 12 | Voice in the optimiser and the application | Not done |
+| 12 | Voice in the application | Done: a Voice view records a question with the microphone (or opens a recording), runs the turn in the engine (`/api/voice`) in floating point or in the die's arithmetic, and plays the answer; the Models list says which folders listen, speak and make the sound |
+| 13 | Voice in the optimiser and the project assistant | Not done: the optimiser and the assistant still design one model's dies; a voice system is sized from the command line |

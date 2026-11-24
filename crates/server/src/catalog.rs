@@ -64,6 +64,20 @@ pub struct ModelEntry {
     pub config: String,
     pub adaptation: Adaptation,
     pub images: ImageAbility,
+    /// What it does in a spoken turn, if anything: `listens` (Moonshine), `speaks` (OuteTTS,
+    /// a language model that writes speech's codes) or `sounds` (DAC's decoder, converted
+    /// with tools/convert/dac.py).
+    pub voice: Option<&'static str>,
+}
+
+/// What the checkpoint in `dir` does in a spoken turn, from its configuration and files.
+pub fn voice_role(dir: &Path, config: &Value) -> Option<&'static str> {
+    match config.get("model_type").and_then(Value::as_str) {
+        Some("moonshine") => Some("listens"),
+        Some("dac") => Some("sounds"),
+        _ if std::fs::read_to_string(dir.join("added_tokens.json")).is_ok_and(|t| t.contains("<|c1_0|>")) => Some("speaks"),
+        _ => None,
+    }
 }
 
 /// What a model does with images, and whether the simulator can follow it.
@@ -154,7 +168,8 @@ fn describe(dir: &Path, name: String) -> Option<ModelEntry> {
         adaptation.reason = Some("tokenizer.json is missing, which is what turns the text into tokens".into());
     }
     let images = image_ability(dir, &value);
-    Some(ModelEntry { name, path: dir.to_string_lossy().into(), supported: adaptation.simulate, architecture, size_gb: size as f64 / 1e9, config, adaptation, images })
+    let voice = voice_role(dir, &value);
+    Some(ModelEntry { name, path: dir.to_string_lossy().into(), supported: adaptation.simulate, architecture, size_gb: size as f64 / 1e9, config, adaptation, images, voice })
 }
 
 fn folder_name(dir: &Path) -> String {

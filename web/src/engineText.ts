@@ -1039,6 +1039,15 @@ export const ENGINE_TEXT: [string, string][] = [
   ["The design's model, with its arithmetic: {n}-bit integers and weights {s}.", "El modelo del diseño, con su aritmética: enteros de {0} bits y pesos {1}."],
   ["{s}: type {s} is not supported", "{0}: tipo {1} no soportado"],
   ["invalid request", "petición inválida"],
+  ["a spoken turn is already running", "ya hay un turno hablado en marcha"],
+  ["a model is not in the known folders", "un modelo no está en las carpetas conocidas"],
+  ["{s} does not do that part of a spoken turn", "{0} no hace esa parte de un turno hablado"],
+  ["the clip is too short", "la grabación es demasiado corta"],
+  ["the clip is longer than 30 seconds", "la grabación dura más de 30 segundos"],
+  ["nothing was heard in the clip", "no se oyó nada en la grabación"],
+  ["the speech model wrote no sound", "el modelo de voz no escribió ningún sonido"],
+  ["not a WAV file", "no es un archivo WAV"],
+  ["only 16-bit PCM WAV files are read", "solo se leen archivos WAV PCM de 16 bits"],
 ];
 
 const NUMBER = "(-?[\\d.,]+)";

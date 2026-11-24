@@ -20,6 +20,8 @@ export interface ServerModel {
   adaptation: Adaptation;
   /** What the model does with images, and what the simulator cannot follow yet. */
   images: { reads: boolean; makes: boolean; edits: boolean; note: string | null };
+  /** What it does in a spoken turn: listens (Moonshine), speaks (OuteTTS) or sounds (DAC). */
+  voice?: "listens" | "speaks" | "sounds" | null;
 }
 
 export type Numeric = "float" | "fixed" | "exact";
