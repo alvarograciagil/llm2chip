@@ -38,6 +38,7 @@ const REG_SAMPLE_TOKEN: usize = 44;
 const REG_FOLLOWER: usize = 45;
 const REG_CHAIN_DATA: usize = 46;
 const REG_CHAIN_STATUS: usize = 47;
+const REG_QUEUE_ROOM: usize = 49;
 
 /// The description the image builder leaves in data memory.
 const DEFAULT_INFO: usize = 0x0C00;
@@ -69,7 +70,8 @@ const INFO_ROTATION_SOURCE: usize = 26;
 const INFO_ROTATION_ADDRESS: usize = 27;
 const INFO_ROTATION_COLS: usize = 28;
 const INFO_SCHEDULE: usize = 29;
-const INFO_PARAMETERS: usize = 30;
+const INFO_QUEUE: usize = 30;
+const INFO_PARAMETERS: usize = 31;
 const TARGET_VECTOR: u32 = 3;
 
 /// The tokenizer's tables, which the image builder leaves after the segment table.
@@ -848,10 +850,16 @@ fn repeat_calls(first: usize, body: usize, count: u32, vars: &[u32; 16]) -> bool
     let entry = unsafe { PERIPHERALS.add(REG_ENTRY) };
     let registers = &registers[..parameters];
     // Between two routines the CPU only writes the parameters and starts the die; the next
-    // values are worked out while the die runs.
+    // values are worked out while the die runs. With a command queue that has room for a
+    // routine's orders, the CPU orders the next while the die runs this one.
+    let queued = info(INFO_QUEUE) as usize > parameters;
     for _ in 0..count {
         for ((entry_word, values), steps) in entries.iter().zip(values.iter_mut()).zip(&steps).take(body) {
-            wait_for_die();
+            if queued {
+                while (peripheral_read(REG_QUEUE_ROOM) as usize) <= parameters {}
+            } else {
+                wait_for_die();
+            }
             for (register, value) in registers.iter().zip(values.iter()) {
                 unsafe { write_volatile(*register, *value) };
             }

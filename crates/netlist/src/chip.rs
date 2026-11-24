@@ -28,6 +28,8 @@ pub const REG_SAMPLE_TOKEN: u32 = 44;
 pub const REG_FOLLOWER: u32 = 45;
 pub const REG_CHAIN_DATA: u32 = 46;
 pub const REG_CHAIN_STATUS: u32 = 47;
+/// How many more orders the die's command queue takes, where the die has one.
+pub const REG_QUEUE_ROOM: u32 = 49;
 
 /// What the debug port shows for each value of `debug_select`.
 pub const DEBUG_CYCLES: u64 = 0;
@@ -250,13 +252,14 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
 
         // The die stays parked from reset until the firmware first starts it.
         let parked = l.fresh();
+        // The order that starts the die: the CPU's own, or the queue's.
+        let entry_order = l.fresh();
         let keep_parked = {
             let held = l.or(parked, reset);
-            let released = l.not(entry_write);
+            let released = l.not(entry_order);
             l.and(held, released)
         };
         l.connect_flops(&[keep_parked], &[parked]);
-        let start = l.or(parked, entry_write);
         // The bus's orders reach the die a cycle later, from registers: otherwise a store
         // of the CPU would decode, start the die and address its memories in one cycle.
         let delayed = |l: &mut Logic, bits: &[Bit]| -> Vec<Bit> {
@@ -264,10 +267,83 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
             l.connect_flops(bits, &q);
             q
         };
-        let start = delayed(&mut l, &[start])[0];
-        let order = delayed(&mut l, &bus_wdata);
-        let param_write = delayed(&mut l, &[param_write])[0];
-        let param_index = delayed(&mut l, &bus_address[..x_bits(&c.die) as usize]);
+        let start = l.fresh();
+        let x = x_bits(&c.die) as usize;
+        let (order, param_write, param_index, queue_empty, queue_room) = if c.die.features.queue_bits == 0 {
+            l.b.or_to(entry_write, Bit::Zero, entry_order);
+            let order = delayed(&mut l, &bus_wdata);
+            let param_write = delayed(&mut l, &[param_write])[0];
+            let param_index = delayed(&mut l, &bus_address[..x]);
+            (order, param_write, param_index, Bit::One, constant(0, 1))
+        } else {
+            l.b.group("Command queue");
+            // The CPU's writes to the parameters and the entry wait here; the die takes them
+            // one a cycle whenever it is free, an entry starting it. The CPU can order the
+            // next routine while the die runs this one.
+            let bits = c.die.features.queue_bits as usize;
+            let item: Vec<Bit> = [entry_write].iter().chain(&bus_address[..x]).chain(&bus_wdata).copied().collect();
+            let push = l.or(param_write, entry_write);
+            let (head, tail, count) = (l.fresh_bus(bits), l.fresh_bus(bits), l.fresh_bus(bits + 1));
+            let slots: Vec<Vec<Bit>> = (0..1u32 << bits)
+                .map(|k| {
+                    let q = l.fresh_bus(item.len());
+                    let here = l.equals(&tail, k);
+                    let write = l.and(push, here);
+                    let d = l.mux_bus(write, &q, &item);
+                    l.connect_flops(&d, &q);
+                    q
+                })
+                .collect();
+            let empty = {
+                let any = l.any(&count);
+                l.not(any)
+            };
+            let die_free = {
+                let waiting = l.not(start);
+                l.and(die_halted[0], waiting)
+            };
+            let can_take = l.or(die_free, parked);
+            let waiting_items = l.not(empty);
+            let pop = l.and(waiting_items, can_take);
+            let front = l.select(&head, &slots);
+            let pop_entry = l.and(pop, front[0]);
+            let not_entry = l.not(front[0]);
+            let pop_param = l.and(pop, not_entry);
+            l.b.or_to(pop_entry, Bit::Zero, entry_order);
+            let step = |l: &mut Logic, bus: &[Bit], by: bool| -> Vec<Bit> {
+                let addend = if by { constant(u32::MAX, bus.len()) } else { constant(1, bus.len()) };
+                l.adder(bus, &addend, Bit::Zero).0
+            };
+            let cleared = |l: &mut Logic, bus: &[Bit]| -> Vec<Bit> {
+                let zero = constant(0, bus.len());
+                l.mux_bus(reset, bus, &zero)
+            };
+            let head_next = step(&mut l, &head, false);
+            let head_d = l.mux_bus(pop, &head, &head_next);
+            let head_d = cleared(&mut l, &head_d);
+            l.connect_flops(&head_d, &head);
+            let tail_next = step(&mut l, &tail, false);
+            let tail_d = l.mux_bus(push, &tail, &tail_next);
+            let tail_d = cleared(&mut l, &tail_d);
+            l.connect_flops(&tail_d, &tail);
+            let (more, fewer) = (step(&mut l, &count, false), step(&mut l, &count, true));
+            let (no_pop, no_push) = (l.not(pop), l.not(push));
+            let (push_only, pop_only) = (l.and(push, no_pop), l.and(pop, no_push));
+            let count_d = l.mux_bus(push_only, &count, &more);
+            let count_d = l.mux_bus(pop_only, &count_d, &fewer);
+            let count_d = cleared(&mut l, &count_d);
+            l.connect_flops(&count_d, &count);
+            let room = {
+                let inverted: Vec<Bit> = count.iter().map(|b| l.not(*b)).collect();
+                l.adder(&constant(1 << bits, bits + 1), &inverted, Bit::One).0
+            };
+            let order = delayed(&mut l, &front[1 + x..]);
+            let param_write = delayed(&mut l, &[pop_param])[0];
+            let param_index = delayed(&mut l, &front[1..1 + x]);
+            (order, param_write, param_index, empty, room)
+        };
+        let start_d = l.or(parked, entry_order);
+        l.connect_flops(&[start_d], &[start]);
 
         let cpu_vector_address = stored(&mut l, REG_VECTOR_ADDRESS, vector_bits);
         let sample_base = stored(&mut l, REG_SAMPLE_BASE, vector_bits);
@@ -406,7 +482,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         l.b.group("Counters and debug");
         let not_halted = l.not(die_halted[0]);
         // Neither the cycle of the order nor the one it reaches the die in is the die's work.
-        let idle_flag = l.any(&[parked, entry_write, start]);
+        let idle_flag = l.any(&[parked, entry_order, start]);
         let not_idle = l.not(idle_flag);
         let die_busy = l.and(not_halted, not_idle);
         let counters: Vec<Vec<Bit>> = [Bit::One, die_busy, streaming]
@@ -471,9 +547,10 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         // A die whose order is on its way already counts as busy.
         let free = {
             let waiting = l.not(start);
-            l.and(die_halted[0], waiting)
+            let halted = l.and(die_halted[0], waiting);
+            l.and(halted, queue_empty)
         };
-        for (register, word) in [(REG_STATUS, widen(&[free])), (REG_VECTOR_DATA, vector_word), (REG_SAMPLE_DONE, widen(&sampler_done)), (REG_SAMPLE_TOKEN, widen(&sampler_token)), (REG_FOLLOWER, widen(&follower)), (REG_CHAIN_DATA, chain_held.clone()), (REG_CHAIN_STATUS, widen(&[chain_has_data[0], chain_can_send[0]]))] {
+        for (register, word) in [(REG_STATUS, widen(&[free])), (REG_QUEUE_ROOM, widen(&queue_room)), (REG_VECTOR_DATA, vector_word), (REG_SAMPLE_DONE, widen(&sampler_done)), (REG_SAMPLE_TOKEN, widen(&sampler_token)), (REG_FOLLOWER, widen(&follower)), (REG_CHAIN_DATA, chain_held.clone()), (REG_CHAIN_STATUS, widen(&[chain_has_data[0], chain_can_send[0]]))] {
             let chosen = l.equals(&selected, register);
             value = l.mux_bus(chosen, &value, &word);
         }
@@ -556,6 +633,10 @@ pub trait DieEngine {
     fn write(&mut self, _address: u32, _value: i64) {}
 }
 
+/// Orders waiting in a command queue: the cycle each came in, whether it starts a routine,
+/// the register and the value.
+type Orders = std::collections::VecDeque<(u64, bool, u32, u32)>;
+
 /// The chip's peripherals at instruction level, with the same timing as the gates.
 /// A status read answers one cycle after its address, so the times here are one early.
 pub struct ChipModel<E> {
@@ -581,11 +662,56 @@ pub struct ChipModel<E> {
     die_free_at: u64,
     sampler_done_at: Option<u64>,
     sampler_token: u32,
+    /// The die's command queue, if it has one: how many orders it holds, and the orders
+    /// waiting, each with the cycle it came in, whether it starts a routine, the register
+    /// and the value.
+    queue: Option<(usize, Orders)>,
+    last_pop: u64,
 }
 
 impl<E: DieEngine> ChipModel<E> {
     pub fn new(engine: E, code: Microprogram, sampler: SamplerModel) -> Self {
-        Self { engine, routines: vec![(0, 0); code.entries.len()], code, sampler, die_busy: 0, samples: (0, 0), parameters: [0; 32], draft_hits: [0; 4], draft_tries: [0; 4], vector_address: 0, sample_base: 0, sample_count: 0, inverse: 0, limit: 0, greedy: false, die_free_at: 0, sampler_done_at: None, sampler_token: 0 }
+        Self { engine, routines: vec![(0, 0); code.entries.len()], code, sampler, die_busy: 0, samples: (0, 0), parameters: [0; 32], draft_hits: [0; 4], draft_tries: [0; 4], vector_address: 0, sample_base: 0, sample_count: 0, inverse: 0, limit: 0, greedy: false, die_free_at: 0, sampler_done_at: None, sampler_token: 0, queue: None, last_pop: 0 }
+    }
+
+    /// The same chip with a command queue of `1 << bits` orders before the die, as
+    /// `DieFeatures::queue_bits` builds it.
+    pub fn with_queue(mut self, bits: u32) -> Self {
+        self.queue = (bits > 0).then(|| (1 << bits, std::collections::VecDeque::new()));
+        self
+    }
+
+    /// Starts routine `value` (an entry, as the firmware writes it) in `cycle`.
+    fn start(&mut self, value: u32, cycle: u64) {
+        // Above the PC may come the entry's number in a microcode dictionary.
+        let pc = value & ((1 << crate::die::ENTRY_INDEX_SHIFT) - 1);
+        let routine = self.code.entries.iter().position(|e| *e == value || *e == pc).expect("unknown routine");
+        let (token, position) = self.token_and_position();
+        self.engine.run(routine, token, position);
+        let cycles = self.engine.cycles(routine, token, position);
+        self.die_busy += cycles;
+        self.routines[routine].0 += 1;
+        self.routines[routine].1 += cycles;
+        // The order reaches the die a cycle after the store.
+        self.die_free_at = cycle + 1 + cycles;
+    }
+
+    /// The orders the queue gives the die up to `now`: one a cycle, from the cycle after
+    /// each came in, once the die is free.
+    fn advance(&mut self, now: u64) {
+        while let Some(&(came, entry, register, value)) = self.queue.as_ref().and_then(|(_, q)| q.front()) {
+            let at = (came + 1).max(self.last_pop + 1).max(self.die_free_at + 1);
+            if at > now {
+                break;
+            }
+            self.queue.as_mut().expect("the queue").1.pop_front();
+            self.last_pop = at;
+            if entry {
+                self.start(value, at);
+            } else {
+                self.parameters[register as usize] = value;
+            }
+        }
     }
 
     /// Recovers the token and position from the parameter registers.
@@ -602,8 +728,11 @@ impl<E: DieEngine> ChipModel<E> {
 
 impl<E: DieEngine> Peripheral for ChipModel<E> {
     fn read(&mut self, register: u32, cycle: u64) -> u32 {
+        self.advance(cycle);
+        let waiting = self.queue.as_ref().map_or(0, |(_, q)| q.len());
         match register {
-            REG_STATUS => (cycle >= self.die_free_at) as u32,
+            REG_STATUS => (cycle >= self.die_free_at && waiting == 0) as u32,
+            REG_QUEUE_ROOM => self.queue.as_ref().map_or(0, |(depth, q)| depth - q.len()) as u32,
             REG_VECTOR_DATA => self.engine.read(self.vector_address) as u32,
             REG_SAMPLE_DONE => self.sampler_done_at.is_some_and(|at| cycle >= at) as u32,
             REG_SAMPLE_TOKEN => self.sampler_token,
@@ -612,21 +741,17 @@ impl<E: DieEngine> Peripheral for ChipModel<E> {
     }
 
     fn write(&mut self, register: u32, value: u32, cycle: u64) {
+        self.advance(cycle);
+        if let Some((depth, queue)) = &mut self.queue {
+            if register < 32 || register == REG_ENTRY {
+                assert!(queue.len() < *depth, "the die's command queue overflows");
+                queue.push_back((cycle, register == REG_ENTRY, register, value));
+                return;
+            }
+        }
         match register {
             0..=31 => self.parameters[register as usize] = value,
-            REG_ENTRY => {
-                // Above the PC may come the entry's number in a microcode dictionary.
-                let pc = value & ((1 << crate::die::ENTRY_INDEX_SHIFT) - 1);
-                let routine = self.code.entries.iter().position(|e| *e == value || *e == pc).expect("unknown routine");
-                let (token, position) = self.token_and_position();
-                self.engine.run(routine, token, position);
-                let cycles = self.engine.cycles(routine, token, position);
-                self.die_busy += cycles;
-                self.routines[routine].0 += 1;
-                self.routines[routine].1 += cycles;
-                // The order reaches the die a cycle after the store.
-                self.die_free_at = cycle + 1 + cycles;
-            }
+            REG_ENTRY => self.start(value, cycle),
             REG_VECTOR_ADDRESS => self.vector_address = value,
             REG_VECTOR_DATA => self.engine.write(self.vector_address, value as i32 as i64),
             REG_SAMPLE_BASE => self.sample_base = value,
@@ -700,7 +825,9 @@ pub const INFO_ROTATION_COLS: usize = 28;
 /// The word of data memory where the schedule of a die run by routines starts (see
 /// `schedule`); zero if it has none.
 pub const INFO_SCHEDULE: usize = 29;
-pub const INFO_PARAMETERS: usize = 30;
+/// How many orders the die's command queue holds; zero without one.
+pub const INFO_QUEUE: usize = 30;
+pub const INFO_PARAMETERS: usize = 31;
 
 /// What the firmware needs to run the image encoder a chip carries, in the order of its
 /// words: see `VisionInfo`.
@@ -816,6 +943,7 @@ pub fn chip_info(c: &DieConfig, code: &Microprogram, logits_register: u32, vocab
     info[INFO_TEMPERATURE] = setup.temperature;
     info[INFO_SEED] = setup.seed;
     info[INFO_ACTIVATION_BITS] = c.cell.activation_bits;
+    info[INFO_QUEUE] = if c.features.queue_bits > 0 { 1 << c.features.queue_bits } else { 0 };
     info[INFO_RAW_TOKENS] = setup.raw_tokens as u32;
     info[INFO_STOP_COUNT] = setup.stop.len() as u32;
     // A model without reasoning tokens never opens it: no token is u32::MAX.

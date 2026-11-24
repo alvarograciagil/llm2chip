@@ -440,7 +440,7 @@ fn the_firmware_transcribes_a_clip_as_the_host_ordering_the_routines() {
     let schedule_words = add_schedule(&mut info, &schedule);
     eprintln!("the chip's description: {} words, and a schedule of {} records", info.len(), schedule.len());
     // What the planner counts for the firmware: up to the first token, and each after it.
-    let (first, each) = chip.firmware_cycles();
+    let (first, each) = chip.firmware_cycles().unwrap();
     let positions = (expected.len() as u64 + 1).min(chip.limit() as u64);
     let image = build_image(&firmware.program, &firmware.data, &info, &schedule_words, &[]).unwrap();
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() };
@@ -485,4 +485,59 @@ fn the_real_recogniser_s_schedule_fits_its_chip_image() {
     eprintln!("a description of {} words, a schedule of {} records ({} words)", info.len(), schedule.len(), words.len());
     netlist::image::build_image(&firmware.program, &firmware.data, &info, &words, &[]).unwrap();
     assert!(netlist::soc::TOKENIZER_WORD + words.len() <= 1 << 14, "the schedule fits a data memory of 16,384 words");
+}
+
+/// The whole toy chip in gates, with a command queue before its die: the firmware follows
+/// the schedule, ordering the encoder's routines ahead while the die runs them, and the
+/// gates write the same bytes as the instruction-level model, in as many cycles.
+#[test]
+#[ignore = "slow: the whole chip in gates, CPU and die, near a million cycles"]
+fn the_whole_chip_with_a_command_queue_transcribes_in_gates_as_at_instruction_level() {
+    use netlist::chip::{add_schedule, chip_design, chip_info, ChipConfig, ChipModel, GenerationSetup};
+    use netlist::image::build_image;
+    use netlist::rv32::Rv32Iss;
+    use netlist::sampler::{exponential_table, SamplerConfig, SamplerModel};
+    use netlist::soc::{SocBus, SocConfig};
+    use netlist::DieConfig;
+    let Some(firmware) = firmware() else { return };
+    let dir = toy("whole");
+    let clip = test_clip(SAMPLES);
+    let bits_for = |count: u64| (u64::BITS - count.max(2).saturating_sub(1).leading_zeros()).max(1);
+    let base = cell_die_config();
+    let roomy = DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 24, cell: netlist::CellConfig { addr_bits: 24, weight_bits: base.cell.activation_bits, ..base.cell }, features: base.features.with_key_shift(6).with_host_writes(true).with_queue_bits(4), ..base };
+    let probe = MoonshineChip::new(&dir, SAMPLES, roomy, Some(32)).unwrap();
+    let (program, layout, _) = probe.parts();
+    let (depth, groups) = layout.cell_depths();
+    let addr_bits = bits_for(depth.max(2 * groups));
+    let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1)).max(addr_bits);
+    let sized = DieConfig { index_bits, cell: netlist::CellConfig { addr_bits, ..roomy.cell }, ..roomy };
+    let wide = MoonshineChip::new(&dir, SAMPLES, sized, Some(32)).unwrap();
+    wide.schedule().unwrap();
+    let die = sim::chip::with_registers_needed(sized, wide.parts().1);
+    let mut chip = MoonshineChip::new(&dir, SAMPLES, die, Some(32)).unwrap();
+    let input: Vec<u8> = chip.schedule_input(&clip).unwrap().iter().flat_map(|w| w.to_le_bytes()).collect();
+    let (routines, code, schedule) = chip.schedule().unwrap();
+    let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: vec![chip.config.end], draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
+    let mut info = chip_info(&die, &code, chip.logits_register(), chip.config.vocab as u32, &setup);
+    let words = add_schedule(&mut info, &schedule);
+    let mut segments = sim::chip::image_segments(&die, &code, chip.parts().1);
+    segments.extend(sim::chip::cell_segments(&die, chip.parts().1, chip.parts().2).unwrap());
+    let image = build_image(&firmware.program, &firmware.data, &info, &words, &segments).unwrap();
+    let sampler = SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 };
+    let soc = SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 };
+
+    let model = ChipModel::new(chip.die_engine(&routines, code.clone()), code, SamplerModel { config: sampler, rng: 0, table: exponential_table() }).with_queue(4);
+    let mut bus = SocBus::booted_with(soc, &image, &input, model).unwrap();
+    let mut cpu = Rv32Iss::default();
+    while !cpu.halted {
+        cpu.step(&mut bus);
+        assert!(cpu.cycle < 50_000_000, "the firmware does not finish");
+    }
+    eprintln!("instruction level: {} cycles, the die busy {}, output {:?}", cpu.cycle, bus.peripheral.die_busy, bus.tx);
+    let started = std::time::Instant::now();
+    let (output, cycles) = gates(&chip_design(ChipConfig { soc, die, sampler }), &image, &input, cpu.cycle + 4096);
+    eprintln!("gates: {cycles} cycles in {:.0} s", started.elapsed().as_secs_f64());
+    assert_eq!(output, bus.tx);
+    assert_eq!(cycles, cpu.cycle, "cycles");
+    std::fs::remove_dir_all(&dir).ok();
 }

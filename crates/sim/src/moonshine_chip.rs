@@ -759,15 +759,19 @@ impl MoonshineChip {
     /// taking (`crate::chip::firmware_cycles`): up to its first token, and for each token
     /// after. The rows and the pairwise sums start their routines alone, the encoder's
     /// repeats on the lean path, and each token's routines alone.
-    pub fn firmware_cycles(&self) -> (u64, u64) {
+    pub fn firmware_cycles(&self) -> Result<(u64, u64), String> {
         let (load, second, add) = &self.reduce;
         let encoder = self.encoder_calls();
-        let summing = encoder.iter().filter(|c| [load, second, add].contains(&&c.routine)).count() as u64;
+        let (summing, lean): (Vec<Call>, Vec<Call>) = encoder.into_iter().partition(|c| [load, second, add].contains(&&c.routine));
         let rows = self.now.sample_rows as u64;
         let words = 1 + 2 + rows * (SAMPLES_PER_ROW as u64 + 1);
         let token = self.token_calls(self.config.start, 0).len() as u64;
         let each = crate::chip::firmware_cycles(0, token, 1);
-        (crate::chip::firmware_cycles(encoder.len() as u64 - summing, rows + summing, words) + each, each)
+        let (_, code, _) = self.schedule()?;
+        let config = self.layout.config();
+        let (queued, parameters) = (crate::chip::queued(&config, &code), code.parameters.len() as u64);
+        let lean = lean.iter().map(|call| self.cycles(std::slice::from_ref(call)).map(|die| crate::chip::lean_cycles(1, die, parameters, queued))).sum::<Result<u64, String>>()?;
+        Ok((lean + crate::chip::firmware_cycles(0, rows + summing.len() as u64, words) + each, each))
     }
 
     /// What the host sends a chip that follows `schedule`, as words: the clip's length, then

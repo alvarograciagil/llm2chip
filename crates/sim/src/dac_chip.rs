@@ -483,14 +483,23 @@ impl DacChip {
     }
 
     /// The control CPU's cycles beyond the die's to follow `schedule` for a window keeping
-    /// `kept` samples (`crate::chip::firmware_cycles`): each frame's routines start alone
-    /// with their codes received, the passes' on the lean path, and each sample kept alone,
-    /// sent back with its exponent.
-    pub fn firmware_cycles(&self, kept: usize) -> u64 {
+    /// `kept` samples, the routines numbered as in `code` (`crate::chip::firmware_cycles`,
+    /// `lean_cycles`): each frame's routines start alone with their codes received, the
+    /// passes' on the lean path, through the command queue if the die has one, and each
+    /// sample kept alone, sent back with its exponent.
+    pub fn firmware_cycles(&self, kept: usize, code: &netlist::Microprogram) -> u64 {
         let frames = self.frames as u64;
         let books = self.codes_in.len() as u64;
-        let passes: u64 = self.passes.iter().map(|p| (p.rows * p.steps.len()) as u64).sum();
-        crate::chip::firmware_cycles(passes, frames * (books + 1) + kept as u64, frames * books + 2 + 2 * kept as u64)
+        let config = self.layout.config();
+        let queued = crate::chip::queued(&config, code);
+        let parameters = code.parameters.len() as u64;
+        let passes: u64 = self
+            .passes
+            .iter()
+            .flat_map(|p| p.steps.iter().map(move |(routine, first, _)| (p.rows, *routine, *first)))
+            .map(|(rows, routine, first)| crate::chip::lean_cycles(rows as u64, code.cycles(&config, routine, first as u32, 0), parameters, queued))
+            .sum();
+        passes + crate::chip::firmware_cycles(0, frames * (books + 1) + kept as u64, frames * books + 2 + 2 * kept as u64)
     }
 
     /// The die as its firmware sees it, run by the exact machine, routines numbered as in

@@ -71,6 +71,10 @@ pub struct DieFeatures {
     /// key head keep its cache once between them. Zero bits: no groups.
     pub group_shift: u32,
     pub group_bits: u32,
+    /// log2 of the orders (a parameter or an entry each) the die's command queue holds:
+    /// the CPU orders the next routine while the die runs this one. Zero: no queue, the
+    /// CPU's orders reach the die directly.
+    pub queue_bits: u32,
 }
 
 impl Default for DieFeatures {
@@ -79,7 +83,7 @@ impl Default for DieFeatures {
         // takes a periodic function's argument round its period is built with.
         let mut widths = [u8::MAX; FIELD_COUNT];
         widths[WRAP_LEFT_FIELD] = 0;
-        Self { ops: u32::MAX, widths, x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0, host_writes: false, group_shift: 0, group_bits: 0 }
+        Self { ops: u32::MAX, widths, x_registers: u32::MAX, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0, host_writes: false, group_shift: 0, group_bits: 0, queue_bits: 0 }
     }
 }
 
@@ -146,6 +150,12 @@ impl DieFeatures {
     }
 
     /// The same die with the CPU's write port into vector memory, or without it.
+    /// The same die with a command queue of `1 << bits` orders.
+    pub fn with_queue_bits(mut self, bits: u32) -> Self {
+        self.queue_bits = bits;
+        self
+    }
+
     pub fn with_host_writes(mut self, host_writes: bool) -> Self {
         self.host_writes = host_writes;
         self
@@ -194,7 +204,7 @@ impl DieFeatures {
     pub fn of(code: &Microprogram) -> Self {
         // Additions are also how the comparator and the sequencer's own results are made.
         let (group_shift, group_bits) = code.group;
-        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0, host_writes: false, group_shift, group_bits };
+        let mut features = Self { ops: 1 << OP_ADD, widths: [0; FIELD_COUNT], x_registers: 1, lane_bits: 0, cluster_bits: 0, key_shift: 0, factor_steps: 1, wide_link: false, vector_bits: 0, factor_bits: 0, wide_bits: 0, dictionary_bits: 0, host_writes: false, group_shift, group_bits, queue_bits: 0 };
         let mut highest_x = 0;
         for word in &code.words {
             features.ops |= 1 << word.op;
@@ -224,7 +234,7 @@ impl DieFeatures {
         assert!(self.group_bits == 0 || other.group_bits == 0 || (self.group_shift, self.group_bits) == (other.group_shift, other.group_bits), "two programs read across groups of different shapes");
         let mut widths = self.widths;
         widths.iter_mut().zip(other.widths).for_each(|(a, b)| *a = (*a).max(b));
-        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link, vector_bits: self.vector_bits.max(other.vector_bits), factor_bits: self.factor_bits.max(other.factor_bits), wide_bits: self.wide_bits.max(other.wide_bits), dictionary_bits: self.dictionary_bits.max(other.dictionary_bits), host_writes: self.host_writes || other.host_writes, group_shift: if self.group_bits > 0 { self.group_shift } else { other.group_shift }, group_bits: self.group_bits.max(other.group_bits) }
+        Self { ops: self.ops | other.ops, widths, x_registers: self.x_registers.max(other.x_registers), lane_bits: self.lane_bits.max(other.lane_bits), cluster_bits: self.cluster_bits.max(other.cluster_bits), key_shift: self.key_shift.max(other.key_shift), factor_steps: self.factor_steps.max(other.factor_steps), wide_link: self.wide_link || other.wide_link, vector_bits: self.vector_bits.max(other.vector_bits), factor_bits: self.factor_bits.max(other.factor_bits), wide_bits: self.wide_bits.max(other.wide_bits), dictionary_bits: self.dictionary_bits.max(other.dictionary_bits), host_writes: self.host_writes || other.host_writes, group_shift: if self.group_bits > 0 { self.group_shift } else { other.group_shift }, group_bits: self.group_bits.max(other.group_bits), queue_bits: self.queue_bits.max(other.queue_bits) }
     }
 
     fn uses(&self, op: u32) -> bool {

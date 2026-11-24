@@ -143,6 +143,29 @@ pub fn firmware_cycles(lean: u64, alone: u64, words: u64) -> u64 {
     lean * FIRMWARE_CYCLES_PER_ROUTINE + alone * FIRMWARE_CYCLES_PER_ROUTINE_ALONE + words * FIRMWARE_CYCLES_PER_WORD
 }
 
+/// The CPU's work to order a routine of the lean path through a command queue
+/// (`DieFeatures::queue_bits`), done while the die runs the routines before it.
+pub const FIRMWARE_CYCLES_PER_QUEUED_ROUTINE: u64 = 300;
+
+/// The CPU's cycles beyond the die's for `calls` routines of the lean path, each of `die`
+/// cycles, with `parameters` parameter registers. Without a command queue each costs
+/// `FIRMWARE_CYCLES_PER_ROUTINE`; with one, the die takes each order in a cycle of its own,
+/// and the CPU's work shows where the routine before is shorter: the queue holds only a
+/// few routines' orders, so a long routine's slack does not carry far.
+pub fn lean_cycles(calls: u64, die: u64, parameters: u64, queued: bool) -> u64 {
+    if queued {
+        calls * (parameters + 1).max(FIRMWARE_CYCLES_PER_QUEUED_ROUTINE.saturating_sub(die))
+    } else {
+        calls * FIRMWARE_CYCLES_PER_ROUTINE
+    }
+}
+
+/// Whether the firmware orders routines through the die's command queue: it has one with
+/// room for a routine's orders.
+pub fn queued(die: &DieConfig, code: &netlist::Microprogram) -> bool {
+    die.features.queue_bits > 0 && 1usize << die.features.queue_bits > code.parameters.len()
+}
+
 /// Follows `schedule` as the firmware does, on `die`, with the host's `input`: the tokens the
 /// chip sends back, and the scores each was picked from, as values. `logits` is the scores'
 /// first element, their exponent's address and how many there are, in vectors of `bits`
@@ -232,7 +255,8 @@ impl DieEngine for RoutinesDie<'_> {
         let (register, index) = self.split(address);
         if register == self.exponents {
             self.vm.set_register_exponent(index, value)
-        } else {
+        } else if register + 1 != self.exponents {
+            // The die's scratch, just below the exponents, is not modelled here.
             self.vm.write_mantissa(register, index, value)
         }
     }

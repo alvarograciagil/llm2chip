@@ -219,13 +219,15 @@ fn the_firmware_decodes_window_by_window_as_the_host_does() {
     let width = config.window_frames(frames, chunk);
     let (_, expected) = sim::dac_chip::decode_chunked(&dir, &codes, chunk, 20).unwrap();
 
+    // Without a command queue before the die, and with one of 16 orders.
+    for queue in [0, 4] {
     let base = cell_die_config();
-    let die = netlist::DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, activation_bits: 20, accumulator_bits: 56, weight_bits: 20, ..base.cell }, scale_bits: 24, features: base.features.with_host_writes(true).with_key_shift(7), ..base };
+    let die = netlist::DieConfig { microcode_bits: 15, reg_bits: 12, index_bits: 20, cell: netlist::CellConfig { addr_bits: 20, activation_bits: 20, accumulator_bits: 56, weight_bits: 20, ..base.cell }, scale_bits: 24, features: base.features.with_host_writes(true).with_key_shift(7).with_queue_bits(queue), ..base };
     let mut chip = DacChip::new(&dir, width, die, false).unwrap();
     let chip_samples = chip.samples();
-    let per_window: Vec<u64> = (0..=frames * config.hop()).map(|kept| chip.firmware_cycles(kept)).collect();
-    let firmware_per_window = |kept: usize| per_window[kept];
     let (code, schedule) = chip.schedule().unwrap();
+    let per_window: Vec<u64> = (0..=frames * config.hop()).map(|kept| chip.firmware_cycles(kept, &code)).collect();
+    let firmware_per_window = |kept: usize| per_window[kept];
     let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     let mut info = chip_info(&die, &code, chip.output_register(), 1, &setup);
     let schedule_words = add_schedule(&mut info, &schedule);
@@ -233,7 +235,7 @@ fn the_firmware_decodes_window_by_window_as_the_host_does() {
     let image = build_image(&firmware.program, &firmware.data, &info, &schedule_words, &[]).unwrap();
     let input: Vec<u8> = sim::dac_chip::schedule_input(&config, &codes, chunk).iter().flat_map(|w| w.to_le_bytes()).collect();
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() };
-    let model = ChipModel::new(chip.die_engine(code.clone()), code, sampler);
+    let model = ChipModel::new(chip.die_engine(code.clone()), code, sampler).with_queue(queue);
     let mut bus = SocBus::booted_with(SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, &image, &input, model).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
@@ -242,7 +244,7 @@ fn the_firmware_decodes_window_by_window_as_the_host_does() {
     }
     let start = bus.tx.iter().position(|b| *b != b'.').unwrap_or(bus.tx.len());
     let words: Vec<i64> = bus.tx[start..].chunks(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as i64).collect();
-    eprintln!("{} cycles of the CPU, {} of the die, {} routines run, {} samples", cpu.cycle, bus.peripheral.die_busy, bus.peripheral.routines.iter().map(|r| r.0).sum::<u64>(), words.len() / 2);
+    eprintln!("queue of {}: {} cycles of the CPU, {} of the die, {} routines run, {} samples", 1 << queue, cpu.cycle, bus.peripheral.die_busy, bus.peripheral.routines.iter().map(|r| r.0).sum::<u64>(), words.len() / 2);
     // What the planner counts for the firmware: each window's, and the count of windows.
     let windows = config.windows(frames, chunk).len() as u64;
     let firmware = cpu.cycle - bus.peripheral.die_busy;
@@ -253,6 +255,7 @@ fn the_firmware_decodes_window_by_window_as_the_host_does() {
     let first = mantissas.iter().zip(&expected).position(|(a, b)| a != b);
     assert_eq!(mantissas.len(), expected.len(), "samples");
     assert!(first.is_none(), "the die's mantissas differ from sample {first:?} of {}, windows of {} samples", expected.len(), chip_samples);
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 

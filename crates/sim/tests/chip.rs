@@ -99,7 +99,9 @@ fn chip_in_gates(die: netlist::DieConfig, tag: &str, table_outside: bool, design
     let code = layout.microprogram(&program).unwrap();
     // Each register takes only the vector memory its routines reach, and the microcode
     // keeps each distinct word once.
+    let queue = die.features.queue_bits;
     let die = sim::chip::with_code_dictionary(sim::chip::compact_die(die, &layout), &code);
+    let die = netlist::DieConfig { features: die.features.with_queue_bits(queue), ..die };
     eprintln!("microcode dictionary: 2^{} words", die.features.dictionary_bits);
     let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let design = design(config);
@@ -140,7 +142,7 @@ fn says_the_same_in_gates(config: ChipConfig, design: &netlist::Design, layout: 
     if layout.outside_table().is_some() || layout.rotation_table_outside().is_some() {
         engine = engine.with_table_outside().unwrap();
     }
-    let model = ChipModel::new(engine, code.clone(), SamplerModel { config: config.sampler, rng: 0, table: exponential_table() });
+    let model = ChipModel::new(engine, code.clone(), SamplerModel { config: config.sampler, rng: 0, table: exponential_table() }).with_queue(config.die.features.queue_bits);
     let mut bus = SocBus::booted_with(config.soc, &image, input, model).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
@@ -249,6 +251,20 @@ fn text_goes_through_the_whole_chip_in_gates() {
     for (address, code) in codes.iter().enumerate() {
         assert_eq!(sim.peek_memory("/die/cell0/compute/weight_sram", address), Some((*code as u8) as u128), "weight {address}");
     }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The same chip with a command queue before its die: the firmware's orders wait there
+/// until the die is free, and the gates take them as the instruction-level model does,
+/// cycle for cycle.
+#[test]
+fn text_goes_through_a_chip_with_a_command_queue_in_gates() {
+    if build_firmware().is_none() {
+        return;
+    }
+    let base = netlist::DieConfig { microcode_bits: 15, ..cell_die_config() };
+    let die = netlist::DieConfig { features: base.features.with_queue_bits(3), ..base };
+    let (_, _, _, dir) = whole_chip_in_gates(die, "queue");
     std::fs::remove_dir_all(&dir).ok();
 }
 
