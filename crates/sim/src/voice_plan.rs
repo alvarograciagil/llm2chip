@@ -45,11 +45,22 @@ pub struct VoiceAsk {
     /// The speech writer reads its speaker's profile before each sentence.
     #[serde(default)]
     pub speaker: bool,
+    /// Sets of dies the language model is measured on when it fits no single die of
+    /// `shapes`: `(chips, sharing, shape)`, sharing as the frontier names it (`mixed:4`).
+    #[serde(default = "large_sets")]
+    pub large: Vec<(u32, String, (u32, u32, u32))>,
+}
+
+/// Sets of dies from the frontier for Qwen3.8-27B: 12 dies of 64 × 128 units and 32,768
+/// cells in groups of four (the least area there), and the fastest ones, 12 of 128 × 128
+/// in groups of four and 16 in groups of eight.
+fn large_sets() -> Vec<(u32, String, (u32, u32, u32))> {
+    vec![(12, "mixed:4".into(), (6, 7, 15)), (12, "mixed:4".into(), (7, 7, 16)), (16, "mixed:8".into(), (7, 7, 16))]
 }
 
 impl Default for VoiceAsk {
     fn default() -> Self {
-        Self { seconds: 3.0, words: 12, first_sound_seconds: 0.5, area_mm2: f64::INFINITY, shapes: vec![(0, 6, 11), (0, 6, 13), (4, 6, 11), (4, 6, 13), (4, 6, 16)], chunks: vec![16, 32, 64], speaker: false }
+        Self { seconds: 3.0, words: 12, first_sound_seconds: 0.5, area_mm2: f64::INFINITY, shapes: vec![(0, 6, 11), (0, 6, 13), (4, 6, 11), (4, 6, 13), (4, 6, 16)], chunks: vec![16, 32, 64], speaker: false, large: large_sets() }
     }
 }
 
@@ -79,14 +90,14 @@ fn weights(dir: &Path, group: u32) -> Result<Weights, String> {
     Ok(Weights::open(dir)?.with_format(Some(format)))
 }
 
-/// A language model on one die of `shape`, after a prompt of `prompt` tokens, with a
-/// context long enough for it and its answer.
-fn language_model(dir: &Path, costs: &Costs, shape: (u32, u32, u32), prompt: u32, needs: u32) -> Result<Fit, String> {
+/// A language model on `chips` dies of `shape` shared as `sharing`, after a prompt of
+/// `prompt` tokens, with a context long enough for it and its answer.
+fn language_model(dir: &Path, costs: &Costs, (chips, sharing): (u32, Sharing), shape: (u32, u32, u32), prompt: u32, needs: u32) -> Result<Fit, String> {
     let context = (prompt + 512).next_power_of_two().max(1024);
     let program = compiler::compile_model(&std::fs::read_to_string(dir.join("config.json")).map_err(|e| e.to_string())?)?;
     let per_token = crate::system::macs(&program.ops, &program.buffers);
-    let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: vec![1], clock_hz: CLOCK, process: N6, context, lane_bits: shape.1..=shape.1, cluster_bits: shape.0..=shape.0, cell_bits: shape.2..=shape.2, sharing: vec![Sharing::Layers] };
-    let c = measure(&program, &weights(dir, 64)?, reference_die(8), costs, &target, Sharing::Layers, (1, shape.0, shape.1, shape.2))?;
+    let target = Target { tokens_per_second: 0.0, prompt_seconds: f64::INFINITY, prompt, chips: vec![chips], clock_hz: CLOCK, process: N6, context, lane_bits: shape.1..=shape.1, cluster_bits: shape.0..=shape.0, cell_bits: shape.2..=shape.2, sharing: vec![sharing] };
+    let c = measure(&program, &weights(dir, 64)?, reference_die(8), costs, &target, sharing, (chips, shape.0, shape.1, shape.2))?;
     Ok(Fit { shape, dies: c.chips, parts_mm2: c.parts_mm2, clock_hz: c.clock_hz, first_cycles: (c.prompt_seconds * c.clock_hz).round() as u64, output_cycles: c.cycles, needs, variant: String::new(), first_macs: per_token * prompt as u64, output_macs: per_token, pj_per_mac: pj_per_mac(16) })
 }
 
@@ -133,11 +144,11 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
             }
         }
         progress(format!("the language model on {name}"));
-        if let Ok(fit) = language_model(&models.think, &costs, shape, 40, question_tokens) {
+        if let Ok(fit) = language_model(&models.think, &costs, (1, Sharing::Layers), shape, 40, question_tokens) {
             think.push(fit);
         }
         progress(format!("OuteTTS on {name}"));
-        if let Ok(fit) = language_model(&models.speak, &costs, shape, writer_prompt, ask.words) {
+        if let Ok(fit) = language_model(&models.speak, &costs, (1, Sharing::Layers), shape, writer_prompt, ask.words) {
             speak.push(fit);
         }
         for &chunk in &ask.chunks {
@@ -151,6 +162,17 @@ pub fn measure_stages(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn F
             let needs = (frames as f64 * TOKENS_PER_FRAME).ceil() as u32;
             let window_macs: u64 = calls.iter().map(|c| crate::system::macs(&chip.routines()[c.routine], &chip.parts().0.buffers)).sum();
             sound.push(Fit { shape, dies: 1, parts_mm2: parts, clock_hz: clock, first_cycles: cycles, output_cycles: cycles / chunk as u64, needs, variant: format!("windows of {frames} frames, {chunk} kept"), first_macs: window_macs, output_macs: window_macs / chunk as u64, pj_per_mac: pj_per_mac(20) });
+        }
+    }
+    // A language model that fits no single die within the reticle: on the larger sets.
+    if !think.iter().any(|f| f.parts_mm2.iter().sum::<f64>() <= N6.reticle_mm2) {
+        for (chips, sharing, shape) in &ask.large {
+            progress(format!("the language model on {chips} dies, {sharing}"));
+            let sharing = crate::sizing::parse_sharings(sharing, &[*chips])?.into_iter().next().ok_or("no sharing")?;
+            match language_model(&models.think, &costs, (*chips, sharing), *shape, 40, question_tokens) {
+                Ok(fit) => think.push(fit),
+                Err(e) => progress(format!("the language model on {chips} dies: {e}")),
+            }
         }
     }
     let stages = vec![
