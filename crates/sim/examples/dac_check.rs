@@ -16,12 +16,29 @@ fn main() -> Result<(), String> {
     let worst = ours.iter().zip(&audio).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
     println!("{} frames -> {} samples (Transformers {}), {:.1} s; largest difference {:.5} of a peak of {:.3}", codes[0].len(), ours.len(), audio.len(), started.elapsed().as_secs_f32(), worst, largest);
     println!("largest |αx| {:.1}", dac.snake_reach(&codes)?);
+    // Only the sine's argument as the die takes it, everything else in floating point.
+    let mut phased = Dac::open(Path::new(&args[0]))?;
+    for bits in [16, 20, 24] {
+        phased.sine_bits = Some(bits);
+        let sound = phased.decode(&codes)?;
+        let error: f32 = sound.iter().zip(&ours).map(|(a, b)| (a - b) * (a - b)).sum::<f32>() / ours.iter().map(|v| v * v).sum::<f32>();
+        println!("only the sine's argument with {bits}-bit vectors: {:.1} dB below the signal", -10.0 * error.log10());
+    }
+    // Every row as the die holds it, everything else in floating point.
+    let mut held = Dac::open(Path::new(&args[0]))?;
+    for bits in [16, 20, 24] {
+        held.row_bits = Some(bits);
+        let sound = held.decode(&codes)?;
+        let error: f32 = sound.iter().zip(&ours).map(|(a, b)| (a - b) * (a - b)).sum::<f32>() / ours.iter().map(|v| v * v).sum::<f32>();
+        println!("only the rows held as the die holds them, {bits}-bit vectors: {:.1} dB below the signal", -10.0 * error.log10());
+    }
     let chunked = dac.decode_chunked(&codes, 16)?;
     let apart = chunked.iter().zip(&ours).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
     println!("a window at a time ({} frames each, 16 kept): {} samples, largest difference from the whole {apart:.2e}", dac.config.window_frames(codes[0].len(), 16), chunked.len());
     if let Some(bits) = args.get(2).and_then(|b| b.parse().ok()) {
         let started = std::time::Instant::now();
-        let mut chip = sim::dac_chip::DacChip::exact(Path::new(&args[0]), codes[0].len(), bits)?;
+        let accumulator = std::env::var("ACCUMULATOR").ok().and_then(|a| a.parse().ok()).unwrap_or(2 * bits + 8);
+        let mut chip = sim::dac_chip::DacChip::exact_summing(Path::new(&args[0]), codes[0].len(), bits, accumulator)?;
         let (die, _) = chip.decode(&codes)?;
         let worst = die.iter().zip(&ours).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
         let error: f32 = die.iter().zip(&ours).map(|(a, b)| (a - b) * (a - b)).sum::<f32>() / ours.iter().map(|v| v * v).sum::<f32>();

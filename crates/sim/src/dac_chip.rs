@@ -168,8 +168,13 @@ impl DacChip {
 
     /// The exact machine's die with vectors of `bits` bits and cells as wide.
     pub fn exact(dir: &Path, frames: usize, bits: u32) -> Result<Self, String> {
+        Self::exact_summing(dir, frames, bits, 2 * bits + 8)
+    }
+
+    /// The same with sums of `accumulator_bits` bits in the cells.
+    pub fn exact_summing(dir: &Path, frames: usize, bits: u32, accumulator_bits: u32) -> Result<Self, String> {
         let base = crate::exact::exact_config(bits);
-        let die = DieConfig { cell: netlist::CellConfig { weight_bits: bits, accumulator_bits: 2 * bits + 8, ..base.cell }, ..base };
+        let die = DieConfig { cell: netlist::CellConfig { weight_bits: bits, accumulator_bits, ..base.cell }, ..base };
         Self::new(dir, frames, die, false)
     }
 

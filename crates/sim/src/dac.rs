@@ -94,6 +94,13 @@ impl DacConfig {
 pub struct Dac {
     pub config: DacConfig,
     tensors: HashMap<String, Vec<f32>>,
+    /// When set, each Snake's argument goes through the table's input as the die takes it:
+    /// a row of `αx · 8/π` at one exponent with this many bits, the rest in floating point.
+    /// To tell how much of the die's error the sine's phase makes.
+    pub sine_bits: Option<u32>,
+    /// When set, every row each layer leaves is held as the die holds it: one exponent for
+    /// the row's channels, mantissas of this many bits.
+    pub row_bits: Option<u32>,
 }
 
 /// Snake: `x + sin²(αx) / α`, with the codec's guard against a zero α.
@@ -111,7 +118,7 @@ impl Dac {
         for (name, _, _) in weights.raw_tensors() {
             tensors.insert(name.to_string(), weights.floats(name)?);
         }
-        Ok(Self { config: DacConfig::read(dir)?, tensors })
+        Ok(Self { config: DacConfig::read(dir)?, tensors, sine_bits: None, row_bits: None })
     }
 
     pub fn tensor(&self, name: &str) -> Result<&[f32], String> {
@@ -194,7 +201,22 @@ impl Dac {
 
     fn snake_rows(&self, name: &str, x: &Rows) -> Result<Rows, String> {
         let alpha = self.tensor(&format!("{name}.alpha"))?;
-        Ok(x.par_iter().map(|row| row.iter().zip(alpha).map(|(v, a)| snake(*v, *a)).collect()).collect())
+        let Some(bits) = self.sine_bits else {
+            return Ok(x.par_iter().map(|row| row.iter().zip(alpha).map(|(v, a)| snake(*v, *a)).collect()).collect());
+        };
+        // The die's table input: αx·8/π, one exponent for the row, `bits`-bit mantissas.
+        let scale = 8.0 / std::f32::consts::PI;
+        Ok(x.par_iter()
+            .map(|row| {
+                let turns: Vec<f64> = row.iter().zip(alpha).map(|(v, a)| (v * a * scale) as f64).collect();
+                let (mantissas, exponent) = netlist::block::encode_vector(&turns, bits);
+                let unit = 2f64.powi(exponent as i32 - bits as i32 + 1);
+                row.iter().zip(alpha).zip(mantissas).map(|((v, a), m)| {
+                    let s = ((m as f64 * unit) as f32 / scale).sin();
+                    v + s * s / (a + 1e-9)
+                }).collect()
+            })
+            .collect())
     }
 
     /// Every Snake's largest |αx| for these codes: how far the sine's argument goes.
@@ -223,19 +245,33 @@ impl Dac {
         stitch(&self.config, frames, chunk, &mut |start, width| self.decode(&window(codes, start, width)))
     }
 
+    /// `x` held as the die holds a row, if `row_bits` says so.
+    fn held(&self, mut x: Rows) -> Rows {
+        if let Some(bits) = self.row_bits {
+            x.par_iter_mut().for_each(|row| {
+                let values: Vec<f64> = row.iter().map(|v| *v as f64).collect();
+                let (mantissas, exponent) = netlist::block::encode_vector(&values, bits);
+                let unit = 2f64.powi(exponent as i32 - bits as i32 + 1);
+                row.iter_mut().zip(mantissas).for_each(|(v, m)| *v = (m as f64 * unit) as f32);
+            });
+        }
+        x
+    }
+
     fn decode_watching(&self, codes: &[Vec<u32>], watch: &mut dyn FnMut(&str, &Rows)) -> Result<Vec<f32>, String> {
-        let mut x = self.conv("decoder.model.0", &self.latent(codes)?, 7, 1, 3)?;
+        let mut x = self.held(self.conv("decoder.model.0", &self.held(self.latent(codes)?), 7, 1, 3)?);
         for (b, s) in self.config.rates.iter().enumerate() {
             let p = |n: &str| format!("decoder.model.{}.block.{n}", b + 1);
             watch(&p("0"), &x);
-            x = self.transposed(&p("1"), &self.snake_rows(&p("0"), &x)?, *s)?;
+            x = self.held(self.transposed(&p("1"), &self.held(self.snake_rows(&p("0"), &x)?), *s)?);
             for (u, dilation) in [1, 3, 9].into_iter().enumerate() {
                 let q = |n: &str| p(&format!("{}.block.{n}", u + 2));
                 watch(&q("0"), &x);
-                let y = self.conv(&q("1"), &self.snake_rows(&q("0"), &x)?, 7, dilation, 3 * dilation)?;
+                let y = self.held(self.conv(&q("1"), &self.held(self.snake_rows(&q("0"), &x)?), 7, dilation, 3 * dilation)?);
                 watch(&q("2"), &y);
-                let y = self.conv(&q("3"), &self.snake_rows(&q("2"), &y)?, 1, 1, 0)?;
+                let y = self.held(self.conv(&q("3"), &self.held(self.snake_rows(&q("2"), &y)?), 1, 1, 0)?);
                 x.iter_mut().zip(&y).for_each(|(a, b)| a.iter_mut().zip(b).for_each(|(a, b)| *a += b));
+                x = self.held(x);
             }
         }
         let last = self.config.rates.len() + 1;
