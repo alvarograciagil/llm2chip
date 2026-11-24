@@ -116,21 +116,21 @@ impl ExactEngine {
 
     /// The most patches of a picture the encoder the chip carries takes, if it carries one.
     pub fn image_patches(&self) -> Option<usize> {
-        self.program.vision.as_ref().map(|part| part.patches)
+        self.program.rows().map(|part| part.patches)
     }
 
     /// Runs a picture through the model's own image encoder, which the chip carries with it
     /// (`compiler::attach_vision`), and keeps it there: gives how many tokens it makes, which
     /// `step_image` then reads one by one.
     pub fn encode_image(&mut self, tower: &crate::vision::VisionTower, image: &crate::vision::Patches) -> Result<usize, String> {
-        let part = self.program.vision.clone().ok_or("this model has no image encoder")?;
+        let part = self.program.rows().cloned().ok_or("this model has no image encoder")?;
         crate::vision_chip::run_encoder(&self.layout, &mut self.vm, &self.program, &part, self.bits, tower, image)
     }
 
     /// Token `index` of the encoded image: the encoder's fusion makes it, and the language
     /// model reads it in place of an embedding, in the cache's next position.
     pub fn step_image(&mut self, index: u32, positions: [u64; 3], want_logits: bool) -> Result<Option<Vec<f32>>, String> {
-        let part = self.program.vision.clone().ok_or("this model has no image encoder")?;
+        let part = self.program.rows().cloned().ok_or("this model has no image encoder")?;
         self.layout.run_ops(&mut self.vm, &self.program, &part.ops[part.merge.clone()], index, index, false)?;
         self.layout.place_rotation(&self.program, self.position as u32, positions, self.mrope)?;
         self.layout.run_token_from_image(&mut self.vm, &self.program, self.position as u32, want_logits)?;
@@ -162,14 +162,14 @@ impl ExactEngine {
     /// `step_hidden` left, in the die's arithmetic.
     pub fn image_logits(&mut self) -> Result<Vec<f32>, String> {
         self.layout.run_image_logits(&mut self.vm, &self.program)?;
-        let image = self.program.image.as_ref().ok_or("this model does not draw")?;
+        let image = self.program.codes().ok_or("this model does not draw")?;
         Ok(self.buffer(image.logits))
     }
 
     /// The vector the image head makes for a drawn code, to go in as the next token's.
     pub fn image_input(&mut self, code: u32) -> Result<Vec<f32>, String> {
         self.layout.run_image_input(&mut self.vm, &self.program, code)?;
-        let image = self.program.image.as_ref().ok_or("this model does not draw")?;
+        let image = self.program.codes().ok_or("this model does not draw")?;
         Ok(self.buffer(image.input))
     }
 

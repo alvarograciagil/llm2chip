@@ -125,7 +125,7 @@ Before voice, `Program` had two fields named after images: `image` (Janus's head
 | Step | What | Status |
 |---|---|---|
 | 1 | This document | Done |
-| 2 | Programs with parts, with identical microcode | In progress |
+| 2 | Programs with parts, with identical microcode | Done: the 890 microprograms the quick tests lower hash the same before and after |
 | 3 | Cross-attention (`Span`), LayerNorm without bias; exact machine and gates bit for bit on a toy model | Planned |
 | 4 | One-dimensional strided convolution checked with `LoadRows` | Planned |
 | 5 | Systems of stages: sizing, optimiser, host moving tokens | Planned |

@@ -77,7 +77,7 @@ fn small_of(op: &Op) -> Vec<String> {
 }
 
 fn all_ops(program: &Program) -> impl Iterator<Item = &Inst> {
-    program.ops.iter().chain(program.draft.iter().flat_map(|d| d.ops.iter())).chain(program.image.iter().flat_map(|i| i.logits_ops.iter().chain(&i.input_ops))).chain(program.vision.iter().flat_map(|v| v.ops.iter()))
+    program.ops.iter().chain(program.draft.iter().flat_map(|d| d.ops.iter())).chain(program.codes().into_iter().flat_map(|i| i.logits_ops.iter().chain(&i.input_ops))).chain(program.rows().into_iter().flat_map(|v| v.ops.iter()))
 }
 
 /// Which buffers can share a register: each is alive from its first write to its last read
@@ -118,7 +118,7 @@ fn buffer_groups(program: &Program) -> (Vec<usize>, Vec<bool>) {
         kept.extend([draft.hidden_in, draft.hidden_out, draft.logits]);
         kept.extend(draft.ops.iter().flat_map(|i| { let (r, w) = i.op.buffers(); r.into_iter().chain(w) }));
     }
-    if let Some(image) = &program.image {
+    if let Some(image) = program.codes() {
         kept.extend([image.logits, image.input]);
         kept.extend(image.logits_ops.iter().chain(&image.input_ops).flat_map(|i| { let (r, w) = i.op.buffers(); r.into_iter().chain(w) }));
     }
@@ -361,7 +361,7 @@ fn spread_buffers(program: &Program) -> HashSet<usize> {
     if let Some(draft) = &program.draft {
         kept.extend([draft.hidden_in, draft.hidden_out]);
     }
-    if let Some(image) = &program.image {
+    if let Some(image) = program.codes() {
         kept.extend([image.logits, image.input]);
     }
     let made: HashMap<usize, &Op> = ops.iter().filter_map(|op| match op {
@@ -435,7 +435,7 @@ pub const ENTRY_FEED_FROM_MAIN: usize = 2;
 pub const ENTRY_FEED_FROM_DRAFT: usize = 3;
 pub const ENTRY_DRAFT: usize = 4;
 pub const ENTRY_DRAFT_LOGITS: usize = 5;
-/// A token that comes from an image, then the encoder's routines in `VisionPart::routines` order.
+/// A token that comes from an image, then the encoder's routines in `RowPart::routines` order.
 pub const ENTRY_TOKEN_FROM_IMAGE: usize = 6;
 pub const ENTRY_VISION: usize = 7;
 
@@ -892,7 +892,7 @@ impl Layout {
         // A layer norm adds up its block with them too.
         let norm_block = all_ops(program).filter_map(|i| if let Op::LayerNorm { block, .. } = i.op { Some(block) } else { None }).max().unwrap_or(0);
         // An image's attention adds up over every patch, which may be more than the text's tokens.
-        let patches = program.vision.as_ref().map_or(0, |v| v.patches);
+        let patches = program.rows().map_or(0, |v| v.patches);
         setup.load_vector(ones, &vec![1.0; chip_tokens.unwrap_or(ONES_LENGTH).max(experts).max(norm_block).max(patches).max(1)]);
         let minus_one = alloc(1);
         setup.load_vector(minus_one, &[-1.0]);
@@ -964,7 +964,7 @@ impl Layout {
             if tokens as u32 > capacity {
                 return Err(format!("each key column has room for {capacity} tokens and the context is {tokens}"));
             }
-            if let Some(vision) = program.vision.as_ref().filter(|v| v.patches as u32 > capacity) {
+            if let Some(vision) = program.rows().filter(|v| v.patches as u32 > capacity) {
                 return Err(format!("each key column has room for {capacity} tokens and an image can have {} patches", vision.patches));
             }
         }
@@ -992,8 +992,8 @@ impl Layout {
             Op::EmbRead { table, .. } => Some(program.table_rows(table)),
             _ => None,
         });
-        let token_range = table_rows.chain([program.vocab, program.vision.as_ref().map_or(0, |v| v.patches)]).max().unwrap_or(0) as u32;
-        let mut layout = Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: if outside.is_some() { program.vision.as_ref().map_or(program.vocab, |v| v.patches) as u32 } else { token_range }, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside, rotation_outside: None, group_field: Cell::new(None), group_used: Cell::new(false), heads_shard: None, local: HashSet::new(), gather_local: HashSet::new(), replicas: HashMap::new(), part_base: Cell::new(0) };
+        let token_range = table_rows.chain([program.vocab, program.rows().map_or(0, |v| v.patches)]).max().unwrap_or(0) as u32;
+        let mut layout = Self { config, buffers, overwritten, weights: matrices, small, keys, values, conv, delta, next, ones, minus_one, epsilon, temporaries, parts, delta_parts, delta_outputs, spread, rope, rope_table, rope_half, rope_factors, vision_rope, from_image: Cell::new(false), row_exponents, inverse_root, inverse_len, setup, cell_plan, in_cells, lookup_tables, key_capacity, chains, followers, extents: RefCell::default(), windows: RefCell::default(), rotations: RefCell::default(), tokens: if outside.is_some() { program.rows().map_or(program.vocab, |v| v.patches) as u32 } else { token_range }, positions: chip_tokens.unwrap_or(1) as u32, shard: None, by_rows: HashSet::new(), outside, rotation_outside: None, group_field: Cell::new(None), group_used: Cell::new(false), heads_shard: None, local: HashSet::new(), gather_local: HashSet::new(), replicas: HashMap::new(), part_base: Cell::new(0) };
         if table_out {
             layout.rotation_out(program, matrices_in_registers);
         }
@@ -1063,7 +1063,7 @@ impl Layout {
         } else {
             code.next_entry();
         }
-        if let Some(vision) = &program.vision {
+        if let Some(vision) = program.rows() {
             // A token that comes from an image: the encoder's output in place of the embedding.
             code.next_entry();
             self.from_image.set(true);
@@ -1566,7 +1566,7 @@ impl Layout {
         let buffers = &program.buffers;
         let attention: Vec<(usize, usize)> = ops.iter().filter_map(|op| if let Op::AttnSum { heads, kv_heads, .. } = op { Some((*heads, *kv_heads)) } else { None }).collect();
         let divides = |count: usize| count.is_multiple_of(n) && count <= PARTS;
-        if n < 2 || attention.is_empty() || program.vision.is_some() || ops.iter().any(|op| matches!(op, Op::Mla { .. })) {
+        if n < 2 || attention.is_empty() || program.rows().is_some() || ops.iter().any(|op| matches!(op, Op::Mla { .. })) {
             return;
         }
         // The attention goes with the chips when its heads divide evenly; when they do not,
@@ -1798,7 +1798,7 @@ impl Layout {
     fn rotation_out(&mut self, program: &Program, keep: bool) -> bool {
         let width = 3 * self.rope_half as u32 + 1;
         let register = self.rope_table[0];
-        if self.rotation_outside.is_some() || self.rope_half == 0 || program.vision.is_some() || program.image.is_some() || program.local_rope_theta.is_some() || !self.setup.initial.contains_key(&(register, 0)) {
+        if self.rotation_outside.is_some() || self.rope_half == 0 || program.rows().is_some() || program.codes().is_some() || program.local_rope_theta.is_some() || !self.setup.initial.contains_key(&(register, 0)) {
             return false;
         }
         let rows = self.positions;
@@ -1847,7 +1847,7 @@ impl Layout {
         self.outside = Some(OutsideTable { name, register, cols, mantissas });
         // Nothing reads by the token past its row now: what remains taken by it, the image's
         // rows with an image part, reaches only as far as those.
-        self.tokens = program.vision.as_ref().map_or(program.vocab, |v| v.patches) as u32;
+        self.tokens = program.rows().map_or(program.vocab, |v| v.patches) as u32;
         true
     }
 
@@ -1873,10 +1873,10 @@ impl Layout {
                 let (list, rope) = if routine == ENTRY_DRAFT { (&draft.ops[..draft.logits_from], true) } else { (&draft.ops[draft.logits_from..], false) };
                 self.run_list(ops, program, list, token, position, rope)
             }
-            ENTRY_TOKEN_FROM_IMAGE if program.vision.is_some() => self.run_token_from_image(ops, program, position, false),
+            ENTRY_TOKEN_FROM_IMAGE if program.rows().is_some() => self.run_token_from_image(ops, program, position, false),
             // The encoder's routines, as `microprogram` lays them out.
-            other if other > ENTRY_TOKEN_FROM_IMAGE && program.vision.is_some() => {
-                let vision = program.vision.as_ref().unwrap();
+            other if other > ENTRY_TOKEN_FROM_IMAGE && program.rows().is_some() => {
+                let vision = program.rows().unwrap();
                 let index = other - ENTRY_VISION;
                 let range = vision.routines().into_iter().nth(index).ok_or_else(|| format!("unknown routine: {other}"))?;
                 let rope = index % 2 == 1 && index < 2 * vision.blocks.len();
@@ -1960,7 +1960,7 @@ impl Layout {
     }
 
     pub fn vision_info(&self, program: &Program, config: &crate::vision::VisionConfig) -> Option<netlist::chip::VisionInfo> {
-        let part = program.vision.as_ref()?;
+        let part = program.rows()?;
         let (_, patch_table, patch_half) = self.vision_rope?;
         let bits = self.config.index_bits;
         let exponents = exponent_register(&self.config);
@@ -2083,13 +2083,13 @@ impl Layout {
 
     /// An image head's scores of each code, from the final hidden state the last token left.
     pub fn run_image_logits<O: BlockOps>(&self, ops: &mut O, program: &Program) -> Result<(), String> {
-        let image = program.image.as_ref().ok_or("this model does not draw")?;
+        let image = program.codes().ok_or("this model does not draw")?;
         self.run_list(ops, program, &image.logits_ops, 0.into(), 0.into(), false)
     }
 
     /// The vector that goes in for a drawn code, in place of a token's embedding.
     pub fn run_image_input<O: BlockOps>(&self, ops: &mut O, program: &Program, code: O::N) -> Result<(), String> {
-        let image = program.image.as_ref().ok_or("this model does not draw")?;
+        let image = program.codes().ok_or("this model does not draw")?;
         self.run_list(ops, program, &image.input_ops, code, 0.into(), false)
     }
 
@@ -2250,7 +2250,7 @@ impl Layout {
         let zero: O::N = 0.into();
         match op {
             Op::EmbRead { dst, .. } if self.from_image.get() => {
-                let output = program.vision.as_ref().ok_or("this model does not read images")?.output;
+                let output = program.rows().ok_or("this model does not read images")?.output;
                 let len = program.buffers[*dst] as u32;
                 ops.copy_part(self.reg(output), zero, self.reg(*dst), zero, len.into());
                 ops.normalize(self.reg(*dst), len.into());

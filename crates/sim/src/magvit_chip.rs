@@ -16,7 +16,7 @@
 use crate::lower::Layout;
 use crate::vm::BlockVm;
 use crate::weights::{Tensor, Weights};
-use compiler::{Buf, Inst, KvShape, Op, Program, VisionPart};
+use compiler::{Buf, Inst, KvShape, Op, Part, Program, RowPart};
 use netlist::block::{encode_vector, exponent_register, BlockOps};
 use netlist::DieConfig;
 use std::collections::HashMap;
@@ -519,8 +519,7 @@ impl MagvitChip {
             final_hidden: output,
             embedding_rows: input_read.is_some().then_some(1 << CODE_BITS),
             draft: None,
-            image: None,
-            vision: Some(VisionPart { ops, embed: 0..0, blocks: Vec::new(), merge: 0..0, pixels: input, position: input, output, head_dim: attention_channels, patches: reach, extra: Vec::new() }),
+            parts: vec![Part::Rows(RowPart { ops, embed: 0..0, blocks: Vec::new(), merge: 0..0, pixels: input, position: input, output, head_dim: attention_channels, patches: reach, extra: Vec::new() })],
         };
         let weights = Arc::new(weights.with_floats(derived)?);
         let layout = match tokens {
@@ -538,7 +537,7 @@ impl MagvitChip {
     }
 
     fn run(&mut self, routine: &Range<usize>, token: usize, position: usize) -> Result<(), String> {
-        let part = self.program.vision.as_ref().expect("the routines");
+        let part = self.program.rows().expect("the routines");
         let list = part.ops[routine.clone()].to_vec();
         self.layout.run_ops(&mut self.vm, &self.program, &list, token as u32, position as u32, false)
     }

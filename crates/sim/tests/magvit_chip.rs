@@ -243,7 +243,7 @@ fn on_gates(build: &dyn Fn(netlist::DieConfig) -> MagvitChip, schedule: &dyn Fn(
             routines.push(call.routine.clone());
         }
     }
-    let lists = |program: &compiler::Program| -> Vec<Vec<compiler::Inst>> { routines.iter().map(|r| program.vision.as_ref().unwrap().ops[r.clone()].to_vec()).collect() };
+    let lists = |program: &compiler::Program| -> Vec<Vec<compiler::Inst>> { routines.iter().map(|r| program.rows().unwrap().ops[r.clone()].to_vec()).collect() };
     let wide = build(sized);
     {
         let (program, layout, _) = wide.parts();

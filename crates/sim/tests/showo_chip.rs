@@ -229,7 +229,7 @@ fn gates_match_the_exact_machine(format: Option<netlist::format::WeightFormat>, 
     let die = die_for(&program, &weights, context, format);
     let layout = Layout::with_cells(&program, &weights, die, context).unwrap();
     let code = layout.microprogram(&program).unwrap();
-    let output = layout.register_of(program.vision.as_ref().unwrap().output);
+    let output = layout.register_of(program.rows().unwrap().output);
 
     // The exact machine of the same die, routine by routine.
     let mut vm = sim::chip::VmEngine::new(program.clone(), open().2, die, context).unwrap();

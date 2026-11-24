@@ -5,7 +5,7 @@ use crate::lower::Layout;
 use crate::vision::{patch_angles, Patches, VisionTower};
 use crate::vm::BlockVm;
 use crate::weights::Weights;
-use compiler::{Inst, Program, VisionPart};
+use compiler::{Inst, Program, RowPart};
 use netlist::block::{encode_vector, exponent_register, BlockOps};
 use netlist::DieConfig;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use std::sync::Arc;
 /// before the fusion: `(operations, patch as token, position, load the patch's rotation)`.
 /// Each patch is embedded, and each block runs its first routine on every patch and then
 /// the second, which attends over all of them.
-pub fn routine_order(part: &VisionPart, count: usize) -> Vec<(&[Inst], u32, u32, bool)> {
+pub fn routine_order(part: &RowPart, count: usize) -> Vec<(&[Inst], u32, u32, bool)> {
     let count = count as u32;
     let embed = (0..count).map(|p| (&part.ops[part.embed.clone()], p, p, false));
     let blocks = part.blocks.iter().flat_map(move |(first, rest)| {
@@ -27,7 +27,7 @@ pub fn routine_order(part: &VisionPart, count: usize) -> Vec<(&[Inst], u32, u32,
 
 pub struct ExactVision {
     pub program: Program,
-    pub part: VisionPart,
+    pub part: RowPart,
     layout: Layout,
     vm: BlockVm,
     bits: u32,
@@ -48,7 +48,7 @@ impl ExactVision {
     }
 
     /// The encoder `part` of `program`, which may be a language model's as well.
-    pub fn with_program(program: Program, part: VisionPart, weights: Weights, config: DieConfig) -> Result<Self, String> {
+    pub fn with_program(program: Program, part: RowPart, weights: Weights, config: DieConfig) -> Result<Self, String> {
         let weights = Arc::new(weights);
         let layout = Layout::new(&program, &weights, config, None)?;
         let mut vm = BlockVm::new(&config, layout.registers_used() as usize + 8, Some(weights));
@@ -86,7 +86,7 @@ impl ExactVision {
 
 /// Runs an image through the encoder up to the fusion, with the host's part: each patch's
 /// pixels, learned position and rotation. Gives how many tokens the fusion can then make.
-pub(crate) fn run_encoder(layout: &Layout, vm: &mut BlockVm, program: &Program, part: &VisionPart, bits: u32, tower: &VisionTower, image: &Patches) -> Result<usize, String> {
+pub(crate) fn run_encoder(layout: &Layout, vm: &mut BlockVm, program: &Program, part: &RowPart, bits: u32, tower: &VisionTower, image: &Patches) -> Result<usize, String> {
     let count = image.rows * image.cols;
     if count > part.patches {
         return Err(format!("the image has {count} patches and the encoder takes {}", part.patches));

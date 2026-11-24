@@ -118,20 +118,28 @@ pub struct Program {
     /// The hidden state after the final norm, the input of a draft step.
     pub final_hidden: Buf,
     pub draft: Option<DraftProgram>,
-    /// An image generator's heads, for models that draw: see `ImageHead`.
-    pub image: Option<ImageHead>,
-    /// An image encoder, for models that read pictures: see `VisionPart`.
-    pub vision: Option<VisionPart>,
+    /// What the model has besides its token routine: a second codebook (`CodeHead`) or
+    /// routines over a store of rows (`RowPart`). At most one of each: see `codes` and
+    /// `rows`.
+    pub parts: Vec<Part>,
     /// Rows of the embedding table when they are not the vocabulary's: Show-o reads text,
     /// its markers and the image's codes from one table, and scores only the codes.
     pub embedding_rows: Option<usize>,
 }
 
-/// The two small heads with which a language model draws, as Janus-Pro does: one turns
-/// the final hidden state into the scores of each code of the image's codebook, the other
-/// turns a drawn code into the vector that goes in, in place of a token's embedding.
+/// A part of a program besides its token routine.
 #[derive(Clone, Debug, Serialize)]
-pub struct ImageHead {
+#[serde(tag = "part", rename_all = "snake_case")]
+pub enum Part {
+    Codes(CodeHead),
+    Rows(RowPart),
+}
+
+/// A second codebook, with two small heads around the model: one turns the final hidden
+/// state into the scores of each code, the other turns a chosen code into the vector that
+/// goes in, in place of a token's embedding. Janus-Pro draws with the codes of an image.
+#[derive(Clone, Debug, Serialize)]
+pub struct CodeHead {
     /// From `final_hidden` to `logits`, one score per code.
     pub logits_ops: Vec<Inst>,
     pub logits: Buf,
@@ -183,10 +191,26 @@ pub struct KvShape {
 }
 
 impl Program {
-    /// Rows of an embedding table: the vocabulary's, or the codebook's for an image head.
+    /// The second codebook's heads, if the program has them.
+    pub fn codes(&self) -> Option<&CodeHead> {
+        self.parts.iter().find_map(|part| if let Part::Codes(codes) = part { Some(codes) } else { None })
+    }
+
+    /// The routines over a store of rows, if the program has them.
+    pub fn rows(&self) -> Option<&RowPart> {
+        self.parts.iter().find_map(|part| if let Part::Rows(rows) = part { Some(rows) } else { None })
+    }
+
+    /// Adds a part, in place of one of the same kind.
+    pub fn set_part(&mut self, part: Part) {
+        self.parts.retain(|p| std::mem::discriminant(p) != std::mem::discriminant(&part));
+        self.parts.push(part);
+    }
+
+    /// Rows of an embedding table: the vocabulary's, or the second codebook's.
     pub fn table_rows(&self, table: &str) -> usize {
-        match &self.image {
-            Some(image) if image.input_ops.iter().any(|i| matches!(&i.op, Op::EmbRead { table: t, .. } if t == table)) => image.codes,
+        match self.codes() {
+            Some(codes) if codes.input_ops.iter().any(|i| matches!(&i.op, Op::EmbRead { table: t, .. } if t == table)) => codes.codes,
             _ => self.embedding_rows.unwrap_or(self.vocab),
         }
     }
@@ -737,8 +761,7 @@ fn empty_program(family: &str, vocab: usize, hidden: usize, num_layers: usize, r
         final_hidden: 0,
         embedding_rows: None,
         draft: None,
-        image: None,
-        vision: None,
+        parts: Vec::new(),
     }
 }
 
@@ -776,7 +799,7 @@ fn add_janus_image_head(program: &mut Program, vq: &Value) -> Result<(), String>
     let active = buffer(program, width);
     input_ops.push(inst("GELU activation", Op::Gelu { src: widened, approximate: false, dst: active }));
     let input = layer(program, &mut input_ops, "model.generation_aligner.hidden_layers.0", active, hidden);
-    program.image = Some(ImageHead { logits_ops, logits, codes, input_ops, input });
+    program.set_part(Part::Codes(CodeHead { logits_ops, logits, codes, input_ops, input }));
     Ok(())
 }
 
@@ -1021,12 +1044,13 @@ mod tests {
     }
 }
 
-/// An image encoder as the chip runs it: operations that form routines, and the order the
-/// firmware runs them in. A routine runs once for each patch (or merged token), with the
-/// patch as the token; the rest of an encoder block attends over every patch, so its
-/// position is the last patch. Its buffers and key slots are the program's it belongs to.
+/// Routines over a store of rows, as the chip runs them: operations that form routines,
+/// and the order the host or the firmware runs them in. A routine runs once for each row,
+/// with the row as the token; one that attends over every row takes the last row as its
+/// position. Its buffers and key slots are the program's it belongs to. The image encoder
+/// is one, with a row per patch: the names of its fields come from it.
 #[derive(Clone, Debug, Serialize)]
-pub struct VisionPart {
+pub struct RowPart {
     pub ops: Vec<Inst>,
     /// Turns a patch's pixels, with its learned position, into the first hidden state.
     pub embed: std::ops::Range<usize>,
@@ -1049,7 +1073,7 @@ pub struct VisionPart {
     pub extra: Vec<std::ops::Range<usize>>,
 }
 
-impl VisionPart {
+impl RowPart {
     /// Every routine in the order of its entries: embedding, each block's two, fusion.
     pub fn routines(&self) -> Vec<std::ops::Range<usize>> {
         std::iter::once(self.embed.clone()).chain(self.blocks.iter().flat_map(|(a, b)| [a.clone(), b.clone()])).chain([self.merge.clone()]).chain(self.extra.iter().cloned()).collect()
@@ -1060,7 +1084,7 @@ impl VisionPart {
 #[derive(Clone, Debug, Serialize)]
 pub struct VisionProgram {
     pub program: Program,
-    pub vision: VisionPart,
+    pub vision: RowPart,
 }
 
 /// The encoder in `vision_config`, for images of at most `patches` patches, on its own.
@@ -1085,8 +1109,7 @@ pub fn compile_vision(config: &str, patches: usize) -> Result<VisionProgram, Str
         final_hidden: 0,
         embedding_rows: None,
         draft: None,
-        image: None,
-        vision: None,
+        parts: Vec::new(),
     };
     let vision = vision_part(&root, patches, &mut program)?;
     program.ops = vision.ops.clone();
@@ -1102,11 +1125,11 @@ pub fn compile_vision(config: &str, patches: usize) -> Result<VisionProgram, Str
 pub fn attach_vision(mut program: Program, config: &str, patches: usize) -> Result<Program, String> {
     let root: Value = serde_json::from_str(config).map_err(|e| e.to_string())?;
     let vision = vision_part(&root, patches, &mut program)?;
-    program.vision = Some(vision);
+    program.set_part(Part::Rows(vision));
     Ok(program)
 }
 
-fn vision_part(root: &Value, patches: usize, program: &mut Program) -> Result<VisionPart, String> {
+fn vision_part(root: &Value, patches: usize, program: &mut Program) -> Result<RowPart, String> {
     let v = &root["vision_config"];
     let number = |key: &str| v[key].as_u64().map(|n| n as usize).ok_or(format!("vision_config has no {key}"));
     let (hidden, heads, depth, intermediate) = (number("hidden_size")?, number("num_heads")?, number("depth")?, number("intermediate_size")?);
@@ -1203,5 +1226,5 @@ fn vision_part(root: &Value, patches: usize, program: &mut Program) -> Result<Vi
     debug_assert_eq!(ops.len(), merge_range.end);
 
     program.kv_slots.extend((0..depth).map(|_| KvShape { head_dim, heads }));
-    Ok(VisionPart { ops, embed, blocks, merge: merge_range, pixels, position, output, head_dim, patches, extra: Vec::new() })
+    Ok(RowPart { ops, embed, blocks, merge: merge_range, pixels, position, output, head_dim, patches, extra: Vec::new() })
 }

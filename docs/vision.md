@@ -91,7 +91,7 @@ The tests catch a badly composed M-RoPE rotation or text that is not shifted: th
 
 Janus-Pro-1B also generates images: its language model writes 576 tokens from a codebook (a 24 × 24 grid), guided away from what it would draw without the text, and a convolutional decoder turns them into pixels. `cargo run --release -p sim --example draw -- <folder> "<description>" output.bmp [temperature] [seed]`.
 
-With `EXACT=16` (and in the application, with the model loaded in the chip's arithmetic), the two copies of the language model, with and without text, and their two image heads run in the die's integer arithmetic. The compiler adds to Janus' program an image head (`ImageHead`) with two lists of operations:
+With `EXACT=16` (and in the application, with the model loaded in the chip's arithmetic), the two copies of the language model, with and without text, and their two image heads run in the die's integer arithmetic. The compiler adds to Janus' program an image head (a `CodeHead`, the codes being the image's) with two lists of operations:
 
 - **Scores:** from the final state, `proj_out` with its bias, GELU and `vision_head` with its bias, one score for each of the codebook's 16,384 codes.
 - **Input:** the code read from `generation_embeddings` like an embedding row, `fc1` with its bias, GELU and `hidden_layers.0` with its bias: the vector that goes in instead of the next token's embedding. It is the same for both copies, so it is computed once.

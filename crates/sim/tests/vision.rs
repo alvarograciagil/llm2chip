@@ -223,7 +223,7 @@ mod gates {
         let count = image.rows * image.cols;
         let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
         let program = compiler::attach_vision(compiler::compile_qwen3_5(CONFIG).unwrap(), &config, count).unwrap();
-        let part = program.vision.clone().unwrap();
+        let part = program.rows().cloned().unwrap();
         let c = DieConfig { index_bits: 10, microcode_bits: 15, ..die_config() };
 
         // The exact machine, products added up weight by weight as these gates do.

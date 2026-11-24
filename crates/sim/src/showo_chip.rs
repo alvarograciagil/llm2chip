@@ -3,7 +3,7 @@
 //!
 //! - **The text** goes in as ordinary tokens, each seeing those before it.
 //! - **The image** sees itself whole, in both directions, so it goes through each layer in
-//!   two passes over its rows, as the image encoder does (`compiler::VisionPart`):
+//!   two passes over its rows, as the image encoder does (`compiler::RowPart`):
 //!   1. each row stores its key and value in the layer's cache, after the text's, and its
 //!      query;
 //!   2. each row attends over the text and every row of the image, then runs the rest of
@@ -16,7 +16,7 @@ use crate::lower::Layout;
 use crate::showo::{fill_with, Magvit, ShowOConfig};
 use crate::vm::BlockVm;
 use crate::weights::{Tensor, Weights};
-use compiler::{Buf, Inst, KvShape, Op, Program, VisionPart};
+use compiler::{Buf, Inst, KvShape, Op, Part, Program, RowPart};
 use netlist::block::exponent_register;
 use netlist::DieConfig;
 use std::path::Path;
@@ -272,10 +272,9 @@ pub fn program_guided(s: &Shape, guidance: Option<f32>) -> Program {
         final_hidden,
         embedding_rows: Some(s.vocab),
         draft: None,
-        image: None,
         // The image's routines, as the chip numbers them: the embedding (by the token), each
         // layer's two passes (by the row), and the codes' scores (by the row).
-        vision: Some(VisionPart { ops: image_ops, embed, blocks, merge: score, pixels: unused, position: unused, output: guided.unwrap_or(scores), head_dim: s.head_dim(), patches: rows, extra }),
+        parts: vec![Part::Rows(RowPart { ops: image_ops, embed, blocks, merge: score, pixels: unused, position: unused, output: guided.unwrap_or(scores), head_dim: s.head_dim(), patches: rows, extra })],
     }
 }
 
@@ -335,7 +334,7 @@ impl ShowOChip {
     /// place of the image (the codes' rows of the output, a place after another), after
     /// `text`. The image is the model's tokens, a code's or the mask.
     pub fn scores(&mut self, text_ids: &[u32], text_positions: &[u64], image: &[u32]) -> Result<Vec<f32>, String> {
-        let part = self.program.vision.clone().ok_or("the image part is missing")?;
+        let part = self.program.rows().cloned().ok_or("the image part is missing")?;
         if image.len() + 2 != self.shape.image_rows {
             return Err(format!("a Show-o image has {} codes", self.shape.image_rows - 2));
         }
@@ -422,7 +421,7 @@ impl ShowOChip {
 
 /// What the firmware needs to run a pass of `program`, Show-o's, laid out by `layout`.
 pub fn firmware_info(program: &Program, layout: &Layout, die: &DieConfig) -> Result<netlist::chip::ShowOInfo, String> {
-    let part = program.vision.as_ref().ok_or("not Show-o's program")?;
+    let part = program.rows().ok_or("not Show-o's program")?;
     let (rope, rope_half) = layout.rope_table().ok_or("the rotation table is not in registers")?;
     let scores = layout.register_of(part.output);
     Ok(netlist::chip::ShowOInfo {
@@ -546,7 +545,7 @@ impl FillDie for ShowOChip {
     }
 
     fn scores(&mut self) -> (i32, Vec<i32>) {
-        let part = self.program.vision.as_ref().expect("the image");
+        let part = self.program.rows().expect("the image");
         let (reg, width) = (self.layout.register_of(part.output), self.program.buffers[part.output] as u32);
         (self.vm.register_exponent(reg) as i32, (0..width).map(|i| self.vm.mantissa(reg, i) as i32).collect())
     }
@@ -562,7 +561,7 @@ impl ShowOChip {
 
     /// The shape of a fill on this machine: its rows, layers, codes and whether it guides.
     pub fn fill_shape(&self) -> FillShape {
-        let part = self.program.vision.as_ref().expect("the image");
+        let part = self.program.rows().expect("the image");
         FillShape { rows: part.patches as u32, layers: part.blocks.len() as u32, guided: !part.extra.is_empty(), bits: self.layout.config().cell.activation_bits }
     }
 }

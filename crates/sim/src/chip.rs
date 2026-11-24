@@ -544,7 +544,7 @@ pub fn fpga_chip_for(models: &[(&Program, &Weights)], trial: DieConfig, context:
             layout.table_outside(program);
         }
         let code = layout.microprogram(program)?;
-        let features = netlist::DieFeatures::of(&code).with_host_writes(program.vision.is_some()).with_lane_bits(trial.features.lane_bits).with_cluster_bits(trial.features.cluster_bits).with_key_shift(trial.features.key_shift).with_factor_steps(options.factor_steps);
+        let features = netlist::DieFeatures::of(&code).with_host_writes(program.rows().is_some()).with_lane_bits(trial.features.lane_bits).with_cluster_bits(trial.features.cluster_bits).with_key_shift(trial.features.key_shift).with_factor_steps(options.factor_steps);
         let die = compact_die(DieConfig { features, microcode_bits: bits_for(code.words.len() as u64), ..trial }, &layout);
         needs.push(if options.dictionary { with_code_dictionary(die, &code) } else { die });
         built.push((layout, code));
