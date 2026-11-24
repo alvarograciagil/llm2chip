@@ -210,8 +210,10 @@ export const useVoice = create<VoiceState>((set, get) => ({
         }
         if (planTimer) clearInterval(planTimer);
         planTimer = null;
-        if (status.state === "done") set({ planning: false, plan: status.result });
-        else set({ planning: false, planError: status.error ?? null });
+        if (status.state === "done") {
+          set({ planning: false, plan: status.result });
+          keepPlan(status.result, parts);
+        } else set({ planning: false, planError: status.error ?? null });
       } catch {
         set({ online: false });
       }
@@ -294,6 +296,21 @@ export const useVoice = create<VoiceState>((set, get) => ({
     poll(set);
   },
 }));
+
+/** The planned voice dies, kept with the project so its estimate and floorplan count them:
+ * every die but the language model's, which the estimator lays out. */
+export function voiceDies(plan: SystemPlan, parts: { listens: boolean; speaks: boolean }) {
+  if (!plan.plan) return null;
+  const dies = plan.plan.dies
+    .filter((d) => !d.stages.includes("language model"))
+    .map(({ stages, count, units, lanes, cells, parts_mm2, clock_mhz }) => ({ stages, count, units, lanes, cells, parts_mm2, clock_mhz }));
+  return dies.length ? { ...parts, dies } : null;
+}
+
+function keepPlan(plan: SystemPlan, parts: { listens: boolean; speaks: boolean }) {
+  const kept = voiceDies(plan, parts);
+  if (kept) useDesign.getState().setParams({ voice_plan: kept });
+}
 
 function poll(set: (partial: Partial<VoiceState>) => void) {
   if (timer) clearInterval(timer);

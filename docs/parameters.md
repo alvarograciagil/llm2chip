@@ -38,13 +38,13 @@ Reserves area for the image encoder (a ViT of about 400 M parameters in Qwen) th
 
 ### Listens (speech to text) (`speech_in`)
 
-The chip also listens: a speech recogniser (Moonshine) turns a spoken question into text for the language model, on dies of its own. They are planned in the Listen view; the floorplan does not count them. Off, nothing of listening is in the chip or the app.
+The chip also listens: a speech recogniser (Moonshine) turns a spoken question into text for the language model, on dies of its own. The floorplan and the estimate count them: reference dies until they are planned with your models in the Listen view. Off, nothing of listening is in the chip or the app.
 
 *On or off.*
 
 ### Speaks (text to speech) (`speech_out`)
 
-The chip also speaks: a speech writer (OuteTTS) and a sound decoder (DAC) say the answer aloud, on dies of their own. They are planned in the Speak view; the floorplan does not count them. Off, nothing of speaking is in the chip or the app.
+The chip also speaks: a speech writer (OuteTTS) and a sound decoder (DAC) say the answer aloud, on dies of their own. The floorplan and the estimate count them: reference dies until they are planned with your models in the Speak view. Off, nothing of speaking is in the chip or the app.
 
 *On or off.*
 

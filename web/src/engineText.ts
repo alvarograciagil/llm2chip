@@ -1077,6 +1077,17 @@ export const ENGINE_TEXT: [string, string][] = [
   ["this engine was built without speaking", "este motor se compiló sin hablar"],
   ["the language model on {n} dies, {s}", "el modelo de lenguaje en {0} dies, {1}"],
   ["the language model on {n} dies: {s}", "el modelo de lenguaje en {0} dies: {1}"],
+  ["the language model has dies of its own", "el modelo de lenguaje tiene dies propios"],
+  ["Vision encoder", "Codificador de imagen"],
+  ["External memory", "Memoria externa"],
+  ["External DRAM", "DRAM externa"],
+  ["Text (language model)", "Texto (modelo de lenguaje)"],
+  ["Listening and speaking", "Escucha y habla"],
+  ["Leakage of listening and speaking", "Fuga de escucha y habla"],
+  ["{n} mm² of text (the language model) and {n} mm² of listening and speaking.", "{0} mm² de texto (el modelo de lenguaje) y {1} mm² de escucha y habla."],
+  ["{n} dies of reference, from plans measured with Moonshine-tiny, OuteTTS and DAC in N6: plan them with your models in the Listen or Speak view.", "{0} dies de referencia, de planes medidos con Moonshine-tiny, OuteTTS y DAC en N6: planifícalos con tus modelos en la vista Escuchar o Hablar."],
+  ["{n} dies planned in N6 with your models, in the Listen or Speak view.", "{0} dies planificados en N6 con tus modelos, en la vista Escuchar o Hablar."],
+  ["{n} dies while they are on; not in the power while generating text.", "{0} dies mientras están encendidos; no entra en la potencia al generar texto."],
 ];
 
 const NUMBER = "(-?[\\d.,]+)";

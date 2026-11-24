@@ -105,12 +105,15 @@ pub struct ChipParams {
     pub mtp_enabled: bool,
     pub mtp_depth: u32,
     pub include_vision: bool,
-    /// The chip listens: a speech recogniser turns a spoken question into text. Its dies are
-    /// planned apart, in the Listen view; the estimate does not count them.
+    /// The chip listens: a speech recogniser turns a spoken question into text, on dies of
+    /// its own that the estimate and the floorplan count (see `voice_plan`).
     pub speech_in: bool,
-    /// The chip speaks: a speech writer and a sound decoder say the answer. Their dies are
-    /// planned apart, in the Speak view; the estimate does not count them.
+    /// The chip speaks: a speech writer and a sound decoder say the answer, on dies of their
+    /// own that the estimate and the floorplan count (see `voice_plan`).
     pub speech_out: bool,
+    /// The voice dies the Listen or Speak view planned for this project's models. None, or a
+    /// plan made for other parts: reference dies from measured plans.
+    pub voice_plan: Option<crate::voice::VoicePlanned>,
 
     /// 0 lets the estimator pick the smallest number that fits.
     pub dies: u32,
@@ -213,6 +216,7 @@ impl Default for ChipParams {
             include_vision: false,
             speech_in: false,
             speech_out: false,
+            voice_plan: None,
             dies: 0,
             die_max_mm2: 815.0,
             macs_per_die: 136_000,

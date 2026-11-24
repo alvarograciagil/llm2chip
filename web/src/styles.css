@@ -30,6 +30,10 @@
   --cat-vector: #af52de;
   --cat-state: #ff2d55;
   --cat-system: #aeaeb2;
+  --part-text: #5856d6;
+  --part-vision: #28a745;
+  --part-listen: #ff9500;
+  --part-speak: #ff2d55;
   --heat-low: #d6e8ff;
   --heat-high: #004ea8;
 }
@@ -67,6 +71,10 @@
     --cat-vector: #bf5af2;
     --cat-state: #ff375f;
     --cat-system: #636366;
+    --part-text: #5e5ce6;
+    --part-vision: #30d158;
+    --part-listen: #ff9f0a;
+    --part-speak: #ff375f;
     --heat-low: #17304f;
     --heat-high: #8cc4ff;
   }
@@ -103,6 +111,10 @@
   --cat-vector: #bf5af2;
   --cat-state: #ff375f;
   --cat-system: #636366;
+  --part-text: #5e5ce6;
+  --part-vision: #30d158;
+  --part-listen: #ff9f0a;
+  --part-speak: #ff375f;
   --heat-low: #17304f;
   --heat-high: #8cc4ff;
 }
@@ -863,6 +875,10 @@ button.link-row {
 .cat-vector { background: var(--cat-vector); }
 .cat-state { background: var(--cat-state); }
 .cat-system { background: var(--cat-system); }
+.part-text { background: var(--part-text); }
+.part-vision { background: var(--part-vision); }
+.part-listen { background: var(--part-listen); }
+.part-speak { background: var(--part-speak); }
 
 .zoom {
   display: inline-flex;

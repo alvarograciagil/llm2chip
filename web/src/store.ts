@@ -22,7 +22,7 @@ export type Selection =
   | { kind: "cell"; die: number; row: number; col: number }
   | null;
 
-export type Overlay = "function" | "layer" | "activity" | "energy" | "data" | "density";
+export type Overlay = "function" | "part" | "layer" | "activity" | "energy" | "data" | "density";
 export type SidebarTab = "parameters" | "optimizations";
 export type View = "floorplan" | "logic" | "schematic" | "simulator" | "images" | "listen" | "speak" | "explorer" | "optimize" | "models" | "numeric" | "parameters" | "viewer";
 export type Appearance = "auto" | "light" | "dark";

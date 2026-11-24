@@ -1,5 +1,5 @@
 import { locale } from "../format";
-import type { BlockArea, DiePlan, Floorplan, Rect, Report } from "../engine";
+import type { BlockArea, DiePlan, Floorplan, Part, Rect, Report, VoiceDiePlan } from "../engine";
 import type { Overlay, Selection } from "../store";
 
 export interface Camera {
@@ -13,7 +13,8 @@ export type Hit =
   | { kind: "array"; die: number; rect: Rect; label: string }
   | { kind: "block"; die: number; id: string; rect: Rect; label: string }
   | { kind: "cell"; die: number; row: number; col: number; rect: Rect; label: string }
-  | { kind: "memory"; rect: Rect; label: string };
+  | { kind: "memory"; rect: Rect; label: string }
+  | { kind: "voice"; die: number; rect: Rect; label: string };
 
 export interface Theme {
   canvas: string;
@@ -25,6 +26,7 @@ export interface Theme {
   accent: string;
   neutral: string;
   categories: Record<BlockArea["category"], string>;
+  parts: Record<Part, string>;
   heatLow: string;
   heatHigh: string;
 }
@@ -75,9 +77,43 @@ export function readTheme(el: Element): Theme {
       state: get("--cat-state"),
       system: get("--cat-system"),
     },
+    parts: { text: get("--part-text"), vision: get("--part-vision"), listen: get("--part-listen"), speak: get("--part-speak") },
     heatLow: get("--heat-low"),
     heatHigh: get("--heat-high"),
   };
+}
+
+export const PART_LABEL: Record<Part, string> = { text: "Text", vision: "Vision", listen: "Listening", speak: "Speaking" };
+const SPEAKING = ["speech writer", "sound decoder"];
+
+/** What a die is for, in words: "Text + Vision", or "Listening + Speaking (sound decoder)"
+ * when a voice die holds only one of speaking's two stages. */
+export function partsLabel(parts: Part[], stages: string[], t: (text: string) => string = String): string {
+  return parts
+    .map((part) => {
+      if (part !== "speak") return t(PART_LABEL[part]);
+      const said = stages.filter((s) => SPEAKING.includes(s));
+      return said.length === SPEAKING.length || said.length === 0 ? t("Speaking") : `${t("Speaking")} (${said.map((s) => t(s)).join(", ")})`;
+    })
+    .join(" + ");
+}
+
+/** A voice die in a line: its number, parts, size and shape. */
+export function voiceLabel(v: VoiceDiePlan, t: (text: string) => string = String): string {
+  const mm2 = v.parts_mm2.reduce((a, b) => a + b, 0);
+  const shape = `${v.units} × ${v.lanes} ${t("units")}, ${v.cells.toLocaleString(locale())} ${t("cells")}, ${Math.round(v.clock_mhz)} MHz`;
+  const reference = v.reference ? ` · ${t("reference dies: plan them with your models")}` : "";
+  return `${t("Die")} ${v.index} · ${partsLabel(v.parts, v.stages, t)} · ${Math.round(mm2).toLocaleString(locale())} mm² · ${shape}${reference}`;
+}
+
+/** The share of a die's weights each segment of the image encoder takes, and where it starts. */
+function visionBand(die: DiePlan): { from: number; share: number } | null {
+  let from = 0;
+  for (const seg of die.cells.segments) {
+    if (seg.part === "vision") return { from, share: seg.fraction };
+    from += seg.fraction;
+  }
+  return null;
 }
 
 function parse(hex: string): [number, number, number] {
@@ -145,6 +181,8 @@ function dieLayerColor(die: DiePlan, plan: Floorplan, theme: Theme): string {
 function fillFor(scene: Scene, die: DiePlan, measure: Measure, category: BlockArea["category"], isArray: boolean): string {
   const { overlay, theme, report } = scene;
   if (overlay === "function") return theme.categories[category];
+  // The die's own blocks serve the language model: the text colour, lighter than its cells.
+  if (overlay === "part") return isArray ? theme.parts.text : mix(theme.parts.text, theme.die, 0.45);
   if (overlay === "layer") return isArray ? dieLayerColor(die, report.floorplan, theme) : theme.neutral;
   const value = overlayValue(measure, overlay);
   if (value <= 0) return theme.neutral;
@@ -189,6 +227,23 @@ function drawCell(ctx: CanvasRenderingContext2D, scene: Scene, die: DiePlan, s: 
     [cells.scale_fraction, theme.categories.compute],
     [cells.noc_fraction, theme.categories.interconnect],
   ];
+
+  if (overlay === "part") {
+    let y = body.y;
+    die.cells.segments.forEach((seg, i) => {
+      const h = body.h * seg.fraction;
+      ctx.fillStyle = mix(theme.parts[seg.part], theme.die, (i % 2) * 0.18);
+      ctx.fillRect(body.x, y, body.w, h);
+      if (h > 14 && s.w > 120) {
+        ctx.fillStyle = inkFor(theme.parts[seg.part]);
+        ctx.font = `500 10px ${FONT}`;
+        ctx.textBaseline = "middle";
+        text(ctx, (scene.t ?? String)(seg.label), body.x + 5, y + h / 2, body.w - 10);
+      }
+      y += h;
+    });
+    return;
+  }
 
   if (overlay !== "function") {
     ctx.fillStyle = fillFor(scene, die, arrayMeasure(scene.report), "memory", true);
@@ -259,6 +314,16 @@ function drawArray(ctx: CanvasRenderingContext2D, scene: Scene, die: DiePlan) {
       ctx.lineTo(s.x + s.w, y);
     }
     ctx.stroke();
+    const band = scene.overlay === "part" ? visionBand(die) : null;
+    if (band) {
+      // The image encoder's share of the die's cells, where it sits after the embedding.
+      const b = { x: s.x, y: s.y + band.from * s.h, w: s.w, h: Math.max(1, band.share * s.h) };
+      ctx.fillStyle = theme.parts.vision;
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+      drawBlockLabel(ctx, b, (scene.t ?? String)("Vision encoder"), theme.parts.vision);
+      if (b.y > s.y + 22) drawBlockLabel(ctx, s, (scene.t ?? String)(`Cell array · ${cells.count.toLocaleString(locale())}`), fill);
+      return;
+    }
     drawBlockLabel(ctx, s, (scene.t ?? String)(`Cell array · ${cells.count.toLocaleString(locale())}`), fill);
     return;
   }
@@ -341,7 +406,66 @@ function drawDie(ctx: CanvasRenderingContext2D, scene: Scene, die: DiePlan) {
   ctx.textBaseline = "bottom";
   const t = scene.t ?? String;
   const range = die.first_layer === null ? "" : die.first_layer === die.last_layer ? ` · ${t(`layer ${die.first_layer}`)}` : ` · ${t(`layers ${die.first_layer}–${die.last_layer}`)}`;
-  if (s.w > 36) text(ctx, s.w > 110 ? `Die ${die.index}${range}` : `${die.index}`, s.x, s.y - 4, s.w);
+  if (s.w > 36) text(ctx, s.w > 110 ? `${t("Die")} ${die.index} · ${partsLabel(die.parts, [], t)}${range}` : `${die.index}`, s.x, s.y - 4, s.w);
+}
+
+const VOICE_PARTS: [number, BlockArea["category"], string][] = [
+  [0, "compute", "Logic"],
+  [1, "memory", "Cell memory"],
+  [2, "vector", "Vector memory"],
+  [3, "system", "Microcode"],
+];
+
+/** A die of listening or speaking: its parts of silicon in bands, or its parts of the chip
+ * side by side; dashed while it is a reference die. */
+function drawVoiceDie(ctx: CanvasRenderingContext2D, scene: Scene, v: VoiceDiePlan, room: number) {
+  const { camera, width, height, theme, overlay } = scene;
+  const t = scene.t ?? String;
+  const s = toScreen(camera, v.rect);
+  if (!visible(s, width, height)) return;
+  ctx.save();
+  roundRect(ctx, s, 4);
+  ctx.fillStyle = theme.die;
+  ctx.fill();
+  ctx.clip();
+  if (overlay === "part") {
+    v.parts.forEach((part, i) => {
+      const w = s.w / v.parts.length;
+      ctx.fillStyle = theme.parts[part];
+      ctx.fillRect(s.x + i * w, s.y, w, s.h);
+      drawBlockLabel(ctx, { x: s.x + i * w, y: s.y, w, h: s.h }, partsLabel([part], v.stages, t), theme.parts[part]);
+    });
+  } else if (overlay === "function") {
+    const total = v.parts_mm2.reduce((a, b) => a + b, 0) || 1;
+    let y = s.y;
+    for (const [i, category, label] of VOICE_PARTS) {
+      const h = (s.h * v.parts_mm2[i]) / total;
+      ctx.fillStyle = theme.categories[category];
+      ctx.fillRect(s.x, y, s.w, h);
+      drawBlockLabel(ctx, { x: s.x, y, w: s.w, h }, t(label), theme.categories[category]);
+      y += h;
+    }
+  } else {
+    ctx.fillStyle = theme.neutral;
+    ctx.fillRect(s.x, s.y, s.w, s.h);
+    drawBlockLabel(ctx, s, partsLabel(v.parts, v.stages, t), theme.neutral);
+  }
+  ctx.restore();
+  if (v.reference) {
+    ctx.save();
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = theme.secondary;
+    ctx.lineWidth = 1.5;
+    roundRect(ctx, s, 4);
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.fillStyle = theme.secondary;
+  ctx.font = `500 11px ${FONT}`;
+  ctx.textBaseline = "bottom";
+  // The caption may run past a small die, up to the next one: what a die is for always shows.
+  const caption = `${t("Die")} ${v.index} · ${partsLabel(v.parts, v.stages, t)}`;
+  if (room * camera.k > 24) text(ctx, caption, s.x, s.y - 4, room * camera.k - 6);
 }
 
 function drawLinks(ctx: CanvasRenderingContext2D, scene: Scene) {
@@ -386,6 +510,8 @@ export function draw(ctx: CanvasRenderingContext2D, scene: Scene) {
 
   drawLinks(ctx, scene);
   for (const die of plan.dies) drawDie(ctx, scene, die);
+  const voice = plan.voice ?? [];
+  voice.forEach((v, i) => drawVoiceDie(ctx, scene, v, (voice[i + 1]?.rect.x ?? plan.width) - v.rect.x));
 
   for (const memory of plan.memory) {
     const s = toScreen(camera, memory.rect);
@@ -393,7 +519,7 @@ export function draw(ctx: CanvasRenderingContext2D, scene: Scene) {
     roundRect(ctx, s, 4);
     ctx.fillStyle = theme.neutral;
     ctx.fill();
-    drawBlockLabel(ctx, s, memory.label, theme.neutral);
+    drawBlockLabel(ctx, s, (scene.t ?? String)(memory.label), theme.neutral);
   }
 
   if (scene.hover && scene.hover.kind !== "die") {
@@ -403,11 +529,14 @@ export function draw(ctx: CanvasRenderingContext2D, scene: Scene) {
   }
 }
 
-export function hitTest(report: Report, wx: number, wy: number, cameraK: number): Hit | null {
+export function hitTest(report: Report, wx: number, wy: number, cameraK: number, t: (text: string) => string = String): Hit | null {
   const inside = (r: Rect) => wx >= r.x && wy >= r.y && wx < r.x + r.w && wy < r.y + r.h;
   const plan = report.floorplan;
   for (const memory of plan.memory) {
     if (inside(memory.rect)) return { kind: "memory", rect: memory.rect, label: memory.label };
+  }
+  for (const v of plan.voice ?? []) {
+    if (inside(v.rect)) return { kind: "voice", die: v.index, rect: v.rect, label: voiceLabel(v, t) };
   }
   for (const die of plan.dies) {
     if (!inside(die.rect)) continue;

@@ -3,6 +3,7 @@
 
 use crate::estimate::BlockArea;
 use crate::params::{ChipParams, KvBackend, WeightBackend};
+use crate::voice::{CountedVoiceDie, Part};
 use model_ir::{Block, ModelGraph};
 use serde::Serialize;
 
@@ -34,6 +35,8 @@ pub struct PlacedBlock {
 pub struct CellSegment {
     pub label: String,
     pub layer: Option<u32>,
+    /// What the matrices are for: the language model's text, or the image encoder.
+    pub part: Part,
     pub fraction: f64,
 }
 
@@ -64,6 +67,9 @@ pub struct DiePlan {
     pub has_embedding: bool,
     pub has_head: bool,
     pub weights: u64,
+    /// What the die is for: text (the language model), and vision on the die that holds the
+    /// image encoder.
+    pub parts: Vec<Part>,
     /// Blocks relative to the die, excluding those interleaved in the array.
     pub blocks: Vec<PlacedBlock>,
     pub cells: CellPlan,
@@ -75,12 +81,33 @@ pub struct MemoryStack {
     pub rect: Rect,
 }
 
+/// A die of listening or speaking, drawn at its size in a row of its own below the
+/// language model's dies.
+#[derive(Clone, Debug, Serialize)]
+pub struct VoiceDiePlan {
+    /// Numbered after the language model's dies.
+    pub index: u32,
+    pub rect: Rect,
+    pub parts: Vec<Part>,
+    /// The voice planner's stages on it: `speech to text`, `speech writer`, `sound decoder`.
+    pub stages: Vec<String>,
+    pub units: u32,
+    pub lanes: u32,
+    pub cells: u64,
+    /// Logic, cell memory, vector memory and microcode, mm².
+    pub parts_mm2: [f64; 4],
+    pub clock_mhz: f64,
+    /// From a measured plan of other models, until the project is planned with its own.
+    pub reference: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Floorplan {
     pub width: f64,
     pub height: f64,
     pub num_layers: u32,
     pub dies: Vec<DiePlan>,
+    pub voice: Vec<VoiceDiePlan>,
     pub memory: Vec<MemoryStack>,
 }
 
@@ -90,27 +117,31 @@ struct DieLayers {
     embedding: bool,
     head: bool,
     weights: u64,
-    segments: Vec<(String, Option<u32>, u64)>,
+    segments: Vec<(String, Option<u32>, Part, u64)>,
 }
 
 fn layer_weights(model: &ModelGraph, layer: u32) -> u64 {
     model.params_where(|t| t.layer == Some(layer) && t.block != Block::Norm)
 }
 
-/// Assigns consecutive layers to dies so each holds a similar number of weights.
-fn partition(model: &ModelGraph, dies: u32) -> Vec<DieLayers> {
+/// Assigns consecutive layers to dies so each holds a similar number of weights. The image
+/// encoder's `vision` weights go on the first die, with the embedding, before the layers.
+fn partition(model: &ModelGraph, dies: u32, vision: u64) -> Vec<DieLayers> {
     let embedding = model.params_in(Block::Embedding);
     let head = model.params_in(Block::Head);
     let layer_total: u64 = (0..model.num_layers).map(|l| layer_weights(model, l)).sum();
-    let mut remaining = embedding + head + layer_total;
+    let mut remaining = embedding + vision + head + layer_total;
     let mut target = remaining as f64 / dies as f64;
 
     let mut out: Vec<DieLayers> = (0..dies)
         .map(|_| DieLayers { first: None, last: None, embedding: false, head: false, weights: 0, segments: Vec::new() })
         .collect();
     out[0].embedding = true;
-    out[0].weights = embedding;
-    out[0].segments.push(("Embedding".into(), None, embedding));
+    out[0].weights = embedding + vision;
+    out[0].segments.push(("Embedding".into(), None, Part::Text, embedding));
+    if vision > 0 {
+        out[0].segments.push(("Vision encoder".into(), None, Part::Vision, vision));
+    }
 
     let mut current = 0usize;
     for layer in 0..model.num_layers {
@@ -128,13 +159,13 @@ fn partition(model: &ModelGraph, dies: u32) -> Vec<DieLayers> {
         die.first.get_or_insert(layer);
         die.last = Some(layer);
         die.weights += weights;
-        die.segments.push((format!("Layer {layer}"), Some(layer), weights));
+        die.segments.push((format!("Layer {layer}"), Some(layer), Part::Text, weights));
     }
 
     let last = out.last_mut().expect("at least one die");
     last.head = true;
     last.weights += head;
-    last.segments.push(("Vocabulary output".into(), None, head));
+    last.segments.push(("Vocabulary output".into(), None, Part::Text, head));
     out
 }
 
@@ -209,6 +240,7 @@ pub(crate) fn build_floorplan(
     blocks: &[BlockArea],
     dies: u32,
     die_area: f64,
+    voice: &[CountedVoiceDie],
 ) -> Floorplan {
     let side = die_area.sqrt();
     let is_array = |b: &BlockArea| ARRAY_BLOCKS.contains(&b.id);
@@ -242,7 +274,8 @@ pub(crate) fn build_floorplan(
     let mut width = columns as f64 * pitch - gap + 2.0 * package_margin;
     let mut height = rows_of_dies as f64 * pitch - gap + 2.0 * package_margin;
 
-    let dies_out: Vec<DiePlan> = partition(model, dies)
+    let vision = if p.include_vision && model.vision.is_some() { model.params_in(Block::Vision) } else { 0 };
+    let dies_out: Vec<DiePlan> = partition(model, dies, vision)
         .into_iter()
         .enumerate()
         .map(|(i, layers)| {
@@ -250,6 +283,10 @@ pub(crate) fn build_floorplan(
             let row = i as u32 / columns;
             let col = if row.is_multiple_of(2) { i as u32 % columns } else { columns - 1 - i as u32 % columns };
             let total = layers.weights.max(1) as f64;
+            let mut parts = vec![Part::Text];
+            if layers.segments.iter().any(|s| s.2 == Part::Vision) {
+                parts.push(Part::Vision);
+            }
             DiePlan {
                 index: i as u32,
                 rect: Rect {
@@ -263,6 +300,7 @@ pub(crate) fn build_floorplan(
                 has_embedding: layers.embedding,
                 has_head: layers.head,
                 weights: layers.weights,
+                parts,
                 blocks: placed.clone(),
                 cells: CellPlan {
                     cols,
@@ -277,12 +315,40 @@ pub(crate) fn build_floorplan(
                     segments: layers
                         .segments
                         .into_iter()
-                        .map(|(label, layer, weights)| CellSegment { label, layer, fraction: weights as f64 / total })
+                        .map(|(label, layer, part, weights)| CellSegment { label, layer, part, fraction: weights as f64 / total })
                         .collect(),
                 },
             }
         })
         .collect();
+
+    // Listening and speaking: each die at its own size, in a row below the language model's.
+    let mut voice_out = Vec::new();
+    let mut x = package_margin;
+    let mut tallest = 0.0f64;
+    for counted in voice {
+        let side = counted.mm2().sqrt();
+        for _ in 0..counted.die.count {
+            voice_out.push(VoiceDiePlan {
+                index: dies + voice_out.len() as u32,
+                rect: Rect { x, y: height, w: side, h: side },
+                parts: counted.parts.clone(),
+                stages: counted.die.stages.clone(),
+                units: counted.die.units,
+                lanes: counted.die.lanes,
+                cells: counted.die.cells,
+                parts_mm2: counted.die.parts_mm2,
+                clock_mhz: counted.die.clock_mhz,
+                reference: counted.reference,
+            });
+            x += side + gap;
+            tallest = tallest.max(side);
+        }
+    }
+    if !voice_out.is_empty() {
+        width = width.max(x - gap + package_margin);
+        height += tallest + package_margin;
+    }
 
     let mut memory = Vec::new();
     let hbm = p.weight_backend == WeightBackend::Hbm4 || p.kv_backend == KvBackend::Hbm4;
@@ -312,6 +378,7 @@ pub(crate) fn build_floorplan(
         height,
         num_layers: model.num_layers,
         dies: dies_out,
+        voice: voice_out,
         memory,
     }
 }
@@ -396,6 +463,45 @@ mod tests {
         let die = &report.floorplan.dies[0];
         assert_eq!((die.first_layer, die.last_layer), (Some(0), Some(63)));
         assert!(die.has_embedding && die.has_head);
+    }
+
+    #[test]
+    fn the_image_encoder_is_on_the_first_die_and_the_dies_stay_balanced() {
+        let p = ChipParams { include_vision: true, ..Default::default() };
+        let report = estimate(&qwen(), &p).unwrap();
+        let dies = &report.floorplan.dies;
+        assert_eq!(dies[0].parts, [Part::Text, Part::Vision]);
+        assert!(dies[0].cells.segments.iter().any(|s| s.part == Part::Vision && s.label == "Vision encoder"));
+        assert!(dies[1..].iter().all(|d| d.parts == [Part::Text]));
+        let segments: f64 = dies[0].cells.segments.iter().map(|s| s.fraction).sum();
+        assert!((segments - 1.0).abs() < 1e-9);
+        let mean = dies.iter().map(|d| d.weights as f64).sum::<f64>() / dies.len() as f64;
+        assert!(dies.iter().all(|d| (d.weights as f64 / mean - 1.0).abs() < 0.35));
+        let without = estimate(&qwen(), &ChipParams::default()).unwrap();
+        assert!(without.floorplan.dies.iter().all(|d| d.parts == [Part::Text]));
+    }
+
+    #[test]
+    fn listening_and_speaking_dies_are_counted_and_drawn_below() {
+        let plain = estimate(&qwen(), &ChipParams::default()).unwrap();
+        assert!(plain.floorplan.voice.is_empty() && plain.metric("voice_area_mm2").is_none());
+        for (listens, speaks) in [(true, false), (false, true), (true, true)] {
+            let p = ChipParams { speech_in: listens, speech_out: speaks, ..Default::default() };
+            let report = estimate(&qwen(), &p).unwrap();
+            let plan = &report.floorplan;
+            assert!(!plan.voice.is_empty());
+            let voice: f64 = plan.voice.iter().map(|v| v.rect.w * v.rect.h).sum();
+            assert!((report.metric("voice_area_mm2").unwrap() - voice).abs() < 1e-6);
+            assert!((report.metric("total_area_mm2").unwrap() - plain.total_area_mm2 - voice).abs() < 1e-6);
+            let bottom = plan.dies.iter().map(|d| d.rect.y + d.rect.h).fold(0.0, f64::max);
+            for (i, v) in plan.voice.iter().enumerate() {
+                assert_eq!(v.index, plan.dies.len() as u32 + i as u32);
+                assert!(v.rect.y >= bottom && v.rect.x + v.rect.w <= plan.width && v.rect.y + v.rect.h <= plan.height);
+                assert!(v.reference);
+            }
+            assert_eq!(plan.voice.iter().any(|v| v.parts.contains(&Part::Listen)), listens);
+            assert_eq!(plan.voice.iter().any(|v| v.parts.contains(&Part::Speak)), speaks);
+        }
     }
 
     #[test]

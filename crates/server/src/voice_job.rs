@@ -244,7 +244,7 @@ pub fn run_plan(start: &PlanStart, job: &PlanJob, home: &Path) -> Result<Value, 
     if !(0.5..=30.0).contains(&start.seconds) {
         return Err("the question must last between half a second and 30 seconds".into());
     }
-    let ask = VoiceAsk { first_output_seconds: start.first_output_ms / 1e3, seconds: start.seconds, area_mm2: start.area_mm2.unwrap_or(f64::INFINITY), speaker: start.speaker, ..VoiceAsk::default() };
+    let ask = VoiceAsk { first_output_seconds: start.first_output_ms / 1e3, seconds: start.seconds, area_mm2: start.area_mm2.unwrap_or(f64::INFINITY), speaker: start.speaker, text_apart: true, ..VoiceAsk::default() };
     let (best, weighed, stages) = plan_voice_cached(&home.join(".llm2chip/cache"), &models, &ask, &mut |what| *job.doing.lock().unwrap() = what)?;
     let names: Vec<&str> = stages.iter().map(|s| s.name.as_str()).collect();
     let named = |group: &[usize]| group.iter().map(|s| names[*s]).collect::<Vec<_>>();

@@ -1363,7 +1363,12 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
         b.bytes_token = bytes;
         b.why = why;
     }
-    let floorplan = build_floorplan(model, p, &blocks, dies, die_area);
+    // Listening and speaking, on dies of their own.
+    let voice = crate::voice::counted(p.speech_in, p.speech_out, p.voice_plan.as_ref());
+    let voice_area: f64 = voice.iter().map(|v| v.mm2() * v.die.count as f64).sum();
+    let voice_dies: u32 = voice.iter().map(|v| v.die.count).sum();
+    let voice_leak: f64 = voice.iter().map(crate::voice::leakage_w).sum();
+    let floorplan = build_floorplan(model, p, &blocks, dies, die_area, &voice);
 
     let mut metrics = Vec::new();
     let mut m = |id, section, label, value, unit, confidence, why: String| {
@@ -1383,7 +1388,24 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     m("dies", "Silicon", "Dies", d, "", Assumed, "The fewest that meet the maximum area per die.".into());
     m("packages", "Silicon", "Packages", plan.packages as f64, "", Assumed, format!("Up to {PACKAGE_MAX_MM2:.0} mm² of silicon in each."));
     m("die_area_mm2", "Silicon", "Area per die", die_area, "mm²", Assumed, "Sum of the die's blocks.".into());
-    m("total_area_mm2", "Silicon", "Total area", total_area, "mm²", Assumed, "Area per die times the number of dies.".into());
+    if voice.is_empty() {
+        m("total_area_mm2", "Silicon", "Total area", total_area, "mm²", Assumed, "Area per die times the number of dies.".into());
+    } else {
+        let reference = voice.iter().any(|v| v.reference);
+        m("total_area_mm2", "Silicon", "Total area", total_area + voice_area, "mm²", Assumed,
+            format!("{total_area:.0} mm² of text (the language model) and {voice_area:.0} mm² of listening and speaking."));
+        m("text_area_mm2", "Silicon", "Text (language model)", total_area, "mm²", Assumed, "Area per die times the number of dies.".into());
+        let parts = match (p.speech_in, p.speech_out) {
+            (true, true) => "Listening and speaking",
+            (true, false) => "Listening",
+            _ => "Speaking",
+        };
+        m("voice_area_mm2", "Silicon", parts, voice_area, "mm²", Assumed,
+            if reference { format!("{voice_dies} dies of reference, from plans measured with Moonshine-tiny, OuteTTS and DAC in N6: plan them with your models in the Listen or Speak view.") }
+            else { format!("{voice_dies} dies planned in N6 with your models, in the Listen or Speak view.") });
+        m("voice_leakage_w", "Energy", "Leakage of listening and speaking", voice_leak, "W", Assumed,
+            format!("{voice_dies} dies while they are on; not in the power while generating text."));
+    }
     m("macs_total", "Silicon", "Weight multipliers in total", n * d, "", Derived,
         "With a single user only one die's work at a time.".into());
     m("cell_sram_kb", "Silicon", "Weight memory per cell", cell_bytes / 1e3, "KB", Derived,

@@ -7,10 +7,12 @@ import { useDesign, type Overlay, type Selection } from "../store";
 import { CATEGORY_LABEL } from "./Inspector";
 import { useT } from "../i18n";
 import { IconButton, Segmented } from "./controls";
-import { draw, fitCamera, hitTest, overlayRange, readTheme, type Camera, type Hit, type Theme } from "./floorplanRender";
+import { draw, fitCamera, hitTest, overlayRange, PART_LABEL, partsLabel, readTheme, type Camera, type Hit, type Theme } from "./floorplanRender";
+import type { Part } from "../engine";
 
 const OVERLAYS: [Overlay, string][] = [
   ["function", "Function"],
+  ["part", "Part"],
   ["layer", "Layer"],
   ["activity", "Activity"],
   ["energy", "Energy"],
@@ -42,6 +44,30 @@ function Legend({ report, overlay }: { report: Report; overlay: Overlay }) {
             {t(CATEGORY_LABEL[c])}
           </span>
         ))}
+      </div>
+    );
+  }
+  if (overlay === "part") {
+    const plan = report.floorplan;
+    const all = [...plan.dies.flatMap((d) => d.parts), ...(plan.voice ?? []).flatMap((v) => v.parts)];
+    const used = (Object.keys(PART_LABEL) as Part[]).filter((p) => all.includes(p));
+    const shared = (plan.voice ?? []).some((v) => v.parts.length > 1);
+    const reference = (plan.voice ?? []).some((v) => v.reference);
+    return (
+      <div className="legend">
+        {used.map((p) => (
+          <span key={p}>
+            <i className={`swatch part-${p}`} aria-hidden="true" />
+            {t(PART_LABEL[p])}
+          </span>
+        ))}
+        {(plan.voice ?? []).map((v) => (
+          <span key={v.index}>
+            {t("Die")} {v.index}: {partsLabel(v.parts, v.stages, t)}
+          </span>
+        ))}
+        {shared && <span>{t("Side by side: a die the parts share")}</span>}
+        {reference && <span>{t("Dashed: reference dies")}</span>}
       </div>
     );
   }
@@ -281,7 +307,7 @@ export function FloorplanView() {
   const drag = useRef<{ x: number; y: number; moved: boolean } | null>(null);
 
   const select = (hit: Hit | null) => {
-    if (!hit || hit.kind === "memory") return setSelection(null);
+    if (!hit || hit.kind === "memory" || hit.kind === "voice") return setSelection(null);
     if (hit.kind === "die") return setSelection({ kind: "die", die: hit.die });
     if (hit.kind === "array") return setSelection({ kind: "array", die: hit.die });
     if (hit.kind === "block") return setSelection({ kind: "block", die: hit.die, id: hit.id });
@@ -314,7 +340,7 @@ export function FloorplanView() {
     const r = latest.current.report;
     if (!r) return;
     const { px, py, wx, wy } = pointer(e);
-    const hit = hitTest(r, wx, wy, camera.current.k);
+    const hit = hitTest(r, wx, wy, camera.current.k, translator.current);
     if (hit?.label !== hover.current?.label || hit?.kind !== hover.current?.kind) {
       hover.current = hit;
       schedule();
@@ -328,14 +354,14 @@ export function FloorplanView() {
     const r = latest.current.report;
     if (moved || !r) return;
     const { wx, wy } = pointer(e);
-    select(hitTest(r, wx, wy, camera.current.k));
+    select(hitTest(r, wx, wy, camera.current.k, translator.current));
   };
 
   const onDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const r = latest.current.report;
     if (!r) return;
     const { wx, wy } = pointer(e);
-    const hit = hitTest(r, wx, wy, camera.current.k);
+    const hit = hitTest(r, wx, wy, camera.current.k, translator.current);
     if (hit) {
       select(hit);
       focus(hit.rect);

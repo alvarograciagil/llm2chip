@@ -5,7 +5,7 @@ import { PARAM_HELP_ES } from "./paramHelpEs";
 import { FIELDS } from "./params";
 
 /** Strings in the engine's sources that never reach a person: names, links, ids. */
-const NOT_TEXT = [/^https:/, /board!\(/, /^Sipeed|^Radiona|^Digilent|^AMD |^Gowin|^Lattice|^Xilinx|^Zynq|^Terasic|^Altera|^Intel |^Cyclone/, /^Each die takes$/];
+const NOT_TEXT = [/^https:/, /board!\(/, /^Sipeed|^Radiona|^Digilent|^AMD |^Gowin|^Lattice|^Xilinx|^Zynq|^Terasic|^Altera|^Intel |^Cyclone/, /^Each die takes$/, /^at least one die$/, /^the N6 process$/];
 
 function engineStrings(file: string): string[] {
   const source = readFileSync(new URL(`../../crates/arch/src/${file}`, import.meta.url), "utf8").split("#[cfg(test)]")[0].replace(/(^|[^:])\/\/[^\n]*/gm, "$1"); // a URL's "://" is not a comment
@@ -20,7 +20,7 @@ const shape = (text: string) => text.replace(/\{[^}]*\}/g, "{}");
 describe("engine texts in Spanish", () => {
   it("cover every text the engine writes", () => {
     const known = new Set(ENGINE_TEXT.map(([english]) => shape(english)));
-    const missing = ["estimate.rs", "fpga.rs", "feasibility.rs", "optim.rs"].flatMap(engineStrings).filter((s) => !known.has(shape(s)));
+    const missing = ["estimate.rs", "fpga.rs", "feasibility.rs", "optim.rs", "floorplan.rs", "voice.rs"].flatMap(engineStrings).filter((s) => !known.has(shape(s)));
     expect(missing).toEqual([]);
   });
 

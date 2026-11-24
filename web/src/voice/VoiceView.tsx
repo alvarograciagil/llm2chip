@@ -209,6 +209,7 @@ function SystemPlanView({ plan }: { plan: SystemPlan }) {
               </li>
             ))}
           </ul>
+          <p className="muted-text">{t("The floorplan and the estimate count these dies.")}</p>
           <ul className="voice-dies muted-text">
             {chosen.stages.map((st) => (
               <li key={st.name}>

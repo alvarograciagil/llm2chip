@@ -1283,6 +1283,16 @@ const ES: Record<string, string> = {
   "Listening and speaking are two separate parts: a chip may have either or both. They are planned with the models on your computer: Moonshine listens, the project's language model answers, OuteTTS and DAC speak. Each stage is measured on several shapes of die, and stages that never run at once can share one when that saves silicon.": "Escuchar y hablar son dos partes separadas: un chip puede tener una, otra o ambas. Se planifican con los modelos de tu ordenador: Moonshine escucha, el modelo de lenguaje del proyecto responde, y OuteTTS y DAC hablan. Cada etapa se mide en varias formas de die, y las etapas que nunca funcionan a la vez pueden compartir uno cuando eso ahorra silicio.",
   "It listens: speech to text": "Escucha: de voz a texto",
   "It speaks: text to speech": "Habla: de texto a voz",
+  "Part": "Parte",
+  "Vision": "Visión",
+  "Listening": "Escucha",
+  "Speaking": "Habla",
+  "Cell memory": "Memoria de celdas",
+  "Vector memory": "Memoria vectorial",
+  "reference dies: plan them with your models": "dies de referencia: planifícalos con tus modelos",
+  "Side by side: a die the parts share": "Lado a lado: un die que comparten las partes",
+  "Dashed: reference dies": "Discontinuos: dies de referencia",
+  "The floorplan and the estimate count these dies.": "El plano y la estimación cuentan estos dies.",
 };
 
 

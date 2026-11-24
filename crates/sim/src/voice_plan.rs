@@ -107,6 +107,10 @@ pub struct VoiceAsk {
     /// `shapes`: `(chips, sharing, shape)`, sharing as the frontier names it (`mixed:4`).
     #[serde(default = "large_sets")]
     pub large: Vec<(u32, String, (u32, u32, u32))>,
+    /// The recogniser never shares the language model's die: a project's language model is
+    /// on dies of its own, the estimator's, so its voice dies hold only voice stages.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub text_apart: bool,
 }
 
 /// Sets of dies from the frontier for Qwen3.8-27B: 12 dies of 64 × 128 units and 32,768
@@ -118,7 +122,7 @@ fn large_sets() -> Vec<(u32, String, (u32, u32, u32))> {
 
 impl Default for VoiceAsk {
     fn default() -> Self {
-        Self { seconds: 3.0, words: 12, first_output_seconds: 0.5, area_mm2: f64::INFINITY, shapes: vec![(0, 6, 11), (0, 6, 13), (4, 6, 11), (4, 6, 13), (4, 6, 16)], chunks: vec![16, 32, 64], speaker: false, large: large_sets() }
+        Self { seconds: 3.0, words: 12, first_output_seconds: 0.5, area_mm2: f64::INFINITY, shapes: vec![(0, 6, 11), (0, 6, 13), (4, 6, 11), (4, 6, 13), (4, 6, 16)], chunks: vec![16, 32, 64], speaker: false, large: large_sets(), text_apart: false }
     }
 }
 
@@ -358,7 +362,21 @@ const PLAN_VERSION: u32 = 5;
 pub fn plan_voice(models: &VoiceModels, ask: &VoiceAsk, progress: &mut dyn FnMut(String)) -> Result<Planned, String> {
     let stages = measure_stages(models, ask, progress)?;
     let limits = Limits { reticle_mm2: N6.reticle_mm2, first_output_seconds: ask.first_output_seconds, area_mm2: ask.area_mm2 };
-    let (best, weighed) = plan(&stages, &at_once(&models.roles()?), limits);
+    let roles = models.roles()?;
+    let mut apart = at_once(&roles);
+    let listen = roles.iter().position(|r| *r == Role::Listen);
+    let think = roles.iter().position(|r| *r == Role::Think);
+    if let (true, Some(listen), Some(think)) = (ask.text_apart, listen, think) {
+        apart.push((listen, think));
+    }
+    let (best, mut weighed) = plan(&stages, &apart, limits);
+    if let (true, Some(listen), Some(think)) = (ask.text_apart, listen, think) {
+        // They never run at once: they are kept apart because the language model's dies are the project's.
+        let said = format!("{} and {} run at once", stages[listen].name, stages[think].name);
+        for w in weighed.iter_mut().filter(|w| w.reason.as_deref() == Some(said.as_str())) {
+            w.reason = Some("the language model has dies of its own".into());
+        }
+    }
     Ok((best, weighed, stages))
 }
 
