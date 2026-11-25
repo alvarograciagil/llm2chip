@@ -106,7 +106,7 @@ The critical path was the sampling unit: a 16-row shift-and-add multiplier, in o
 
 In the sequencer, measured in gates, the longest path to the address of the next word is not the repeat count but the index register: choosing it, adding the step and comparing it with the limit decide whether to jump. Shortening it without changing a single cycle needs reading the dictionary and the index through two ports at once, that is, duplicating those memories, which is just what small FPGAs lack; the other way is reading the word one cycle earlier with a one-cycle delay on jumps, which changes the compiler, the cycle model and every test that counts cycles. This is the slowest family in the catalogue; on a Xilinx 7 series or UltraScale+ the same circuit should run quite a bit faster.
 
-At 35.4 MHz, the toy model would give about 2,700-3,000 tok/s, of no practical value beyond showing the chip works.
+At 35.4 MHz, the toy model would give about 2,700-3,000 tok/s, of no practical value beyond showing the chip works. These clocks were measured before the 48 KB program memory and the message port with its serial links; they have not been placed again since (no nextpnr at hand), so the current design may differ a little.
 
 ### With a model that writes stories: stories260K
 

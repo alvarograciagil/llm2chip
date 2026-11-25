@@ -149,7 +149,7 @@ The most used options:
 
 ## What is verified
 
-- **Whole chip in gates.** The netlist of a complete chip (CPU, firmware, load controller, die and sampling unit) produces the same bytes in the same cycles as the instruction-level simulation, from input to output, on a tiny Qwen3.5 model. So does a toy Show-o chip filling in an image: 12.45 million cycles.
+- **Whole chip in gates.** The netlist of a complete chip (CPU, firmware, load controller, die and sampling unit) produces the same bytes in the same cycles as the instruction-level simulation, from input to output, on a tiny Qwen3.5 model. So does a toy Show-o chip filling in an image: 11.29 million cycles.
 - **Several chips.** With one image, two identical chips on a simulated board, with delays and flipped bits on their links, generate the same text and logits as a single chip, split by layers, by rows or both.
 - **Exact arithmetic.** The exact integer machine matches the gates bit for bit in every buffer of those models; the cells and vector lanes give the same bits in gates as in the exact machine.
 - **Real models.** Real Qwen3.8-27B runs end to end with the chip's firmware. Real Qwen3-0.6B matches `mlx-lm` in floating point: 24 of 24 tokens. Every supported architecture, with tiny random weights, gives the same logits as `mlx-lm`, token by token.

@@ -259,7 +259,7 @@ The chip also fills in the image by itself. The firmware runs MaskGIT's steps wi
 Checked:
 - **Against floating point:** confidences within 0.02 nats and draw frequencies within 1 % (`crates/sim/tests/maskgit_rt.rs`).
 - **On the chip at instruction level:** the toy Show-o fills in an image of 16 places, half of them known, with guidance and 4 steps, in 24.1 million CPU cycles. It gives the same codes as the host ordering the same machine (`the_firmware_fills_an_image_as_the_host_ordered_it`).
-- **The whole chip in gates,** CPU, firmware, loader and die, fills in the toy image with two steps. It sends the same bytes in the same cycles as at instruction level: 12.45 million cycles, 1,156 s (`the_whole_chip_fills_an_image_in_gates_as_at_instruction_level`).
+- **The whole chip in gates,** CPU, firmware, loader and die, fills in the toy image with two steps. It sends the same bytes in the same cycles as at instruction level: 11.29 million cycles, 883 s (`the_whole_chip_fills_an_image_in_gates_as_at_instruction_level`).
 - **With the real Show-o:** the same loop (`fill_on`), on the addressed die with the guidance in the die and 8-bit affine weights in its cells, retouches the red disc with "a yellow lemon" in 4 steps and 360 s (`cargo run --release -p sim --example showo_fill_chip`). A lemon comes out, with its texture.
 
 ### The real Show-o on the addressed die

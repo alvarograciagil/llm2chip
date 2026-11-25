@@ -308,12 +308,12 @@ Bit and cycle exact against the instruction level and the exact machine ([simula
 
 | Run | Cycles |
 |---|---|
-| Toy Moonshine's whole chip, its firmware following the schedule through a command queue | 1,192,263 |
+| Toy Moonshine's whole chip, its firmware following the schedule through a command queue | 1,185,922 |
 | One layer of the real Moonshine-tiny on the die (`LLM2CHIP_REAL_MOONSHINE=1`, about 20 minutes) | 13,568,264 |
 | Toy streaming Moonshine on the die | 900,912 |
 | Toy Moonshine on the die, three tokens | 280,614 |
 | Toy DAC decoder on the die | 70,624 |
-| Toy Show-o filling an image through the whole chip (CPU, firmware, die) | 12.45 M |
+| Toy Show-o filling an image through the whole chip (CPU, firmware, die) | 11.29 M |
 | Toy Show-o transformer on the die | 3.1 M |
 | Toy MAGVIT-v2 decoder, 664 routines | 2.65 M |
 | Toy Show-o fill through the firmware at instruction level | 23.8 M |

@@ -55,8 +55,8 @@ What runs in gates:
 - **The whole chip with a tiny Qwen3.5:** CPU, firmware, load controller, die and sampling unit, from input bytes to output bytes, in the same cycles as the instruction level.
 - **stories260K through the whole chip:** the same text and cycles as the instruction level, and the same logits as the exact machine.
 - **Several chips on a board:** two or four chips with delays and flipped bits on their links, split by layers, by rows or both, give the same logits as one die.
-- **Images:** a toy Show-o filling an image through the firmware (12.45 M cycles), the MAGVIT-v2 toy encoder and decoder (2.65 M cycles for the decoder), and the Qwen-style vision encoder, patch by patch.
-- **Voice:** toy Moonshine (280,614 cycles), streaming Moonshine (900,912) and DAC (70,624) on the die bit for bit, Moonshine's whole chip following its schedule through a command queue (1,192,263 cycles, the same bytes as the instruction level), and one layer of the real Moonshine-tiny on the die (13.6 M cycles, `LLM2CHIP_REAL_MOONSHINE=1`).
+- **Images:** a toy Show-o filling an image through the firmware (11.29 M cycles), the MAGVIT-v2 toy encoder and decoder (2.65 M cycles for the decoder), and the Qwen-style vision encoder, patch by patch.
+- **Voice:** toy Moonshine (280,614 cycles), streaming Moonshine (900,912) and DAC (70,624) on the die bit for bit, Moonshine's whole chip following its schedule through a command queue (1,185,922 cycles, the same bytes as the instruction level), and one layer of the real Moonshine-tiny on the die (13.6 M cycles, `LLM2CHIP_REAL_MOONSHINE=1`).
 - **Reliability:** ECC with injected faults, spare rows, the memory self-test, JTAG, scan chains with ATPG patterns.
 
 Gates are also exported to Verilog and VHDL, and the exported chip runs in Icarus Verilog with its firmware, giving the same bytes and cycles (`LLM2CHIP_ICARUS=1`, close to an hour).
