@@ -7,7 +7,7 @@ use netlist::Simulator;
 use std::path::Path;
 use std::process::Command;
 
-const CONFIG: SocConfig = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6, links: netlist::soc::HostLinks { uart: None, qspi: false } };
+const CONFIG: SocConfig = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6, links: netlist::soc::HostLinks { uart: None, qspi: false, i2c: None } };
 
 /// Built once per test run, so that tests running together do not race on the binary.
 fn build_firmware() -> Option<FirmwareImage> {

@@ -86,6 +86,9 @@ pub struct HostLinks {
     /// A quad SPI target (`qspi_*`), with an interrupt line that says it has something to
     /// send. Its clock may be up to an eighth of the chip's.
     pub qspi: bool,
+    /// An I2C target at this 7-bit address (`i2c_scl`, `i2c_sda`, `i2c_sda_low` to pull the
+    /// data line down, `i2c_irq`). Its clock may be up to a twentieth of the chip's.
+    pub i2c: Option<u8>,
 }
 
 /// The quad SPI target's commands, the first byte after its select falls. A read and the
@@ -98,6 +101,7 @@ pub const QSPI_STATUS: u8 = 0x05;
 const LINK_BYTES: u32 = 0;
 const LINK_UART: u32 = 1;
 const LINK_QSPI: u32 = 2;
+const LINK_I2C: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct SocConfig {
@@ -616,6 +620,203 @@ fn uart_transmitter(l: &mut Logic, offered: Bit, byte: &[Bit], divider: u32, res
     (idle, line)
 }
 
+/// An I2C bus's two lines, as the chip sees them.
+struct I2cLines {
+    scl: Bit,
+    sda: Bit,
+}
+
+/// What an I2C target gives the host port.
+struct I2cTarget {
+    /// A byte the host wrote, for a cycle.
+    valid: Bit,
+    byte: Vec<Bit>,
+    /// Pull the data line down.
+    sda_low: Bit,
+    /// The byte the host is reading from the send queue has gone out.
+    went: Bit,
+}
+
+/// An I2C target at a 7-bit `address`. A write's bytes go to the port, each acknowledged if
+/// it took them (`accepted`) and refused otherwise, so the host sends it again. A read gives
+/// two bytes first, the receive queue's `room` and the entries `waiting` to be sent, and then
+/// the send queue's bytes while it `offered` one (`shown`), or 0xC0 with nothing to send.
+///
+/// The lines come through flip-flops and the data line one later than the clock, so its
+/// change just after the clock falls is not taken for a start or a stop. The chip sets the
+/// data line a few cycles after the clock falls, and a byte from the queue is taken when its
+/// last bit has been read, so a read cut short sends it again.
+#[allow(clippy::too_many_arguments)]
+fn i2c_target(l: &mut Logic, lines: I2cLines, address: u8, offered: Bit, shown: &[Bit], room: &[Bit], waiting: &[Bit], accepted: Bit, reset: Bit) -> I2cTarget {
+    let (c1, scl, scl_before) = (l.fresh(), l.fresh(), l.fresh());
+    l.connect_flops(&[lines.scl, c1, scl], &[c1, scl, scl_before]);
+    let (d1, d2, sda, sda_before) = (l.fresh(), l.fresh(), l.fresh(), l.fresh());
+    l.connect_flops(&[lines.sda, d1, d2, sda], &[d1, d2, sda, sda_before]);
+    let scl_low = l.not(scl);
+    let rise = {
+        let was_low = l.not(scl_before);
+        l.and(scl, was_low)
+    };
+    let fall = l.and(scl_low, scl_before);
+    let held = l.and(scl, scl_before);
+    let start = {
+        let low = l.not(sda);
+        let a = l.and(held, sda_before);
+        l.and(a, low)
+    };
+    let stop = {
+        let was_low = l.not(sda_before);
+        let a = l.and(held, was_low);
+        l.and(a, sda)
+    };
+    // Between a start and a stop; the clock's rises in this byte and its acknowledgement;
+    // whether this byte is the address, whether it was this chip's, whether the host reads.
+    let (busy, count, first, mine, read) = (l.fresh(), l.fresh_bus(4), l.fresh(), l.fresh(), l.fresh());
+    // To acknowledge at the ninth clock; sending a read's bytes; which of a read's bytes this
+    // is (the room, the waiting, then the queue's); the byte going out and whether it came
+    // from the queue; the data line pulled down.
+    let (ack, sending, step, out, from_queue, pull) = (l.fresh(), l.fresh(), l.fresh_bus(2), l.fresh_bus(8), l.fresh(), l.fresh());
+    let at_rise = l.and(rise, busy);
+    let at_fall = l.and(fall, busy);
+    let ninth = l.equals(&count, 8);
+    let seventh = l.equals(&count, 7);
+    let zero = l.equals(&count, 0);
+    let complete = l.and(at_rise, seventh);
+    let acknowledged = l.and(at_rise, ninth);
+    // The bits so far, the latest lowest, and the byte with the bit the clock brings now.
+    let shift = l.fresh_bus(7);
+    let byte: Vec<Bit> = [sda].into_iter().chain(shift.iter().copied()).collect();
+    let not_first = l.not(first);
+    let address_done = l.and(complete, first);
+    let data_done = l.and(complete, not_first);
+    let ours = l.equals(&byte[1..], address as u32);
+    let valid = {
+        let not_read = l.not(read);
+        let a = l.and(data_done, mine);
+        l.and(a, not_read)
+    };
+    let ended = l.or(start, stop);
+    let keep = {
+        let a = l.not(ended);
+        let b = l.not(reset);
+        l.and(a, b)
+    };
+    let next_busy = {
+        let a = l.or(busy, start);
+        let not_stop = l.not(stop);
+        let b = l.and(a, not_stop);
+        let alive = l.not(reset);
+        l.and(b, alive)
+    };
+    let next_count = {
+        let stepped = counter_step(l, &count, Bit::One);
+        let wrapped = l.mux_bus(ninth, &stepped, &constant(0, 4));
+        let a = l.mux_bus(at_rise, &count, &wrapped);
+        let off = l.or(ended, reset);
+        unless_reset(l, &a, off)
+    };
+    let next_first = {
+        let a = l.mux(acknowledged, first, Bit::Zero);
+        let b = l.or(a, start);
+        let alive = l.not(reset);
+        l.and(b, alive)
+    };
+    let next_mine = {
+        let a = l.mux(address_done, mine, ours);
+        l.and(a, keep)
+    };
+    let next_read = l.mux(address_done, read, byte[0]);
+    let next_ack = {
+        let data = l.and(valid, accepted);
+        let now = l.mux(first, data, ours);
+        let a = l.mux(complete, ack, now);
+        l.and(a, keep)
+    };
+    let host_acks = l.not(sda);
+    let next_sending = {
+        let reads = l.and(ours, byte[0]);
+        let a = l.mux(address_done, sending, reads);
+        let goes_on = l.and(sending, host_acks);
+        let data_ack = l.and(acknowledged, not_first);
+        let b = l.mux(data_ack, a, goes_on);
+        l.and(b, keep)
+    };
+    // At the fall after the ninth clock a read loads its next byte.
+    let load = {
+        let a = l.and(at_fall, zero);
+        l.and(a, sending)
+    };
+    let at_status = l.equals(&step, 0);
+    let at_waiting = l.equals(&step, 1);
+    let from_head = {
+        let past = l.equals(&step, 2);
+        l.and(past, offered)
+    };
+    let chosen = {
+        let idle = constant(FRAME_END as u32, 8);
+        let a = l.mux_bus(from_head, &idle, shown);
+        let b = l.mux_bus(at_waiting, &a, waiting);
+        l.mux_bus(at_status, &b, room)
+    };
+    let next_step = {
+        let past = l.equals(&step, 2);
+        let not_past = l.not(past);
+        let counts = l.and(load, not_past);
+        let a = counter_step(l, &step, counts);
+        let off = l.or(start, reset);
+        unless_reset(l, &a, off)
+    };
+    let data_bit = {
+        let a = l.and(at_fall, sending);
+        let not_zero = l.not(zero);
+        let not_ninth = l.not(ninth);
+        let b = l.and(a, not_zero);
+        l.and(b, not_ninth)
+    };
+    let next_out = {
+        let shifted: Vec<Bit> = (0..8).map(|i| if i == 0 { Bit::Zero } else { out[i - 1] }).collect();
+        let a = l.mux_bus(data_bit, &out, &shifted);
+        l.mux_bus(load, &a, &chosen)
+    };
+    // The byte from the queue has gone when the host has clocked its last bit.
+    let went = l.and(data_done, from_queue);
+    let next_from = {
+        let not_went = l.not(went);
+        let kept = l.and(from_queue, not_went);
+        let a = l.mux(load, kept, from_head);
+        l.and(a, keep)
+    };
+    let next_pull = {
+        let ack_low = l.and(ninth, ack);
+        let bit_low = {
+            let a = l.not(out[6]);
+            l.and(data_bit, a)
+        };
+        let load_low = {
+            let a = l.not(chosen[7]);
+            l.and(load, a)
+        };
+        let low = l.or(ack_low, bit_low);
+        let low = l.or(low, load_low);
+        let a = l.mux(at_fall, pull, low);
+        l.and(a, keep)
+    };
+    let next_shift: Vec<Bit> = {
+        let shifted: Vec<Bit> = (0..7).map(|i| if i == 0 { sda } else { shift[i - 1] }).collect();
+        let shifting = {
+            let not_ninth = l.not(ninth);
+            l.and(at_rise, not_ninth)
+        };
+        l.mux_bus(shifting, &shift, &shifted)
+    };
+    l.connect_flops(&[next_busy, next_first, next_mine, next_read, next_ack, next_sending, next_from, next_pull], &[busy, first, mine, read, ack, sending, from_queue, pull]);
+    l.connect_flops(&next_count, &count);
+    l.connect_flops(&next_step, &step);
+    l.connect_flops(&next_out, &out);
+    l.connect_flops(&next_shift, &shift);
+    I2cTarget { valid, byte, sda_low: pull, went }
+}
+
 pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     let cpu = core(gen);
     let queue = fifo(gen, config.fifo_bits, ENTRY_BITS);
@@ -658,6 +859,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     let host_dropped = b.output("host_dropped", 1)[0];
     let links = config.links;
     let uart_pins = links.uart.map(|_| (b.input("uart_rx", 1)[0], b.output("uart_tx", 1)[0]));
+    let i2c_pins = links.i2c.map(|_| (b.input("i2c_scl", 1)[0], b.input("i2c_sda", 1)[0], b.output("i2c_sda_low", 1)[0], b.output("i2c_irq", 1)[0]));
     let qspi_pins = links.qspi.then(|| (b.input("qspi_sck", 1)[0], b.input("qspi_cs_n", 1)[0], b.input("qspi_in", 4), b.output("qspi_out", 4), b.output("qspi_oe", 1)[0], b.output("qspi_irq", 1)[0]));
     assert!(config.fifo_bits <= 7, "the quad SPI status counts the queues in a byte");
 
@@ -898,12 +1100,21 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         // The link the port answers on: the last one a message came from; before any, the
         // first serial link the chip has, or its byte port. Kept as its difference from that
         // first one, so a reset brings it back.
-        let first_link = if links.qspi { LINK_QSPI } else if links.uart.is_some() { LINK_UART } else { LINK_BYTES };
+        let first_link = if links.qspi {
+            LINK_QSPI
+        } else if links.i2c.is_some() {
+            LINK_I2C
+        } else if links.uart.is_some() {
+            LINK_UART
+        } else {
+            LINK_BYTES
+        };
         let active_kept = l.fresh_bus(2);
         let active: Vec<Bit> = active_kept.iter().enumerate().map(|(i, b)| if first_link >> i & 1 == 1 { l.not(*b) } else { *b }).collect();
         let on_bytes = l.equals(&active, LINK_BYTES);
         let on_uart = l.equals(&active, LINK_UART);
         let on_qspi = l.equals(&active, LINK_QSPI);
+        let on_i2c = l.equals(&active, LINK_I2C);
         // Each link's byte, as it arrives.
         let (uart_valid, uart_byte) = match (links.uart, uart_pins) {
             (Some(divider), Some((line, _))) => uart_receiver(&mut l, line, divider, reset),
@@ -955,6 +1166,9 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
             (selected, off, phase, byte, written, data_step, is_read, is_status, reading)
         });
         let (qspi_valid, qspi_byte) = qspi.as_ref().map_or((Bit::Zero, constant(0, 8)), |q| (q.4, q.3.clone()));
+        // The I2C target's written byte, and whether the port took it, made below with its
+        // reads.
+        let (i2c_valid, i2c_byte, i2c_accepted) = if links.i2c.is_some() { (l.fresh(), l.fresh_bus(8), l.fresh()) } else { (Bit::Zero, constant(0, 8), Bit::Zero) };
 
         // The arbiter: outside a message the first link with a byte goes, the byte port
         // first; inside one, only the link it came from. The byte port is held back; a
@@ -962,6 +1176,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         let may_bytes = l.or(outside, on_bytes);
         let may_uart = l.or(outside, on_uart);
         let may_qspi = l.or(outside, on_qspi);
+        let may_i2c = l.or(outside, on_i2c);
         let take_bytes = l.and(host_rx_valid, may_bytes);
         let not_bytes = l.not(take_bytes);
         let take_uart = {
@@ -974,14 +1189,28 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
             let b = l.and(a, not_bytes);
             l.and(b, neither)
         };
+        // An I2C byte the port cannot take is refused, so the host sends it again.
+        let take_i2c = {
+            let a = l.and(i2c_valid, may_i2c);
+            let b = l.and(a, not_bytes);
+            let c = l.or(take_uart, take_qspi);
+            let neither = l.not(c);
+            l.and(b, neither)
+        };
         let in_valid = {
             let a = l.or(take_bytes, take_uart);
-            l.or(a, take_qspi)
+            let b = l.or(a, take_qspi);
+            l.or(b, take_i2c)
         };
         let in_data = {
             let a = l.mux_bus(take_uart, &host_rx_data, &uart_byte);
-            l.mux_bus(take_qspi, &a, &qspi_byte)
+            let b = l.mux_bus(take_qspi, &a, &qspi_byte);
+            l.mux_bus(take_i2c, &b, &i2c_byte)
         };
+        if links.i2c.is_some() {
+            let taken = l.and(take_i2c, not_full);
+            l.b.or_to(taken, Bit::Zero, i2c_accepted);
+        }
         let ready = l.and(not_full, may_bytes);
         l.b.or_to(ready, Bit::Zero, host_rx_ready);
         let dropped = {
@@ -1066,8 +1295,10 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         let taken_link = {
             let uart_code = constant(LINK_UART, 2);
             let qspi_code = constant(LINK_QSPI, 2);
+            let i2c_code = constant(LINK_I2C, 2);
             let a = l.mux_bus(take_uart, &constant(LINK_BYTES, 2), &uart_code);
-            l.mux_bus(take_qspi, &a, &qspi_code)
+            let b = l.mux_bus(take_qspi, &a, &qspi_code);
+            l.mux_bus(take_i2c, &b, &i2c_code)
         };
         let switches = l.and(accepted, starts);
         let next_active = l.mux_bus(switches, &active, &taken_link);
@@ -1119,6 +1350,31 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
             let ready = l.and(idle, on_uart);
             link_ready = l.or(link_ready, ready);
         }
+        // What a serial link's status gives: the room in the receive queue and the entries
+        // waiting to be sent.
+        let (room, waiting): (Vec<Bit>, Vec<Bit>) = if links.qspi || links.i2c.is_some() {
+            let depth = constant(1 << config.fifo_bits, 8);
+            let used: Vec<Bit> = (0..8).map(|i| rx_count.get(i).copied().unwrap_or(Bit::Zero)).collect();
+            let negated: Vec<Bit> = used.iter().map(|b| l.not(*b)).collect();
+            let room = l.adder(&depth, &negated, Bit::One).0;
+            let waiting = (0..8).map(|i| tx_count.get(i).copied().unwrap_or(Bit::Zero)).collect();
+            (room, waiting)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        if let (Some(address), Some((scl, sda, sda_low, irq))) = (links.i2c, i2c_pins) {
+            l.b.group("Host port: I2C");
+            let offered = l.and(tx_valid, on_i2c);
+            let target = i2c_target(&mut l, I2cLines { scl, sda }, address, offered, &shown, &room, &waiting, i2c_accepted, reset);
+            l.b.or_to(target.valid, Bit::Zero, i2c_valid);
+            for (from, to) in target.byte.iter().zip(&i2c_byte) {
+                l.b.or_to(*from, Bit::Zero, *to);
+            }
+            l.b.or_to(target.sda_low, Bit::Zero, sda_low);
+            l.b.or_to(offered, Bit::Zero, irq);
+            let ready = l.and(target.went, on_i2c);
+            link_ready = l.or(link_ready, ready);
+        }
         if let (Some((selected, off, phase, _, _, data_step, is_read, is_status, reading)), Some((_, _, _, io_out, oe, irq))) = (qspi, &qspi_pins) {
             l.b.group("Host port: quad SPI");
             // A read's byte is the head of the queue, looked at a few cycles after the last
@@ -1130,13 +1386,6 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
             let (out_byte, from_queue, dummy_done, step) = (l.fresh_bus(8), l.fresh(), l.fresh(), l.fresh_bus(2));
             let available = l.and(tx_valid, on_qspi);
             let from_head = l.and(is_read, available);
-            let room: Vec<Bit> = {
-                let depth = constant(1 << config.fifo_bits, 8);
-                let used: Vec<Bit> = (0..8).map(|i| rx_count.get(i).copied().unwrap_or(Bit::Zero)).collect();
-                let negated: Vec<Bit> = used.iter().map(|b| l.not(*b)).collect();
-                l.adder(&depth, &negated, Bit::One).0
-            };
-            let waiting: Vec<Bit> = (0..8).map(|i| tx_count.get(i).copied().unwrap_or(Bit::Zero)).collect();
             let idle_byte = constant(FRAME_END as u32, 8);
             let status_byte = {
                 let first = l.equals(&step, 0);

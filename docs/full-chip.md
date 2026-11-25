@@ -52,17 +52,18 @@ Everything that crosses the host port is a message, both ways, so a host can ask
 
 ### The host port's links
 
-Besides its byte port (`host_*`: valid, ready and a byte each way, on the chip's clock), a chip can have physical links, chosen in the design (`host_uart`, `uart_baud`, `host_qspi`; `netlist::soc::HostLinks`). Each carries the same messages:
+Besides its byte port (`host_*`: valid, ready and a byte each way, on the chip's clock), a chip can have physical links, chosen in the design (`host_uart`, `uart_baud`, `host_qspi`, `host_i2c`, `i2c_khz`; `netlist::soc::HostLinks`). Each carries the same messages:
 
 | Link | Pins | Carries | Costs |
 |---|---|---|---|
 | Byte port | `host_rx_*`, `host_tx_*` | A byte a cycle each way; the chip holds the host back when its queue is full | Always there |
 | Serial port (UART) | `uart_rx`, `uart_tx` | 8N1, a byte in ten bits at the chosen rate | 234 gates, 48 flip-flops |
 | Quad SPI target | `qspi_sck`, `qspi_cs_n`, `qspi_in` (4), `qspi_out` (4), `qspi_oe`, `qspi_irq` | Four bits each clock edge, the clock up to an eighth of the chip's: about 60 MB/s at 1 GHz, 2 MB/s at 35 MHz | 227 gates, 42 flip-flops |
+| I2C target | `i2c_scl`, `i2c_sda`, `i2c_sda_low`, `i2c_irq` | A byte in nine clocks, up to 1 MHz (Fast-mode Plus): 111 KB/s | 275 gates, 36 flip-flops |
 
-**Which link answers.** The chip answers on the link the last message came from. Before any message it speaks on the first serial link it has (the quad SPI one, then the serial port), or the byte port. What waits in the send queue goes out on whichever link the next message names, so a host that speaks first gets the boot report too.
+**Which link answers.** The chip answers on the link the last message came from. Before any message it speaks on the first serial link it has (the quad SPI one, then I2C, then the serial port), or the byte port. What waits in the send queue goes out on whichever link the next message names, so a host that speaks first gets the boot report too.
 
-**One link at a time.** A message that starts on one link holds the port until its end. In the meantime the byte port waits, but a serial link cannot be held back, so its bytes are dropped and counted, as are a serial link's bytes that come with the receive queue full. `debug_select` = 6 (`DEBUG_HOST_DROPPED`) reads the count.
+**One link at a time.** A message that starts on one link holds the port until its end. In the meantime the byte port waits, but a serial link cannot be held back, so its bytes are dropped and counted, as are a serial link's bytes that come with the receive queue full. I2C is the exception: the chip does not acknowledge a byte it cannot take, and the host sends it again. `debug_select` = 6 (`DEBUG_HOST_DROPPED`) reads the count.
 
 **The quad SPI target** works in SPI mode 0, the high nibble first. After the select falls, the first byte is a command:
 
@@ -70,17 +71,26 @@ Besides its byte port (`host_*`: valid, ready and a byte each way, on the chip's
 |---|---|
 | `0x01` write | The host's bytes, into the receive queue |
 | `0x02` read | A dummy byte while the lines turn round, then the chip's bytes; with nothing to send it sends `0xC0`, which a host's reader skips |
-| `0x05` status | A dummy byte, then two bytes: the room in the receive queue and the bytes waiting to be read |
+| `0x05` status | A dummy byte, then two bytes: the room in the receive queue and the entries waiting to be sent (an escaped byte goes as two, and a read past the end gives `0xC0`) |
 
 The interrupt line is high while the chip has something to send on this link. The host should read the status before writing more than the room it gives.
 
-**Timing.** The serial port's line and the quad SPI's pins go through two flip-flops into the chip's clock. A read's byte is taken from the send queue a few cycles after the last one went out, which is why the quad SPI clock may be up to an eighth of the chip's.
+**The I2C target** answers at the 7-bit address the design gives it (`--i2c` in the FPGA example), on a bus it may share with other chips. The data line is open drain: the chip only pulls it down (`i2c_sda_low`), and a board's pull-up resistor raises it.
+
+| Transaction | Then |
+|---|---|
+| Write | The host's bytes, into the receive queue. Each is acknowledged if the port took it; one it could not take (another link inside a message, or the queue full) is not, and the host sends it again |
+| Read | Two bytes first, the room in the receive queue and the entries waiting to be sent, then the chip's bytes, `0xC0` with nothing to send. A host that only wants the status reads two bytes |
+
+Its interrupt line, like the quad SPI one, is high while the chip has something to send on this link. A byte read from the send queue leaves it only once its last bit has been clocked out, so a read cut short by a stop sends it again next time.
+
+**Timing.** The serial port's line and the quad SPI's pins go through two flip-flops into the chip's clock. A read's byte is taken from the send queue a few cycles after the last one went out, which is why the quad SPI clock may be up to an eighth of the chip's. I2C's clock goes through two flip-flops and its data line through three, so a data line that changes just as the clock falls is not taken for a start or a stop; the chip sets the data line a few cycles after the clock falls, which gives the hold time the bus asks for. Its clock must be at most a twentieth of the chip's, and it has no filter for spikes shorter than a cycle: on a noisy bus, add one outside.
 
 **Speech** goes over the host port as words: about 64 KB/s to listen and 192 KB/s to speak. A serial port slower than that would make the chip wait for it, and the estimate warns about it.
 
-**A host for a board.** `tools/host/chip_host.py` frames what you ask over a board's serial port and prints what the chip answers: a question as text or tokens, the status (with the context in use as a percentage), the options, setting one, a stop and a clear.
+**A host for a board.** `tools/host/chip_host.py` frames what you ask over a board's serial port, or over I2C from Linux (`--i2c 1:0x42`, a Raspberry Pi's bus 1), and prints what the chip answers: a question as text or tokens, the status (with the context in use as a percentage), the options, setting one, a stop and a clear.
 
-**Checked:** `each_link_is_answered_on_its_own` (in `crates/netlist/tests/links.rs`) runs the control system with the real firmware in gates, with a serial port and a quad SPI target beside its byte port. Before any message the boot report comes out on the quad SPI link, and its interrupt line goes down once it is read. Then a status asked on the serial port is answered there, an option asked on the byte port is answered there, and one written over the quad SPI link is read back from it, escapes and all. A serial byte sent while the byte port is inside a message is dropped and counted.
+**Checked:** `each_link_is_answered_on_its_own` (in `crates/netlist/tests/links.rs`) runs the control system with the real firmware in gates, with a serial port, a quad SPI target and an I2C target beside its byte port. Before any message the boot report comes out on the quad SPI link, and its interrupt line goes down once it is read. Then a status asked on the serial port is answered there, an option asked on the byte port is answered there, and one written over the quad SPI link is read back from it, escapes and all. A serial byte sent while the byte port is inside a message is dropped and counted. Over I2C, a host with its own clock and open-drain bus reads the room and the waiting, writes an option and reads it back, sees another address go unacknowledged, and has a byte refused while the byte port is inside a message, then taken when sent again.
 
 **Checked:** `the_host_asks_and_steers_the_chip_in_messages` (in `chip.rs`) asks a chip its options, sets one and sees the next answer follow it, asks for its status while it waits and in the middle of an answer, stops an answer, asks for a clear as a message, and gets the errors of what the chip does not take. Every test of the whole chip in gates checks the framing both ways, byte for byte and cycle for cycle against the instruction level.
 

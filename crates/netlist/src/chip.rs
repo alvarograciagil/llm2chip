@@ -94,6 +94,11 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         } else {
             Vec::new()
         })
+        .chain(if c.soc.links.i2c.is_some() {
+            vec![("i2c_scl", b.input("i2c_scl", 1)), ("i2c_sda", b.input("i2c_sda", 1)), ("i2c_sda_low", b.output("i2c_sda_low", 1)), ("i2c_irq", b.output("i2c_irq", 1))]
+        } else {
+            Vec::new()
+        })
         .collect();
     let host_dropped = b.wire("host_dropped", 1)[0];
     // The pin's reset, which alone clears the image's base, and the firmware's reboot from

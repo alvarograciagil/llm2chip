@@ -63,11 +63,11 @@ What the schematic view draws is the same netlist that is simulated and exported
 | RV32IM CPU | Real firmware written in Rust: boot, tokenizer, control and sampling loops |
 | Load controller | Brings the image into every memory and checks its CRC |
 | Sampling unit | Top-k and temperature, with a parallel logit filter |
-| Host port | Messages both ways, framed in hardware, over a byte port and optionally a serial port or a quad SPI link |
+| Host port | Messages both ways, framed in hardware, over a byte port and optionally a serial port, a quad SPI link or I2C |
 | Chip-to-chip links | Data and commands with error correction and flow control |
 | Reliability and debug | Memory self-test, spare rows, JTAG, scan chains and ATPG patterns, counters and a debug port |
 
-A chip can carry a fixed system prompt in its image, and it holds a conversation: each question goes on over the cache the earlier ones left, until a clear pin empties it without reloading the weights ([full chip](docs/full-chip.md#a-conversation-and-the-clear-pin)). Everything crosses its host port as messages, so a host can also ask how much of the context the conversation takes, read and change the generation's settings, and stop an answer, over a byte port, a serial port or a quad SPI link ([full chip](docs/full-chip.md#the-host-port-messages)).
+A chip can carry a fixed system prompt in its image, and it holds a conversation: each question goes on over the cache the earlier ones left, until a clear pin empties it without reloading the weights ([full chip](docs/full-chip.md#a-conversation-and-the-clear-pin)). Everything crosses its host port as messages, so a host can also ask how much of the context the conversation takes, read and change the generation's settings, and stop an answer, over a byte port, a serial port, a quad SPI link or I2C ([full chip](docs/full-chip.md#the-host-port-messages)).
 
 All the chips in a system come from the same netlist and read the same image. One pin decides which one leads; at boot they count themselves along the control chain, and each one takes its part of the model.
 

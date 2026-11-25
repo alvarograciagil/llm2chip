@@ -728,13 +728,14 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     let cpu_memory_bits = 8.0 * (FIRMWARE_PROGRAM_BYTES as f64 + text_bytes as f64 + 4.0 * arena_words as f64);
     push("cpu_memory", "CPU memory", cpu_memory_bits / 1e6 / tech.sram_density(1024.0),
         "The firmware's program and the memory where the tokenizer works on the input text.");
-    if p.host_uart || p.host_qspi {
+    if p.host_uart || p.host_qspi || p.host_i2c {
         // Measured on the generated control system (`link_cost` example): a serial port
-        // adds 234 gates and 48 flip-flops, a quad SPI target 227 and 42.
-        let (u, q) = (p.host_uart as u8 as f64, p.host_qspi as u8 as f64);
-        let (gates, flops) = (234.0 * u + 227.0 * q, 48.0 * u + 42.0 * q);
+        // adds 234 gates and 48 flip-flops, a quad SPI target 227 and 42, an I2C target 275
+        // and 36.
+        let (u, q, i) = (p.host_uart as u8 as f64, p.host_qspi as u8 as f64, p.host_i2c as u8 as f64);
+        let (gates, flops) = (234.0 * u + 227.0 * q + 275.0 * i, 48.0 * u + 42.0 * q + 36.0 * i);
         push("host_links", "Host port links", (gates * tech.and_um2 + flops * tech.ff_um2) * um2 * ROUTING_OVERHEAD,
-            "The serial port and the quad SPI target beside the host port's byte port: each carries the same messages, and the chip answers on the one the last message came from.");
+            "The serial port, quad SPI and I2C targets beside the host port's byte port: each carries the same messages, and the chip answers on the one the last message came from.");
     }
     push("control", "Sequencer and microprogram", 0.8,
         "Runs the microprogram that drives each stage.");
@@ -1136,12 +1137,21 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     // Speech goes over the host port as words: a word a sample of the question, and two a
     // sample of the answer's sound, mantissa and exponent.
     let speech = if p.speech_out { 2.0 * 24_000.0 * 4.0 } else if p.speech_in { 16_000.0 * 4.0 } else { 0.0 };
-    if p.host_uart && !p.host_qspi && speech > p.uart_baud as f64 / 10.0 {
+    // The slow links: a serial port's byte takes ten bits, an I2C byte nine clocks.
+    let uart_rate = if p.host_uart { p.uart_baud as f64 / 10.0 } else { 0.0 };
+    let i2c_rate = if p.host_i2c { p.i2c_khz as f64 * 1e3 / 9.0 } else { 0.0 };
+    if (p.host_uart || p.host_i2c) && !p.host_qspi && speech > uart_rate.max(i2c_rate) {
+        let on_uart = uart_rate >= i2c_rate;
         violations.push(Violation {
             severity: Severity::Warning,
-            message: format!("Speech needs {:.0} KB/s over the host port, and the serial port carries {:.0}: through it the chip would wait for the link.", speech / 1e3, p.uart_baud as f64 / 1e4),
-            fix: "Raise the serial port's rate, add the quad SPI link or use the byte port.".into(),
-            field: Some("uart_baud"), value: Some(serde_json::json!((speech * 10.0).ceil() as u64)),
+            message: if on_uart {
+                format!("Speech needs {:.0} KB/s over the host port, and the serial port carries {:.0}: through it the chip would wait for the link.", speech / 1e3, uart_rate / 1e3)
+            } else {
+                format!("Speech needs {:.0} KB/s over the host port, and the I2C link carries {:.0}: through it the chip would wait for the link.", speech / 1e3, i2c_rate / 1e3)
+            },
+            fix: if on_uart { "Raise the serial port's rate, add the quad SPI link or use the byte port." } else { "Add the quad SPI link or a fast serial port, or use the byte port: I2C reaches 1 MHz at most." }.into(),
+            field: Some(if on_uart { "uart_baud" } else { "host_qspi" }),
+            value: Some(if on_uart { serde_json::json!((speech * 10.0).ceil() as u64) } else { serde_json::json!(true) }),
         });
     }
     if p.mtp_enabled && model.params_in(Block::Mtp) == 0 {
@@ -1506,11 +1516,12 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     }
     // The host port's serial links: a serial port carries a byte in ten bits at its baud
     // rate; a quad SPI target four bits an edge, its clock up to an eighth of the chip's.
-    if p.host_uart || p.host_qspi {
+    if p.host_uart || p.host_qspi || p.host_i2c {
         let uart = if p.host_uart { p.uart_baud as f64 / 10.0 } else { 0.0 };
         let qspi = if p.host_qspi { freq * 1e9 / 16.0 } else { 0.0 };
-        m("host_link_kb_s", "Bandwidth", "Fastest serial link to the host", uart.max(qspi) / 1e3, "KB/s", Derived,
-            "A serial port moves a byte in ten bits at its baud rate; a quad SPI target four bits each edge of its clock, which may be up to an eighth of the chip's. The byte port moves a byte a cycle.".into());
+        let i2c = if p.host_i2c { p.i2c_khz as f64 * 1e3 / 9.0 } else { 0.0 };
+        m("host_link_kb_s", "Bandwidth", "Fastest serial link to the host", uart.max(qspi).max(i2c) / 1e3, "KB/s", Derived,
+            "A serial port moves a byte in ten bits at its baud rate; a quad SPI target four bits each edge of its clock, which may be up to an eighth of the chip's; an I2C target a byte in nine clocks. The byte port moves a byte a cycle.".into());
     }
     m("freq_ghz", "Speed", "Effective clock", freq, "GHz", Assumed,
         format!("Limited to {fmax:.2} GHz by the multiplier stages."));
@@ -1855,6 +1866,13 @@ mod tests {
         assert!(quad.violations.iter().all(|v| v.field != Some("uart_baud")));
         // A quad SPI clock an eighth of 1 GHz, four bits an edge.
         assert!(quad.metric("host_link_kb_s").unwrap() > 60_000.0);
+        // I2C at 1 MHz: enough to listen, not to speak.
+        let i2c = estimate(&qwen(), &ChipParams { host_i2c: true, speech_in: true, ..Default::default() }).unwrap();
+        assert!((i2c.metric("host_link_kb_s").unwrap() - 111.1).abs() < 0.1);
+        assert!(i2c.violations.iter().all(|v| v.field != Some("host_qspi")));
+        let speaking = estimate(&qwen(), &ChipParams { host_i2c: true, speech_out: true, ..Default::default() }).unwrap();
+        assert!(speaking.violations.iter().any(|v| v.field == Some("host_qspi")), "speech does not fit I2C");
+        assert!(speaking.blocks.iter().any(|b| b.id == "host_links"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! The host port's physical links in gates: the byte port, a serial port and a quad SPI
-//! target, each answered on its own, with the real firmware.
+//! The host port's physical links in gates: the byte port, a serial port, a quad SPI
+//! target and an I2C target, each answered on its own, with the real firmware.
 
 use netlist::image::build_image;
 use netlist::port::{self, Event};
@@ -12,6 +12,9 @@ use std::process::Command;
 /// Clocks a bit on the serial port, and the quad SPI clock's period in the chip's clocks.
 const DIVIDER: u32 = 8;
 const SCK: u64 = 16;
+/// The I2C target's address, and half its clock's period in the chip's clocks.
+const ADDRESS: u8 = 0x42;
+const HALF: u64 = 16;
 
 fn firmware() -> Option<FirmwareImage> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../firmware");
@@ -37,6 +40,11 @@ struct Board {
     uart_out: Vec<u8>,
     listening: Option<(u64, u8, u32)>,
     last_line: bool,
+    /// The I2C bus: the host's clock, whether it pulls the data line down, and whether the
+    /// chip did, both pulling it as an open drain does.
+    scl: bool,
+    host_low: bool,
+    chip_low: bool,
 }
 
 impl Board {
@@ -48,7 +56,7 @@ impl Board {
         sim.set("qspi_cs_n", 1).unwrap();
         sim.tick();
         sim.set("reset", 0).unwrap();
-        let mut board = Self { sim, image, pending: None, cycle: 0, bytes_in: VecDeque::new(), bytes_out: Vec::new(), uart_in: VecDeque::new(), uart_out: Vec::new(), listening: None, last_line: true };
+        let mut board = Self { sim, image, pending: None, cycle: 0, bytes_in: VecDeque::new(), bytes_out: Vec::new(), uart_in: VecDeque::new(), uart_out: Vec::new(), listening: None, last_line: true, scl: true, host_low: false, chip_low: false };
         while board.sim.get("booting").unwrap_or(1) == 1 || board.cycle == 0 {
             board.step();
         }
@@ -64,7 +72,10 @@ impl Board {
         sim.set("host_rx_valid", !self.bytes_in.is_empty() as u64).unwrap();
         sim.set("host_rx_data", self.bytes_in.front().copied().unwrap_or(0) as u64).unwrap();
         sim.set("uart_rx", self.uart_in.pop_front().unwrap_or(true) as u64).unwrap();
+        sim.set("i2c_scl", self.scl as u64).unwrap();
+        sim.set("i2c_sda", !(self.host_low || self.chip_low) as u64).unwrap();
         sim.settle();
+        self.chip_low = sim.get("i2c_sda_low").unwrap() == 1;
         self.pending = (sim.get("image_req_valid").unwrap() == 1).then(|| self.image[sim.get("image_req_addr").unwrap() as usize]);
         if !self.bytes_in.is_empty() && sim.get("host_rx_ready").unwrap() == 1 {
             self.bytes_in.pop_front();
@@ -119,6 +130,87 @@ impl Board {
         }
     }
 
+    /// The I2C data line as the host sees it.
+    fn sda(&self) -> bool {
+        !(self.host_low || self.chip_low)
+    }
+
+    /// An I2C start and the address byte, `read` or not; whether the chip acknowledged.
+    fn i2c_start(&mut self, read: bool) -> bool {
+        self.host_low = true;
+        self.run(HALF);
+        self.scl = false;
+        self.i2c_write(ADDRESS << 1 | read as u8)
+    }
+
+    /// One byte to the chip, the clock low on entry and on leaving; whether it acknowledged.
+    fn i2c_write(&mut self, byte: u8) -> bool {
+        for bit in (0..8).rev() {
+            self.host_low = byte >> bit & 1 == 0;
+            self.clock_pulse();
+        }
+        self.host_low = false;
+        self.run(HALF);
+        self.scl = true;
+        self.run(HALF / 2);
+        let acknowledged = !self.sda();
+        self.run(HALF / 2);
+        self.scl = false;
+        acknowledged
+    }
+
+    /// One byte from the chip, then the host's acknowledgement, or not for the last.
+    fn i2c_read(&mut self, more: bool) -> u8 {
+        self.host_low = false;
+        let mut byte = 0;
+        for _ in 0..8 {
+            self.run(HALF);
+            self.scl = true;
+            self.run(HALF / 2);
+            byte = byte << 1 | self.sda() as u8;
+            self.run(HALF / 2);
+            self.scl = false;
+        }
+        self.host_low = more;
+        self.clock_pulse();
+        self.host_low = false;
+        byte
+    }
+
+    /// Half a period low with the data set, then half high.
+    fn clock_pulse(&mut self) {
+        self.run(HALF);
+        self.scl = true;
+        self.run(HALF);
+        self.scl = false;
+    }
+
+    fn i2c_stop(&mut self) {
+        self.host_low = true;
+        self.run(HALF);
+        self.scl = true;
+        self.run(HALF);
+        self.host_low = false;
+        self.run(HALF);
+    }
+
+    /// Writes bytes to the chip in one transaction; whether it took each.
+    fn i2c_send(&mut self, bytes: &[u8]) -> Vec<bool> {
+        assert!(self.i2c_start(false), "the chip answers to its address");
+        let taken = bytes.iter().map(|b| self.i2c_write(*b)).collect();
+        self.i2c_stop();
+        taken
+    }
+
+    /// Reads `count` bytes from the chip in one transaction: the room, the waiting, then
+    /// what it sends.
+    fn i2c_receive(&mut self, count: usize) -> Vec<u8> {
+        assert!(self.i2c_start(true));
+        let got = (0..count).map(|i| self.i2c_read(i + 1 < count)).collect();
+        self.i2c_stop();
+        got
+    }
+
     /// One quad SPI transaction: the command, the bytes to write, and for a read or the
     /// status the dummy byte and `read` bytes back.
     fn qspi(&mut self, command: u8, write: &[u8], read: usize) -> Vec<u8> {
@@ -151,7 +243,7 @@ impl Board {
 #[test]
 fn each_link_is_answered_on_its_own() {
     let Some(firmware) = firmware() else { return };
-    let config = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6, links: HostLinks { uart: Some(DIVIDER), qspi: true } };
+    let config = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6, links: HostLinks { uart: Some(DIVIDER), qspi: true, i2c: Some(ADDRESS) } };
     let image = build_image(&firmware.program, &firmware.data, &[], &[], &[]).unwrap();
     let mut board = Board::new(config, image);
     // The CPU clears its memory first, then reports the boot.
@@ -202,4 +294,40 @@ fn each_link_is_answered_on_its_own() {
     board.bytes_in.extend([netlist::soc::FRAME_END]);
     board.run(20_000);
     assert!(matches!(port::events(&board.bytes_out)[..], [Event::Options(_), Event::Status { .. }]));
+
+    // On the I2C target, there. A read starts with the room and what waits; a byte to
+    // another address is not acknowledged.
+    board.i2c_stop();
+    assert_eq!(board.i2c_receive(2), [64, 0]);
+    board.host_low = true;
+    board.run(HALF);
+    board.scl = false;
+    assert!(!board.i2c_write((ADDRESS + 1) << 1), "another chip's address");
+    board.i2c_stop();
+    let message = port::set(5, 0xDB_C0_00_07);
+    assert!(board.i2c_send(&message).iter().all(|t| *t));
+    board.run(20_000);
+    assert_eq!(board.pin("i2c_irq"), 1);
+    let status = board.i2c_receive(2);
+    assert_eq!(status[0], 64);
+    let read = board.i2c_receive(status[1] as usize + 4);
+    assert_eq!(&read[..2], &[64, status[1]]);
+    assert_eq!(port::events(&read[2..]), [Event::Options(vec![(5, 0xDB_C0_00_07)])], "{read:?}");
+    assert_eq!(board.pin("i2c_irq"), 0);
+    assert_eq!(port::events(&board.uart_out).len(), 1, "the serial port heard nothing more");
+
+    // While the byte port is inside a message, the I2C target refuses, and the host can
+    // send the byte again afterwards.
+    board.bytes_in.extend([port::kind::STATUS]);
+    board.run(100);
+    assert_eq!(board.i2c_send(&[port::kind::OPTIONS]), [false]);
+    board.bytes_in.extend([netlist::soc::FRAME_END]);
+    board.run(20_000);
+    assert_eq!(port::events(&board.bytes_out).len(), 3);
+    assert_eq!(board.i2c_send(&port::options()), [true, true]);
+    board.run(20_000);
+    // What waits is counted in entries, and an escaped byte takes two.
+    let waiting = board.i2c_receive(2)[1] as usize;
+    let read = board.i2c_receive(2 * waiting + 2);
+    assert!(matches!(port::events(&read[2..])[..], [Event::Options(_)]), "{read:?} bytes {:?}", port::events(&board.bytes_out));
 }

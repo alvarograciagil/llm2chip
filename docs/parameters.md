@@ -366,6 +366,18 @@ Adds a quad SPI target to the host port: four data lines, a clock, a select and 
 
 *On or off.*
 
+### I2C (`host_i2c`)
+
+Adds an I2C target to the host port: two open-drain lines shared with other chips, at its own address, and an interrupt line that says the chip has something to send. A write's bytes go in, each refused if the port cannot take it, so the host sends it again; a read gives first the room in the receive queue and what waits to be sent. It is slow (a byte in nine clocks, 1 MHz at most) but every microcontroller has it.
+
+*On or off.*
+
+### I2C clock (`i2c_khz`)
+
+The I2C bus's clock: 100 kHz standard, 400 fast, 1,000 Fast-mode Plus. A byte takes nine clocks, so 1 MHz carries 111 KB/s: enough for text and to listen, not to speak. The chip's clock must be at least twenty times faster.
+
+*From 100 to 1000 kHz, on a logarithmic scale.*
+
 ### Weight loading (`load_interface`)
 
 Where the weights arrive from when the chip powers up: NVMe, PCIe 5.0 or UART. It only affects start-up time, not generation speed.

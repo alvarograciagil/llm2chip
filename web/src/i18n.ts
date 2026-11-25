@@ -216,6 +216,7 @@ const ES: Record<string, string> = {
   "Serial port (UART)": "Puerto serie (UART)",
   "Serial port rate": "Velocidad del puerto serie",
   "Quad SPI": "SPI cuádruple",
+  "I2C clock": "Reloj del I2C",
   "baud": "baudios",
   "Multipliers per die": "Multiplicadores por die",
   "Multiplier type": "Tipo de multiplicador",

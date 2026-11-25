@@ -121,12 +121,14 @@ pub struct ChipParams {
     /// the chip's description, in the image: burnt into ROM with the weights, or loaded at
     /// power-up with them, where a new image changes it.
     pub system_prompt: String,
-    /// The host port's links besides its byte port: a serial port at `uart_baud`, and a quad
-    /// SPI target whose clock may be up to an eighth of the chip's. Each carries the same
-    /// messages.
+    /// The host port's links besides its byte port: a serial port at `uart_baud`, a quad
+    /// SPI target whose clock may be up to an eighth of the chip's, and an I2C target at
+    /// `i2c_khz`. Each carries the same messages.
     pub host_uart: bool,
     pub uart_baud: u32,
     pub host_qspi: bool,
+    pub host_i2c: bool,
+    pub i2c_khz: u32,
 
     /// 0 lets the estimator pick the smallest number that fits.
     pub dies: u32,
@@ -235,6 +237,8 @@ impl Default for ChipParams {
             host_uart: false,
             uart_baud: 3_000_000,
             host_qspi: false,
+            host_i2c: false,
+            i2c_khz: 1000,
             dies: 0,
             die_max_mm2: 815.0,
             macs_per_die: 136_000,

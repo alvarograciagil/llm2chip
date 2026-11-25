@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A host for an llm2chip chip on a board, over its serial port.
+"""A host for an llm2chip chip on a board, over its serial port or its I2C link.
 
 The chip speaks in messages (see `netlist::port` and docs/full-chip.md): a kind byte, the
 bytes, and an end byte 0xC0, with 0xC0 and 0xDB inside a message sent as 0xDB 0xDC and
@@ -11,6 +11,10 @@ bytes, and an end byte 0xC0, with 0xC0 and 0xDB inside a message sent as 0xDB 0x
     python3 chip_host.py PORT status | options | clear | stop
     python3 chip_host.py PORT set temperature_x256 192
     python3 chip_host.py PORT load 262144     (start again from the image at that word)
+    python3 chip_host.py --i2c 1:0x42 status  (Linux's /dev/i2c-1, the chip at 0x42)
+
+Over I2C a read gives two bytes first, the room in the chip's receive queue and what waits
+to be sent, so the host writes no more than the room and reads what waits.
 
 Without a port (`-` instead), it only checks its own framing.
 """
@@ -129,31 +133,87 @@ def self_check():
     print("framing: ok")
 
 
+class Serial:
+    def __init__(self, port, baud):
+        import serial
+
+        self.link = serial.Serial(port, baud, timeout=0.1)
+
+    def write(self, data):
+        self.link.write(data)
+
+    def read(self):
+        return self.link.read(4096)
+
+
+class I2c:
+    """Linux's i2c-dev: each read or write is one transaction at the chip's address."""
+
+    def __init__(self, bus, address):
+        import fcntl
+        import os
+
+        self.os = os
+        self.fd = os.open(f"/dev/i2c-{bus}", os.O_RDWR)
+        fcntl.ioctl(self.fd, 0x0703, address)  # I2C_SLAVE
+
+    def status(self):
+        room, waiting = self.os.read(self.fd, 2)
+        return room, waiting
+
+    def write(self, data):
+        import time
+
+        while data:
+            room, _ = self.status()
+            if room == 0:
+                time.sleep(0.001)
+                continue
+            try:
+                self.os.write(self.fd, data[:room])
+            except OSError:
+                sys.exit("the chip refused a byte: another link is inside a message")
+            data = data[room:]
+
+    def read(self):
+        import time
+
+        _, waiting = self.status()
+        if not waiting:
+            time.sleep(0.01)
+            return b""
+        # Entries waiting; an escaped byte goes as two, and with nothing left the chip sends
+        # ends, which the reader skips.
+        return self.os.read(self.fd, 2 + 2 * waiting)[2:]
+
+
 def main():
     args = sys.argv[1:]
     if not args:
         sys.exit(__doc__)
     if args[0] == "-":
         return self_check()
-    port, args = args[0], args[1:]
-    baud = 3_000_000
-    if args[:1] == ["--baud"]:
-        baud, args = int(args[1]), args[2:]
+    if args[0] == "--i2c":
+        bus, address = args[1].split(":")
+        link, args = I2c(int(bus), int(address, 0)), args[2:]
+    else:
+        port, args = args[0], args[1:]
+        baud = 3_000_000
+        if args[:1] == ["--baud"]:
+            baud, args = int(args[1]), args[2:]
+        link = Serial(port, baud)
     message = request(args)
     READY_ENDS[0] = args[0] == "load"
-    import serial
-
-    with serial.Serial(port, baud, timeout=0.1) as link:
-        link.write(message)
-        reader, idle = Reader(), 0
-        while idle < 600:
-            data = link.read(4096)
-            idle = 0 if data else idle + 1
-            for kind, payload in reader.read(data):
-                line, last = describe(kind, payload)
-                print(line, end="", flush=True)
-                if last:
-                    return
+    link.write(message)
+    reader, idle = Reader(), 0
+    while idle < 600:
+        data = link.read()
+        idle = 0 if data else idle + 1
+        for kind, payload in reader.read(data):
+            line, last = describe(kind, payload)
+            print(line, end="", flush=True)
+            if last:
+                return
 
 
 if __name__ == "__main__":
