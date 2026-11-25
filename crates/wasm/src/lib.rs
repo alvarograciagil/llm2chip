@@ -333,21 +333,23 @@ impl DieSimulation {
         let p: ChipParams = serde_json::from_str(params).map_err(|e| JsError::new(&e.to_string()))?;
         if kind == "boot" {
             let config = demo::block_config();
-            let chip = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 13, fifo_bits: 6 }, die: config, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+            let chip = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6 }, die: config, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
             let design = chip_design(chip);
             let mut sim = Simulator::new(&design).map_err(|e| JsError::new(&e.0))?;
             sim.set("reset", 1).map_err(|e| JsError::new(&e.0))?;
             sim.tick();
             sim.set("reset", 0).map_err(|e| JsError::new(&e.0))?;
-            // An empty prompt: the firmware loads everything and stops.
+            // An empty question: the firmware loads everything and stops.
             let mut boot = BootDemo::new(config).map_err(|e| JsError::new(&e))?;
             for _ in 0..=netlist::chip::RESET_RELEASE {
                 sim.tick();
             }
-            sim.set("host_rx_valid", 1).map_err(|e| JsError::new(&e.0))?;
-            sim.set("host_rx_data", 0).map_err(|e| JsError::new(&e.0))?;
-            boot.serve(&mut sim)?;
-            sim.tick();
+            for byte in netlist::port::tokens(&[]) {
+                sim.set("host_rx_valid", 1).map_err(|e| JsError::new(&e.0))?;
+                sim.set("host_rx_data", byte as u64).map_err(|e| JsError::new(&e.0))?;
+                boot.serve(&mut sim)?;
+                sim.tick();
+            }
             sim.set("host_rx_valid", 0).map_err(|e| JsError::new(&e.0))?;
             return Ok(DieSimulation { design, config, sim, demo: Demo::Boot(boot), started: true });
         }
@@ -457,7 +459,9 @@ impl DieSimulation {
                 to_js(&serde_json::json!({ "got": got, "expected": built.expected, "exact": exact, "tolerance": built.tolerance }))
             }
             Demo::Boot(boot) => {
-                let text = String::from_utf8_lossy(&boot.output).into_owned();
+                // The boot's message: a dot for each segment whose checksum held.
+                let report = netlist::port::messages(&boot.output).into_iter().find(|m| m.kind == netlist::port::kind::BOOT);
+                let text = report.map_or(String::new(), |m| String::from_utf8_lossy(&m.payload).into_owned());
                 let exact = text == ".".repeat(boot.segments);
                 to_js(&serde_json::json!({ "got": [], "expected": [], "exact": exact, "tolerance": 0.0, "text": text }))
             }

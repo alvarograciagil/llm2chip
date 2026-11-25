@@ -58,7 +58,7 @@ cargo build --release -p server --no-default-features                      # one
                                     text tokens         codes, + DAC decoder)
 ```
 
-Each stage is a program of its own on dies of its own. Between stages only text travels, as bytes: a few dozen a second, far below what any link carries. Each chip already reads and writes UTF-8 bytes through its host port, with its own tokenizer, so a recogniser and a language model with different vocabularies join without translating token ids. Splitting the stages over dies costs nothing measurable in latency, and each stage's dies can have their own shape.
+Each stage is a program of its own on dies of its own. Between stages only text travels, as bytes: a few dozen a second, far below what any link carries. Each chip already reads and writes UTF-8 text through its host port, in messages, with its own tokenizer, so a recogniser and a language model with different vocabularies join without translating token ids. Splitting the stages over dies costs nothing measurable in latency, and each stage's dies can have their own shape.
 
 In a conversation what matters is not tokens per second but **how long until the first sound**, which should stay below about half a second. It adds up three things:
 
@@ -207,7 +207,7 @@ A schedule can be longer than the chip's description has room for (1,008 words),
 
 ### What the host sends and gets back
 
-Every word is 32 bits, little-endian; a vector is its exponent then its elements, in the die's format (`netlist::block::encode_vector`).
+The words go in stream messages (see [full-chip.md](full-chip.md#the-host-port-messages)), as many as the host likes: the chip reads them as one stream. It answers in a stream message of its own. Every word is 32 bits, little-endian; a vector is its exponent then its elements, in the die's format (`netlist::block::encode_vector`).
 
 - **Moonshine** (`MoonshineChip::schedule_input`): the clip's length in samples, then `1 / count` for its GroupNorm (a vector of one), then the rows of 64 samples. The chip works out the lengths as `Lengths::of` does, runs the encoder and sends back the text's tokens, greedily, up to the end token or six a second of audio.
 - **Streaming Moonshine** (`StreamingChip::schedule_input`): for each 20 ms, a word other than zero and four vectors of 80 samples; a zero when the speech ends. Speech past the last whole 20 ms is left out, and the speech must last longer than the layers run behind (240 ms for Moonshine-tiny's). The chip sends back the tokens.
@@ -236,7 +236,7 @@ The system's planner adds the CPU's cycles to the die's (`sim::chip::firmware_cy
 | A routine started alone (rows of samples, pairwise sums, each token's routines, each frame's codes, each sample sent back) | 1,000 |
 | A word received or sent | 200 |
 
-Both firmware tests check the measured cycles against that count, with the queue and without, and DAC's with routines shorter and longer than the CPU's work. The firmware takes 32,332 of its 32,768 bytes of program memory: 436 are left.
+Both firmware tests check the measured cycles against that count, with the queue and without, and DAC's with routines shorter and longer than the CPU's work. The firmware takes 35,704 bytes of its 48 KB of program memory.
 
 ## Several programs on several dies
 

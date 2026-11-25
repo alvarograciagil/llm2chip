@@ -593,18 +593,18 @@ fn the_firmware_scores_the_draft_head_like_the_software() {
     let setup = GenerationSetup { max_new: count as u32 + 1, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: depth as u32, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: None, think_budget: u32::MAX };
     let info = chip_info(&die, &code, 1, 8, &setup);
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
-    let input: Vec<u8> = prompt.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect();
+    let input = netlist::port::tokens(&prompt);
     let mut chip_engine = engine();
     let runner = RunnerEngine::new(&mut chip_engine, 16, 0);
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
-    let mut bus = SocBus::booted_with(SocConfig { program_bits: 14, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
         assert!(cpu.cycle < 200_000_000, "the firmware does not finish");
     }
     assert!(bus.peripheral.engine.error.is_none(), "{:?}", bus.peripheral.engine.error);
-    let tokens: Vec<u32> = bus.tx.as_chunks::<4>().0.iter().map(|t| u32::from_le_bytes(*t)).collect();
+    let tokens: Vec<u32> = netlist::port::answers(&bus.tx).concat();
     assert_eq!(tokens[..count], output[..count], "the generated tokens");
     assert_eq!(bus.peripheral.draft_tries[..depth], tries[..depth], "intentos");
     assert_eq!(bus.peripheral.draft_hits[..depth], hits[..depth], "hits");
@@ -663,18 +663,18 @@ fn the_firmware_closes_the_reasoning_when_its_budget_runs_out() {
     let setup = GenerationSetup { max_new: count as u32, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: Some((6, close)), think_budget: budget };
     let info = chip_info(&die, &code, 1, 8, &setup);
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
-    let input: Vec<u8> = prompt.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect();
+    let input = netlist::port::tokens(&prompt);
     let mut chip_engine = engine();
     let runner = RunnerEngine::new(&mut chip_engine, 16, 0);
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
-    let mut bus = SocBus::booted_with(SocConfig { program_bits: 14, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
         assert!(cpu.cycle < 200_000_000, "the firmware does not finish");
     }
     assert!(bus.peripheral.engine.error.is_none(), "{:?}", bus.peripheral.engine.error);
-    let tokens: Vec<u32> = bus.tx.as_chunks::<4>().0.iter().map(|t| u32::from_le_bytes(*t)).collect();
+    let tokens: Vec<u32> = netlist::port::answers(&bus.tx).concat();
     assert_eq!(tokens, expected, "the chip must close the reasoning after {budget} tokens");
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -717,11 +717,11 @@ fn the_firmware_runs_the_chips_system_prompt_before_the_hosts() {
     let mut full = info.clone();
     add_system_prompt(&mut info, &system).unwrap();
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
-    let input: Vec<u8> = question.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect();
+    let input = netlist::port::tokens(&question);
     let mut chip_engine = engine();
     let runner = RunnerEngine::new(&mut chip_engine, 16, 0);
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
-    let mut bus = SocBus::booted_with(SocConfig { program_bits: 14, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
@@ -730,7 +730,7 @@ fn the_firmware_runs_the_chips_system_prompt_before_the_hosts() {
     assert!(bus.peripheral.engine.error.is_none(), "{:?}", bus.peripheral.engine.error);
     // Every token of the system prompt and the question, and each answer token but the last.
     assert_eq!(bus.peripheral.engine.steps as usize, whole.len() + count - 1);
-    let tokens: Vec<u32> = bus.tx.as_chunks::<4>().0.iter().map(|t| u32::from_le_bytes(*t)).collect();
+    let tokens: Vec<u32> = netlist::port::answers(&bus.tx).concat();
     assert_eq!(tokens, expected);
 
     // A description with no room left for it refuses the system prompt.
@@ -759,17 +759,18 @@ fn the_cpu_profile_adds_up_and_tells_waiting_from_work() {
     let setup = GenerationSetup { max_new: 4, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: FLOW_DRAFT_REGISTER << FLOW_INDEX_BITS, think: None, think_budget: u32::MAX };
     let info = chip_info(&die, &code, 1, 8, &setup);
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
-    let input: Vec<u8> = [3u32, 5, 6].iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect();
+    let input = netlist::port::tokens(&[3u32, 5, 6]);
     let mut engine = Engine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
     let runner = RunnerEngine::new(&mut engine, 16, 1000);
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
-    let mut bus = SocBus::booted_with(SocConfig { program_bits: 14, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
     let mut cpu = Rv32Iss::default();
     let mut profile = CpuProfile::from_elf(elf);
     let mut orders = 0;
     // The steps cut as the simulator's server cuts them: a prompt token's step ends just
     // before the order of the next routine, an answer's when its token reaches the host.
     let (mut last, mut prompt_steps, mut answer_steps) = (ChipActivity::default(), Vec::new(), Vec::new());
+    let (mut reader, mut read, mut tokens_out) = (netlist::port::Reader::default(), 0, 0);
     while !cpu.halted {
         let before = ChipActivity::of(&profile, &bus.peripheral);
         let pc = cpu.pc;
@@ -781,7 +782,9 @@ fn the_cpu_profile_adds_up_and_tells_waiting_from_work() {
             prompt_steps.push(before.since(&last));
             last = before;
         }
-        if bus.tx.len() / 4 > answer_steps.len() {
+        tokens_out += reader.read(&bus.tx[read..]).iter().filter(|m| m.kind == netlist::port::kind::TOKENS).count();
+        read = bus.tx.len();
+        if tokens_out > answer_steps.len() {
             let now = ChipActivity::of(&profile, &bus.peripheral);
             answer_steps.push(now.since(&last));
             last = now;
@@ -1216,19 +1219,16 @@ fn the_firmware_holds_a_conversation_on_a_kept_engine_until_the_clear_pin() {
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
     let runner = RunnerEngine::keeping(Box::new(engine()), 16, 0);
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
-    let mut bus = SocBus::booted_with(SocConfig { program_bits: 14, data_bits: 13, fifo_bits: 6 }, &image, &[], ChipModel::new(runner, code, sampler)).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6 }, &image, &[], ChipModel::new(runner, code, sampler)).unwrap();
     let mut cpu = Rv32Iss::default();
-    let words = |tx: &[u8]| tx.as_chunks::<4>().0.iter().map(|t| u32::from_le_bytes(*t)).collect::<Vec<u32>>();
     let mut ask = |bus: &mut SocBus<_>, prompt: &[u32]| {
         let start = bus.tx.len();
-        bus.send(&prompt.iter().chain(&[u32::MAX]).flat_map(|t| t.to_le_bytes()).collect::<Vec<u8>>());
-        while !words(&bus.tx[start..]).contains(&u32::MAX) {
+        bus.send(&netlist::port::tokens(prompt));
+        while netlist::port::answers(&bus.tx[start..]).is_empty() {
             cpu.step(bus);
             assert!(!cpu.halted && cpu.cycle < 200_000_000, "the chip stopped or never answered");
         }
-        let mut answer = words(&bus.tx[start..]);
-        answer.pop();
-        answer
+        netlist::port::answers(&bus.tx[start..])[0].clone()
     };
     assert_eq!(ask(&mut bus, &first), expected[0]);
     assert_eq!(bus.peripheral.engine.cache_tokens(), first.len() + count);

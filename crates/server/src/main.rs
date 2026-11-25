@@ -953,17 +953,6 @@ fn sample_on_unit(unit: &mut SamplerModel, logits: &[f32], temperature: f32, top
     unit.sample(&mantissas, inverse, top_k.clamp(1, SAMPLER_ENTRIES as usize), temperature <= 0.0).token
 }
 
-/// The bytes after `shown` that already form complete UTF-8 characters.
-fn take_text(bytes: &[u8], shown: &mut usize) -> String {
-    let pending = &bytes[*shown..];
-    let valid = match std::str::from_utf8(pending) {
-        Ok(_) => pending.len(),
-        Err(e) => e.valid_up_to(),
-    };
-    *shown += valid;
-    String::from_utf8_lossy(&pending[..valid]).into_owned()
-}
-
 /// The first `depth` counters the firmware reported for the draft head.
 fn draft_counts(counts: &[u32; 4], depth: usize) -> Vec<u32> {
     counts[..depth.min(4)].to_vec()
@@ -1039,11 +1028,7 @@ fn run_firmware(loaded: &mut Loaded, text: &str, add_special: bool, ids: &[u32],
     // The firmware's tokenizer adds the special tokens itself only when they did not go first.
     let special = !turn.going_on && carried.is_empty() && add_special;
     let context = if request.fidelity.context_tokens > 0 { request.fidelity.context_tokens } else { DEFAULT_CONTEXT };
-    let prompt: Vec<u8> = if use_tables {
-        rest.bytes().chain([0]).collect()
-    } else {
-        sent.iter().flat_map(|t| t.to_le_bytes()).chain(u32::MAX.to_le_bytes()).collect()
-    };
+    let prompt = if use_tables { netlist::port::text(&rest) } else { netlist::port::tokens(&sent) };
     let clear = kept.is_some() && !turn.going_on;
     let (mut chip, input) = match kept {
         Some(chip) => (chip, prompt),
@@ -1116,7 +1101,7 @@ fn build_chip(loaded: &mut Loaded, carried: &[u32], special: bool, context: u64,
     let image = build_image(&firmware.program, &firmware.data, &info, tables, &[])?;
     // The memory the chip needs for this model's tables and its image layout.
     let data_bits = (image.len().max(1 << 13).next_power_of_two().ilog2()).max(13);
-    let soc = SocConfig { program_bits: 14, data_bits, fifo_bits: 6 };
+    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits, fifo_bits: 6 };
     // The image must boot before the engine goes into the chip.
     SocBus::booted(soc, &image, &[])?;
     let unit = sampler_model(vocabulary, seed, request.fidelity.sampler_lanes);
@@ -1126,13 +1111,13 @@ fn build_chip(loaded: &mut Loaded, carried: &[u32], special: bool, context: u64,
     let input = match picture {
         Some((tokens, placement, placeholder, (bytes, _))) => {
             runner = runner.with_image(tokens, placement, placeholder);
-            bytes.into_iter().chain(prompt).collect()
+            netlist::port::picture(&bytes).into_iter().chain(prompt).collect()
         }
         None => prompt,
     };
     let bus = SocBus::booted_with(soc, &image, &[], ChipModel::new(runner, code, unit))?;
     // What the CPU is, for the simulator to show beside what it does.
-    let about = serde_json::json!({ "type": "cpu", "isa": "RV32IM", "program_bytes": 4u64 << soc.program_bits, "data_bytes": 4u64 << soc.data_bits, "firmware_bytes": 4 * firmware.program.len(), "image_bytes": 4 * image.len(), "tokenizer": use_tables });
+    let about = serde_json::json!({ "type": "cpu", "isa": "RV32IM", "program_bytes": 4 * soc.program_words as u64, "data_bytes": 4u64 << soc.data_bits, "firmware_bytes": 4 * firmware.program.len(), "image_bytes": 4 * image.len(), "tokenizer": use_tables });
     let chip = KeptChip { bus, cpu: Rv32Iss::default(), profile: netlist::activity::CpuProfile::from_elf(FIRMWARE), signature: signature.to_string(), raw: !use_tables, conversation, about };
     Ok((chip, input))
 }
@@ -1166,14 +1151,16 @@ fn run_turn(chip: &mut KeptChip, tokenizer: &Tokenizer, input: &[u8], ids: &[u32
     bus.send(input);
     let engine = &bus.peripheral.engine;
     let (first_cycle, first_die) = (cpu.cycle, engine.die_cycles);
-    let (steps, generated, tokens, start) = (engine.steps, engine.generated, engine.tokens.len(), bus.tx.len());
+    let (steps, tokens, start) = (engine.steps, engine.tokens.len(), bus.tx.len());
     let mut last = ChipActivity::of(profile, &bus.peripheral);
-    let (mut emitted, mut reported, mut shown) = (0, 0, start);
+    let (mut emitted, mut reported) = (0, 0);
     let mut output: Vec<u32> = Vec::new();
     let mut decoded_shown = 0;
-    // The text the chip writes ends with a zero byte, its tokens with `END_OF_TOKENS`.
-    let mut ended = false;
-    while !cpu.halted && !ended {
+    // The chip's messages, read as its bytes leave it: a token's text or the token, each
+    // ending its step; the answer's end, with the positions the conversation takes.
+    let (mut reader, mut read) = (netlist::port::Reader::default(), start);
+    let mut ended: Option<(netlist::port::Ending, u32)> = None;
+    while !cpu.halted && ended.is_none() {
         if cancelled.load(Relaxed) {
             return Ok(None);
         }
@@ -1191,47 +1178,34 @@ fn run_turn(chip: &mut KeptChip, tokenizer: &Tokenizer, input: &[u8], ids: &[u32
             let _ = sender.blocking_send(serde_json::json!({ "type": "prefill", "done": reported, "total": ids.len(), "seconds": bus.peripheral.engine.last_seconds, "cycles": cpu.cycle, "activity": activity_json(&before.since(&last)) }));
             last = before;
         }
-        if !raw {
-            let end = bus.tx[start..].iter().position(|b| *b == 0).map(|at| start + at);
-            ended = end.is_some();
-            let text = &bus.tx[..end.unwrap_or(bus.tx.len())];
-            // A token's text is complete once the firmware asks for the next token's logits.
-            while emitted + 1 < bus.peripheral.engine.generated - generated {
-                emitted += 1;
-                let piece = take_text(text, &mut shown);
-                let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth), "activity": activity_json(&before.since(&last)) }));
-                last = before;
-            }
+        if bus.tx.len() == read {
             continue;
         }
-        while !ended && (bus.tx.len() - start) / 4 > emitted {
-            let at = start + emitted * 4;
-            let token = u32::from_le_bytes([bus.tx[at], bus.tx[at + 1], bus.tx[at + 2], bus.tx[at + 3]]);
-            if token == u32::MAX {
-                ended = true;
-                break;
-            }
-            output.push(token);
+        let messages = reader.read(&bus.tx[read..]);
+        read = bus.tx.len();
+        for message in messages {
+            let piece = match message.event() {
+                netlist::port::Event::Text(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                netlist::port::Event::Tokens(ids) => {
+                    output.extend(&ids);
+                    let decoded = tokenizer.decode(&output, true).map_err(|e| e.to_string())?;
+                    if decoded.ends_with('\u{FFFD}') { String::new() } else { let part = decoded[decoded_shown..].to_string(); decoded_shown = decoded.len(); part }
+                }
+                netlist::port::Event::End { ending, position, .. } => {
+                    ended = Some((ending, position));
+                    continue;
+                }
+                netlist::port::Event::Error { code, detail } => return Err(format!("the chip reports error {code} ({detail})")),
+                _ => continue,
+            };
             emitted += 1;
-            let decoded = tokenizer.decode(&output, true).map_err(|e| e.to_string())?;
-            let piece = if decoded.ends_with('\u{FFFD}') { String::new() } else { let part = decoded[decoded_shown..].to_string(); decoded_shown = decoded.len(); part };
-            // Here the step ends with the token written to the host, this very instruction.
+            // Here the step ends with the token sent to the host, this very instruction.
             let now = ChipActivity::of(profile, &bus.peripheral);
-            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "id": token, "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth), "activity": activity_json(&now.since(&last)) }));
+            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "id": output.last(), "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth), "activity": activity_json(&now.since(&last)) }));
             last = now;
         }
     }
     profile.settle();
-    if !raw {
-        let end = bus.tx[start..].iter().position(|b| *b == 0).map_or(bus.tx.len(), |at| start + at);
-        let piece = take_text(&bus.tx[..end], &mut shown);
-        if !piece.is_empty() {
-            emitted += 1;
-            let now = ChipActivity::of(profile, &bus.peripheral);
-            let _ = sender.blocking_send(serde_json::json!({ "type": "token", "text": piece, "seconds": bus.peripheral.engine.last_seconds, "saturated": 0, "index": emitted, "cycles": cpu.cycle, "hits": draft_counts(&bus.peripheral.draft_hits, request.mtp_depth), "tries": draft_counts(&bus.peripheral.draft_tries, request.mtp_depth), "activity": activity_json(&now.since(&last)) }));
-            last = now;
-        }
-    }
     let runner = &bus.peripheral.engine;
     let fed = &runner.tokens[tokens..];
     if !raw && fed.is_empty() && !ids.is_empty() {
@@ -1240,15 +1214,15 @@ fn run_turn(chip: &mut KeptChip, tokenizer: &Tokenizer, input: &[u8], ids: &[u32
     let tokenizer_match = (!raw).then(|| fed.starts_with(ids));
     // A chip without a conversation keeps nothing for the next question.
     let held = if *conversation { runner.cache_tokens() } else { 0 };
-    // Short of the limit, the firmware stopped by its own rules: an end token, a loop or a
-    // full cache.
-    let reason = if emitted >= request.max_tokens {
-        "limit"
-    } else if runner.cache_tokens() as u64 >= context {
-        "context"
-    } else {
-        "chip"
+    // The firmware says why it stopped: the limit, a full cache, or its own rules (an end
+    // token or a loop).
+    let reason = match ended.map(|(ending, _)| ending) {
+        Some(netlist::port::Ending::Limit) => "limit",
+        Some(netlist::port::Ending::Full) => "context",
+        Some(netlist::port::Ending::Loop) => "loop",
+        _ => "chip",
     };
+    let _ = context;
     let now = ChipActivity::of(profile, &bus.peripheral);
     let _ = sender.blocking_send(serde_json::json!({ "type": "done", "tokens": emitted, "reason": reason, "held": held, "chip": { "cycles": cpu.cycle - first_cycle, "die_cycles": runner.die_cycles - first_die, "tokenizer_match": tokenizer_match }, "activity": activity_json(&now.since(&last)), "totals": activity_json(&now) }));
     Ok(Some(held))

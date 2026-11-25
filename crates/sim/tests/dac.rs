@@ -237,17 +237,16 @@ fn the_firmware_decodes_window_by_window_as_the_host_does() {
     let schedule_words = add_schedule(&mut info, &schedule);
     eprintln!("the chip's description: {} words, and a schedule of {} records", info.len(), schedule.len());
     let image = build_image(&firmware.program, &firmware.data, &info, &schedule_words, &[]).unwrap();
-    let input: Vec<u8> = sim::speak::dac_chip::schedule_input(&config, &codes, chunk).iter().flat_map(|w| w.to_le_bytes()).collect();
+    let input = netlist::port::stream(&sim::speak::dac_chip::schedule_input(&config, &codes, chunk));
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() };
     let model = ChipModel::new(chip.die_engine(code.clone()), code, sampler).with_queue(queue);
-    let mut bus = SocBus::booted_with(SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, &image, &input, model).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, &image, &input, model).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
         assert!(cpu.cycle < 400_000_000, "the firmware does not finish");
     }
-    let start = bus.tx.iter().position(|b| *b != b'.').unwrap_or(bus.tx.len());
-    let words: Vec<i64> = bus.tx[start..].chunks(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as i64).collect();
+    let words: Vec<i64> = netlist::port::words(&bus.tx).iter().map(|w| *w as i32 as i64).collect();
     eprintln!("{channels} channels, queue of {}: {} cycles of the CPU, {} of the die, {} routines run, {} samples", 1 << queue, cpu.cycle, bus.peripheral.die_busy, bus.peripheral.routines.iter().map(|r| r.0).sum::<u64>(), words.len() / 2);
     // What the planner counts for the firmware: each window's, and the count of windows.
     let windows = config.windows(frames, chunk).len() as u64;

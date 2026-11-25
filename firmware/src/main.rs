@@ -1,5 +1,6 @@
 //! Firmware of the control CPU: loads the model, reads text, runs the die and writes text.
-//! It talks to the outside world only through the host port.
+//! It talks to the outside world only through the host port, in messages: see
+//! `netlist::port`, which hosts use to write and read them.
 #![no_std]
 #![no_main]
 
@@ -11,6 +12,46 @@ const HOST_RX_DATA: *const u32 = 0x2000_0000 as *const u32;
 const HOST_RX_STATUS: *const u32 = 0x2000_0004 as *const u32;
 const HOST_TX_DATA: *mut u32 = 0x2000_0008 as *mut u32;
 const HOST_TX_STATUS: *const u32 = 0x2000_000C as *const u32;
+/// Reading it gives the head of the receive queue without taking it; writing it starts a
+/// message on the way out, of the kind written.
+const HOST_RX_PEEK: *const u32 = 0x2000_0010 as *const u32;
+const HOST_TX_START: *mut u32 = 0x2000_0010 as *mut u32;
+const HOST_TX_END: *mut u32 = 0x2000_0014 as *mut u32;
+/// The receive status: a payload byte at the head (the usual case), the clear pin, a
+/// message's start or its end at the head.
+const RX_BYTE: u32 = 1;
+const RX_START: u32 = 4;
+const RX_END: u32 = 8;
+
+/// The kinds of message, as `netlist::port::kind` names them.
+const K_TEXT: u32 = 0x01;
+const K_TOKENS: u32 = 0x02;
+const K_PICTURE: u32 = 0x03;
+const K_STREAM: u32 = 0x04;
+const K_STATUS: u32 = 0x10;
+const K_OPTIONS: u32 = 0x11;
+const K_SET: u32 = 0x12;
+const K_STOP: u32 = 0x13;
+const K_CLEAR: u32 = 0x14;
+const K_BOOT: u32 = 0x20;
+const K_READY: u32 = 0x21;
+const K_END: u32 = 0x22;
+const K_ERROR: u32 = 0x2F;
+/// Error codes, as `netlist::port::error` names them.
+const E_NO_PLAN: u8 = 1;
+const E_UNKNOWN: u8 = 2;
+const E_UNEXPECTED: u8 = 3;
+const E_NO_OPTION: u8 = 4;
+const E_TOO_LONG: u8 = 5;
+/// Why an answer ended, as `netlist::port::Ending` reads it.
+const END_TOKEN: u8 = 0;
+const END_LIMIT: u8 = 1;
+const END_LOOP: u8 = 2;
+const END_FULL: u8 = 3;
+const END_STOPPED: u8 = 4;
+const END_CLEARED: u8 = 5;
+/// The description's fields a host may read and set while the chip runs.
+const OPTION_FIELDS: [usize; 6] = [INFO_MAX_NEW, INFO_GREEDY, INFO_LIMIT, INFO_TEMPERATURE, INFO_SEED, INFO_THINK_BUDGET];
 
 const LOADER: *mut u32 = 0x3000_0000 as *mut u32;
 const LOADER_START: usize = 6;
@@ -86,7 +127,6 @@ const TARGET_VECTOR: u32 = 3;
 /// The tokenizer's tables, which the image builder leaves after the segment table.
 const TOKENIZER: *const u32 = 0x1000_8000 as *const u32;
 
-const END_OF_TOKENS: u32 = u32::MAX;
 const ROUTINE_TOKEN: u32 = 0;
 const ROUTINE_LOGITS: u32 = 1;
 const ROUTINE_FEED_FROM_MAIN: u32 = 2;
@@ -133,8 +173,17 @@ _start:
 static mut INFO_WORD: usize = DEFAULT_INFO;
 static mut TABLE_WORD: usize = DEFAULT_SEGMENT_TABLE;
 static mut CHIPS: u32 = 1;
-/// The clear pin was raised: what is being read or written is dropped.
+/// The clear pin was raised, or the host asked for a clear: what is being read or written is
+/// dropped.
 static mut ABORT: bool = false;
+/// The host asked to end the answer being written.
+static mut STOP: bool = false;
+/// The kind of the message being written, or zero.
+static mut OPEN: u32 = 0;
+/// Where the conversation stands, for the host to ask: the positions it takes, and whether
+/// an answer is being written.
+static mut POSITION: u32 = 0;
+static mut ANSWERING: bool = false;
 
 fn aborted() -> bool {
     unsafe { ABORT }
@@ -160,22 +209,202 @@ fn peripheral_read(register: usize) -> u32 {
     unsafe { read_volatile(PERIPHERALS.add(register)) }
 }
 
-/// The next byte from the host; 0 once the clear pin has been raised, and from then on.
-#[inline(always)]
-fn receive() -> u8 {
-    unsafe {
-        loop {
-            // A byte waiting and no clear, the usual case, costs what it did before the pin.
-            let status = read_volatile(HOST_RX_STATUS);
-            if status == 1 {
-                return read_volatile(HOST_RX_DATA) as u8;
-            }
-            if status & CLEAR_REQUESTED != 0 {
-                ABORT = true;
-                return 0;
-            }
+/// What is not a stream's byte: a clear (false), a message's end, the start of the stream's
+/// next message, or another message, handled. Out of the way of the usual case.
+#[cold]
+#[inline(never)]
+fn between_bytes(status: u32) -> bool {
+    if status & CLEAR_REQUESTED != 0 {
+        unsafe { ABORT = true };
+        return false;
+    }
+    if status & RX_END != 0 {
+        take();
+    } else if status & RX_START != 0 {
+        let kind = peek();
+        if kind == K_STREAM {
+            take();
+        } else {
+            control(kind);
         }
     }
+    !aborted()
+}
+
+fn take() -> u32 {
+    unsafe { read_volatile(HOST_RX_DATA) }
+}
+
+fn peek() -> u32 {
+    unsafe { read_volatile(HOST_RX_PEEK) & 0xFF }
+}
+
+/// The next byte of the message being read; none at its end, which it takes, or after a
+/// clear.
+fn payload_byte() -> Option<u8> {
+    loop {
+        let status = unsafe { read_volatile(HOST_RX_STATUS) };
+        if status == RX_BYTE {
+            return Some(take() as u8);
+        }
+        if status & CLEAR_REQUESTED != 0 {
+            unsafe { ABORT = true };
+            return None;
+        }
+        if status & RX_END != 0 {
+            take();
+            return None;
+        }
+        // A message cut short: the next one starts.
+        if status & RX_START != 0 {
+            return None;
+        }
+    }
+}
+
+fn payload_word() -> Option<u32> {
+    let mut word = 0;
+    for shift in 0..4 {
+        word |= (payload_byte()? as u32) << (8 * shift);
+    }
+    Some(word)
+}
+
+/// Reads the rest of the message.
+fn skip_message() {
+    while payload_byte().is_some() {}
+}
+
+fn is_turn(kind: u32) -> bool {
+    matches!(kind, K_TEXT | K_TOKENS | K_PICTURE | K_STREAM)
+}
+
+/// The next turn's message, its start taken, the messages before it handled: its kind, or
+/// zero after a clear.
+fn next_message() -> u32 {
+    loop {
+        let status = unsafe { read_volatile(HOST_RX_STATUS) };
+        if status & CLEAR_REQUESTED != 0 {
+            unsafe { ABORT = true };
+            return 0;
+        }
+        if status & RX_START != 0 {
+            let kind = peek();
+            if is_turn(kind) {
+                take();
+                return kind;
+            }
+            control(kind);
+            if aborted() {
+                return 0;
+            }
+        } else if status != 0 {
+            // What is left of a message already read.
+            take();
+        }
+    }
+}
+
+/// Handles a message that is not a turn, whose start is at the head of the queue: it asks
+/// where the conversation stands, the options, sets one, stops the answer or clears the
+/// conversation. A turn where none is taken is refused.
+#[inline(never)]
+fn control(kind: u32) {
+    take();
+    match kind {
+        K_STATUS => {
+            skip_message();
+            reply(K_STATUS, &mut || unsafe {
+                send(ANSWERING as u8);
+                send_word(POSITION);
+                send_word(capacity());
+            });
+        }
+        K_OPTIONS => {
+            skip_message();
+            reply(K_OPTIONS, &mut || {
+                for field in OPTION_FIELDS {
+                    send(field as u8);
+                    send_word(info(field));
+                }
+            });
+        }
+        K_SET => {
+            let field = payload_byte().unwrap_or(0) as usize;
+            let value = payload_word().unwrap_or(0);
+            skip_message();
+            if !OPTION_FIELDS.contains(&field) {
+                error(E_NO_OPTION, field as u32);
+                return;
+            }
+            unsafe { write_volatile((DATA_MEMORY as *mut u32).add(INFO_WORD + field), value) };
+            if field == INFO_SEED {
+                peripheral_write(REG_SAMPLE_SEED, value);
+            }
+            reply(K_OPTIONS, &mut || {
+                send(field as u8);
+                send_word(value);
+            });
+        }
+        K_STOP => {
+            skip_message();
+            unsafe { STOP = true };
+        }
+        K_CLEAR => {
+            skip_message();
+            unsafe { ABORT = true };
+        }
+        _ => {
+            skip_message();
+            error(if is_turn(kind) { E_UNEXPECTED } else { E_UNKNOWN }, kind);
+        }
+    }
+}
+
+/// The conversation's capacity in positions, zero for a chip that answers once.
+fn capacity() -> u32 {
+    let at = info(INFO_CONVERSATION) as usize;
+    if at != 0 { info(at) } else { 0 }
+}
+
+/// Starts a message on the way out.
+fn begin(kind: u32) {
+    unsafe {
+        while read_volatile(HOST_TX_STATUS) == 0 {}
+        write_volatile(HOST_TX_START, kind);
+        OPEN = kind;
+    }
+}
+
+/// Ends the message on the way out.
+fn finish() {
+    unsafe {
+        while read_volatile(HOST_TX_STATUS) == 0 {}
+        write_volatile(HOST_TX_END, 0);
+        OPEN = 0;
+    }
+}
+
+/// A message of its own, written by `body`, even while another is being written: that one
+/// is ended first and goes on after it, as a message of the same kind.
+fn reply(kind: u32, body: &mut dyn FnMut()) {
+    let open = unsafe { OPEN };
+    if open != 0 {
+        finish();
+    }
+    begin(kind);
+    body();
+    finish();
+    if open != 0 {
+        begin(open);
+    }
+}
+
+fn error(code: u8, detail: u32) {
+    reply(K_ERROR, &mut || {
+        send(code);
+        send_word(detail);
+    });
 }
 
 /// Has the load controller move `count` elements, or write zeros when `fill`, and waits.
@@ -231,6 +460,7 @@ fn clear_conversation(rows: u32) {
     unsafe {
         write_volatile(HOST_RX_STATUS as *mut u32, 0);
         ABORT = false;
+        POSITION = 0;
     }
 }
 
@@ -244,12 +474,14 @@ fn send(byte: u8) {
 /// Loads every segment of the image; each CRC mismatch is reported to the host.
 fn load_segments() {
     let table = unsafe { TABLE_WORD };
+    begin(K_BOOT);
     for index in 0..data_word(table) as usize {
         let field = |i: usize| data_word(table + 1 + index * SEGMENT_FIELDS + i);
         transfer(false, [field(0), field(1), field(2), field(3), field(4), field(5)]);
         let good = unsafe { read_volatile(LOADER.add(LOADER_CRC)) } == field(6);
         send(if good { b'.' } else { b'E' });
     }
+    finish();
 }
 
 const COUNT_WORD: u32 = 0xC000_0000;
@@ -442,32 +674,22 @@ fn encode_text(length: usize, sink: &mut impl FnMut(u32)) {
 
 /// Hands over the system prompt's tokens, which the chip carries, at the start of a
 /// conversation, then reads the whole prompt from the host and hands over its tokens.
-fn read_prompt(first: bool, sink: &mut impl FnMut(u32)) {
+fn read_prompt(first: bool, kind: u32, sink: &mut impl FnMut(u32)) {
     let system = info(INFO_SYSTEM) as usize;
     if first && system != 0 {
         for at in system + 1..=system + info(system) as usize {
             sink(info(at));
         }
     }
-    if info(INFO_RAW_TOKENS) != 0 {
-        loop {
-            let mut token = 0u32;
-            for shift in 0..4 {
-                token |= (receive() as u32) << (8 * shift);
-            }
-            if token == END_OF_TOKENS || aborted() {
-                return;
-            }
+    if kind == K_TOKENS {
+        while let Some(token) = payload_word() {
             sink(token);
         }
+        return;
     }
     let buffer = unsafe { core::slice::from_raw_parts_mut(TOKENIZER.add(tok(F_TEXT) as usize) as *mut u8, tok(F_TEXT_BYTES) as usize) };
     let (mut length, mut fits) = (0, true);
-    loop {
-        let byte = receive();
-        if byte == 0 {
-            break;
-        }
+    while let Some(byte) = payload_byte() {
         match buffer.get_mut(length) {
             Some(slot) => {
                 *slot = byte;
@@ -476,17 +698,53 @@ fn read_prompt(first: bool, sink: &mut impl FnMut(u32)) {
             None => fits = false,
         }
     }
-    if fits && !aborted() {
+    if aborted() {
+        return;
+    }
+    if fits {
         encode_text(length, sink);
+    } else {
+        error(E_TOO_LONG, length as u32);
     }
 }
 
+/// The next word of the host's stream: the stream messages' bytes, little-endian, one
+/// message after another, the other messages met on the way handled; 0 once the
+/// conversation is cleared. Payload bytes waiting, the usual case, cost what a plain byte
+/// port did: anything else goes to `rest_of_word` as the function's last step, so the usual
+/// path calls nothing and saves no registers.
+#[inline(never)]
 fn receive_word() -> u32 {
-    let mut word = 0u32;
-    for shift in 0..4 {
-        word |= (receive() as u32) << (8 * shift);
+    let (mut word, mut shift) = (0u32, 0u32);
+    loop {
+        let status = unsafe { read_volatile(HOST_RX_STATUS) };
+        if status != RX_BYTE {
+            return rest_of_word(word, shift, status);
+        }
+        word |= (unsafe { read_volatile(HOST_RX_DATA) } & 0xFF) << shift;
+        shift += 8;
+        if shift == 32 {
+            return word;
+        }
     }
-    word
+}
+
+/// The rest of a word when something other than its bytes came first.
+#[cold]
+#[inline(never)]
+fn rest_of_word(mut word: u32, mut shift: u32, mut status: u32) -> u32 {
+    loop {
+        if status == RX_BYTE {
+            word |= (unsafe { read_volatile(HOST_RX_DATA) } & 0xFF) << shift;
+            shift += 8;
+            if shift == 32 {
+                return word;
+            }
+        } else if !between_bytes(status) {
+            return 0;
+        }
+        status = unsafe { read_volatile(HOST_RX_STATUS) };
+    }
 }
 
 fn vision(field: usize) -> u32 {
@@ -867,14 +1125,15 @@ impl Reasoning {
     }
 }
 
-fn emit(token: u32, decoding: &mut Decoding) {
-    if info(INFO_RAW_TOKENS) != 0 {
-        for shift in 0..4 {
-            send((token >> (8 * shift)) as u8);
-        }
-        return;
+/// A token of the answer, as tokens or as text, as the turn came.
+fn emit(token: u32, kind: u32, decoding: &mut Decoding) {
+    begin(kind);
+    if kind == K_TOKENS {
+        send_word(token);
+    } else {
+        tokenizer().write_token(token, decoding, &mut send);
     }
-    tokenizer().write_token(token, decoding, &mut send);
+    finish();
 }
 
 /// A schedule's records: see `netlist::schedule`, which reads them the same way.
@@ -1070,7 +1329,7 @@ extern "C" fn main() {
     let (id, total) = count_chips();
     if !select_part(id, total) {
         if id == 0 {
-            send(b'N');
+            error(E_NO_PLAN, total);
         }
         return;
     }
@@ -1080,13 +1339,18 @@ extern "C" fn main() {
     }
     peripheral_write(REG_SAMPLE_SEED, info(INFO_SEED));
     // A die run by routines follows its schedule: the host sends what it says.
+    // What it sends back is one stream of words.
     if info(INFO_SCHEDULE) != 0 {
+        begin(K_STREAM);
         follow(0, usize::MAX, &mut [0; 16]);
+        finish();
         return;
     }
     // A chip that carries Show-o fills images instead of writing text.
     if info(INFO_SHOWO) != 0 {
+        begin(K_STREAM);
         showo_pass();
+        finish();
         return;
     }
     let entry_token = ROUTINE_TOKEN;
@@ -1102,15 +1366,31 @@ extern "C" fn main() {
         if conversation != 0 {
             clear_conversation(rows);
         }
+        // The chip waits for the conversation's first turn.
+        reply(K_READY, &mut || send_word(if conversation != 0 { capacity } else { 0 }));
         let (mut last, mut position, mut draft_position) = (0, 0, 0u32);
         let mut reasoning = Reasoning::default();
         // After an image, the text's rotations run behind the cache by this much.
         let mut behind = 0u32;
         let mut first = true;
         loop {
-            // A chip that carries an image encoder first hears whether an image comes.
-            let mut picture = if info(INFO_VISION) != 0 { read_picture() } else { None };
-            read_prompt(first, &mut |token| {
+            // A turn: a picture first, for a chip that reads them, then its text or tokens.
+            let mut kind = next_message();
+            let mut picture = None;
+            if kind == K_PICTURE && info(INFO_VISION) != 0 {
+                picture = read_picture();
+                skip_message();
+                kind = next_message();
+            }
+            if aborted() {
+                break;
+            }
+            if kind != K_TOKENS && (kind != K_TEXT || info(INFO_RAW_TOKENS) != 0) {
+                skip_message();
+                error(E_UNEXPECTED, kind);
+                continue;
+            }
+            read_prompt(first, kind, &mut |token| {
                 // A full cache takes nothing more until the conversation is cleared.
                 if position >= capacity {
                     return;
@@ -1144,6 +1424,7 @@ extern "C" fn main() {
                 run_die(entry_token, token, position);
                 last = token;
                 position += 1;
+                unsafe { POSITION = position };
             });
             first = false;
             if aborted() {
@@ -1152,46 +1433,71 @@ extern "C" fn main() {
             if position == 0 && conversation == 0 {
                 return;
             }
-            answer(&mut last, &mut position, &mut draft_position, &mut reasoning, (depth, rotates, behind, stops.clone(), capacity));
+            let ending = answer(&mut last, &mut position, &mut draft_position, &mut reasoning, (depth, rotates, behind, stops.clone(), capacity), kind);
+            // The answer's end: why, and how much of the context the conversation takes.
+            reply(K_END, &mut || {
+                send(ending);
+                send_word(position);
+                send_word(if conversation != 0 { capacity } else { 0 });
+            });
+            if ending == END_CLEARED {
+                break;
+            }
             if conversation == 0 {
                 return;
-            }
-            // The answer's end, and the chip waits for the next turn of the conversation.
-            if info(INFO_RAW_TOKENS) != 0 {
-                emit(END_OF_TOKENS, &mut Decoding::default());
-            } else {
-                send(0);
-            }
-            if aborted() {
-                break;
             }
         }
         rows = position;
     }
 }
 
-/// Writes the answer after the prompt, from `last` at `position`, until a stop token, a
-/// loop, the most new tokens, a full cache or the clear pin.
-fn answer(last: &mut u32, position: &mut u32, draft_position: &mut u32, reasoning: &mut Reasoning, (depth, rotates, behind, stops, capacity): (usize, bool, u32, core::ops::Range<usize>, u32)) {
+/// Writes the answer after the prompt, from `last` at `position`, as tokens or as text as the
+/// turn came, until a stop token, a loop, the most new tokens, a full cache, the host's stop
+/// or a clear: gives which.
+fn answer(last: &mut u32, position: &mut u32, draft_position: &mut u32, reasoning: &mut Reasoning, (depth, rotates, behind, stops, capacity): (usize, bool, u32, core::ops::Range<usize>, u32), kind: u32) -> u8 {
     if *position == 0 {
-        return;
+        return END_TOKEN;
     }
+    unsafe { (ANSWERING, STOP) = (true, false) };
+    let ending = write_answer(last, position, draft_position, reasoning, (depth, rotates, behind, stops, capacity), kind);
+    unsafe { (ANSWERING, POSITION) = (false, *position) };
+    ending
+}
+
+/// Whether the host wants the answer to end: a clear, or a stop. Messages that are not a
+/// turn are handled here, between tokens; a turn waits for the answer's end.
+fn interrupted() -> Option<u8> {
+    let status = unsafe { read_volatile(HOST_RX_STATUS) };
+    if status != 0 && status != RX_BYTE {
+        if status & CLEAR_REQUESTED != 0 {
+            unsafe { ABORT = true };
+        } else if status & RX_START != 0 && !is_turn(peek()) {
+            control(peek());
+        }
+    }
+    if aborted() {
+        return Some(END_CLEARED);
+    }
+    if unsafe { STOP } { Some(END_STOPPED) } else { None }
+}
+
+fn write_answer(last: &mut u32, position: &mut u32, draft_position: &mut u32, reasoning: &mut Reasoning, (depth, rotates, behind, stops, capacity): (usize, bool, u32, core::ops::Range<usize>, u32), kind: u32) -> u8 {
     let (entry_token, entry_logits) = (ROUTINE_TOKEN, ROUTINE_LOGITS);
-    // Raw mode has no tokenizer in memory to ask.
-    let mut decoding = if info(INFO_RAW_TOKENS) != 0 { Decoding::default() } else { tokenizer().decoding() };
+    // An answer in tokens has no tokenizer to ask.
+    let mut decoding = if kind == K_TEXT { tokenizer().decoding() } else { Decoding::default() };
     let mut pending = [(0u32, [0u32; MAX_DRAFT_DEPTH]); MAX_DRAFT_DEPTH + 1];
     let (mut waiting, mut produced, mut previous) = (0usize, 0u32, 0u32);
     // A model that never writes its end token stops once it repeats itself.
     let mut watch = LoopWatch::default();
     for _ in 0..info(INFO_MAX_NEW) {
-        if unsafe { read_volatile(HOST_RX_STATUS) } & CLEAR_REQUESTED != 0 {
-            unsafe { ABORT = true };
-            return;
+        unsafe { POSITION = *position };
+        if let Some(ending) = interrupted() {
+            return ending;
         }
         run_die(entry_logits, *last, *position - 1);
         *last = reasoning.steer(sample());
         if stops.clone().any(|at| info(at) == *last) {
-            return;
+            return END_TOKEN;
         }
         if depth > 0 {
             if produced > 0 {
@@ -1227,9 +1533,12 @@ fn answer(last: &mut u32, position: &mut u32, draft_position: &mut u32, reasonin
             run_die(ROUTINE_DRAFT, *last, *draft_position);
             *draft_position += 1;
         }
-        emit(*last, &mut decoding);
-        if watch.push(*last) || *position >= capacity {
-            return;
+        emit(*last, kind, &mut decoding);
+        if watch.push(*last) {
+            return END_LOOP;
+        }
+        if *position >= capacity {
+            return END_FULL;
         }
         if rotates && behind > 0 {
             rotate_as(*position, *position - behind);
@@ -1239,6 +1548,7 @@ fn answer(last: &mut u32, position: &mut u32, draft_position: &mut u32, reasonin
         produced += 1;
         previous = *last;
     }
+    END_LIMIT
 }
 
 #[panic_handler]

@@ -157,13 +157,13 @@ fn image_and_input(chip: &Chip) -> (Vec<u32>, Vec<u8>) {
     let mut segments = image_segments(&chip.die, &chip.code, &chip.layout);
     segments.extend(cell_segments(&chip.die, &chip.layout, &Weights::open_with_vision(&chip.dir).unwrap()).unwrap());
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &segments).unwrap();
-    let mut input = picture_bytes(&chip.tower, Some(&chip.image), chip.die.cell.activation_bits).unwrap();
-    input.extend(PROMPT.iter().chain(&[u32::MAX]).flat_map(|t| t.to_le_bytes()));
+    let mut input = netlist::port::picture(&picture_bytes(&chip.tower, Some(&chip.image), chip.die.cell.activation_bits).unwrap());
+    input.extend(netlist::port::tokens(&PROMPT));
     (image, input)
 }
 
 fn soc() -> SocConfig {
-    SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }
+    SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }
 }
 
 /// The chip at instruction level: its output bytes and cycles, and the last logits.
@@ -179,9 +179,7 @@ fn instruction_level(chip: &Chip, image: &[u32], input: &[u8]) -> (Vec<u8>, u64,
 }
 
 fn tokens_of(bytes: &[u8]) -> Vec<u32> {
-    // Each segment loaded at boot reports a dot first.
-    let start = bytes.iter().position(|b| *b != b'.').unwrap_or(bytes.len());
-    bytes[start..].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    netlist::port::answers(bytes).concat()
 }
 
 #[test]
@@ -269,11 +267,11 @@ fn the_firmware_drives_a_software_die_that_reads_the_picture() {
     let mut info = chip_info(&die, &code, 1, chip.program.vocab as u32, &setup);
     add_vision(&mut info, &sim::vision_chip::software_vision_info(&chip.tower.config, count * merge * merge, FLOW_INDEX_BITS, FLOW_REGISTER_BITS));
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
-    let mut input = picture_bytes(&chip.tower, Some(&chip.image), 16).unwrap();
-    input.extend(PROMPT.iter().chain(&[u32::MAX]).flat_map(|t| t.to_le_bytes()));
+    let mut input = netlist::port::picture(&picture_bytes(&chip.tower, Some(&chip.image), 16).unwrap());
+    input.extend(netlist::port::tokens(&PROMPT));
     let runner = RunnerEngine::new(&mut engine, 16, 0).with_image(ImageTokens::OnChip(count), Placement::Grid(chip.image.rows, chip.image.cols, merge), chip.vision.image_token);
     let model = ChipModel::new(runner, code, SamplerModel { config: sampler_config(), rng: 0, table: exponential_table() });
-    let mut bus = SocBus::booted_with(SocConfig { program_bits: 14, data_bits: 14, fifo_bits: 6 }, &image, &input, model).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, &image, &input, model).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);

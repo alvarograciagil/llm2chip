@@ -364,18 +364,17 @@ fn the_firmware_runs_show_o_s_pass_as_the_host_ordered_it() {
     let mut segments = sim::chip::image_segments(&die, &code, &layout);
     segments.extend(sim::chip::cell_segments(&die, &layout, &weights).unwrap());
     let chip_image = build_image(&firmware.program, &firmware.data, &info, &[], &segments).unwrap();
-    let input: Vec<u8> = [0, text, first].into_iter().chain(ids.iter().copied()).chain(image.iter().copied()).flat_map(|w| w.to_le_bytes()).collect();
+    let input = netlist::port::stream(&[0, text, first].into_iter().chain(ids.iter().copied()).chain(image.iter().copied()).collect::<Vec<u32>>());
     let engine = sim::chip::VmEngine::new(program.clone(), open().2, die, context).unwrap();
     let model = ChipModel::new(engine, code.clone(), SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() });
-    let mut bus = SocBus::booted_with(SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, &chip_image, &input, model).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, &chip_image, &input, model).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
         assert!(cpu.cycle < 500_000_000, "the firmware does not finish");
     }
     // Each segment loaded at boot reports a dot first.
-    let start = bus.tx.iter().position(|b| *b != b'.').unwrap_or(bus.tx.len());
-    let sent: Vec<u32> = bus.tx[start..].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).map(|w| w & ((1u32 << die.cell.activation_bits) - 1)).collect();
+    let sent: Vec<u32> = netlist::port::words(&bus.tx).iter().map(|w| w & ((1u32 << die.cell.activation_bits) - 1)).collect();
     eprintln!("firmware: {} CPU cycles, {} words", cpu.cycle, sent.len());
     assert_eq!(sent.len(), expected.len());
     assert_eq!(sent, expected, "code scores");
@@ -408,7 +407,7 @@ fn fill_engine(dir: &Path, program: &compiler::Program, die: netlist::DieConfig,
 }
 
 fn fill_soc() -> netlist::soc::SocConfig {
-    netlist::soc::SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }
+    netlist::soc::SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }
 }
 
 fn fill_sampler() -> netlist::sampler::SamplerConfig {
@@ -463,7 +462,7 @@ fn fill_chip(tag: &str, steps: usize, outside: bool) -> Option<FillChip> {
     words.push(fill.seed);
     words.extend(steps.iter().flat_map(|(remaining, temperature)| [*remaining as u32, *temperature as u32]));
     words.extend(codes.iter().map(|c| c.unwrap_or(u32::MAX)));
-    let input = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let input = netlist::port::stream(&words);
     Some(FillChip { dir, program, die, context, code, image, input, expected, outside })
 }
 
@@ -484,10 +483,9 @@ fn fill_on_iss(chip: &FillChip) -> (Vec<u8>, u64) {
     (bus.tx.clone(), cpu.cycle)
 }
 
-/// The codes in what the chip sent, after the dots of the segments loaded at boot.
+/// The codes in what the chip sent, its stream of words.
 fn sent_codes(bytes: &[u8]) -> Vec<u32> {
-    let start = bytes.iter().position(|b| *b != b'.').unwrap_or(bytes.len());
-    bytes[start..].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    netlist::port::words(bytes)
 }
 
 /// The chip fills an image itself: its firmware runs MaskGIT's steps on the CPU, with

@@ -559,8 +559,9 @@ pub fn system_prompt_tokens(text: &str) -> u32 {
     if text.is_empty() { 0 } else { (text.len() as u32).div_ceil(4) + 6 }
 }
 
-/// The CPU's program memory, the firmware's size rounded up to a power of two.
-pub const FIRMWARE_PROGRAM_BYTES: u32 = 1 << 15;
+/// The CPU's program memory: 48 KB, in banks of 32 and 16 KB, for the firmware's 35.6 KB
+/// and room to grow (`netlist::soc::PROGRAM_WORDS`).
+pub const FIRMWARE_PROGRAM_BYTES: u32 = 48 << 10;
 
 /// Cycles sampling adds to each generated token. Logits are filtered as `lm_head`
 /// produces them, so only a unit too narrow to keep up delays the die.

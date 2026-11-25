@@ -282,7 +282,7 @@ fn an_fpga_gets_its_adders_as_sums_that_match_the_gates() {
     // The cell and the CPU have ripple adders, and a Wallace tree ends in a prefix adder.
     let mut modules = cell_design(c).modules;
     modules.extend(cell_design(CellConfig { multiplier: netlist::multiplier::MultiplierKind::Wallace, ..c }).modules);
-    modules.extend(soc_design(SocConfig { program_bits: 10, data_bits: 10, fifo_bits: 4 }).modules);
+    modules.extend(soc_design(SocConfig { program_words: 1 << 10, data_bits: 10, fifo_bits: 4 }).modules);
     let adders: Vec<String> = modules.keys().filter(|n| n.starts_with("ripple_adder_") || n.starts_with("prefix_adder_")).cloned().collect();
     assert!(adders.iter().any(|n| n.starts_with("prefix_adder_")) && adders.iter().any(|n| n.starts_with("ripple_adder_")), "{adders:?}");
     let mut seed = 0x9E37_79B9_7F4A_7C15u64;

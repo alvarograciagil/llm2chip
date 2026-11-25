@@ -214,7 +214,7 @@ fn setup_for(name: &str, firmware: &FirmwareImage, die: DieConfig, sharing: Shar
     std::fs::create_dir_all(&dir).unwrap();
     make_checkpoint(&dir);
     let program = compile_qwen3_5(CONFIG).unwrap();
-    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let tables = tiny_tokenizer();
     let generation = GenerationSetup { max_new: 1, greedy: false, limit: 4, temperature: 256, seed: 0x1234_5678, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     let plans: Vec<_> = [1, chips].iter().map(|chips| plan_parts(&program, &dir, die, CHIP_TOKENS, &generation, *chips, sharing, false).unwrap()).collect();
@@ -290,7 +290,7 @@ fn two_chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &
 /// Several chips on a noisy board say the same as one at instruction level.
 fn chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &str, sharing: Sharing, chips: usize) {
     let setup = setup_for(name, firmware, die, sharing, chips);
-    let input = b"hoy\0";
+    let input = &netlist::port::text("hoy");
     let program = compile_qwen3_5(CONFIG).unwrap();
 
     // One chip, at instruction level, with the very same image.
@@ -303,8 +303,8 @@ fn chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &str,
         cpu.step(&mut bus);
         assert!(cpu.cycle < 100_000_000, "the firmware does not finish");
     }
-    let reference = String::from_utf8_lossy(&bus.tx).trim_start_matches('.').to_string();
-    assert_eq!(reference.len(), 1, "{:?}", String::from_utf8_lossy(&bus.tx));
+    let reference = netlist::port::answer_texts(&bus.tx)[0].clone();
+    assert_eq!(reference.len(), 1, "{:?}", netlist::port::events(&bus.tx));
 
     let group = match sharing {
         Sharing::Mixed(g) if (g as usize) < chips => Some(g as usize),
@@ -312,9 +312,9 @@ fn chips_say_what_one_says(firmware: &FirmwareImage, die: DieConfig, name: &str,
     };
     let mut board = Board::new(&setup.design, chips, &setup.image, input, setup.die.features.link_lanes(), group);
     board.run(std::env::var("LIMIT").ok().and_then(|l| l.parse().ok()).unwrap_or(8_000_000));
-    let text = String::from_utf8_lossy(&board.output).into_owned();
+    let text = netlist::port::answer_texts(&board.output).first().cloned().unwrap_or_default();
     eprintln!("{} cycles, {} flipped bits on the links, output {text:?}", board.cycles, board.flips);
-    assert_eq!(text.trim_start_matches('.'), reference, "the text must be the same as with a single chip");
+    assert_eq!(text, reference, "the text must be the same as with a single chip");
     assert!(board.flips > 0, "the test must inject errors");
 
     let debug = |chip: &mut Simulator, what: u64| {
@@ -365,21 +365,18 @@ fn the_leading_chips_clear_pin_clears_every_chip_of_the_chain() {
     std::fs::create_dir_all(&dir).unwrap();
     make_checkpoint(&dir);
     let program = compile_qwen3_5(CONFIG).unwrap();
-    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let generation = GenerationSetup { max_new: 2, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     // Each chip holds the layers it runs, their cache and their recurrent state.
     let plans: Vec<_> = [1, 2].iter().map(|chips| plan_parts(&program, &dir, die, CHIP_TOKENS, &generation, *chips, Sharing::Layers, true).unwrap()).collect();
     let entries: Vec<Vec<ClearEntry>> = plans[1].iter().map(|part| conversation_entries(&part.info)).collect();
     let image = build_plan_image(&firmware.program, &firmware.data, &tiny_tokenizer().to_words(), &plans).unwrap();
     let design = chip_design(config);
-    let question = b"hoy\0";
-    let mut board = Board::new(&design, 2, &image, question, die.features.link_lanes(), None);
+    let question = netlist::port::text("hoy");
+    let mut board = Board::new(&design, 2, &image, &question, die.features.link_lanes(), None);
     // Each answer ends with a zero byte, and the chip waits for the next turn.
     let answers = |board: &Board| -> Vec<String> {
-        let text: Vec<u8> = board.output.iter().copied().filter(|b| *b != b'.').collect();
-        let mut parts: Vec<String> = text.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
-        parts.pop();
-        parts
+        netlist::port::answer_texts(&board.output)
     };
     // Whether each chip's part of the conversation holds anything.
     let lane_bits = die.features.lane_bits;
@@ -414,7 +411,7 @@ fn the_leading_chips_clear_pin_clears_every_chip_of_the_chain() {
     eprintln!("both chips cleared within {} cycles", board.cycles - raised);
 
     // A new conversation: the same question, the same answer.
-    board.input.extend(question);
+    board.input.extend(&question);
     board.run_until(LIMIT, |b| answers(b).len() == 2);
     assert_eq!(answers(&board)[1], first, "after the clear the chain answers as the first time");
     std::fs::remove_dir_all(&dir).ok();
@@ -424,9 +421,9 @@ fn the_leading_chips_clear_pin_clears_every_chip_of_the_chain() {
 fn a_number_of_chips_the_image_does_not_cover_is_reported() {
     let Some(firmware) = build_firmware() else { return };
     let setup = setup("three", &firmware, DieConfig { microcode_bits: 15, ..cell_die_config() }, Sharing::Layers);
-    let mut board = Board::new(&setup.design, 3, &setup.image, b"hoy\0", 1, None);
+    let mut board = Board::new(&setup.design, 3, &setup.image, &netlist::port::text("hoy"), 1, None);
     board.run(2_000_000);
-    assert_eq!(String::from_utf8_lossy(&board.output), "N");
+    assert_eq!(netlist::port::errors(&board.output), [netlist::port::error::NO_PLAN]);
     std::fs::remove_dir_all(&setup.dir).ok();
 }
 

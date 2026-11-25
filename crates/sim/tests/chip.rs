@@ -103,7 +103,7 @@ fn chip_in_gates(die: netlist::DieConfig, tag: &str, table_outside: bool, design
     let die = sim::chip::with_code_dictionary(sim::chip::compact_die(die, &layout), &code);
     let die = netlist::DieConfig { features: die.features.with_queue_bits(queue), ..die };
     eprintln!("microcode dictionary: 2^{} words", die.features.dictionary_bits);
-    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let design = design(config);
     let (sim, die_busy) = says_the_same_in_gates(config, &design, &layout, &code, CONFIG, &dir);
     (sim, die_busy, layout, dir)
@@ -118,7 +118,7 @@ fn image_and_input(config: ChipConfig, layout: &Layout, code: &netlist::Micropro
     let mut segments = image_segments(&die, code, layout);
     segments.extend(cell_segments(&die, layout, &Weights::open(dir).unwrap()).unwrap());
     let image = build_image(&firmware.program, &firmware.data, &info, &tiny_tokenizer().to_words(), &segments).unwrap();
-    (image, b"hoy\0".to_vec())
+    (image, netlist::port::text("hoy"))
 }
 
 /// Boots `design` with the image of one model and checks it writes what the instruction-level
@@ -137,7 +137,7 @@ fn says_the_same_in_gates(config: ChipConfig, design: &netlist::Design, layout: 
     let image = build_image(&firmware.program, &firmware.data, &info, &tables.to_words(), &segments).unwrap();
     eprintln!("image of {} words", image.len());
 
-    let input = b"hoy\0";
+    let input = &netlist::port::text("hoy");
     let mut engine = VmEngine::new(compile_qwen3_5(model).unwrap(), Weights::open(dir).unwrap(), die, CHIP_TOKENS).unwrap();
     if layout.outside_table().is_some() || layout.rotation_table_outside().is_some() {
         engine = engine.with_table_outside().unwrap();
@@ -153,7 +153,7 @@ fn says_the_same_in_gates(config: ChipConfig, design: &netlist::Design, layout: 
     eprintln!("instruction-level simulator: {} cycles, output {:?}", cpu.cycle, String::from_utf8_lossy(&expected));
     // A table that stays in the image is not loaded at boot.
     let at_boot = segments.iter().filter(|s| !matches!(s.target, netlist::image::Target::RuntimeTable | netlist::image::Target::RotationTable)).count();
-    assert_eq!(expected.iter().filter(|b| **b == b'.').count(), at_boot, "every segment must load correctly");
+    assert_eq!(netlist::port::boot(&expected), Some((at_boot, 0)), "every segment must load correctly");
 
     let start = std::time::Instant::now();
     let (output, cycles, sim) = run_gates(design, &image, input, cpu.cycle + 4096);
@@ -211,7 +211,7 @@ fn text_goes_through_the_whole_chip_in_icarus_verilog() {
     let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let die = sim::chip::with_code_dictionary(sim::chip::compact_die(die, &layout), &code);
-    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let (image, input) = image_and_input(config, &layout, &code, CONFIG, &dir);
     let engine = VmEngine::new(program, Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
     let model = ChipModel::new(engine, code.clone(), SamplerModel { config: config.sampler, rng: 0, table: exponential_table() });
@@ -320,7 +320,7 @@ fn any_token_on_the_stop_list_ends_the_answer() {
     let program = compile_qwen3_5(CONFIG).unwrap();
     let die = netlist::DieConfig { microcode_bits: 15, ..cell_die_config() };
     let sampler = SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 };
-    let soc = SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 };
+    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 };
     let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let generate = |stop: Vec<u32>| {
@@ -329,12 +329,12 @@ fn any_token_on_the_stop_list_ends_the_answer() {
         let image = build_image(&firmware.program, &firmware.data, &info, &tiny_tokenizer().to_words(), &[image_segments(&die, &code, &layout), cell_segments(&die, &layout, &Weights::open(&dir).unwrap()).unwrap()].concat()).unwrap();
         let engine = VmEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
         let model = ChipModel::new(engine, code.clone(), SamplerModel { config: sampler, rng: 0, table: exponential_table() });
-        let mut bus = SocBus::booted_with(soc, &image, b"hoy\0", model).unwrap();
+        let mut bus = SocBus::booted_with(soc, &image, &netlist::port::text("hoy"), model).unwrap();
         let mut cpu = Rv32Iss::default();
         while !cpu.halted {
             cpu.step(&mut bus);
         }
-        bus.tx.iter().filter(|b| **b != b'.').copied().collect::<Vec<u8>>()
+        netlist::port::answer_texts(&bus.tx)[0].clone().into_bytes()
     };
     let free = generate(Vec::new());
     assert_eq!(free.len(), 1, "a one-letter token");
@@ -351,23 +351,17 @@ struct Talk {
 }
 
 impl Talk {
-    /// Runs until the chip has ended `answers` answers in all, raw tokens each ending in
-    /// `u32::MAX`: the tokens of each.
+    /// Runs until the chip has ended `answers` answers in all: the tokens of each.
     fn until(&mut self, answers: usize) -> Vec<Vec<u32>> {
-        let split = |tx: &[u8]| -> Vec<Vec<u32>> {
-            let words: Vec<u32> = tx.iter().copied().filter(|b| *b != b'.').collect::<Vec<u8>>().as_chunks::<4>().0.iter().map(|w| u32::from_le_bytes(*w)).collect();
-            words.split(|w| *w == u32::MAX).map(<[u32]>::to_vec).collect()
-        };
-        while split(&self.bus.tx).len() <= answers {
+        while netlist::port::answers(&self.bus.tx).len() < answers {
             self.cpu.step(&mut self.bus);
             assert!(!self.cpu.halted && self.cpu.cycle < 200_000_000, "the chip stopped or never answered");
         }
-        split(&self.bus.tx)[..answers].to_vec()
+        netlist::port::answers(&self.bus.tx)[..answers].to_vec()
     }
 
     fn say(&mut self, tokens: &[u32]) {
-        let bytes: Vec<u8> = tokens.iter().chain(&[u32::MAX]).flat_map(|t| t.to_le_bytes()).collect();
-        self.bus.send(&bytes);
+        self.bus.send(&netlist::port::tokens(tokens));
     }
 }
 
@@ -398,7 +392,7 @@ fn conversation_on(die: netlist::DieConfig, tag: &str) -> Vec<netlist::chip::Cle
     make_checkpoint(&dir);
     let program = compile_qwen3_5(CONFIG).unwrap();
     let sampler = SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 };
-    let soc = SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 };
+    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 };
     let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, 16).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let state = layout.conversation_state(&program);
@@ -423,7 +417,7 @@ fn conversation_on(die: netlist::DieConfig, tag: &str) -> Vec<netlist::chip::Cle
         while !chip.cpu.halted {
             chip.cpu.step(&mut chip.bus);
         }
-        chip.bus.tx.iter().copied().filter(|b| *b != b'.').collect::<Vec<u8>>().as_chunks::<4>().0.iter().map(|w| u32::from_le_bytes(*w)).collect::<Vec<u32>>()
+        netlist::port::answers(&chip.bus.tx).concat()
     };
     let (first, second) = ([3u32, 5, 1], [2u32, 6]);
     let mut talk = start(Some(&state), &first);
@@ -473,6 +467,79 @@ fn conversation_on(die: netlist::DieConfig, tag: &str) -> Vec<netlist::chip::Cle
     state
 }
 
+/// The host asks and steers a chip in messages: the options and their values, a new value
+/// for one, where the conversation stands, even in the middle of an answer, a stop, a clear
+/// asked as a message, and the errors of what the chip does not take.
+#[test]
+fn the_host_asks_and_steers_the_chip_in_messages() {
+    use netlist::port::{self, Ending, Event};
+    let Some(firmware) = build_firmware() else { return };
+    let dir = std::env::temp_dir().join(format!("llm2chip-messages-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+    let die = netlist::DieConfig { microcode_bits: 15, ..cell_die_config() };
+    let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, 16).unwrap();
+    let code = layout.microprogram(&program).unwrap();
+    let segments = [image_segments(&die, &code, &layout), cell_segments(&die, &layout, &Weights::open(&dir).unwrap()).unwrap()].concat();
+    let setup = GenerationSetup { max_new: 3, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: 77 };
+    let mut info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
+    netlist::chip::add_conversation(&mut info, 16, &layout.conversation_state(&program)).unwrap();
+    let image = build_image(&firmware.program, &firmware.data, &info, &[], &segments).unwrap();
+    let engine = VmEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), die, 16).unwrap();
+    let model = ChipModel::new(engine, code.clone(), SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() });
+    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 };
+    let mut talk = Talk { bus: SocBus::booted_with(soc, &image, &[], model).unwrap(), cpu: Rv32Iss::default() };
+    // Runs until the chip has sent `count` messages of its own after the boot, and gives them.
+    let mut seen = 0;
+    let mut next = |talk: &mut Talk, count: usize| -> Vec<Event> {
+        while port::events(&talk.bus.tx).len() < seen + count {
+            talk.cpu.step(&mut talk.bus);
+            assert!(!talk.cpu.halted && talk.cpu.cycle < 200_000_000, "the chip stopped or never answered: {:?}", port::events(&talk.bus.tx));
+        }
+        let events = port::events(&talk.bus.tx);
+        let got = events[seen..seen + count].to_vec();
+        seen += count;
+        got
+    };
+    assert!(matches!(next(&mut talk, 2)[..], [Event::Boot { failed: 0, .. }, Event::Ready { capacity: 16 }]));
+
+    // The options, then one set anew, which the next answer follows.
+    talk.bus.send(&port::options());
+    let options = vec![(5, 3), (6, 1), (7, 1), (8, 256), (9, 1), (20, 77)];
+    assert_eq!(next(&mut talk, 1), [Event::Options(options)]);
+    talk.bus.send(&port::set(port::option("max_new_tokens").unwrap(), 1));
+    assert_eq!(next(&mut talk, 1), [Event::Options(vec![(5, 1)])]);
+    talk.bus.send(&port::tokens(&[3, 5, 1]));
+    let answer = next(&mut talk, 2);
+    assert!(matches!(answer[..], [Event::Tokens(_), Event::End { ending: Ending::Limit, position: 4, capacity: 16 }]), "{answer:?}");
+
+    // Where it stands while it waits.
+    talk.bus.send(&port::status());
+    assert_eq!(next(&mut talk, 1), [Event::Status { answering: false, position: 4, capacity: 16 }]);
+
+    // In the middle of an answer: asked, it says it is answering; stopped, it ends there.
+    talk.bus.send(&port::set(5, 3));
+    next(&mut talk, 1);
+    talk.bus.send(&[port::tokens(&[2]), port::status()].concat());
+    let during = next(&mut talk, 1);
+    assert!(matches!(during[..], [Event::Status { answering: true, position: 5, .. }]), "{during:?}");
+    let rest = next(&mut talk, 4);
+    assert!(matches!(rest[3], Event::End { ending: Ending::Limit, position: 8, .. }), "{rest:?}");
+    talk.bus.send(&[port::tokens(&[6]), port::stop()].concat());
+    assert!(matches!(next(&mut talk, 1)[..], [Event::End { ending: Ending::Stopped, position: 9, .. }]));
+
+    // What it does not take.
+    talk.bus.send(&[port::set(3, 0), port::frame(0x7E, &[1, 2]), port::text("hola")].concat());
+    let refused = next(&mut talk, 3);
+    assert_eq!(refused, [Event::Error { code: port::error::NO_OPTION, detail: 3 }, Event::Error { code: port::error::UNKNOWN, detail: 0x7E }, Event::Error { code: port::error::UNEXPECTED, detail: port::kind::TEXT as u32 }]);
+
+    // A clear asked in a message: the conversation starts again, its cache empty.
+    talk.bus.send(&[port::clear(), port::status()].concat());
+    assert_eq!(next(&mut talk, 2), [Event::Ready { capacity: 16 }, Event::Status { answering: false, position: 0, capacity: 16 }]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// The clear pin and the load controller's fills in gates: a chip holding a conversation
 /// answers, is cleared while it waits, and answers the same question again, writing what the
 /// instruction-level chip writes, byte for byte and cycle for cycle.
@@ -487,15 +554,14 @@ fn the_clear_pin_works_in_gates_as_at_instruction_level() {
     let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), base, CHIP_TOKENS).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let die = sim::chip::with_code_dictionary(sim::chip::compact_die(base, &layout), &code);
-    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let setup = GenerationSetup { max_new: 2, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     let mut info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
     netlist::chip::add_conversation(&mut info, CHIP_TOKENS as u32, &layout.conversation_state(&program)).unwrap();
     let segments = [image_segments(&die, &code, &layout), cell_segments(&die, &layout, &Weights::open(&dir).unwrap()).unwrap()].concat();
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &segments).unwrap();
-    let question: Vec<u8> = [3u32, 5, u32::MAX].iter().flat_map(|t| t.to_le_bytes()).collect();
-    let marker = u32::MAX.to_le_bytes();
-    let answers = |output: &[u8]| output.windows(4).filter(|w| *w == marker).count();
+    let question = netlist::port::tokens(&[3, 5]);
+    let answers = |output: &[u8]| netlist::port::answers(output).len();
 
     // At instruction level: the cycle each answer ends, and the cycle the pin is raised.
     let engine = VmEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
@@ -521,9 +587,8 @@ fn the_clear_pin_works_in_gates_as_at_instruction_level() {
     }
     let second = cpu.cycle;
     let expected = bus.tx.clone();
-    let after_boot = expected.iter().position(|b| *b != b'.').unwrap();
-    let half = (expected.len() - after_boot) / 2;
-    assert_eq!(expected[after_boot..after_boot + half], expected[after_boot + half..], "the same question again after the clear");
+    let both = netlist::port::answers(&expected);
+    assert_eq!(both[0], both[1], "the same question again after the clear");
 
     // In gates, with the pin raised at the same cycle and the question sent after it.
     let mut sim = Simulator::new(&chip_design(config)).unwrap();
@@ -630,7 +695,7 @@ fn a_real_model_writes_the_same_text_through_the_whole_chip() {
     let mut segments = image_segments(&config.die, code, layout);
     segments.extend(cell_segments(&config.die, layout, &weights).unwrap());
     let image = build_image(&firmware.program, &firmware.data, &info, &tables, &segments).unwrap();
-    let input = b"Once upon a time\0".to_vec();
+    let input = netlist::port::text("Once upon a time");
 
     let engine = VmEngine::new(program.clone(), Weights::open(&dir).unwrap(), config.die, context).unwrap().with_table_outside().unwrap();
     let model = ChipModel::new(engine, code.clone(), SamplerModel { config: config.sampler, rng: 0, table: exponential_table() });
@@ -640,7 +705,7 @@ fn a_real_model_writes_the_same_text_through_the_whole_chip() {
         cpu.step(&mut bus);
         assert!(cpu.cycle < 100_000_000, "the firmware does not finish");
     }
-    let text = String::from_utf8_lossy(&bus.tx).trim_start_matches('.').to_string();
+    let text = netlist::port::answer_texts(&bus.tx)[0].clone();
     eprintln!("instruction-level simulator: {} cycles, {text:?}", cpu.cycle);
 
     // The same die's machine driven by the host, and floating point, from the same tokens.
@@ -717,9 +782,10 @@ fn boot(sim: &mut Simulator, image: &[u32], input: &[u8], pending: &mut Option<u
 /// Two chips in a chain on their pins, as stages of a system are joined: the first's
 /// output (`host_tx_valid`, `host_tx_data`) drives the second's input (`host_rx_valid`,
 /// `host_rx_data`), and the second's `host_rx_ready` holds the first back when it is full.
-/// Between them only the first's boot report (a dot for each segment it loaded) is left
-/// out and, once the first halts, a zero closes the second's prompt. The second writes what
-/// it writes when its prompt is the first's answer, given by a host.
+/// Between them a little logic reads the first's messages as they go by: its text goes on as
+/// the second's question, framing and all, the rest is dropped, and the first's answer's end
+/// closes the question. The second writes what it writes when a host gives it the first's
+/// answer.
 #[test]
 #[ignore = "slow: two whole chips in gates, one after the other and then in a chain"]
 fn two_chips_in_a_chain_pass_their_text_on_their_pins() {
@@ -734,52 +800,66 @@ fn two_chips_in_a_chain_pass_their_text_on_their_pins() {
     let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), base, CHIP_TOKENS).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let die = sim::chip::with_code_dictionary(sim::chip::compact_die(base, &layout), &code);
-    let config = ChipConfig { soc: SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let design = chip_design(config);
     let (image, input) = image_and_input(config, &layout, &code, CONFIG, &dir);
     const LIMIT: u64 = 20_000_000;
 
     // Each alone, the second given the first's answer by a host.
     let (first, _, _) = run_gates(&design, &image, &input, LIMIT);
-    let answer: Vec<u8> = first.iter().copied().skip_while(|b| *b == b'.').collect();
+    let answer = netlist::port::answer_texts(&first)[0].clone().into_bytes();
     assert!(!answer.is_empty(), "the first chip answers");
-    let prompt: Vec<u8> = answer.iter().copied().chain([0]).collect();
+    let prompt = netlist::port::frame(netlist::port::kind::TEXT, &answer);
     let (expected, _, _) = run_gates(&design, &image, &prompt, LIMIT);
-    eprintln!("alone: the first answers {:?}, the second {:?}", String::from_utf8_lossy(&answer), String::from_utf8_lossy(&expected));
+    eprintln!("alone: the first answers {:?}, the second {:?}", String::from_utf8_lossy(&answer), netlist::port::all_text(&expected));
 
-    // In a chain.
+    // In a chain: between them, the first's messages are read on the way, its text goes on
+    // as the second's question and its answer's end closes it.
     let (mut a, mut b) = (Simulator::new(&design).unwrap(), Simulator::new(&design).unwrap());
     let (mut pending_a, mut pending_b) = (None, None);
     boot(&mut a, &image, &input, &mut pending_a);
     boot(&mut b, &image, &[], &mut pending_b);
     b.set("host_tx_ready", 1).unwrap();
-    let (mut reporting, mut closed, mut passed, mut output) = (true, false, Vec::new(), Vec::new());
+    use netlist::port::kind;
+    use netlist::soc::FRAME_END;
+    // The kind of the first's message going by, the question opened on the second, and the
+    // end that closes it, waiting to go.
+    let (mut going, mut opened, mut closing, mut passed, mut output) = (None::<u8>, false, false, Vec::new(), Vec::new());
     for cycle in 0.. {
         assert!(cycle < LIMIT, "the chain does not finish");
         for (sim, pending) in [(&mut a, &mut pending_a), (&mut b, &mut pending_b)] {
             sim.set("image_resp_valid", pending.is_some() as u64).unwrap();
             sim.set("image_resp_data", pending.unwrap_or(0) as u64).unwrap();
         }
-        // The second's room decides whether the first may send this cycle.
+        // The second's room decides whether the first's text may go this cycle.
         b.set("host_rx_valid", 0).unwrap();
         b.settle();
         let room = b.get("host_rx_ready").unwrap() == 1;
-        a.set("host_tx_ready", (room || reporting) as u64).unwrap();
         a.settle();
         let (valid, byte) = (a.get("host_tx_valid").unwrap() == 1, a.get("host_tx_data").unwrap() as u8);
-        let halted = a.get("halted").unwrap() == 1;
-        let send = if valid && reporting && byte == b'.' {
-            None
-        } else if valid && room {
-            reporting = false;
-            Some(byte)
-        } else if halted && !closed && !valid && room {
-            closed = true;
-            Some(0)
+        let text_byte = valid && going == Some(kind::TEXT) && byte != FRAME_END;
+        let (take, send) = if closing {
+            (false, room.then(|| { closing = false; FRAME_END }))
+        } else if text_byte && !opened {
+            (false, room.then(|| { opened = true; kind::TEXT }))
+        } else if text_byte {
+            (room, room.then_some(byte))
         } else {
-            None
+            (valid, None)
         };
-        if let Some(byte) = send.filter(|b| *b != 0) {
+        a.set("host_tx_ready", take as u64).unwrap();
+        a.settle();
+        if take {
+            match going {
+                None => going = Some(byte),
+                Some(k) if byte == FRAME_END => {
+                    going = None;
+                    closing = k == kind::END;
+                }
+                _ => {}
+            }
+        }
+        if let Some(byte) = send.filter(|_| text_byte && take) {
             passed.push(byte);
         }
         b.set("host_rx_valid", send.is_some() as u64).unwrap();
@@ -796,7 +876,7 @@ fn two_chips_in_a_chain_pass_their_text_on_their_pins() {
             sim.tick();
         }
     }
-    eprintln!("in a chain: {:?} passed on, the second writes {:?}", String::from_utf8_lossy(&passed), String::from_utf8_lossy(&output));
+    eprintln!("in a chain: {:?} passed on, the second writes {:?}", String::from_utf8_lossy(&passed), netlist::port::all_text(&output));
     assert_eq!(passed, answer, "what went from one chip to the other");
     assert_eq!(output, expected, "the second chip's answer");
     std::fs::remove_dir_all(&dir).ok();

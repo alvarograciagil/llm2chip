@@ -433,7 +433,7 @@ fn the_firmware_transcribes_a_clip_as_the_host_ordering_the_routines() {
     let expected = host.transcribe(&clip).unwrap();
 
     let mut chip = MoonshineChip::new(&dir, longest, die, Some(32)).unwrap();
-    let input: Vec<u8> = chip.schedule_input(&clip).unwrap().iter().flat_map(|w| w.to_le_bytes()).collect();
+    let input = netlist::port::stream(&chip.schedule_input(&clip).unwrap());
     let (routines, code, schedule) = chip.schedule().unwrap();
     let end = chip.config.end;
     let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: vec![end], draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
@@ -447,14 +447,13 @@ fn the_firmware_transcribes_a_clip_as_the_host_ordering_the_routines() {
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() };
     let count = routines.len();
     let model = ChipModel::new(chip.die_engine(&routines, code.clone()), code, sampler);
-    let mut bus = SocBus::booted_with(SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 }, &image, &input, model).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, &image, &input, model).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
         assert!(cpu.cycle < 200_000_000, "the firmware does not finish");
     }
-    let start = bus.tx.iter().position(|b| *b != b'.').unwrap_or(bus.tx.len());
-    let tokens: Vec<u32> = bus.tx[start..].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let tokens = netlist::port::words(&bus.tx);
     eprintln!("{} cycles of the CPU, {} of the die, tokens {tokens:?}", cpu.cycle, bus.peripheral.die_busy);
     assert_eq!(tokens, expected);
     let firmware = cpu.cycle - bus.peripheral.die_busy;
@@ -516,7 +515,7 @@ fn the_whole_chip_with_a_command_queue_transcribes_in_gates_as_at_instruction_le
     wide.schedule().unwrap();
     let die = sim::chip::with_registers_needed(sized, wide.parts().1);
     let mut chip = MoonshineChip::new(&dir, SAMPLES, die, Some(32)).unwrap();
-    let input: Vec<u8> = chip.schedule_input(&clip).unwrap().iter().flat_map(|w| w.to_le_bytes()).collect();
+    let input = netlist::port::stream(&chip.schedule_input(&clip).unwrap());
     let (routines, code, schedule) = chip.schedule().unwrap();
     let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: vec![chip.config.end], draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     let mut info = chip_info(&die, &code, chip.logits_register(), chip.config.vocab as u32, &setup);
@@ -525,7 +524,7 @@ fn the_whole_chip_with_a_command_queue_transcribes_in_gates_as_at_instruction_le
     segments.extend(sim::chip::cell_segments(&die, chip.parts().1, chip.parts().2).unwrap());
     let image = build_image(&firmware.program, &firmware.data, &info, &words, &segments).unwrap();
     let sampler = SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 };
-    let soc = SocConfig { program_bits: 13, data_bits: 14, fifo_bits: 6 };
+    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 };
 
     let model = ChipModel::new(chip.die_engine(&routines, code.clone()), code, SamplerModel { config: sampler, rng: 0, table: exponential_table() }).with_queue(4);
     let mut bus = SocBus::booted_with(soc, &image, &input, model).unwrap();

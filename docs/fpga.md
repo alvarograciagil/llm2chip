@@ -15,7 +15,7 @@ By default it is the chip for **a single board**: no JTAG port, no factory memor
 | Resource | Amount |
 |---|---|
 | Logic | ≈ 355,000 NAND2 equivalents (with scale and bias in two cycles) |
-| Memory | 1.68 Mbit: CPU 0.52 (32 KB of program and 32 KB of data); function tables 0.26; microcode 0.5 (with a dictionary; 1.3 without); vector bank 0.07, with the register table giving each register only what it uses (2.1 without it) |
+| Memory | 1.81 Mbit: CPU 0.66 (48 KB of program and 32 KB of data); function tables 0.26; microcode 0.5 (with a dictionary; 1.3 without); vector bank 0.07, with the register table giving each register only what it uses (2.1 without it) |
 | Clock | The critical path is about 24 full-adder delays: on a low-end FPGA, between 20 and 50 MHz |
 
 ## Synthesis measured with Yosys

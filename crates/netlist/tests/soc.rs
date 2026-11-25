@@ -7,7 +7,7 @@ use netlist::Simulator;
 use std::path::Path;
 use std::process::Command;
 
-const CONFIG: SocConfig = SocConfig { program_bits: 13, data_bits: 13, fifo_bits: 6 };
+const CONFIG: SocConfig = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6 };
 
 /// Built once per test run, so that tests running together do not race on the binary.
 fn build_firmware() -> Option<FirmwareImage> {
@@ -103,11 +103,14 @@ fn segments() -> Vec<Segment> {
     ]
 }
 
-fn compare(image: &[u32], expected_output: &[u8]) {
-    let input = b"\0";
-    let (bus, cycles) = run_iss(image, input);
-    assert_eq!(bus.tx, expected_output, "{}", String::from_utf8_lossy(&bus.tx));
-    let run = run_gates(image, input, cycles + 64);
+/// Boots, reports the segments it loaded and the ones that failed, and stops at an empty
+/// question.
+fn compare(image: &[u32], loaded: usize, failed: usize) {
+    let input = netlist::port::tokens(&[]);
+    let (bus, cycles) = run_iss(image, &input);
+    assert_eq!(netlist::port::boot(&bus.tx), Some((loaded, failed)), "{:?}", netlist::port::events(&bus.tx));
+    assert_eq!(netlist::port::events(&bus.tx).last(), Some(&netlist::port::Event::Ready { capacity: 0 }));
+    let run = run_gates(image, &input, cycles + 64);
     assert_eq!(run.output, bus.tx, "the gates' output");
     assert_eq!(run.writes.len(), bus.writes.len());
     for (gate, model) in run.writes.iter().zip(&bus.writes) {
@@ -122,7 +125,7 @@ fn compare(image: &[u32], expected_output: &[u8]) {
 fn the_chip_boots_from_its_image_and_loads_every_segment() {
     let Some(firmware) = build_firmware() else { return };
     let image = build_image(&firmware.program, &firmware.data, &[], &[], &segments()).unwrap();
-    compare(&image, b"...");
+    compare(&image, 3, 0);
 }
 
 #[test]
@@ -131,5 +134,5 @@ fn a_corrupted_segment_is_reported() {
     let mut image = build_image(&firmware.program, &firmware.data, &[], &[], &segments()).unwrap();
     let last = image.len() - 1;
     image[last] ^= 0x10;
-    compare(&image, b"..E");
+    compare(&image, 3, 1);
 }

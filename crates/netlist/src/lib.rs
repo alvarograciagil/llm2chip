@@ -25,6 +25,7 @@ pub mod stil;
 pub mod atpg;
 mod sim;
 pub mod soc;
+pub mod port;
 mod verilog;
 mod vhdl;
 

@@ -304,7 +304,7 @@ fn firmware_matches(firmware: &FirmwareImage, path: &Path, failures: &mut Vec<St
     let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     let info = chip_info(&die, &code, 1, 248_077, &setup);
     let image = build_image(&firmware.program, &firmware.data, &info, &tables, &[]).unwrap();
-    let soc = SocConfig { program_bits: 14, data_bits: (tables.len() + (1 << 14)).next_power_of_two().ilog2(), fifo_bits: 6 };
+    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: (tables.len() + (1 << 14)).next_power_of_two().ilog2(), fifo_bits: 6 };
     let _ = ChipConfig { soc, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 18, entries: 4, lanes: 1 } };
 
     // A prompt of several thousand tokens, which some models encode as a single piece.
@@ -312,8 +312,7 @@ fn firmware_matches(firmware: &FirmwareImage, path: &Path, failures: &mut Vec<St
     for text in TEXTS.iter().copied().chain([long.as_str()]) {
         let expected = reference.encode(text, false).unwrap().get_ids().to_vec();
         let tokens = Rc::new(RefCell::new(Vec::new()));
-        let mut input = text.as_bytes().to_vec();
-        input.push(0);
+        let input = netlist::port::text(text);
         let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 18, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
         let model = ChipModel::new(Recorder(tokens.clone()), code.clone(), sampler);
         let mut bus = SocBus::booted_with(soc, &image, &input, model).unwrap();

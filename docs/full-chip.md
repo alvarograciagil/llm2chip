@@ -8,13 +8,46 @@ The real chip would have a PCIe or USB PHY. In simulation, that PHY is replaced 
 
 | Signal | Direction | Use |
 |---|---|---|
-| `host_rx_*` | Input, byte stream | Commands and UTF-8 text |
-| `host_tx_*` | Output, byte stream | UTF-8 text and status |
+| `host_rx_*` | Input, byte stream | Messages from the host: turns, control (see [below](#the-host-port-messages)) |
+| `host_tx_*` | Output, byte stream | Messages to the host: answers, status, errors |
 | `image_req_*`, `image_data_*` | Requests for image blocks | Reading the model from the host |
 | `reset` | Input | Starts again from the image: reloads everything, weights included |
 | `clear` | Input | Clears the conversation without reloading the weights (see [below](#a-conversation-and-the-clear-pin)) |
 
-The chip receives bytes of text and returns bytes of text. Tokenizing, inference, sampling and detokenizing happen inside. A chip run by a schedule (a speech recogniser or a sound decoder) exchanges 32-bit words instead: samples or codes in, tokens or samples out ([voice.md](voice.md#what-the-host-sends-and-gets-back)).
+The chip receives text and returns text, in messages. Tokenizing, inference, sampling and detokenizing happen inside. A chip run by a schedule (a speech recogniser or a sound decoder) exchanges streams of 32-bit words instead: samples or codes in, tokens or samples out ([voice.md](voice.md#what-the-host-sends-and-gets-back)).
+
+## The host port: messages
+
+Everything that crosses the host port is a message, both ways, so a host can ask and steer the chip while it works, not only send text. The format is SLIP's: a message is its **kind** (a byte), its **bytes**, and an **end** byte, `0xC0`. Inside a message, `0xC0` goes as `0xDB 0xDC` and `0xDB` as `0xDB 0xDD`. There is no length field: the end marks the boundary, and a byte lost on the way spoils one message only, since the next end starts afresh. `netlist::port` writes and reads them for every host: the tests, the engine's simulator, the gates in the browser.
+
+| From the host | Kind | Bytes | The chip answers |
+|---|---|---|---|
+| A turn as text | `0x01` | UTF-8 | Its answer as text, a message a token, then the end |
+| A turn as tokens | `0x02` | 32-bit tokens | Its answer as tokens, a message a token, then the end |
+| A picture | `0x03` | The patches, as the chip's encoder takes them | Nothing: the turn after it places it |
+| A stream | `0x04` | 32-bit words, for a chip run by a schedule or Show-o's passes | A stream of words |
+| Status | `0x10` | | Whether it is answering, the positions the conversation takes and its capacity |
+| Options | `0x11` | | Each option's number and value |
+| Set an option | `0x12` | Its number and its value | The option with its new value, or an error |
+| Stop | `0x13` | | The answer ends there |
+| Clear | `0x14` | | As the clear pin |
+
+| From the chip | Kind | Bytes |
+|---|---|---|
+| Boot | `0x20` | A byte a segment loaded: `.` for a good checksum, `E` for one that failed |
+| Ready | `0x21` | The conversation's capacity in positions, zero for a chip that answers once: it waits for a first turn |
+| End of an answer | `0x22` | Why (end token, limit, loop, full context, stopped, cleared), the positions the conversation takes and its capacity |
+| Error | `0x2F` | A code (no plan for this many chips, an unknown message, one the chip does not take now, an unknown option, a text too long) and a detail |
+
+**What the host can see and change while the chip runs.** The status gives the context in use, so the host knows the percentage without counting. The options are the generation's settings in the chip's description: the most tokens an answer takes, greedy or not, top-k, the temperature, the seed and the reasoning budget. Setting one writes it in data memory, and the next token follows it.
+
+**Between tokens.** Before each token it writes, the firmware looks at the port's status, as it did for the clear pin. A message that is not a turn is handled there and answered at once, so a status asked in the middle of an answer comes back between two tokens. A turn sent during an answer waits for the answer's end. A message the chip answers in the middle of one of its own, such as a stream of words, ends that one first and starts it again after.
+
+**The port's hardware does the framing.** As bytes arrive it takes the escapes out and keeps each byte's place beside it in the receive queue, as a two-bit mark: a message's start (its kind), a byte inside, or its end. The status register tells the CPU what is at the head of the queue: a payload byte (the usual case), a start, an end, or the clear pin. A payload byte costs the firmware what a plain byte port did. On the way out the firmware writes a start (`HOST_TX_START`), the bytes and an end (`HOST_TX_END`), and the hardware puts in the escapes. Reading the head without taking it (`HOST_RX_PEEK`) lets the firmware leave a turn waiting. All this is about a hundred flip-flops and the queues' two extra bits.
+
+**Integrity** is left to the physical link. The framing limits a lost or corrupted byte to one message, and a host can always clear the conversation and start again.
+
+**Checked:** `the_host_asks_and_steers_the_chip_in_messages` (in `chip.rs`) asks a chip its options, sets one and sees the next answer follow it, asks for its status while it waits and in the middle of an answer, stops an answer, asks for a clear as a message, and gets the errors of what the chip does not take. Every test of the whole chip in gates checks the framing both ways, byte for byte and cycle for cycle against the instruction level.
 
 ## Blocks
 
@@ -144,14 +177,14 @@ The voice planner counts its tokens in the language model's context but not befo
 
 ## A conversation and the clear pin
 
-A chip can **hold a conversation**: after each answer it sends an end mark and waits for the next turn. The turn goes on over the same cache, without reading the earlier turns again. Two pins start again:
+A chip can **hold a conversation**: after each answer it sends the answer's end and waits for the next turn. The turn goes on over the same cache, without reading the earlier turns again. Two pins start again:
 
 | Pin | What it does | Takes |
 |---|---|---|
 | `reset` | Starts from the image: the firmware, the weights, everything | As long as loading the image |
 | `clear` | Clears the conversation: zeros over the cache and the recurrent state, and the vector memory's first contents again; then it reads the system prompt and waits | Milliseconds |
 
-**The end mark** is a `0` byte when the chip tokenizes, or the word `0xFFFFFFFF` when it exchanges raw tokens. The host sends the next turn as its chat template writes it after the answer, as `voice::Conversation` does. A cache that fills up takes nothing more: the chip ends the turn and waits for a clear.
+**The answer's end** is a message of its own, with why it ended and the positions the conversation takes. The host sends the next turn as its chat template writes it after the answer, as `voice::Conversation` does. A cache that fills up takes nothing more: the chip ends the turn and waits for a clear.
 
 **When the context fills,** the chip forgets nothing by itself. It takes no more tokens until the clear pin: an answer that fills the cache ends there, and the next question has nowhere to go. Each key in the cache carries its position's rotation, and each token sits in the place its position gives it. Dropping the oldest tokens is therefore not free. These are the ways to go on:
 - **From the host, with the chip as it is.** Before the cache fills, the host raises the clear pin and sends again the system prompt and the latest turns that fit. It can also send a summary of the conversation instead of the turns, which compresses the context. The chip's own model can write the summary as one more turn, if it is asked while the cache still has room for it. It costs reading those turns again, or writing the summary and reading it, once at each compression.
@@ -168,7 +201,7 @@ A chip can **hold a conversation**: after each answer it sends an end mark and w
 At power-up the firmware zeros the whole cache, since it cannot know what the memory held.
 
 **How it works.**
-- **The pin:** it stays requested until the firmware writes the host port's status register, and the firmware sees it as bit 1 of that status (`CLEAR_REQUESTED`). Raising it drops the bytes the host had sent and the chip had not read. The firmware watches it while it waits for bytes and before each token it writes, so it can cut an answer short.
+- **The pin:** it stays requested until the firmware writes the host port's status register, and the firmware sees it as bit 1 of that status (`CLEAR_REQUESTED`). Raising it drops the bytes the host had sent and the chip had not read. The firmware watches it while it waits for bytes and before each token it writes, so it can cut an answer short. A host can ask the same in a message.
 - **The load controller** writes the zeros. While its register 9 (`LOADER_FILL`) holds 1, each element's words are zeros and the image is not read. The timing is the same as a read the image answers at once: three cycles an element.
 - **The conversation table** sits in the chip's description (`netlist::chip::add_conversation`). It holds the cache's capacity in positions, then entries of five words: a first address, how many registers from it and the step between them, how far each reaches, and the elements of one position's row (zero when the register is zeroed whole). `Layout::conversation_state` makes it from the die's own layout.
 - **A chain of chips:** only the leader's pin is wired. The leader sends the clear down the chain as a command with the positions used, and each chip zeros its own layers' part.
@@ -182,7 +215,7 @@ The estimate shows how long clearing a conversation that filled the context take
 - `the_leading_chips_clear_pin_clears_every_chip_of_the_chain` (in `multichip.rs`, with the slow tests) runs two chips in gates on a board, each with its own layers. After an answer each holds its part of the conversation. The leader's pin zeros both parts, in some 10,600 cycles, and the same question gets the first answer again.
 - `the_firmware_holds_a_conversation_on_a_kept_engine_until_the_clear_pin` (in `tiny_model.rs`) runs the firmware at instruction level on a software die that keeps its engine, as the simulator does: two turns as the whole conversation, then the clear and the first answer again.
 
-**The firmware** takes 32,276 of its 32,768 bytes. To make room for the conversation it is built with less inlining (`-inline-threshold=25`, in `firmware/.cargo/config.toml`), which also made it faster at decoding sound. Building it for size instead (`opt-level = "z"`) fits too, but makes the CPU some 8 % slower than the voice planner counts. Reading a byte from the host costs what it did before the pin, since the usual case is checked first.
+**The firmware** takes 35,704 bytes of a program memory of 48 KB, in banks of 32 and 16 KB (`netlist::soc::PROGRAM_WORDS`): the host port's messages took it past 32 KB. It is built with less inlining (`-inline-threshold=25`, in `firmware/.cargo/config.toml`), which keeps it fast at decoding sound. Reading a word from the host calls nothing in the usual case, so the function saves no registers: what is not a payload byte goes to another function as its last step. With it the toy recogniser's CPU takes 2.06 million cycles, against 2.28 million before the messages.
 
 ## Why not everything in gates with Qwen
 

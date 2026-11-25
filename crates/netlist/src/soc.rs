@@ -13,6 +13,26 @@ pub const HOST_RX_DATA: u32 = HOST_BASE;
 pub const HOST_RX_STATUS: u32 = HOST_BASE + 4;
 pub const HOST_TX_DATA: u32 = HOST_BASE + 8;
 pub const HOST_TX_STATUS: u32 = HOST_BASE + 12;
+/// Read: the head of the receive queue without taking it. Write: starts a message of that
+/// kind on the way out.
+pub const HOST_RX_PEEK: u32 = HOST_BASE + 16;
+pub const HOST_TX_START: u32 = HOST_BASE + 16;
+/// Write: ends the message on the way out.
+pub const HOST_TX_END: u32 = HOST_BASE + 20;
+/// The receive status's bits: a payload byte at the head, the clear pin, a message's start
+/// (its kind) at the head, and a message's end at the head. Only the first is the usual case.
+pub const RX_BYTE: u32 = 1;
+pub const RX_START: u32 = 4;
+pub const RX_END: u32 = 8;
+/// The host port's framing, as SLIP's: a message is its kind, its bytes and this end, and
+/// either mark inside a message goes as the escape and then its code.
+pub const FRAME_END: u8 = 0xC0;
+pub const FRAME_ESCAPE: u8 = 0xDB;
+pub const FRAME_ESCAPED_END: u8 = 0xDC;
+pub const FRAME_ESCAPED_ESCAPE: u8 = 0xDD;
+/// The marks the port keeps beside each byte in its queues, above the byte.
+pub const MARK_START: u32 = 1;
+pub const MARK_END: u32 = 2;
 
 pub const LOADER_BASE: u32 = 0x3000_0000;
 pub const LOADER_SOURCE: u32 = LOADER_BASE;
@@ -49,25 +69,49 @@ pub const TARGET_BITS: u32 = 4;
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct SocConfig {
-    /// log2 of the words of program memory.
-    pub program_bits: u32,
+    /// Words of program memory, in banks of powers of two: 12,288 (48 KB) are a bank of
+    /// 8,192 and one of 4,096.
+    pub program_words: u32,
     /// log2 of the words of data memory.
     pub data_bits: u32,
     /// log2 of the bytes each host queue holds.
     pub fifo_bits: u32,
 }
 
-fn fifo(gen: &mut Gen, bits: u32) -> String {
-    let name = format!("byte_fifo_{bits}");
+/// The program memory the firmware takes: 48 KB, for its 35.6 KB and room to grow.
+pub const PROGRAM_WORDS: u32 = 12 << 10;
+
+impl SocConfig {
+    /// Bits of a program memory word address.
+    pub fn program_bits(&self) -> u32 {
+        self.program_words.next_power_of_two().ilog2()
+    }
+
+    /// The program memory's banks, largest first: each one's first word and its address bits.
+    pub fn program_banks(&self) -> Vec<(u32, u32)> {
+        let mut first = 0;
+        (0..=self.program_bits()).rev().filter(|k| self.program_words >> k & 1 == 1).map(|k| {
+            let bank = (first, k);
+            first += 1 << k;
+            bank
+        }).collect()
+    }
+}
+
+/// Bits of an entry of the host port's queues: a byte and its mark.
+const ENTRY_BITS: u32 = 10;
+
+fn fifo(gen: &mut Gen, bits: u32, width: u32) -> String {
+    let name = format!("byte_fifo_{bits}_{width}");
     if gen.modules.contains_key(&name) {
         return name;
     }
-    let mut b = Builder::new(&name, "Byte queue", "Circular memory between the host port and the CPU: keeps the bytes until the other side collects them.");
+    let mut b = Builder::new(&name, "Byte queue", "Circular memory between the host port and the CPU: keeps the bytes, each with the mark of a message's start or end, until the other side collects them.");
     let reset = b.input("reset", 1)[0];
     let push = b.input("push", 1)[0];
-    let data_in = b.input("data_in", 8);
+    let data_in = b.input("data_in", width);
     let pop = b.input("pop", 1)[0];
-    let data_out = b.output("data_out", 8);
+    let data_out = b.output("data_out", width);
     let not_empty = b.output("not_empty", 1)[0];
     let not_full = b.output("not_full", 1)[0];
     let valid = b.output("valid", 1)[0];
@@ -109,7 +153,7 @@ fn fifo(gen: &mut Gen, bits: u32) -> String {
         enable = accepted;
     }
     b.group("Memory");
-    b.ram2p("bytes", bits, 8, &[("raddr", read_address), ("waddr", write_address), ("we", vec![enable]), ("wdata", data_in), ("rdata", data_out)]);
+    b.ram2p("bytes", bits, width, &[("raddr", read_address), ("waddr", write_address), ("we", vec![enable]), ("wdata", data_in), ("rdata", data_out)]);
     gen.add(b.finish())
 }
 
@@ -421,7 +465,7 @@ fn loader(gen: &mut Gen) -> String {
 
 pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     let cpu = core(gen);
-    let queue = fifo(gen, config.fifo_bits);
+    let queue = fifo(gen, config.fifo_bits, ENTRY_BITS);
     let load = loader(gen);
     let mut b = Builder::new("soc_control", "Control system", "Control CPU, program and data memories and host port, joined by the internal bus.");
     let reset = b.input("reset", 1)[0];
@@ -474,21 +518,43 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     b.inst("cpu", &cpu, &[("reset", vec![cpu_reset]), ("imem_rdata", imem_rdata.clone()), ("dmem_rdata", dmem_rdata.clone()), ("imem_addr", imem_addr.clone()), ("dmem_addr", dmem_addr.clone()), ("dmem_wdata", dmem_wdata.clone()), ("dmem_we", dmem_we.clone()), ("dmem_re", vec![dmem_re]), ("rf_we", rf_we), ("rf_addr", rf_addr), ("rf_wdata", rf_wdata), ("halted", vec![halted])]);
 
     b.group("Program memory");
-    let program_address = b.wire("program_address", config.program_bits);
+    let program_bits = config.program_bits();
+    let program_address = b.wire("program_address", program_bits);
     let program_write = b.wire("program_write", 1)[0];
-    b.sram("program", config.program_bits, 32, &[("addr", program_address.clone()), ("we", vec![program_write]), ("wdata", load_data[..32].to_vec()), ("rdata", imem_rdata.clone())]);
+    {
+        // Banks of powers of two, each answering for the addresses whose top bits name it; a
+        // read answers a cycle later, from the bank the address chose then.
+        let banks = config.program_banks();
+        let mut l = Logic { b: &mut b, next: 0 };
+        let mut read = constant(0, 32);
+        for (index, &(first, bits)) in banks.iter().enumerate() {
+            let chosen = l.equals(&program_address[bits as usize..], first >> bits);
+            let write = l.and(program_write, chosen);
+            let data = l.b.wire(&format!("program_{index}_data"), 32);
+            let name = if banks.len() == 1 { "program".to_string() } else { format!("program_{index}") };
+            l.b.sram(&name, bits, 32, &[("addr", program_address[..bits as usize].to_vec()), ("we", vec![write]), ("wdata", load_data[..32].to_vec()), ("rdata", data.clone())]);
+            let was = l.fresh();
+            l.connect_flops(&[chosen], &[was]);
+            read = l.mux_bus(was, &read, &data);
+        }
+        for (from, to) in read.iter().zip(&imem_rdata) {
+            l.b.or_to(*from, Bit::Zero, *to);
+        }
+    }
 
     let ram_data = b.wire("ram_data", 32);
-    let rx_out = b.wire("rx_out", 8);
+    let rx_out = b.wire("rx_out", ENTRY_BITS);
     let rx_not_empty = b.wire("rx_not_empty", 1)[0];
     let tx_not_full = b.wire("tx_not_full", 1)[0];
-    let tx_out = b.wire("tx_out", 8);
+    let tx_out = b.wire("tx_out", ENTRY_BITS);
     let tx_not_empty = b.wire("tx_not_empty", 1);
     let rx_not_full = b.wire("rx_not_full", 1)[0];
     let tx_valid = b.wire("tx_valid", 1)[0];
     let tx_taken = b.wire("tx_taken", 1)[0];
-    b.group("Host port");
-    b.and_to(host_tx_ready, tx_valid, tx_taken);
+    let rx_head_valid = b.wire("rx_head_valid", 1)[0];
+    let rx_entry = b.wire("rx_entry", ENTRY_BITS);
+    let rx_push = b.wire("rx_push", 1)[0];
+    let tx_entry = b.wire("tx_entry", ENTRY_BITS);
 
     let (ram_we, rx_pop, tx_push, read_data, data_address, data_wdata);
     {
@@ -498,8 +564,9 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         let is_ram = l.equals(&top, RAM_BASE >> 28);
         let is_host = l.equals(&top, HOST_BASE >> 28);
         let is_loader = l.equals(&top, LOADER_BASE >> 28);
-        let register = &dmem_addr[2..4];
+        let register = &dmem_addr[2..5];
         let (reg_rx_data, reg_rx_status, reg_tx_data, reg_tx_status) = (l.equals(register, 0), l.equals(register, 1), l.equals(register, 2), l.equals(register, 3));
+        let (reg_peek_start, reg_tx_end) = (l.equals(register, 4), l.equals(register, 5));
         let any_write = l.any(&dmem_we);
         let host_read = l.and(is_host, dmem_re);
         let host_write = l.and(is_host, any_write);
@@ -528,8 +595,8 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         let program_load = l.and(boot_write, to_program);
         let data_load = l.and(boot_write, to_data);
         l.b.or_to(program_load, Bit::Zero, program_write);
-        let pc_word = imem_addr[2..2 + config.program_bits as usize].to_vec();
-        let load_word = load_addr[..config.program_bits as usize].to_vec();
+        let pc_word = imem_addr[2..2 + program_bits as usize].to_vec();
+        let load_word = load_addr[..program_bits as usize].to_vec();
         let chosen_program = l.mux_bus(booting, &pc_word, &load_word);
         for (from, to) in chosen_program.iter().zip(&program_address) {
             l.b.or_to(*from, Bit::Zero, *to);
@@ -548,7 +615,20 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
             })
             .collect::<Vec<Bit>>();
         rx_pop = l.and(host_read, reg_rx_data);
-        tx_push = l.and(host_write, reg_tx_data);
+        // On the way out the CPU writes a message's start (its kind), its bytes and its end;
+        // each goes in the queue with its mark.
+        let tx_byte = l.and(host_write, reg_tx_data);
+        let tx_start = l.and(host_write, reg_peek_start);
+        let tx_end = l.and(host_write, reg_tx_end);
+        let some_tx = l.or(tx_byte, tx_start);
+        tx_push = l.or(some_tx, tx_end);
+        let not_end = l.not(tx_end);
+        for (bit, to) in dmem_wdata[..8].iter().zip(&tx_entry) {
+            let kept = l.and(*bit, not_end);
+            l.b.or_to(kept, Bit::Zero, *to);
+        }
+        l.b.or_to(tx_start, Bit::Zero, tx_entry[8]);
+        l.b.or_to(tx_end, Bit::Zero, tx_entry[9]);
 
         // Reads answer one cycle after the address, like the memories do.
         l.b.group("Bus response");
@@ -558,7 +638,16 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         let pick_tx_status = l.fresh();
         let status_rx = l.fresh();
         let status_tx = l.fresh();
-        let (status_rx_now, status_tx_now) = (rx_not_empty, tx_not_full);
+        // What is at the head of the receive queue, once it has settled: a payload byte, a
+        // message's start or its end.
+        let (rx_start_mark, rx_end_mark) = (rx_out[8], rx_out[9]);
+        let is_mark = l.or(rx_start_mark, rx_end_mark);
+        let plain = l.not(is_mark);
+        let head_byte = l.and(rx_head_valid, plain);
+        let head_start = l.and(rx_head_valid, rx_start_mark);
+        let head_end = l.and(rx_head_valid, rx_end_mark);
+        let _ = rx_not_empty;
+        let (status_rx_now, status_tx_now) = (head_byte, tx_not_full);
         // The clear pin stays requested until the firmware writes the status register.
         let requested = l.fresh();
         let next_requested = {
@@ -571,7 +660,13 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         };
         l.connect_flops(&[next_requested], &[requested]);
         let status_clear = l.fresh();
-        let want_rx_data = l.and(host_read, reg_rx_data);
+        let want_rx_data = {
+            let peek = l.and(host_read, reg_peek_start);
+            let take = l.and(host_read, reg_rx_data);
+            l.or(take, peek)
+        };
+        let (status_start, status_end) = (l.fresh(), l.fresh());
+        l.connect_flops(&[head_start, head_end], &[status_start, status_end]);
         let want_rx_status = l.and(host_read, reg_rx_status);
         let want_tx_status = l.and(host_read, reg_tx_status);
         let loader_read = l.and(is_loader, dmem_re);
@@ -586,8 +681,8 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         let pick_peripheral = l.fresh();
         l.connect_flops(&[read_peripheral], &[pick_peripheral]);
         l.connect_flops(&[is_ram, want_rx_data, want_rx_status, want_tx_status, status_rx_now, status_tx_now, want_busy, want_crc, loader_busy, requested], &[pick_ram, pick_rx_data, pick_rx_status, pick_tx_status, status_rx, status_tx, pick_busy, pick_crc, busy_seen, status_clear]);
-        let rx_word: Vec<Bit> = rx_out.iter().copied().chain(std::iter::repeat_n(Bit::Zero, 24)).collect();
-        let rx_status_word: Vec<Bit> = [status_rx, status_clear].into_iter().chain(std::iter::repeat_n(Bit::Zero, 30)).collect();
+        let rx_word: Vec<Bit> = rx_out.iter().copied().chain(std::iter::repeat_n(Bit::Zero, 32 - ENTRY_BITS as usize)).collect();
+        let rx_status_word: Vec<Bit> = [status_rx, status_clear, status_start, status_end].into_iter().chain(std::iter::repeat_n(Bit::Zero, 28)).collect();
         let tx_status_word: Vec<Bit> = std::iter::once(status_tx).chain(std::iter::repeat_n(Bit::Zero, 31)).collect();
         let zero = constant(0, 32);
         let mut value = l.mux_bus(pick_ram, &zero, &ram_data);
@@ -602,12 +697,119 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         for (from, to) in read_data.iter().zip(&dmem_rdata) {
             l.b.or_to(*from, Bit::Zero, *to);
         }
+        l.b.group("Host port: messages");
+        // In: a byte after a message's end starts the next one, as its kind; 0xC0 ends it;
+        // 0xDB says the next byte is 0xC0 (sent as 0xDC) or 0xDB (sent as 0xDD). Each byte
+        // goes in the queue with its mark, so the CPU sees where messages begin and end, and
+        // a byte lost on the way spoils one message only: the next end starts afresh.
         let not_full = rx_not_full;
         l.b.or_to(not_full, Bit::Zero, host_rx_ready);
+        let accepted = l.and(host_rx_valid, not_full);
+        let (inside, escaping) = (l.fresh(), l.fresh());
+        let is_end = l.equals(&host_rx_data, FRAME_END as u32);
+        let is_escape = l.equals(&host_rx_data, FRAME_ESCAPE as u32);
+        let outside = l.not(inside);
+        let not_escaping = l.not(escaping);
+        let not_end_byte = l.not(is_end);
+        let not_escape_byte = l.not(is_escape);
+        // A message's kind: the first byte that is neither mark.
+        let plain_byte = l.and(not_end_byte, not_escape_byte);
+        let starts = l.and(outside, plain_byte);
+        let ends = l.and(inside, is_end);
+        let begins_escape = {
+            let a = l.and(inside, not_escaping);
+            l.and(a, is_escape)
+        };
+        let payload = {
+            let a = l.and(inside, not_end_byte);
+            let skip = l.not(begins_escape);
+            l.and(a, skip)
+        };
+        let pushes = {
+            let a = l.or(starts, ends);
+            l.or(a, payload)
+        };
+        let push_now = l.and(accepted, pushes);
+        l.b.or_to(push_now, Bit::Zero, rx_push);
+        // An escaped byte comes back as it was.
+        let restored = {
+            let was_end = l.equals(&host_rx_data, FRAME_ESCAPED_END as u32);
+            let was_escape = l.equals(&host_rx_data, FRAME_ESCAPED_ESCAPE as u32);
+            let to_end = l.and(escaping, was_end);
+            let to_escape = l.and(escaping, was_escape);
+            let end_byte = constant(FRAME_END as u32, 8);
+            let escape_byte = constant(FRAME_ESCAPE as u32, 8);
+            let a = l.mux_bus(to_end, &host_rx_data, &end_byte);
+            l.mux_bus(to_escape, &a, &escape_byte)
+        };
+        let not_ends = l.not(ends);
+        for (bit, to) in restored.iter().zip(&rx_entry) {
+            let kept = l.and(*bit, not_ends);
+            l.b.or_to(kept, Bit::Zero, *to);
+        }
+        l.b.or_to(starts, Bit::Zero, rx_entry[8]);
+        l.b.or_to(ends, Bit::Zero, rx_entry[9]);
+        let keep = {
+            let a = l.not(reset);
+            let b = l.not(clear);
+            l.and(a, b)
+        };
+        let next_inside = {
+            let now = l.or(inside, starts);
+            let left = l.and(now, not_ends);
+            let stays = l.mux(accepted, inside, left);
+            l.and(stays, keep)
+        };
+        let next_escaping = {
+            let now = l.mux(accepted, escaping, begins_escape);
+            l.and(now, keep)
+        };
+        l.connect_flops(&[next_inside, next_escaping], &[inside, escaping]);
+
+        // Out: a start sends its kind, an end sends 0xC0, and a byte that is either mark goes
+        // as 0xDB and then its code, the entry staying at the head for that second byte.
+        let second = l.fresh();
+        let byte = &tx_out[..8];
+        let (start_mark, end_mark) = (tx_out[8], tx_out[9]);
+        let marked = l.or(start_mark, end_mark);
+        let plain = l.not(marked);
+        let out_is_end = l.equals(byte, FRAME_END as u32);
+        let out_is_escape = l.equals(byte, FRAME_ESCAPE as u32);
+        let special = l.or(out_is_end, out_is_escape);
+        let needs_escape = l.and(plain, special);
+        let first_of_two = {
+            let not_second = l.not(second);
+            l.and(needs_escape, not_second)
+        };
+        let code = {
+            let escaped_end = constant(FRAME_ESCAPED_END as u32, 8);
+            let escaped_escape = constant(FRAME_ESCAPED_ESCAPE as u32, 8);
+            l.mux_bus(out_is_end, &escaped_escape, &escaped_end)
+        };
+        let shown = {
+            let end_byte = constant(FRAME_END as u32, 8);
+            let escape_byte = constant(FRAME_ESCAPE as u32, 8);
+            let a = l.mux_bus(end_mark, byte, &end_byte);
+            let b = l.mux_bus(first_of_two, &a, &escape_byte);
+            l.mux_bus(second, &b, &code)
+        };
         l.b.or_to(tx_valid, Bit::Zero, host_tx_valid);
-        for (from, to) in tx_out.iter().zip(&host_tx_data) {
+        for (from, to) in shown.iter().zip(&host_tx_data) {
             l.b.or_to(*from, Bit::Zero, *to);
         }
+        let sent = l.and(host_tx_ready, tx_valid);
+        let holds = l.and(sent, first_of_two);
+        let not_holds = l.not(holds);
+        let taken = l.and(sent, not_holds);
+        l.b.or_to(taken, Bit::Zero, tx_taken);
+        let next_second = {
+            let started = l.or(second, holds);
+            let not_taken = l.not(taken);
+            let stays = l.and(started, not_taken);
+            let alive = l.not(reset);
+            l.and(stays, alive)
+        };
+        l.connect_flops(&[next_second], &[second]);
     }
 
     b.group("Data memory");
@@ -619,11 +821,10 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     b.inst("loader", &load, &[("reset", vec![reset]), ("reg_write", vec![loader_reg_write]), ("reg_index", dmem_addr[2..6].to_vec()), ("reg_data", dmem_wdata.clone()), ("image_resp_valid", vec![image_resp_valid]), ("image_resp_data", image_resp_data), ("image_req_valid", vec![image_req_valid]), ("image_req_addr", image_req_addr), ("write_valid", vec![load_valid]), ("write_target", load_target.clone()), ("write_unit", load_unit), ("write_addr", load_addr.clone()), ("write_data", load_data.clone()), ("busy", vec![loader_busy]), ("cpu_hold", vec![booting]), ("crc", loader_crc)]);
 
     b.group("Host port");
-    let rx_head_valid = b.wire("rx_head_valid", 1);
     let rx_reset = b.wire("rx_reset", 1)[0];
     b.or_to(reset, clear, rx_reset);
-    b.inst("rx_queue", &queue, &[("reset", vec![rx_reset]), ("push", vec![host_rx_valid]), ("data_in", host_rx_data), ("pop", vec![rx_pop]), ("data_out", rx_out), ("not_empty", vec![rx_not_empty]), ("not_full", vec![rx_not_full]), ("valid", rx_head_valid)]);
-    b.inst("tx_queue", &queue, &[("reset", vec![reset]), ("push", vec![tx_push]), ("data_in", dmem_wdata[..8].to_vec()), ("pop", vec![tx_taken]), ("data_out", tx_out), ("not_empty", tx_not_empty), ("not_full", vec![tx_not_full]), ("valid", vec![tx_valid])]);
+    b.inst("rx_queue", &queue, &[("reset", vec![rx_reset]), ("push", vec![rx_push]), ("data_in", rx_entry), ("pop", vec![rx_pop]), ("data_out", rx_out), ("not_empty", vec![rx_not_empty]), ("not_full", vec![rx_not_full]), ("valid", vec![rx_head_valid])]);
+    b.inst("tx_queue", &queue, &[("reset", vec![reset]), ("push", vec![tx_push]), ("data_in", tx_entry), ("pop", vec![tx_taken]), ("data_out", tx_out), ("not_empty", tx_not_empty), ("not_full", vec![tx_not_full]), ("valid", vec![tx_valid])]);
     gen.add(b.finish())
 }
 
@@ -704,8 +905,14 @@ impl Peripheral for NoPeripheral {
 pub struct SocBus<P = NoPeripheral> {
     pub program: Vec<u32>,
     pub ram: Vec<u32>,
-    pub rx: VecDeque<u8>,
+    /// The receive queue: each byte with its mark above it (`MARK_START`, `MARK_END`).
+    pub rx: VecDeque<u16>,
+    /// The bytes the chip has sent, framed as they leave its pins.
     pub tx: Vec<u8>,
+    /// Where the port's reading of the host's bytes stands: inside a message, and after an
+    /// escape.
+    inside: bool,
+    escaping: bool,
     pub image: Vec<u32>,
     pub writes: Vec<LoadWrite>,
     registers: [u32; 6],
@@ -729,11 +936,16 @@ impl SocBus<NoPeripheral> {
 
 impl<P: Peripheral> SocBus<P> {
     pub fn new(config: SocConfig, program: &[u32], data: &[u32], input: &[u8], peripheral: P) -> Self {
-        let mut image = vec![0; 1 << config.program_bits];
+        if program.len() > config.program_words as usize {
+            panic!("the firmware takes {} words and the program memory holds {}", program.len(), config.program_words);
+        }
+        let mut image = vec![0; config.program_words as usize];
         image[..program.len()].copy_from_slice(program);
         let mut ram = vec![0; 1 << config.data_bits];
         ram[..data.len()].copy_from_slice(data);
-        Self { program: image, ram, rx: input.iter().copied().collect(), tx: Vec::new(), image: Vec::new(), writes: Vec::new(), registers: [0; 6], fill: false, clear_requested: false, now: 0, busy_until: None, crc: 0, peripheral, last_access: None }
+        let mut bus = Self { program: image, ram, rx: VecDeque::new(), tx: Vec::new(), inside: false, escaping: false, image: Vec::new(), writes: Vec::new(), registers: [0; 6], fill: false, clear_requested: false, now: 0, busy_until: None, crc: 0, peripheral, last_access: None };
+        bus.send(input);
+        bus
     }
 
     /// The state right after the load controller has copied the firmware from `image`.
@@ -753,6 +965,7 @@ impl<P: Peripheral> SocBus<P> {
     /// dropped, and the firmware sees the request in the port's status.
     pub fn clear(&mut self) {
         self.rx.clear();
+        (self.inside, self.escaping) = (false, false);
         self.clear_requested = true;
     }
 
@@ -761,9 +974,31 @@ impl<P: Peripheral> SocBus<P> {
         self.clear_requested
     }
 
-    /// The host sends more bytes.
+    /// The host sends more bytes, framed: the port reads them into its queue as the gates do.
     pub fn send(&mut self, bytes: &[u8]) {
-        self.rx.extend(bytes);
+        for &byte in bytes {
+            if !self.inside {
+                if byte != FRAME_END && byte != FRAME_ESCAPE {
+                    self.rx.push_back((MARK_START << 8) as u16 | byte as u16);
+                    self.inside = true;
+                }
+            } else if byte == FRAME_END {
+                self.rx.push_back((MARK_END << 8) as u16);
+                (self.inside, self.escaping) = (false, false);
+            } else if self.escaping {
+                let restored = match byte {
+                    FRAME_ESCAPED_END => FRAME_END,
+                    FRAME_ESCAPED_ESCAPE => FRAME_ESCAPE,
+                    other => other,
+                };
+                self.rx.push_back(restored as u16);
+                self.escaping = false;
+            } else if byte == FRAME_ESCAPE {
+                self.escaping = true;
+            } else {
+                self.rx.push_back(byte as u16);
+            }
+        }
     }
 
     /// Copies a segment, or fills it with zeros, and notes when the controller becomes free
@@ -791,7 +1026,8 @@ impl<P: Peripheral> Rv32Bus for SocBus<P> {
     }
 
     fn fetch(&mut self, address: u32) -> u32 {
-        self.program[(address as usize / 4) & (self.program.len() - 1)]
+        // Past the last bank no bank answers, and the gates read zeros.
+        self.program.get((address as usize / 4) & ((1 << self.program.len().next_power_of_two().ilog2()) - 1)).copied().unwrap_or(0)
     }
 
     fn read(&mut self, address: u32) -> u32 {
@@ -814,10 +1050,19 @@ impl<P: Peripheral> SocBus<P> {
     fn read_from(&mut self, address: u32) -> u32 {
         match address >> 28 {
             1 => self.ram[(address as usize / 4) & (self.ram.len() - 1)],
-            2 => match address & 0xC {
+            2 => match address & 0x1C {
                 0 => self.rx.pop_front().unwrap_or(0) as u32,
-                4 => !self.rx.is_empty() as u32 | if self.clear_requested { CLEAR_REQUESTED } else { 0 },
+                4 => {
+                    let head = match self.rx.front().map(|e| (*e >> 8) as u32) {
+                        Some(0) => RX_BYTE,
+                        Some(MARK_START) => RX_START,
+                        Some(MARK_END) => RX_END,
+                        _ => 0,
+                    };
+                    head | if self.clear_requested { CLEAR_REQUESTED } else { 0 }
+                }
                 12 => 1,
+                16 => self.rx.front().copied().unwrap_or(0) as u32,
                 _ => 0,
             },
             3 => match (address >> 2) & 15 {
@@ -840,8 +1085,18 @@ impl<P: Peripheral> SocBus<P> {
                     }
                 }
             }
-            2 if address & 0xC == 8 => self.tx.push(data as u8),
-            2 if address & 0xC == 4 => self.clear_requested = false,
+            2 => match address & 0x1C {
+                // A byte inside a message: either mark goes as the escape and its code.
+                8 => match data as u8 {
+                    FRAME_END => self.tx.extend([FRAME_ESCAPE, FRAME_ESCAPED_END]),
+                    FRAME_ESCAPE => self.tx.extend([FRAME_ESCAPE, FRAME_ESCAPED_ESCAPE]),
+                    byte => self.tx.push(byte),
+                },
+                4 => self.clear_requested = false,
+                16 => self.tx.push(data as u8),
+                20 => self.tx.push(FRAME_END),
+                _ => {}
+            },
             3 => match (address >> 2) & 15 {
                 index @ 0..=5 => self.registers[index as usize] = data,
                 6 => self.start_transfer(),

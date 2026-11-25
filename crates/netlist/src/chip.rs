@@ -971,7 +971,9 @@ pub struct GenerationSetup {
     /// Temperature times 256.
     pub temperature: u32,
     pub seed: u32,
-    /// The host exchanges 32-bit token numbers instead of text.
+    /// The chip has no tokenizer: it takes turns and writes answers as 32-bit token numbers
+    /// only, and refuses text (see `port::kind`). With one, a turn's answer comes as the turn
+    /// came, text or tokens.
     pub raw_tokens: bool,
     /// Tokens that end the generation, as many as the model has.
     pub stop: Vec<u32>,
