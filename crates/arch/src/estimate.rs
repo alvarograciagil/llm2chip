@@ -559,7 +559,7 @@ pub fn system_prompt_tokens(text: &str) -> u32 {
     if text.is_empty() { 0 } else { (text.len() as u32).div_ceil(4) + 6 }
 }
 
-/// The CPU's program memory: 48 KB, in banks of 32 and 16 KB, for the firmware's 35.6 KB
+/// The CPU's program memory: 48 KB, in banks of 32 and 16 KB, for the firmware's 35.9 KB
 /// and room to grow (`netlist::soc::PROGRAM_WORDS`).
 pub const FIRMWARE_PROGRAM_BYTES: u32 = 48 << 10;
 

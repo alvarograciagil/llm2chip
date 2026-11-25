@@ -96,6 +96,10 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         })
         .collect();
     let host_dropped = b.wire("host_dropped", 1)[0];
+    // The pin's reset, which alone clears the image's base, and the firmware's reboot from
+    // another image, which restarts everything else as the pin does.
+    let power_reset = b.wire("power_reset", 1)[0];
+    let reboot = b.wire("reboot", 1)[0];
     let halted = b.output("halted", 1);
     let booting = b.output("booting", 1);
     let image_req_valid = b.output("image_req_valid", 1);
@@ -209,6 +213,8 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         ("peripheral_wdata", bus_wdata.clone()),
         ("peripheral_rdata", bus_rdata.clone()),
         ("host_dropped", vec![host_dropped]),
+        ("power_reset", vec![power_reset]),
+        ("reboot", vec![reboot]),
     ];
     control_pins.extend(serial);
     b.inst("control", &control, &control_pins);
@@ -235,7 +241,11 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         let (first, synced) = (l.fresh(), l.fresh());
         l.connect_flops(&[external_reset], &[first]);
         l.connect_flops(&[first], &[synced]);
-        let external_reset = synced;
+        l.b.or_to(synced, Bit::Zero, power_reset);
+        // A reboot from another image starts the same way, a cycle after the firmware asks.
+        let rebooting = l.fresh();
+        l.connect_flops(&[reboot], &[rebooting]);
+        let external_reset = l.or(synced, rebooting);
         // The chip leaves reset only after a fixed delay, so that every part starts together.
         let stretch = l.fresh_bus(4);
         let released = l.fresh();

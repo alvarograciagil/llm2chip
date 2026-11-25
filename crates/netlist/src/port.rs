@@ -32,6 +32,9 @@ pub mod kind {
     pub const STOP: u8 = 0x13;
     /// Clears the conversation, as the clear pin does.
     pub const CLEAR: u8 = 0x14;
+    /// Starts the chip again from the image at this word of the image memory (4 bytes): its
+    /// boot report and its ready answer.
+    pub const LOAD: u8 = 0x15;
 
     /// The chip has loaded its image: a byte a segment, `.` for a good checksum, `E` for one
     /// that failed.
@@ -160,6 +163,11 @@ pub fn stop() -> Vec<u8> {
 
 pub fn clear() -> Vec<u8> {
     frame(kind::CLEAR, &[])
+}
+
+/// Starts the chip again from the image at `base` in its image memory.
+pub fn load(base: u32) -> Vec<u8> {
+    frame(kind::LOAD, &base.to_le_bytes())
 }
 
 /// A message as it arrived: its kind and its bytes, the framing undone.

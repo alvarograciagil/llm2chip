@@ -10,6 +10,7 @@ bytes, and an end byte 0xC0, with 0xC0 and 0xDB inside a message sent as 0xDB 0x
     python3 chip_host.py PORT tokens 1 2 3
     python3 chip_host.py PORT status | options | clear | stop
     python3 chip_host.py PORT set temperature_x256 192
+    python3 chip_host.py PORT load 262144     (start again from the image at that word)
 
 Without a port (`-` instead), it only checks its own framing.
 """
@@ -19,7 +20,7 @@ import sys
 
 END, ESCAPE, ESCAPED_END, ESCAPED_ESCAPE = 0xC0, 0xDB, 0xDC, 0xDD
 TEXT, TOKENS, PICTURE, STREAM = 0x01, 0x02, 0x03, 0x04
-STATUS, OPTIONS, SET, STOP, CLEAR = 0x10, 0x11, 0x12, 0x13, 0x14
+STATUS, OPTIONS, SET, STOP, CLEAR, LOAD = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15
 BOOT, READY, ANSWER_END, ERROR = 0x20, 0x21, 0x22, 0x2F
 OPTION_NUMBERS = {"max_new_tokens": 5, "greedy": 6, "top_k": 7, "temperature_x256": 8, "seed": 9, "think_budget": 20}
 ENDINGS = ["end token", "limit", "loop", "full context", "stopped", "cleared"]
@@ -77,7 +78,7 @@ def describe(kind, payload):
     if kind == BOOT:
         return f"[boot: {len(payload)} segments, {sum(b != ord('.') for b in payload)} failed]\n", False
     if kind == READY:
-        return f"[ready: room for {word(payload, 0)} positions]\n", False
+        return f"[ready: room for {word(payload, 0)} positions]\n", READY_ENDS[0]
     if kind == ANSWER_END:
         ending = ENDINGS[payload[0]] if payload and payload[0] < len(ENDINGS) else "?"
         position, capacity = word(payload, 1), word(payload, 5)
@@ -97,6 +98,10 @@ def describe(kind, payload):
     return f"[message {kind:#x}: {payload.hex()}]\n", False
 
 
+# A load is answered by the new image's ready.
+READY_ENDS = [False]
+
+
 def request(args):
     what = args[0]
     if what == "ask":
@@ -108,6 +113,8 @@ def request(args):
         if number is None:
             sys.exit(f"options: {', '.join(OPTION_NUMBERS)}")
         return frame(SET, bytes([number]) + struct.pack("<I", int(args[2])))
+    if what == "load":
+        return frame(LOAD, struct.pack("<I", int(args[1], 0)))
     kinds = {"status": STATUS, "options": OPTIONS, "stop": STOP, "clear": CLEAR}
     if what not in kinds:
         sys.exit(__doc__)
@@ -133,6 +140,7 @@ def main():
     if args[:1] == ["--baud"]:
         baud, args = int(args[1]), args[2:]
     message = request(args)
+    READY_ENDS[0] = args[0] == "load"
     import serial
 
     with serial.Serial(port, baud, timeout=0.1) as link:

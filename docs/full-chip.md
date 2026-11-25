@@ -31,6 +31,7 @@ Everything that crosses the host port is a message, both ways, so a host can ask
 | Set an option | `0x12` | Its number and its value | The option with its new value, or an error |
 | Stop | `0x13` | | The answer ends there |
 | Clear | `0x14` | | As the clear pin |
+| Load | `0x15` | A word of the image memory | Starts again from the image there: its boot report, then ready |
 
 | From the chip | Kind | Bytes |
 |---|---|---|
@@ -44,6 +45,8 @@ Everything that crosses the host port is a message, both ways, so a host can ask
 **Between tokens.** Before each token it writes, the firmware looks at the port's status, as it did for the clear pin. A message that is not a turn is handled there and answered at once, so a status asked in the middle of an answer comes back between two tokens. A turn sent during an answer waits for the answer's end. A message the chip answers in the middle of one of its own, such as a stream of words, ends that one first and starts it again after.
 
 **The port's hardware does the framing.** As bytes arrive it takes the escapes out and keeps each byte's place beside it in the receive queue, as a two-bit mark: a message's start (its kind), a byte inside, or its end. The status register tells the CPU what is at the head of the queue: a payload byte (the usual case), a start, an end, or the clear pin. A payload byte costs the firmware what a plain byte port did. On the way out the firmware writes a start (`HOST_TX_START`), the bytes and an end (`HOST_TX_END`), and the hardware puts in the escapes. Reading the head without taking it (`HOST_RX_PEEK`) lets the firmware leave a turn waiting. All this is about a hundred flip-flops and the queues' two extra bits.
+
+**Another model.** The image memory can hold several images, one after another. Every address the load controller asks for has the image's base added (`LOADER_IMAGE_BASE`), which only a power-on reset clears. A load message passes the base down the chain of chips, waits until everything the chip was sending has gone out, sets the base and starts the chip again from it (`LOADER_REBOOT`), as the reset pin does: firmware, weights and description from the new image. Its boot report and its ready answer the message. `a_load_message_starts_the_chip_again_from_another_image` (in `chip.rs`) puts two images in one memory and moves from the first to the second, at instruction level and in gates, with the same messages.
 
 **Integrity** is left to the physical link. The framing limits a lost or corrupted byte to one message, and a host can always clear the conversation and start again.
 
@@ -247,7 +250,7 @@ The estimate shows how long clearing a conversation that filled the context take
 - `the_leading_chips_clear_pin_clears_every_chip_of_the_chain` (in `multichip.rs`, with the slow tests) runs two chips in gates on a board, each with its own layers. After an answer each holds its part of the conversation. The leader's pin zeros both parts, in some 10,600 cycles, and the same question gets the first answer again.
 - `the_firmware_holds_a_conversation_on_a_kept_engine_until_the_clear_pin` (in `tiny_model.rs`) runs the firmware at instruction level on a software die that keeps its engine, as the simulator does: two turns as the whole conversation, then the clear and the first answer again.
 
-**The firmware** takes 35,704 bytes of a program memory of 48 KB, in banks of 32 and 16 KB (`netlist::soc::PROGRAM_WORDS`): the host port's messages took it past 32 KB. It is built with less inlining (`-inline-threshold=25`, in `firmware/.cargo/config.toml`), which keeps it fast at decoding sound. Reading a word from the host calls nothing in the usual case, so the function saves no registers: what is not a payload byte goes to another function as its last step. With it the toy recogniser's CPU takes 2.06 million cycles, against 2.28 million before the messages.
+**The firmware** takes 35,892 bytes of a program memory of 48 KB, in banks of 32 and 16 KB (`netlist::soc::PROGRAM_WORDS`): the host port's messages took it past 32 KB. It is built with less inlining (`-inline-threshold=25`, in `firmware/.cargo/config.toml`), which keeps it fast at decoding sound. Reading a word from the host calls nothing in the usual case, so the function saves no registers: what is not a payload byte goes to another function as its last step. With it the toy recogniser's CPU takes 2.06 million cycles, against 2.28 million before the messages.
 
 ## Why not everything in gates with Qwen
 

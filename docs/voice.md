@@ -236,7 +236,7 @@ The system's planner adds the CPU's cycles to the die's (`sim::chip::firmware_cy
 | A routine started alone (rows of samples, pairwise sums, each token's routines, each frame's codes, each sample sent back) | 1,000 |
 | A word received or sent | 200 |
 
-Both firmware tests check the measured cycles against that count, with the queue and without, and DAC's with routines shorter and longer than the CPU's work. The firmware takes 35,704 bytes of its 48 KB of program memory.
+Both firmware tests check the measured cycles against that count, with the queue and without, and DAC's with routines shorter and longer than the CPU's work. The firmware takes 35,892 bytes of its 48 KB of program memory.
 
 ## Several programs on several dies
 

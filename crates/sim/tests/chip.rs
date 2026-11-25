@@ -540,6 +540,92 @@ fn the_host_asks_and_steers_the_chip_in_messages() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Two images in one image memory, alike but for the most tokens an answer takes: the chip
+/// boots from the first, and a load message starts it again from the second, at instruction
+/// level and in gates, with the same messages.
+#[test]
+fn a_load_message_starts_the_chip_again_from_another_image() {
+    use netlist::port::{self, Event};
+    let Some(firmware) = build_firmware() else { return };
+    let dir = std::env::temp_dir().join(format!("llm2chip-load-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    make_checkpoint(&dir);
+    let program = compile_qwen3_5(CONFIG).unwrap();
+    let base = netlist::DieConfig { microcode_bits: 15, ..cell_die_config() };
+    let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), base, CHIP_TOKENS).unwrap();
+    let code = layout.microprogram(&program).unwrap();
+    let die = sim::chip::with_code_dictionary(sim::chip::compact_die(base, &layout), &code);
+    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6, links: Default::default() }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let segments = [image_segments(&die, &code, &layout), cell_segments(&die, &layout, &Weights::open(&dir).unwrap()).unwrap()].concat();
+    let image = |max_new: u32| {
+        let setup = GenerationSetup { max_new, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
+        let info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
+        build_image(&firmware.program, &firmware.data, &info, &[], &segments).unwrap()
+    };
+    let first = image(2);
+    let second_at = first.len().next_multiple_of(1024) as u32;
+    let mut memory = first.clone();
+    memory.resize(second_at as usize, 0);
+    memory.extend(image(5));
+    let input = [port::options(), port::load(second_at), port::options()].concat();
+    let max_new = |events: &[Event]| events.iter().filter_map(|e| if let Event::Options(o) = e { Some(o[0].1) } else { None }).collect::<Vec<u32>>();
+
+    // At instruction level: the bus starts again when the firmware asks, and so does the CPU.
+    let engine = VmEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
+    let model = ChipModel::new(engine, code.clone(), SamplerModel { config: config.sampler, rng: 0, table: exponential_table() });
+    let mut bus = SocBus::booted_with(config.soc, &memory, &input, model).unwrap();
+    let mut cpu = Rv32Iss::default();
+    while max_new(&port::events(&bus.tx)).len() < 2 {
+        cpu.step(&mut bus);
+        if bus.rebooting() {
+            bus.reboot().unwrap();
+            cpu = Rv32Iss::default();
+            // The rest of the host's question comes after the reboot, as on the pins.
+            bus.send(&port::options());
+        }
+        assert!(cpu.cycle < 50_000_000, "{:?}", port::events(&bus.tx));
+    }
+    let events = port::events(&bus.tx);
+    assert_eq!(max_new(&events), [2, 5], "the second image's options: {events:?}");
+    assert_eq!(events.iter().filter(|e| matches!(e, Event::Boot { failed: 0, .. })).count(), 2, "a boot report for each image");
+
+    // In gates: the image's base before every address the load controller asks for.
+    let mut sim = Simulator::new(&chip_design(config)).unwrap();
+    let mut pending = None;
+    boot(&mut sim, &memory, &[], &mut pending);
+    sim.set("host_tx_ready", 1).unwrap();
+    let mut to_send: std::collections::VecDeque<u8> = [port::options(), port::load(second_at)].concat().into();
+    let mut output = Vec::new();
+    let mut sent_again = false;
+    for cycle in 0.. {
+        assert!(cycle < 50_000_000, "{:?}", port::events(&output));
+        sim.set("image_resp_valid", pending.is_some() as u64).unwrap();
+        sim.set("image_resp_data", pending.unwrap_or(0) as u64).unwrap();
+        sim.set("host_rx_valid", !to_send.is_empty() as u64).unwrap();
+        sim.set("host_rx_data", to_send.front().copied().unwrap_or(0) as u64).unwrap();
+        sim.settle();
+        pending = (sim.get("image_req_valid").unwrap() == 1).then(|| memory[sim.get("image_req_addr").unwrap() as usize]);
+        if !to_send.is_empty() && sim.get("host_rx_ready").unwrap() == 1 {
+            to_send.pop_front();
+        }
+        if sim.get("host_tx_valid").unwrap() == 1 {
+            output.push(sim.get("host_tx_data").unwrap() as u8);
+        }
+        let events = port::events(&output);
+        // Once the second image says it is ready, the host asks again.
+        if !sent_again && events.iter().filter(|e| matches!(e, Event::Ready { .. })).count() == 2 {
+            to_send.extend(port::options());
+            sent_again = true;
+        }
+        if max_new(&events).len() == 2 {
+            break;
+        }
+        sim.tick();
+    }
+    assert_eq!(port::events(&output), events, "the same messages as at instruction level");
+    std::fs::remove_dir_all(dir).ok();
+}
+
 /// The clear pin and the load controller's fills in gates: a chip holding a conversation
 /// answers, is cleared while it waits, and answers the same question again, writing what the
 /// instruction-level chip writes, byte for byte and cycle for cycle.

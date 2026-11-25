@@ -33,6 +33,7 @@ const K_OPTIONS: u32 = 0x11;
 const K_SET: u32 = 0x12;
 const K_STOP: u32 = 0x13;
 const K_CLEAR: u32 = 0x14;
+const K_LOAD: u32 = 0x15;
 const K_BOOT: u32 = 0x20;
 const K_READY: u32 = 0x21;
 const K_END: u32 = 0x22;
@@ -118,6 +119,13 @@ const INFO_CONVERSATION: usize = 32;
 const INFO_PARAMETERS: usize = 33;
 /// The load controller writes zeros instead of reading the image while this is set.
 const LOADER_FILL: usize = 9;
+/// Where the image starts in the image memory, and the reboot from it.
+const LOADER_IMAGE_BASE: usize = 10;
+const LOADER_REBOOT: usize = 11;
+/// The send status's bit that says everything has gone out.
+const TX_EMPTY: u32 = 2;
+/// The order along the chain to start again from another image, with its base.
+const LOAD_ROUTINE: u32 = u32::MAX - 1;
 /// The order along the chain to clear the conversation, with the positions it used.
 const CLEAR_ROUTINE: u32 = u32::MAX;
 /// The host port's status bit that says the clear pin was raised.
@@ -354,11 +362,32 @@ fn control(kind: u32) {
             skip_message();
             unsafe { ABORT = true };
         }
+        K_LOAD => {
+            let base = payload_word().unwrap_or(0);
+            skip_message();
+            if chips() > 1 {
+                chain_send(LOAD_ROUTINE);
+                chain_send(base);
+                chain_send(0);
+            }
+            // What was being sent goes out first; the new image's boot report answers.
+            unsafe { while read_volatile(HOST_TX_STATUS) & TX_EMPTY == 0 {} }
+            load_image(base);
+        }
         _ => {
             skip_message();
             error(if is_turn(kind) { E_UNEXPECTED } else { E_UNKNOWN }, kind);
         }
     }
+}
+
+/// Starts the chip again from the image at `base` in the image memory, as a reset does.
+fn load_image(base: u32) -> ! {
+    unsafe {
+        write_volatile(LOADER.add(LOADER_IMAGE_BASE), base);
+        write_volatile(LOADER.add(LOADER_REBOOT), 1);
+    }
+    loop {}
 }
 
 /// The conversation's capacity in positions, zero for a chip that answers once.
@@ -614,6 +643,9 @@ fn serve_chain(id: u32) -> ! {
         if routine == CLEAR_ROUTINE {
             clear_state(token);
             continue;
+        }
+        if routine == LOAD_ROUTINE {
+            load_image(token);
         }
         start_die(routine, token, position);
         wait_for_die();
