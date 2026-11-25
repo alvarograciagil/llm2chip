@@ -1779,11 +1779,13 @@ mod tests {
     fn fpga_preset_is_slow_but_runs_the_full_model() {
         let p = ChipParams {
             node: "fpga_u250".into(),
+            fpga_board: "alveo-u250".into(),
             max_params_g: 28.0,
             context_tokens: 2048,
             macs_per_die: 1024,
             vector_lanes_per_die: 256,
-            freq_ghz: 0.25,
+            vector_units_per_die: 32,
+            freq_ghz: 0.2,
             weight_backend: WeightBackend::ExternalDdr,
             kv_backend: KvBackend::ExternalDdr,
             ..Default::default()

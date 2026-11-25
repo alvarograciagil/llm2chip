@@ -22,11 +22,14 @@ const BUILTIN_MODELS: [(&str, &str, &str); 6] = [
     ("stories260k", "stories260K", include_str!("../../../models/stories260k.json")),
 ];
 
-const PRESETS: [&str; 4] = [
+const PRESETS: [&str; 7] = [
     include_str!("../../../presets/qwen-sram.json"),
+    include_str!("../../../presets/qwen-voice.json"),
+    include_str!("../../../presets/qwen-stacked-dram.json"),
+    include_str!("../../../presets/qwen-moe.json"),
     include_str!("../../../presets/llama-rom.json"),
     include_str!("../../../presets/fpga-u250.json"),
-    include_str!("../../../presets/stories-180nm.json"),
+    include_str!("../../../presets/fpga-ulx3s.json"),
 ];
 
 fn to_js<T: serde::Serialize>(value: &T) -> Result<String, JsError> {

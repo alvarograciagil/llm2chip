@@ -1,0 +1,7 @@
+{
+ "id": "qwen-stacked-dram",
+ "name": "Qwen3.8-27B on stacked DRAM",
+ "model": "qwen3.8-27b",
+ "description": "The weights in DRAM stacked on the logic: one die of about 260 mm² instead of 14, at the cost of more power.",
+ "params": { "target_tok_s": 4000, "weight_backend": "stacked_dram" }
+}

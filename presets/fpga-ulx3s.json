@@ -1,0 +1,24 @@
+{
+ "id": "fpga-ulx3s",
+ "name": "stories260K on a ULX3S",
+ "model": "stories260k",
+ "description": "A board of about 150 $ with open-source tools: the clock was measured placing and routing the chip, the weights sit in its SDRAM and the host talks over the serial port.",
+ "params": {
+  "target_tok_s": 0,
+  "node": "fpga_u250",
+  "fpga_board": "ulx3s-85f",
+  "max_params_g": 0.00028,
+  "context_tokens": 256,
+  "macs_per_die": 8,
+  "vector_lanes_per_die": 1,
+  "vector_units_per_die": 1,
+  "function_units_per_die": 1,
+  "auto_circuit": false,
+  "factor_steps": 2,
+  "use_model_mix": false,
+  "group_size": 0,
+  "weight_bits": 8,
+  "weight_backend": "external_ddr",
+  "host_uart": true
+ }
+}

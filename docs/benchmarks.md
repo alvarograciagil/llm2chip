@@ -51,7 +51,7 @@ Where each die's area goes:
 
 Weight memory takes 89 % of the silicon: this kind of chip is a memory with multipliers inside, and SRAM density, which has barely improved since N5, sets its size and cost. That is why weight format matters more than anything else (see below), and why the estimator offers ROM (weights fixed at manufacture) and stacked DRAM as alternatives.
 
-For reference, the same estimator gives 787 mm² and 15,234 tok/s for the Taalas HC1 preset (Llama 3.1 8B in mask ROM, N6), against the 815 mm² and more than 15,000 tok/s published for that chip ([research.md](research.md)).
+For reference, the same estimator gives 781 mm² and 15,122 tok/s for the Taalas HC1 preset (Llama 3.1 8B in mask ROM, N6), against the 815 mm² and more than 15,000 tok/s published for that chip ([research.md](research.md)).
 
 ### Speed from the circuit
 

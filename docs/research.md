@@ -11,7 +11,7 @@ Reference notes for calibrating the estimator and deciding what is worth buildin
 | Groq 3 LPU | 500 MB SRAM | 150 TB/s | No comparable figure | Deterministic dataflow |
 | Etched Sohu | 144 GB HBM3E | About 1.8 times an H100 | 62,500 tok/s per chip, announced | Pre-production, no public access |
 
-The application's calibration preset gives 787 mm² and 15,234 tok/s for the HC1, within the range EE Times measured.
+The application's calibration preset gives 781 mm² and 15,122 tok/s for the HC1, within the range EE Times measured.
 
 ## What we learned and what it changes
 

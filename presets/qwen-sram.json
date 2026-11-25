@@ -1,2 +1,7 @@
-{ "id": "qwen-sram", "name": "Qwen3.8-27B in SRAM", "model": "qwen3.8-27b",
-  "description": "The base architecture: loadable weights in cells spread over the chip.", "params": {} }
+{
+ "id": "qwen-sram",
+ "name": "Qwen3.8-27B in SRAM",
+ "model": "qwen3.8-27b",
+ "description": "The base architecture: loadable weights in SRAM next to their multipliers, spread over 14 dies, about 4,000 tok/s.",
+ "params": { "target_tok_s": 4000 }
+}

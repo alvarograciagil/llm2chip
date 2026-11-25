@@ -1,0 +1,12 @@
+{
+ "id": "qwen-voice",
+ "name": "Qwen3.8-27B that listens and speaks",
+ "model": "qwen3.8-27b",
+ "description": "The base architecture with dies of its own for speech: Moonshine listens, OuteTTS and DAC speak.",
+ "params": {
+  "target_tok_s": 4000,
+  "speech_in": true,
+  "speech_out": true,
+  "system_prompt": "You are a voice assistant. Answer in one short sentence."
+ }
+}

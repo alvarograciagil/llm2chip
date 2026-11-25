@@ -1,16 +1,18 @@
 {
  "id": "fpga-u250",
- "name": "Qwen3.8-27B on an FPGA U250",
+ "name": "Qwen3.8-27B on an AMD Alveo U250",
  "model": "qwen3.8-27b",
- "description": "The whole model on an FPGA with DDR4: slow, but buildable.",
+ "description": "The whole model on a data-centre FPGA with its DDR4: slow, but buildable.",
  "params": {
+  "target_tok_s": 0,
   "node": "fpga_u250",
+  "fpga_board": "alveo-u250",
   "max_params_g": 28,
   "context_tokens": 2048,
   "macs_per_die": 1024,
   "vector_lanes_per_die": 256,
-  "freq_ghz": 0.25,
-  "die_max_mm2": 858,
+  "vector_units_per_die": 32,
+  "freq_ghz": 0.2,
   "weight_backend": "external_ddr",
   "kv_backend": "external_ddr"
  }

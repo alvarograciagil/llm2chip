@@ -1,9 +1,10 @@
 {
  "id": "llama-rom",
- "name": "Llama 8B in ROM, HC1-style",
+ "name": "Llama 3.1 8B in ROM, HC1-style",
  "model": "llama-3.1-8b",
- "description": "A model burnt into ROM, close to Taalas' approach.",
+ "description": "A model burnt into mask ROM on one die, as Taalas' HC1: about 15,000 tok/s.",
  "params": {
+  "target_tok_s": 0,
   "max_params_g": 8.1,
   "weight_backend": "rom",
   "use_model_mix": false,
