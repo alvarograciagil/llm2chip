@@ -196,6 +196,7 @@ This is an architecture and logic design, not a manufacturable layout: there is 
 | [`docs/examples.md`](docs/examples.md) | Every example and how to run it, and a walk through the application |
 | [`docs/simulation.md`](docs/simulation.md) | How the simulation works: floating point, the exact machine, instruction level and gates, and how each checks the next |
 | [`docs/full-chip.md`](docs/full-chip.md) | The whole chip: blocks, simulation levels, several chips, the system prompt, conversations and the clear pin, the fixed microprogram |
+| [`docs/host-links.md`](docs/host-links.md) | The host port's physical links: byte port, serial port, quad SPI and I2C, with their commands, timing and hosts |
 | [`docs/parameters.md`](docs/parameters.md) | Every parameter of the design, as the application explains it |
 | [`docs/vision.md`](docs/vision.md) | Images on the chip: the vision encoder, Janus-Pro and Show-o |
 | [`docs/voice.md`](docs/voice.md) | Voice on the chip: speech to text (Moonshine, also while it is spoken), text to speech (OuteTTS and DAC), the firmware's schedules and command queue, and several programs on several dies |

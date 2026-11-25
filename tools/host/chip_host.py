@@ -137,7 +137,8 @@ class Serial:
     def __init__(self, port, baud):
         import serial
 
-        self.link = serial.Serial(port, baud, timeout=0.1)
+        # With the chip's clear-to-send line, the adapter waits while its queue fills.
+        self.link = serial.Serial(port, baud, timeout=0.1, rtscts=True)
 
     def write(self, data):
         self.link.write(data)
@@ -182,9 +183,10 @@ class I2c:
         if not waiting:
             time.sleep(0.01)
             return b""
-        # Entries waiting; an escaped byte goes as two, and with nothing left the chip sends
-        # ends, which the reader skips.
-        return self.os.read(self.fd, 2 + 2 * waiting)[2:]
+        # No more than what waits: past it the chip sends ends, which would cut a message it
+        # is still writing. An escaped byte is one entry and two bytes, so the rest of it
+        # comes in the next read.
+        return self.os.read(self.fd, 2 + waiting)[2:]
 
 
 def main():

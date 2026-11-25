@@ -350,7 +350,7 @@ How many activations each link passes per cycle. The hidden vector crosses every
 
 ### Serial port (UART) (`host_uart`)
 
-Adds a serial port to the host port, beside its byte port: two pins, a byte in ten bits. It carries the same messages, and the chip answers on the link the last message came from. A board's USB serial port is the usual one; it cannot hold the chip back, so a byte that arrives while another link is inside a message is dropped and counted.
+Adds a serial port to the host port, beside its byte port: a byte in ten bits, and a clear-to-send line that tells the host to wait while the receive queue fills or another link is inside a message. It carries the same messages, and the chip answers on the link the last message came from. A board's USB serial port is the usual one, with hardware flow control.
 
 *On or off.*
 

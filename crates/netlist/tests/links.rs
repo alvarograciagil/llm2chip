@@ -211,6 +211,33 @@ impl Board {
         got
     }
 
+    /// Reads what waits over I2C, no more than the waiting count each time, until nothing
+    /// does: an escaped byte takes one entry and two bytes, so it can take more than one read.
+    fn i2c_all(&mut self) -> Vec<u8> {
+        let mut got = Vec::new();
+        loop {
+            let [room, waiting] = self.i2c_receive(2)[..] else { unreachable!() };
+            assert_eq!(room, 64, "the receive queue is empty");
+            if waiting == 0 {
+                return got;
+            }
+            let read = self.i2c_receive(2 + waiting as usize);
+            got.extend(&read[2..]);
+        }
+    }
+
+    /// The same over quad SPI: the status, then a read of what waits.
+    fn qspi_receive(&mut self) -> Vec<u8> {
+        let mut got = Vec::new();
+        loop {
+            let waiting = self.qspi(QSPI_STATUS, &[], 2)[1] as usize;
+            if waiting == 0 {
+                return got;
+            }
+            got.extend(self.qspi(QSPI_READ, &[], waiting));
+        }
+    }
+
     /// One quad SPI transaction: the command, the bytes to write, and for a read or the
     /// status the dummy byte and `read` bytes back.
     fn qspi(&mut self, command: u8, write: &[u8], read: usize) -> Vec<u8> {
@@ -254,7 +281,7 @@ fn each_link_is_answered_on_its_own() {
     assert_eq!(board.pin("qspi_irq"), 1, "bytes {:?}, serial {:?}", board.bytes_out, board.uart_out);
     let status = board.qspi(QSPI_STATUS, &[], 2);
     assert!(status[1] > 0, "bytes waiting: {status:?}");
-    let first = board.qspi(QSPI_READ, &[], status[1] as usize + 4);
+    let first = board.qspi_receive();
     let events = port::events(&first);
     assert!(matches!(events[..], [Event::Boot { .. }, Event::Ready { capacity: 0 }]), "{events:?}");
     assert_eq!(board.pin("qspi_irq"), 0, "nothing left to send");
@@ -275,15 +302,16 @@ fn each_link_is_answered_on_its_own() {
     board.qspi(QSPI_WRITE, &port::set(9, 0x1234_C0DB), 0);
     board.run(20_000);
     assert_eq!(board.pin("qspi_irq"), 1, "bytes {:?}, serial {:?}", board.bytes_out, board.uart_out);
-    let waiting = board.qspi(QSPI_STATUS, &[], 2)[1] as usize;
-    let answer = board.qspi(QSPI_READ, &[], waiting + 2);
+    let answer = board.qspi_receive();
     assert_eq!(port::events(&answer), [Event::Options(vec![(9, 0x1234_C0DB)])], "escapes both ways: {answer:?}");
     assert_eq!(port::events(&board.uart_out).len(), 1, "the serial port heard nothing more");
 
     // A serial byte that comes while the byte port is inside a message is dropped and
     // counted; the byte port's message goes on.
+    assert_eq!(board.pin("uart_cts_n"), 0, "the serial port may send");
     board.bytes_in.extend([port::kind::STATUS]);
     board.run(100);
+    assert_eq!(board.pin("uart_cts_n"), 1, "another link holds the port");
     board.uart_send(&[0x55]);
     let mut dropped = 0;
     for _ in 0..DIVIDER * 12 {
@@ -308,11 +336,8 @@ fn each_link_is_answered_on_its_own() {
     assert!(board.i2c_send(&message).iter().all(|t| *t));
     board.run(20_000);
     assert_eq!(board.pin("i2c_irq"), 1);
-    let status = board.i2c_receive(2);
-    assert_eq!(status[0], 64);
-    let read = board.i2c_receive(status[1] as usize + 4);
-    assert_eq!(&read[..2], &[64, status[1]]);
-    assert_eq!(port::events(&read[2..]), [Event::Options(vec![(5, 0xDB_C0_00_07)])], "{read:?}");
+    let read = board.i2c_all();
+    assert_eq!(port::events(&read), [Event::Options(vec![(5, 0xDB_C0_00_07)])], "{read:?}");
     assert_eq!(board.pin("i2c_irq"), 0);
     assert_eq!(port::events(&board.uart_out).len(), 1, "the serial port heard nothing more");
 
@@ -326,8 +351,22 @@ fn each_link_is_answered_on_its_own() {
     assert_eq!(port::events(&board.bytes_out).len(), 3);
     assert_eq!(board.i2c_send(&port::options()), [true, true]);
     board.run(20_000);
-    // What waits is counted in entries, and an escaped byte takes two.
-    let waiting = board.i2c_receive(2)[1] as usize;
-    let read = board.i2c_receive(2 * waiting + 2);
-    assert!(matches!(port::events(&read[2..])[..], [Event::Options(_)]), "{read:?} bytes {:?}", port::events(&board.bytes_out));
+    let read = board.i2c_all();
+    assert!(matches!(port::events(&read)[..], [Event::Options(_)]), "{read:?} bytes {:?}", port::events(&board.bytes_out));
+
+    // The serial port's flow control: with the CPU held, the receive queue fills, and the
+    // clear-to-send line rises once less than a quarter of it is free, at 48 entries of 64.
+    board.sim.set("cpu_hold", 1).unwrap();
+    let stream = port::stream(&[0x0101_0101; 12]);
+    board.uart_send(&stream[..47]);
+    board.run(47 * 10 * DIVIDER as u64 + 4 * DIVIDER as u64);
+    assert_eq!(board.pin("uart_cts_n"), 0, "47 entries in");
+    board.uart_send(&stream[47..48]);
+    board.run(12 * DIVIDER as u64);
+    assert_eq!(board.pin("uart_cts_n"), 1, "48 entries in: wait");
+    // Freed, the CPU drains it, and the host may send again.
+    board.sim.set("cpu_hold", 0).unwrap();
+    board.uart_send(&stream[48..]);
+    board.run(40_000);
+    assert_eq!(board.pin("uart_cts_n"), 0);
 }

@@ -86,7 +86,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         .soc
         .links
         .uart
-        .map(|_| vec![("uart_rx", b.input("uart_rx", 1)), ("uart_tx", b.output("uart_tx", 1))])
+        .map(|_| vec![("uart_rx", b.input("uart_rx", 1)), ("uart_tx", b.output("uart_tx", 1)), ("uart_cts_n", b.output("uart_cts_n", 1))])
         .unwrap_or_default()
         .into_iter()
         .chain(if c.soc.links.qspi {

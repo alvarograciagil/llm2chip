@@ -730,10 +730,10 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
         "The firmware's program and the memory where the tokenizer works on the input text.");
     if p.host_uart || p.host_qspi || p.host_i2c {
         // Measured on the generated control system (`link_cost` example): a serial port
-        // adds 234 gates and 48 flip-flops, a quad SPI target 227 and 42, an I2C target 275
+        // adds 242 gates and 49 flip-flops, a quad SPI target 227 and 42, an I2C target 275
         // and 36.
         let (u, q, i) = (p.host_uart as u8 as f64, p.host_qspi as u8 as f64, p.host_i2c as u8 as f64);
-        let (gates, flops) = (234.0 * u + 227.0 * q + 275.0 * i, 48.0 * u + 42.0 * q + 36.0 * i);
+        let (gates, flops) = (242.0 * u + 227.0 * q + 275.0 * i, 49.0 * u + 42.0 * q + 36.0 * i);
         push("host_links", "Host port links", (gates * tech.and_um2 + flops * tech.ff_um2) * um2 * ROUTING_OVERHEAD,
             "The serial port, quad SPI and I2C targets beside the host port's byte port: each carries the same messages, and the chip answers on the one the last message came from.");
     }

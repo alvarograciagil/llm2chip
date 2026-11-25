@@ -81,7 +81,8 @@ pub const TARGET_BITS: u32 = 4;
 /// from, and before any, on the first of these it has, or the byte port.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct HostLinks {
-    /// A serial port (`uart_rx`, `uart_tx`, 8N1), at this many of the chip's clocks a bit.
+    /// A serial port (`uart_rx`, `uart_tx`, 8N1), at this many of the chip's clocks a bit,
+    /// with a clear-to-send line (`uart_cts_n`) for the host's flow control.
     pub uart: Option<u32>,
     /// A quad SPI target (`qspi_*`), with an interrupt line that says it has something to
     /// send. Its clock may be up to an eighth of the chip's.
@@ -858,7 +859,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
     // the queue was full. Serial links cannot be held back.
     let host_dropped = b.output("host_dropped", 1)[0];
     let links = config.links;
-    let uart_pins = links.uart.map(|_| (b.input("uart_rx", 1)[0], b.output("uart_tx", 1)[0]));
+    let uart_pins = links.uart.map(|_| (b.input("uart_rx", 1)[0], b.output("uart_tx", 1)[0], b.output("uart_cts_n", 1)[0]));
     let i2c_pins = links.i2c.map(|_| (b.input("i2c_scl", 1)[0], b.input("i2c_sda", 1)[0], b.output("i2c_sda_low", 1)[0], b.output("i2c_irq", 1)[0]));
     let qspi_pins = links.qspi.then(|| (b.input("qspi_sck", 1)[0], b.input("qspi_cs_n", 1)[0], b.input("qspi_in", 4), b.output("qspi_out", 4), b.output("qspi_oe", 1)[0], b.output("qspi_irq", 1)[0]));
     assert!(config.fifo_bits <= 7, "the quad SPI status counts the queues in a byte");
@@ -1117,7 +1118,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         let on_i2c = l.equals(&active, LINK_I2C);
         // Each link's byte, as it arrives.
         let (uart_valid, uart_byte) = match (links.uart, uart_pins) {
-            (Some(divider), Some((line, _))) => uart_receiver(&mut l, line, divider, reset),
+            (Some(divider), Some((line, _, _))) => uart_receiver(&mut l, line, divider, reset),
             _ => (Bit::Zero, constant(0, 8)),
         };
         // The quad SPI target's state, read and written below: the clock's edges through
@@ -1341,12 +1342,30 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         }
         let mut link_ready = l.and(host_tx_ready, on_bytes);
         let mut lines_idle = Bit::One;
-        if let (Some(divider), Some((_, line))) = (links.uart, uart_pins) {
+        if let (Some(divider), Some((_, line, cts_n))) = (links.uart, uart_pins) {
             l.b.group("Host port: serial link");
             let offered = l.and(tx_valid, on_uart);
             let (idle, out) = uart_transmitter(&mut l, offered, &shown, divider, reset);
             lines_idle = idle;
             l.b.or_to(out, Bit::Zero, line);
+            // Clear to send: high, the host waits, while three quarters of the receive
+            // queue are in use (its count has the top bit, or the next two) or another link holds
+            // the port. Through a flip-flop, so the pin is clean.
+            let f = config.fifo_bits as usize;
+            assert!(f >= 2, "a serial port's flow control needs a queue of four entries or more");
+            let filling = {
+                let a = l.and(rx_count[f - 1], rx_count[f - 2]);
+                l.or(rx_count[f], a)
+            };
+            let held = {
+                let elsewhere = l.not(on_uart);
+                l.and(inside, elsewhere)
+            };
+            let wait = l.or(filling, held);
+            let wait = unless_reset(&mut l, &[wait], reset)[0];
+            let kept = l.fresh();
+            l.connect_flops(&[wait], &[kept]);
+            l.b.or_to(kept, Bit::Zero, cts_n);
             let ready = l.and(idle, on_uart);
             link_ready = l.or(link_ready, ready);
         }
