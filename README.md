@@ -66,6 +66,8 @@ What the schematic view draws is the same netlist that is simulated and exported
 | Chip-to-chip links | Data and commands with error correction and flow control |
 | Reliability and debug | Memory self-test, spare rows, JTAG, scan chains and ATPG patterns, counters and a debug port |
 
+A chip can carry a fixed system prompt in its image, and it holds a conversation: each question goes on over the cache the earlier ones left, until a clear pin empties it without reloading the weights ([full chip](docs/full-chip.md#a-conversation-and-the-clear-pin)).
+
 All the chips in a system come from the same netlist and read the same image. One pin decides which one leads; at boot they count themselves along the control chain, and each one takes its part of the model.
 
 ## The application
@@ -75,8 +77,9 @@ A web interface backed by a local engine (or a desktop app):
 - **Floorplan:** the chip's areas, zooming from the whole system down to a cell.
 - **How it works:** the operations the model performs, layer by layer, and where each one runs.
 - **Schematic:** the real circuit by area, down to each logic gate, simulated step by step.
-- **Simulator:** type a prompt and run it on the chip, choosing how much of each block to simulate.
-- **Images:** draw a picture from a text, or retouch a marked region of one, with Show-o, optionally exactly as the chip would (its cells, its addressing and its firmware's sampling loop). Janus-Pro draws from the Simulator view.
+- **Simulator:** type a prompt and run it on the chip, choosing how much of each block to simulate. Questions follow one another as a conversation over the chip's cache, with how much of its context they take; a new conversation raises the chip's clear pin.
+- **Images:** draw a picture from a text, or retouch a marked region of one, with Show-o, optionally exactly as the chip would (its cells, its addressing and its firmware's sampling loop). Janus-Pro draws from the Simulator view. Shown when the project draws images, an option that counts the drawing die in the floorplan.
+- **Listen and Speak:** a spoken question heard, answered and said aloud, or a text said, each stage in the chip's arithmetic, and the dies a chip that listens or speaks needs. Shown when the project listens or speaks.
 - **Explorer:** parameter sweeps, the Pareto frontier, format comparisons and calibration.
 - **Optimise:** say what matters most (speed, silicon, silicon per tok/s or energy per token) and the limits a design must meet, and the engine searches numbers of chips, ways of sharing (including the group size), units, lanes and cells, measuring each on its generated circuit, then recommends one with its alternatives and applies it to the designer.
 - **Numerics:** the chip's arithmetic against floating point, layer by layer and token by token.
@@ -152,6 +155,7 @@ The most used options:
 - **Tokenizer.** The firmware's tokenizer is compiled from each model's `tokenizer.json` and matches the reference library on thousands of difficult texts, including the real files of Llama 3.2, Mistral 7B, Mistral Nemo and DeepSeek V3.
 - **Images.** The real Show-o runs on the die as the chip addresses it, with its weights in 8-bit cells: in one pass, 61 of 64 masked places get the same best code as floating point. MAGVIT-v2 runs in the chip's arithmetic with 49.6 dB PSNR (decoder) and 99.3 % of bits equal (encoder).
 - **Voice.** Moonshine, streaming Moonshine and OuteTTS with DAC match Transformers on their real weights, and in the chip's arithmetic a spoken question is heard and answered aloud. Toy versions of all three run in gates bit for bit, Moonshine's whole chip included: its firmware orders the die's routines through a command queue, the same bytes in the same 1.19 million cycles as the instruction level ([voice](docs/voice.md)).
+- **Conversation.** A chip that holds a conversation answers a second question as one question with the whole conversation would, and its clear pin zeros its cache and recurrent state. This holds at instruction level, in gates on a whole chip, and in gates on two chained chips, where only the leader's pin is wired. The simulator's engine, the real firmware and the browser keep the same cache and give the same answers.
 - **Formats and export.** Every weight format and multiplier is checked against reference arithmetic, and the exported Verilog and VHDL run in external simulators.
 - **Physical design.** The compute cell and a tile with a real SRAM macro go through OpenROAD on open PDKs, which calibrates the estimator; the FPGA version of the chip is synthesized with Yosys and placed and routed with nextpnr at 35.4 MHz on an ECP5.
 
@@ -178,6 +182,7 @@ This is an architecture and logic design, not a manufacturable layout: there is 
 - **Dies with fewer vector units than heads** take the heads in rounds: the program repeats each loop over heads once a round, and each unit keeps a copy of its heads' cache for every round. Folding the layers into one loop, which would shrink the program to one layer's and matter on FPGAs, is still to be done ([full chip](docs/full-chip.md#a-fixed-microprogram)).
 - **Manufacturing tests are not complete:** there are memory self-test, JTAG, scan chains in the chip for manufacturing and ATPG patterns per block with their STIL files, but no patterns for the whole chip's main chain, the chains have pins of their own rather than the JTAG port, and there are no at-speed delay faults.
 - **The voice chips are joined by the host in the simulation:** each runs by itself on its firmware, but the four have not been chained pin to pin, and a die that speaks needs 20-bit vectors ([voice](docs/voice.md#limits-and-what-is-next)).
+- **A full context is not forgotten little by little:** the chip stops taking tokens until its clear pin, and the host can go on by sending the latest turns, or a summary, again ([full chip](docs/full-chip.md#a-conversation-and-the-clear-pin)).
 - **Nothing has run on physical hardware.** The FPGA flow, board recommendations and the expected speed are in [`docs/fpga.md`](docs/fpga.md).
 - **The Windows and Linux packages and the Vulkan backend** have not been run on those systems yet.
 
@@ -189,7 +194,7 @@ This is an architecture and logic design, not a manufacturable layout: there is 
 | [`docs/benchmarks.md`](docs/benchmarks.md) | Results: Qwen3.8-27B on a chip, quality of the chip's arithmetic, images, FPGA and layouts |
 | [`docs/examples.md`](docs/examples.md) | Every example and how to run it, and a walk through the application |
 | [`docs/simulation.md`](docs/simulation.md) | How the simulation works: floating point, the exact machine, instruction level and gates, and how each checks the next |
-| [`docs/full-chip.md`](docs/full-chip.md) | The whole chip: blocks, simulation levels, several chips, the fixed microprogram |
+| [`docs/full-chip.md`](docs/full-chip.md) | The whole chip: blocks, simulation levels, several chips, the system prompt, conversations and the clear pin, the fixed microprogram |
 | [`docs/parameters.md`](docs/parameters.md) | Every parameter of the design, as the application explains it |
 | [`docs/vision.md`](docs/vision.md) | Images on the chip: the vision encoder, Janus-Pro and Show-o |
 | [`docs/voice.md`](docs/voice.md) | Voice on the chip: speech to text (Moonshine, also while it is spoken), text to speech (OuteTTS and DAC), the firmware's schedules and command queue, and several programs on several dies |

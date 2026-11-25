@@ -153,6 +153,13 @@ A chip can **hold a conversation**: after each answer it sends an end mark and w
 
 **The end mark** is a `0` byte when the chip tokenizes, or the word `0xFFFFFFFF` when it exchanges raw tokens. The host sends the next turn as its chat template writes it after the answer, as `voice::Conversation` does. A cache that fills up takes nothing more: the chip ends the turn and waits for a clear.
 
+**When the context fills,** the chip forgets nothing by itself. It takes no more tokens until the clear pin: an answer that fills the cache ends there, and the next question has nowhere to go. Each key in the cache carries its position's rotation, and each token sits in the place its position gives it. Dropping the oldest tokens is therefore not free. These are the ways to go on:
+- **From the host, with the chip as it is.** Before the cache fills, the host raises the clear pin and sends again the system prompt and the latest turns that fit. It can also send a summary of the conversation instead of the turns, which compresses the context. The chip's own model can write the summary as one more turn, if it is asked while the cache still has room for it. It costs reading those turns again, or writing the summary and reading it, once at each compression.
+- **In the chip, not built.**
+  - **A ring with attention sinks**, as in StreamingLLM: the first tokens stay, and the newest overwrite the oldest. It needs the firmware to place the cache's tokens and rotations otherwise, and it is still to be seen whether the die's addressing takes it without new logic.
+  - **A cache in fewer bits,** 8 or 4 a value: more tokens fit in the same memory. This is a choice of the design.
+- **DeltaNet's layers** do not fill: their recurrent state has a fixed size and fades the old by itself. In a hybrid model, such as Qwen3.5, only the attention layers' cache fills.
+
 **What the clear zeros.** It zeros what a conversation leaves in the die, and nothing else:
 - **The cache.** On a die that keeps each token's row of keys and values together, only the rows the conversation used are zeroed: what the time takes grows with the conversation, not with the context. A die that keeps each column's tokens together zeros its cache whole.
 - **The recurrent state** (DeltaNet's and the convolutions'). Zeroing it is needed for correctness, not only for privacy: without it, the next conversation starts from the old one's state.
