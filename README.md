@@ -170,7 +170,7 @@ From [`docs/benchmarks.md`](docs/benchmarks.md), where each figure says whether 
 - **Quality on the real weights (measured):** the chip's 16-bit block floating point picks the same token as floating point in 29 of 30 steps on Qwen3.8-27B and 11 of 12 on Qwen3.6-35B-A3B. DeltaNet's state holds at 16 and even 12 bits; plain fixed point does not.
 - **Images (measured):** Qwen3.8-27B's vision encoder runs in the die's arithmetic within 1.5 % of floating point; Show-o on 8-bit cells picks the same code as floating point in 61 of 64 places; MAGVIT-v2 decodes at 49.6 dB PSNR from floating point.
 - **A chip that listens and speaks (estimated from the circuit):** Moonshine-tiny, Qwen3-0.6B, OuteTTS and DAC on three dies and 591 mm² in N6, the first sound 474 ms after a three-second question ends, about 7 J a turn, most of it leakage; with Qwen3.8-27B, 14 dies and 7,741 mm² ([voice](docs/voice.md#the-system-planned)).
-- **FPGA (measured in synthesis):** the smallest complete chip takes 11,166 LUT6 on Xilinx 7 series or 17,872 LUT4 on ECP5, and routes at 35.4 MHz on an ECP5-85F.
+- **FPGA (measured in synthesis):** the smallest complete chip takes 11,166 LUT6 on Xilinx 7 series or 17,872 LUT4 on ECP5, and routes at 34.2 MHz on an ECP5-85F.
 
 ## Limits
 

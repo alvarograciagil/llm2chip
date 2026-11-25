@@ -4,7 +4,7 @@ The goal is to validate the project on real hardware: the same circuit that is s
 
 ## The chip that goes to the FPGA
 
-`cargo run --release -p sim --example fpga -- chip.v --dsp` writes in Verilog the whole chip for the test model (a toy Qwen3.5: 2 layers, one DeltaNet and one attention, width 8, a vocabulary of 8 letters):
+`cargo run --release -p sim --example fpga -- chip.v --dsp --factor-steps 2` writes in Verilog the whole chip for the test model (a toy Qwen3.5: 2 layers, one DeltaNet and one attention, width 8, a vocabulary of 8 letters):
 
 - A RISC-V RV32IM CPU with its firmware, which boots, loads the image checking its CRC, tokenizes, drives the die and samples.
 - A die with 8 cells, a one-lane vector unit, and only the logic its microprogram uses.
@@ -14,7 +14,7 @@ By default it is the chip for **a single board**: no JTAG port, no factory memor
 
 | Resource | Amount |
 |---|---|
-| Logic | ≈ 355,000 NAND2 equivalents (with scale and bias in two cycles) |
+| Logic | ≈ 358,000 NAND2 equivalents (with scale and bias in two cycles, `--factor-steps 2`; about 494,000 in one) |
 | Memory | 1.81 Mbit: CPU 0.66 (48 KB of program and 32 KB of data); function tables 0.26; microcode 0.5 (with a dictionary; 1.3 without); vector bank 0.07, with the register table giving each register only what it uses (2.1 without it) |
 | Clock | The critical path is about 24 full-adder delays: on a low-end FPGA, between 20 and 50 MHz |
 
@@ -84,7 +84,7 @@ Sources: [Kria KV260](https://www.amd.com/en/products/system-on-modules/kria/k26
 
 ## Expected speed
 
-The die spends 11,103 cycles per generated token with the toy model (measured on its microprogram, at the last position of the context); with the firmware, about 12,000-13,000.
+The die spends 7,762 cycles per generated token with the toy model, with scale and bias in two cycles (7,720 in one), measured on its microprogram at the last position of the context; the firmware adds its own. When the clocks in the table were measured it was 11,172: the microprogram has shortened since.
 
 ### Clock measured after place and route
 
@@ -101,12 +101,13 @@ With OSS CAD Suite (Yosys and nextpnr), the toy chip is placed and routed on a L
 | For a single board, with registers, function tables and CPU memory fitted | 30.7 MHz | 18,486 | 126 DP16KD | 59 |
 | Also, the sampling unit's sums and comparisons in carry chains | **35.4 MHz** | 18,440 | 126 DP16KD | 59 |
 | Also, registers shared between buffers that are never alive at once | 34.5 MHz | 17,872 | 125 DP16KD | 59 |
+| Also, 48 KB of program memory and the serial port with flow control (`--uart 16`) | 34.2 MHz | 17,923 | 129 DP16KD | 59 |
 
-The critical path was the sampling unit: a 16-row shift-and-add multiplier, in one cycle, feeding the address of the exponential table. Then it moved to the die's cells: reading the bias, the product by the scale (split across several chained DSP blocks) and the accumulator in the same cycle, 49 ns. With scale and bias in two cycles, the factor comes from a register and each cycle multiplies half of its bits: the die spends 11,172 cycles per token instead of 11,103 (0.6 % more) and the clock rises to 22.1 MHz, so designs for FPGA use it by default. Next was the bus from the CPU to the die: a CPU write was decoded, started the die and took an address to its vector memory in the same cycle. With registered commands, the clock rises to 26.5 MHz. Next was the vector memory address: the microcode word just read chose an entry of the register table out of 512, shifted it and added twice, gate by gate, in the same cycle, 38 ns with 27 in routing. With the table in distributed memory and the sums in carry chains, the clock rises to 32.1 MHz with half the logic. The critical path then moved to the sequencer's loop: the word just read compares its repeat count, and that chooses the address of the next one in the dictionary, 31 ns with 21 in routing. Computing the PC's sum earlier does not improve it (30.5 MHz, within placement noise). With the single-board chip it was the sampling unit again, 32.6 ns: the subtraction giving the logit difference went gate by gate and the tool turned it into a chain of 16 LUTs before the multiplier. With the sampling unit's sums as sums, in carry chains, the clock rises to 35.4 MHz, with the same cycles. Now the cell rules: scale times product in two chained DSP blocks, about 28 ns with 18 in routing.
+The critical path was the sampling unit: a 16-row shift-and-add multiplier, in one cycle, feeding the address of the exponential table. Then it moved to the die's cells: reading the bias, the product by the scale (split across several chained DSP blocks) and the accumulator in the same cycle, 49 ns. With scale and bias in two cycles, the factor comes from a register and each cycle multiplies half of its bits: the die spends 11,172 cycles per token instead of 11,103 (0.6 % more) and the clock rises to 22.1 MHz, so designs for FPGA use it by default. Next was the bus from the CPU to the die: a CPU write was decoded, started the die and took an address to its vector memory in the same cycle. With registered commands, the clock rises to 26.5 MHz. Next was the vector memory address: the microcode word just read chose an entry of the register table out of 512, shifted it and added twice, gate by gate, in the same cycle, 38 ns with 27 in routing. With the table in distributed memory and the sums in carry chains, the clock rises to 32.1 MHz with half the logic. The critical path then moved to the sequencer's loop: the word just read compares its repeat count, and that chooses the address of the next one in the dictionary, 31 ns with 21 in routing. Computing the PC's sum earlier does not improve it (30.5 MHz, within placement noise). With the single-board chip it was the sampling unit again, 32.6 ns: the subtraction giving the logit difference went gate by gate and the tool turned it into a chain of 16 LUTs before the multiplier. With the sampling unit's sums as sums, in carry chains, the clock rises to 35.4 MHz, with the same cycles. Then the cell rules: scale times product in two chained DSP blocks, about 28 ns with 18 in routing. With the 48 KB program memory and the serial port it is the sequencer's loop again, 29.2 ns with 19.3 in routing: a microcode word read from block memory chooses the address of the next one. The new memory and the link cost four memory blocks and about 50 LUT4, and leave the clock within placement noise.
 
 In the sequencer, measured in gates, the longest path to the address of the next word is not the repeat count but the index register: choosing it, adding the step and comparing it with the limit decide whether to jump. Shortening it without changing a single cycle needs reading the dictionary and the index through two ports at once, that is, duplicating those memories, which is just what small FPGAs lack; the other way is reading the word one cycle earlier with a one-cycle delay on jumps, which changes the compiler, the cycle model and every test that counts cycles. This is the slowest family in the catalogue; on a Xilinx 7 series or UltraScale+ the same circuit should run quite a bit faster.
 
-At 35.4 MHz, the toy model would give about 2,700-3,000 tok/s, of no practical value beyond showing the chip works. These clocks were measured before the 48 KB program memory and the message port with its serial links; they have not been placed again since (no nextpnr at hand), so the current design may differ a little.
+At 34.2 MHz the die's cycles alone allow about 4,400 tok/s with the toy model, somewhat fewer with the firmware's, of no practical value beyond showing the chip works. Without `--factor-steps 2` the same chip takes 15,038 LUT4 and 91 multipliers but only reaches 25.4 MHz: reading the bias, the product by the scale and the sum fall in one cycle again.
 
 ### With a model that writes stories: stories260K
 

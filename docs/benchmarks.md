@@ -333,7 +333,7 @@ The smallest complete chip (CPU, die, sampling unit), synthesized with Yosys (`f
 | Lattice ECP5 | 17,872 LUT4 | 5,527 | 125 DP16KD | 59 |
 | Cyclone IV E | 53,603 LE | 9,017 | — | — |
 
-Placed and routed with nextpnr on an ECP5-85F: **35.4 MHz**, up from 15.4 MHz through the changes listed in fpga.md.
+Placed and routed with nextpnr on an ECP5-85F, with the 48 KB program memory and the serial port: **34.2 MHz**, up from 15.4 MHz through the changes listed in fpga.md.
 
 stories260K (a 260,000-parameter Llama that writes short stories), cycles measured on its microprogram at the end of a 64-token context:
 
