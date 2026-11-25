@@ -368,7 +368,7 @@ Adds a quad SPI target to the host port: four data lines, a clock, a select and 
 
 ### I2C (`host_i2c`)
 
-Adds an I2C target to the host port: two open-drain lines shared with other chips, at its own address, and an interrupt line that says the chip has something to send. A write's bytes go in, each refused if the port cannot take it, so the host sends it again; a read gives first the room in the receive queue and what waits to be sent. It is slow (a byte in nine clocks, 1 MHz at most) but every microcontroller has it.
+Adds an I2C target to the host port: two open-drain lines shared with other chips, at its own address, and an interrupt line that says the chip has something to send. A write's bytes go in, each refused if the port cannot take it, so the host sends it again; a read gives first the room in the receive queue and what waits to be sent. Both lines pass through a filter that ignores spikes under 50 ns, as the standard asks. It is slow (a byte in nine clocks, 1 MHz at most) but every microcontroller has it.
 
 *On or off.*
 

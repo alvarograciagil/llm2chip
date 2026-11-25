@@ -1,15 +1,20 @@
 //! The whole chip, in Verilog, to synthesise for an FPGA: the RISC-V controller, the die
 //! with only the logic its microprogram uses, and the sampling unit.
 //!
-//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR]... [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary] [--factor-steps N] [--group N] [--tokenizer FILE] [--chain] [--uart CLOCKS_A_BIT] [--qspi] [--i2c HEX_ADDRESS] [--path NET] [--groups]`
+//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR]... [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary] [--factor-steps N] [--group N] [--tokenizer FILE] [--chain] [--uart CLOCKS_A_BIT] [--qspi] [--i2c HEX_ADDRESS [--i2c-filter CYCLES]] [--path NET] [--groups]`
 //!
 //! With `--dsp`, each one-cycle multiplier is written as a signed product so the FPGA
 //! tools put it in their multiplier blocks. Without `--model`, the chip is the one
-//! `the_chip_sized_for_an_fpga_says_the_same_in_gates` runs for the test model; with it,
+//! `the_chip_sized_for_an_fpga_says_the_same_in_gates` runs for the test model, there with
+//! one-cycle scale and bias; with it,
 //! a chip of the same shape sized for that model's weights and `--context` tokens; with
 //! several, one chip that runs any of them, each booting from its own image. The
 //! embedding table stays in the image, and the firmware brings each token's row; with
 //! `--table-inside` it goes into the vector memory instead.
+//!
+//! Scale and bias take two cycles by default (`--factor-steps 2`): their product leaves the
+//! cells' longest path, which on an ECP5 takes the clock from 25 to 34 MHz with a quarter
+//! less logic, for 0.5 % more cycles. `--factor-steps 1` gives the one-cycle cells.
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -116,14 +121,14 @@ fn main() {
     };
     let tokenizer_words = option("--tokenizer").map_or(0, |path| sim::tokenizer::TokenizerTables::from_file(Path::new(&path), context as u64).unwrap().to_words().len());
     let options = FpgaOptions {
-        factor_steps: option("--factor-steps").map_or(trial.features.factor_steps, |n| n.parse().unwrap()),
+        factor_steps: option("--factor-steps").map_or(2, |n| n.parse().unwrap()),
         table_inside: args.iter().any(|a| a == "--table-inside"),
         dictionary: !args.iter().any(|a| a == "--no-dictionary"),
         tokenizer_words,
         chain: args.iter().any(|a| a == "--chain"),
         // A board's serial port, at the given clocks a bit (the board's clock over the baud
         // rate), and a quad SPI target.
-        links: netlist::soc::HostLinks { uart: option("--uart").map(|n| n.parse().unwrap()), qspi: args.iter().any(|a| a == "--qspi"), i2c: option("--i2c").map(|n| u8::from_str_radix(n.trim_start_matches("0x"), 16).unwrap()) },
+        links: netlist::soc::HostLinks { uart: option("--uart").map(|n| n.parse().unwrap()), qspi: args.iter().any(|a| a == "--qspi"), i2c: option("--i2c").map(|n| u8::from_str_radix(n.trim_start_matches("0x"), 16).unwrap()), i2c_filter: option("--i2c-filter").map_or(3, |n| n.parse().unwrap()) },
     };
     let pairs: Vec<(&compiler::Program, &Weights)> = models.iter().map(|(p, w)| (p, w)).collect();
     let FpgaChip { design, config, models: built } = fpga_chip_for(&pairs, trial, context, options).unwrap();

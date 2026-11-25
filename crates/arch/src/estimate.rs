@@ -731,9 +731,14 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     if p.host_uart || p.host_qspi || p.host_i2c {
         // Measured on the generated control system (`link_cost` example): a serial port
         // adds 242 gates and 49 flip-flops, a quad SPI target 227 and 42, an I2C target 275
-        // and 36.
+        // and 36. The I2C lines' spike filter ignores spikes under 50 ns, as fast mode
+        // asks: a counter up to ⌈50 ns × clock⌉ + 1 per line, about 4.5 gates a bit and 4
+        // more, and its bits and one more in flip-flops (26 and 6 at 3 cycles, 62 and 14
+        // at 51).
         let (u, q, i) = (p.host_uart as u8 as f64, p.host_qspi as u8 as f64, p.host_i2c as u8 as f64);
-        let (gates, flops) = (242.0 * u + 227.0 * q + 275.0 * i, 49.0 * u + 42.0 * q + 36.0 * i);
+        let filter_bits = ((50.0 * p.freq_ghz).ceil().max(1.0) + 1.0).log2().ceil();
+        let (filter_gates, filter_flops) = (2.0 * (4.5 * filter_bits + 4.0), 2.0 * (filter_bits + 1.0));
+        let (gates, flops) = (242.0 * u + 227.0 * q + (275.0 + filter_gates) * i, 49.0 * u + 42.0 * q + (36.0 + filter_flops) * i);
         push("host_links", "Host port links", (gates * tech.and_um2 + flops * tech.ff_um2) * um2 * ROUTING_OVERHEAD,
             "The serial port, quad SPI and I2C targets beside the host port's byte port: each carries the same messages, and the chip answers on the one the last message came from.");
     }

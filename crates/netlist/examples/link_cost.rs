@@ -13,7 +13,7 @@ fn main() {
     };
     let base = count(HostLinks::default());
     let none = HostLinks::default();
-    for (name, links) in [("serial port, 333 clocks a bit", HostLinks { uart: Some(333), ..none }), ("quad SPI", HostLinks { qspi: true, ..none }), ("I2C", HostLinks { i2c: Some(0x42), ..none })] {
+    for (name, links) in [("serial port, 333 clocks a bit", HostLinks { uart: Some(333), ..none }), ("quad SPI", HostLinks { qspi: true, ..none }), ("I2C", HostLinks { i2c: Some(0x42), ..none }), ("I2C, 3-cycle spike filter", HostLinks { i2c: Some(0x42), i2c_filter: 3, ..none }), ("I2C, 51-cycle spike filter", HostLinks { i2c: Some(0x42), i2c_filter: 51, ..none })] {
         let (gates, flops) = count(links);
         println!("{name}: {} gates, {} flip-flops more", gates - base.0, flops - base.1);
     }

@@ -12,9 +12,13 @@ use std::process::Command;
 /// Clocks a bit on the serial port, and the quad SPI clock's period in the chip's clocks.
 const DIVIDER: u32 = 8;
 const SCK: u64 = 16;
-/// The I2C target's address, and half its clock's period in the chip's clocks.
+/// The I2C target's address, and half its clock's period in the chip's clocks: the fastest
+/// clock it takes, a twentieth of the chip's.
 const ADDRESS: u8 = 0x42;
-const HALF: u64 = 16;
+const HALF: u64 = 10;
+/// The target's spike filter, and the longest spike it must ignore.
+const FILTER: u32 = 3;
+const SPIKE: u64 = FILTER as u64 - 1;
 
 fn firmware() -> Option<FirmwareImage> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../firmware");
@@ -45,6 +49,10 @@ struct Board {
     scl: bool,
     host_low: bool,
     chip_low: bool,
+    /// Whether the bus has spikes, both lines flipping for a moment in the middle of each
+    /// stretch the host holds them; and whether they are flipped now.
+    spikes: bool,
+    flipped: bool,
 }
 
 impl Board {
@@ -56,7 +64,7 @@ impl Board {
         sim.set("qspi_cs_n", 1).unwrap();
         sim.tick();
         sim.set("reset", 0).unwrap();
-        let mut board = Self { sim, image, pending: None, cycle: 0, bytes_in: VecDeque::new(), bytes_out: Vec::new(), uart_in: VecDeque::new(), uart_out: Vec::new(), listening: None, last_line: true, scl: true, host_low: false, chip_low: false };
+        let mut board = Self { sim, image, pending: None, cycle: 0, bytes_in: VecDeque::new(), bytes_out: Vec::new(), uart_in: VecDeque::new(), uart_out: Vec::new(), listening: None, last_line: true, scl: true, host_low: false, chip_low: false, spikes: false, flipped: false };
         while board.sim.get("booting").unwrap_or(1) == 1 || board.cycle == 0 {
             board.step();
         }
@@ -72,8 +80,8 @@ impl Board {
         sim.set("host_rx_valid", !self.bytes_in.is_empty() as u64).unwrap();
         sim.set("host_rx_data", self.bytes_in.front().copied().unwrap_or(0) as u64).unwrap();
         sim.set("uart_rx", self.uart_in.pop_front().unwrap_or(true) as u64).unwrap();
-        sim.set("i2c_scl", self.scl as u64).unwrap();
-        sim.set("i2c_sda", !(self.host_low || self.chip_low) as u64).unwrap();
+        sim.set("i2c_scl", (self.scl ^ self.flipped) as u64).unwrap();
+        sim.set("i2c_sda", (!(self.host_low || self.chip_low) ^ self.flipped) as u64).unwrap();
         sim.settle();
         self.chip_low = sim.get("i2c_sda_low").unwrap() == 1;
         self.pending = (sim.get("image_req_valid").unwrap() == 1).then(|| self.image[sim.get("image_req_addr").unwrap() as usize]);
@@ -138,7 +146,7 @@ impl Board {
     /// An I2C start and the address byte, `read` or not; whether the chip acknowledged.
     fn i2c_start(&mut self, read: bool) -> bool {
         self.host_low = true;
-        self.run(HALF);
+        self.hold(HALF);
         self.scl = false;
         self.i2c_write(ADDRESS << 1 | read as u8)
     }
@@ -150,11 +158,11 @@ impl Board {
             self.clock_pulse();
         }
         self.host_low = false;
-        self.run(HALF);
+        self.hold(HALF);
         self.scl = true;
-        self.run(HALF / 2);
+        self.hold(HALF / 2);
         let acknowledged = !self.sda();
-        self.run(HALF / 2);
+        self.hold(HALF / 2);
         self.scl = false;
         acknowledged
     }
@@ -164,11 +172,11 @@ impl Board {
         self.host_low = false;
         let mut byte = 0;
         for _ in 0..8 {
-            self.run(HALF);
+            self.hold(HALF);
             self.scl = true;
-            self.run(HALF / 2);
+            self.hold(HALF / 2);
             byte = byte << 1 | self.sda() as u8;
-            self.run(HALF / 2);
+            self.hold(HALF / 2);
             self.scl = false;
         }
         self.host_low = more;
@@ -179,19 +187,32 @@ impl Board {
 
     /// Half a period low with the data set, then half high.
     fn clock_pulse(&mut self) {
-        self.run(HALF);
+        self.hold(HALF);
         self.scl = true;
-        self.run(HALF);
+        self.hold(HALF);
         self.scl = false;
     }
 
     fn i2c_stop(&mut self) {
         self.host_low = true;
-        self.run(HALF);
+        self.hold(HALF);
         self.scl = true;
-        self.run(HALF);
+        self.hold(HALF);
         self.host_low = false;
-        self.run(HALF);
+        self.hold(HALF);
+    }
+
+    /// The I2C bus as the host holds it for `cycles`, with a spike in the middle if it has them.
+    fn hold(&mut self, cycles: u64) {
+        if !self.spikes {
+            return self.run(cycles);
+        }
+        let before = (cycles - SPIKE) / 2;
+        self.run(before);
+        self.flipped = true;
+        self.run(SPIKE);
+        self.flipped = false;
+        self.run(cycles - SPIKE - before);
     }
 
     /// Writes bytes to the chip in one transaction; whether it took each.
@@ -270,7 +291,7 @@ impl Board {
 #[test]
 fn each_link_is_answered_on_its_own() {
     let Some(firmware) = firmware() else { return };
-    let config = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6, links: HostLinks { uart: Some(DIVIDER), qspi: true, i2c: Some(ADDRESS) } };
+    let config = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6, links: HostLinks { uart: Some(DIVIDER), qspi: true, i2c: Some(ADDRESS), i2c_filter: FILTER } };
     let image = build_image(&firmware.program, &firmware.data, &[], &[], &[]).unwrap();
     let mut board = Board::new(config, image);
     // The CPU clears its memory first, then reports the boot.
@@ -353,6 +374,16 @@ fn each_link_is_answered_on_its_own() {
     board.run(20_000);
     let read = board.i2c_all();
     assert!(matches!(port::events(&read)[..], [Event::Options(_)]), "{read:?} bytes {:?}", port::events(&board.bytes_out));
+
+    // With spikes on the bus, both lines flipping for two cycles in the middle of each
+    // stretch the host holds them, the filter keeps them out: a message goes in and its
+    // answer comes back.
+    board.spikes = true;
+    assert!(board.i2c_send(&port::set(5, 0x1234)).iter().all(|t| *t));
+    board.run(20_000);
+    let read = board.i2c_all();
+    assert_eq!(port::events(&read), [Event::Options(vec![(5, 0x1234)])], "{read:?}");
+    board.spikes = false;
 
     // The serial port's flow control: with the CPU held, the receive queue fills, and the
     // clear-to-send line rises once less than a quarter of it is free, at 48 entries of 64.

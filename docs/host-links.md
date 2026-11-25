@@ -7,7 +7,7 @@ A chip speaks to its host in messages (see [the host port: messages](full-chip.m
 | Byte port | `host_rx_valid`, `host_rx_ready`, `host_rx_data` (8), `host_tx_valid`, `host_tx_ready`, `host_tx_data` (8) | A byte a cycle each way | Valid and ready, both ways | Always there |
 | Serial port | `uart_rx`, `uart_tx`, `uart_cts_n` | A byte in ten bits at the chosen rate | The chip's CTS line | 242 gates, 49 flip-flops |
 | Quad SPI target | `qspi_sck`, `qspi_cs_n`, `qspi_in` (4), `qspi_out` (4), `qspi_oe`, `qspi_irq` | A byte in two clocks, the clock up to an eighth of the chip's | A status command | 227 gates, 42 flip-flops |
-| I2C target | `i2c_scl`, `i2c_sda`, `i2c_sda_low`, `i2c_irq` | A byte in nine clocks, the clock up to 1 MHz and a twentieth of the chip's | Room and waiting at the start of each read; a byte that is not taken is not acknowledged | 275 gates, 36 flip-flops |
+| I2C target | `i2c_scl`, `i2c_sda`, `i2c_sda_low`, `i2c_irq` | A byte in nine clocks, the clock up to 1 MHz and a twentieth of the chip's | Room and waiting at the start of each read; a byte that is not taken is not acknowledged | 275 gates, 36 flip-flops, and 26 and 6 more with a 3-cycle spike filter |
 
 What each carries, before the framing and the link's own overhead:
 
@@ -41,7 +41,7 @@ The same happens when the receive queue is full. `debug_select` = 6 (`DEBUG_HOST
 
 **Reading past what waits.** With nothing to send, the quad SPI and I2C targets send `0xC0`, which a reader skips between messages. In the middle of a message, though, that same byte would end it early on the host's side. A host should therefore read no more bytes than the `waiting` count the link gives. Each waiting entry gives at least one byte, so a read of that length never runs dry. If the read stops in the middle of an escape, the rest of it comes in the next one.
 
-**Clocks.** No serial link shares a clock with the chip. Each input pin goes through two flip-flops (I2C's data line through three) before the chip's logic sees it. That is why each link's clock has to be several times slower than the chip's, as set out below.
+**Clocks.** No serial link shares a clock with the chip. Each input pin goes through two flip-flops (I2C's data line through three, and both I2C lines through a spike filter) before the chip's logic sees it. That is why each link's clock has to be several times slower than the chip's, as set out below.
 
 ## The byte port
 
@@ -167,12 +167,12 @@ Every read starts with two bytes: the free entries in the receive queue and the 
 
 | What | Requirement |
 |---|---|
-| The clock | High and low at least 5 cycles each. The bus's own limits (0.26 µs high and 0.5 µs low at 1 MHz) need a chip clock of at least 20 times the bus clock |
+| The clock | High and low at least 5 cycles each, and the low long enough for the chip to set the data line (below) and the host's setup. The bus's own limits (0.26 µs high and 0.5 µs low at 1 MHz) need a chip clock of at least 20 times the bus clock |
 | The data line, from the host | The chip reads it about a cycle before the clock's rise as it sees it, so it needs a cycle of setup |
-| The data line, from the chip | Changes 3 or 4 cycles after the clock falls, which gives the hold the bus asks for. At 20 MHz that is 150–200 ns, well within the 450 ns Fast-mode Plus allows |
+| The data line, from the chip | Changes 3 or 4 cycles after the clock falls, plus the spike filter's cycles, which gives the hold the bus asks for. At 20 MHz, with a 2-cycle filter, that is 250–300 ns, within the 450 ns Fast-mode Plus allows |
 | Start and stop | The data line falls or rises while the clock is high, at least 2 cycles from either clock edge |
 
-The data line passes through one more flip-flop than the clock. So a data line that changes just as the clock falls, which the bus allows, is not taken for a start or a stop. There is no filter for spikes shorter than a cycle: on a noisy bus, put one outside, as Fast-mode asks of 50 ns spikes.
+The data line passes through one more flip-flop than the clock. So a data line that changes just as the clock falls, which the bus allows, is not taken for a start or a stop. Both lines also go through a spike filter of `i2c_filter` cycles (`--i2c-filter` in the FPGA example, 3 by default): a new level counts only once it has lasted that many cycles in a row, so a shorter spike never reaches the target, and both lines arrive that many cycles later. Fast mode asks to ignore spikes under 50 ns, which takes ⌈50 ns × clock⌉ + 1 cycles: 2 at 20 MHz, 3 up to 40 MHz, 51 at 1 GHz. It costs a counter per line: 26 gates and 6 flip-flops at 3 cycles, 62 and 14 at 51. With 0 there is no filter.
 
 **A host.**
 
@@ -197,4 +197,5 @@ From a microcontroller, see [`tools/host/chip_i2c/`](../tools/host/chip_i2c).
 - An option asked on the byte port is answered there.
 - An option written over quad SPI, and another over I2C, are each read back on their own link, escapes and all.
 - I2C refuses another address, and refuses a byte while the byte port holds the port.
+- I2C, with its clock at a twentieth of the chip's, still works with spikes of two cycles on both lines in the middle of every stretch the host holds them; without the filter, the same spikes break the transaction.
 - A serial byte sent while another link holds the port is dropped and counted.

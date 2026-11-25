@@ -90,6 +90,11 @@ pub struct HostLinks {
     /// An I2C target at this 7-bit address (`i2c_scl`, `i2c_sda`, `i2c_sda_low` to pull the
     /// data line down, `i2c_irq`). Its clock may be up to a twentieth of the chip's.
     pub i2c: Option<u8>,
+    /// The clocks a level must last on the I2C lines to count: shorter spikes are ignored,
+    /// and the lines reach the target that many cycles later. The standard asks fast mode
+    /// to ignore spikes under 50 ns, which takes `⌈50 ns × clock⌉ + 1`, 3 up to 40 MHz.
+    /// 0 or 1: no filter.
+    pub i2c_filter: u32,
 }
 
 /// The quad SPI target's commands, the first byte after its select falls. A read and the
@@ -621,10 +626,35 @@ fn uart_transmitter(l: &mut Logic, offered: Bit, byte: &[Bit], divider: u32, res
     (idle, line)
 }
 
-/// An I2C bus's two lines, as the chip sees them.
+/// An I2C bus's two lines, as the chip sees them, and the clocks a level must last to count.
 struct I2cLines {
     scl: Bit,
     sda: Bit,
+    filter: u32,
+}
+
+/// A line that only follows its input once the input has kept a new level for `cycles`
+/// cycles in a row, so a shorter spike never gets through; a flip-flop as well. With 0 or
+/// 1, just the input.
+fn filtered(l: &mut Logic, input: Bit, cycles: u32) -> Bit {
+    if cycles <= 1 {
+        return input;
+    }
+    let out = l.fresh();
+    // The cycles the input has differed so far, up to `cycles - 1`.
+    let count = l.fresh_bus((32 - (cycles - 1).leading_zeros()) as usize);
+    let differs = l.xor(input, out);
+    let enough = l.equals(&count, cycles - 1);
+    let flip = l.and(differs, enough);
+    let next_out = l.mux(flip, out, input);
+    let counting = {
+        let short = l.not(enough);
+        l.and(differs, short)
+    };
+    let stepped = counter_step(l, &count, Bit::One);
+    let next_count: Vec<Bit> = stepped.iter().map(|b| l.and(*b, counting)).collect();
+    l.connect_flops(&[[next_out].as_slice(), &next_count].concat(), &[[out].as_slice(), &count].concat());
+    out
 }
 
 /// What an I2C target gives the host port.
@@ -643,16 +673,21 @@ struct I2cTarget {
 /// two bytes first, the receive queue's `room` and the entries `waiting` to be sent, and then
 /// the send queue's bytes while it `offered` one (`shown`), or 0xC0 with nothing to send.
 ///
-/// The lines come through flip-flops and the data line one later than the clock, so its
-/// change just after the clock falls is not taken for a start or a stop. The chip sets the
+/// The lines come through flip-flops and the spike filter, and the data line one cycle
+/// later than the clock, so its change just after the clock falls is not taken for a start
+/// or a stop. The chip sets the
 /// data line a few cycles after the clock falls, and a byte from the queue is taken when its
 /// last bit has been read, so a read cut short sends it again.
 #[allow(clippy::too_many_arguments)]
 fn i2c_target(l: &mut Logic, lines: I2cLines, address: u8, offered: Bit, shown: &[Bit], room: &[Bit], waiting: &[Bit], accepted: Bit, reset: Bit) -> I2cTarget {
-    let (c1, scl, scl_before) = (l.fresh(), l.fresh(), l.fresh());
-    l.connect_flops(&[lines.scl, c1, scl], &[c1, scl, scl_before]);
+    let (c1, c2, scl_before) = (l.fresh(), l.fresh(), l.fresh());
+    l.connect_flops(&[lines.scl, c1], &[c1, c2]);
+    let scl = filtered(l, c2, lines.filter);
+    l.connect_flops(&[scl], &[scl_before]);
     let (d1, d2, sda, sda_before) = (l.fresh(), l.fresh(), l.fresh(), l.fresh());
-    l.connect_flops(&[lines.sda, d1, d2, sda], &[d1, d2, sda, sda_before]);
+    l.connect_flops(&[lines.sda, d1], &[d1, d2]);
+    let sda_filtered = filtered(l, d2, lines.filter);
+    l.connect_flops(&[sda_filtered, sda], &[sda, sda_before]);
     let scl_low = l.not(scl);
     let rise = {
         let was_low = l.not(scl_before);
@@ -1384,7 +1419,7 @@ pub(crate) fn soc(gen: &mut Gen, config: SocConfig) -> String {
         if let (Some(address), Some((scl, sda, sda_low, irq))) = (links.i2c, i2c_pins) {
             l.b.group("Host port: I2C");
             let offered = l.and(tx_valid, on_i2c);
-            let target = i2c_target(&mut l, I2cLines { scl, sda }, address, offered, &shown, &room, &waiting, i2c_accepted, reset);
+            let target = i2c_target(&mut l, I2cLines { scl, sda, filter: links.i2c_filter }, address, offered, &shown, &room, &waiting, i2c_accepted, reset);
             l.b.or_to(target.valid, Bit::Zero, i2c_valid);
             for (from, to) in target.byte.iter().zip(&i2c_byte) {
                 l.b.or_to(*from, Bit::Zero, *to);
