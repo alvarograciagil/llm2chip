@@ -81,10 +81,38 @@ function NewConversation() {
   if (s.fresh || s.running) return null;
   const title = clearMs !== null ? `${t("Empties the chip's cache, as its clear pin does")}: ${formatNumber(clearMs)} ms ${t("in this design")}` : t("Empties the chip's cache, as its clear pin does");
   return (
-    <button className="pill" title={title} onClick={() => s.set({ fresh: true, history: [], result: null, asked: null })}>
-      {t("New conversation")}
-    </button>
+    <>
+      <ContextUse />
+      <button className="pill" title={title} onClick={() => s.set({ fresh: true, history: [], result: null, asked: null, held: 0 })}>
+        {t("New conversation")}
+      </button>
+    </>
   );
+}
+
+/** How much of the chip's context the conversation takes. */
+function ContextUse() {
+  const t = useT();
+  const s = useVoice();
+  const context = useDesign((d) => Number(d.params.context_tokens) || 0);
+  if (context <= 0 || s.held <= 0) return null;
+  return (
+    <span className="conversation-context" title={t("Tokens the chip's cache holds: the system prompt, every question and every answer so far.")}>
+      <progress max={context} value={Math.min(s.held, context)} aria-label={t("Context the conversation takes")} />
+      <span className="muted-text">
+        {formatNumber(s.held)} / {formatNumber(context)} tokens
+      </span>
+    </span>
+  );
+}
+
+/** The conversation filled the chip's context: the answer ended there. */
+function ContextFull() {
+  const t = useT();
+  const s = useVoice();
+  const context = useDesign((d) => Number(d.params.context_tokens) || 0);
+  if (s.running || context <= 0 || s.held < context) return null;
+  return <p className="note-warning">{t("The chip's context filled up: it remembers no more tokens. Start a new conversation, or raise the context in the design.")}</p>;
 }
 
 /** Listening: a question spoken in, its text, the language model's answer, and the answer said
@@ -106,6 +134,7 @@ export function ListenView() {
         {parts.speaks && <Said label={t("3. Said")} />}
         {!parts.speaks && s.running && <p className="muted-text">{t(PHASES[s.phase] ?? "Working…")}</p>}
         {s.plan && <SystemPlanView plan={s.plan} />}
+        <ContextFull />
         <Failure />
         <div className="composer">
           {s.recording ? (
@@ -160,6 +189,7 @@ export function SpeakView() {
         {s.answerFirst && <Stage label={t("2. Answer")} text={s.result?.answer?.text} seconds={s.result?.answer?.seconds} />}
         <Said label={s.answerFirst ? t("3. Said") : t("2. Said")} />
         {s.plan && <SystemPlanView plan={s.plan} />}
+        <ContextFull />
         <Failure />
         <div className="composer">
           <input

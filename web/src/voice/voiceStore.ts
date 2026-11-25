@@ -16,6 +16,9 @@ export function chipParts(): { listens: boolean; speaks: boolean } {
 export interface Stage {
   text?: string;
   seconds: number;
+  /** For the answer: the tokens the conversation's cache holds after it, and the most it can. */
+  held?: number;
+  context?: number;
 }
 
 export interface Spoken {
@@ -85,6 +88,8 @@ interface VoiceState {
   error: string | null;
   /** The conversation's earlier turns, and whether the next question starts a new one. */
   history: { heard: string; answer: string }[];
+  /** Tokens the conversation's cache holds after the last answer. */
+  held: number;
   fresh: boolean;
   /** Speak in the voice of the profile kept with OuteTTS. */
   speaker: boolean;
@@ -177,6 +182,7 @@ export const useVoice = create<VoiceState>((set, get) => ({
   result: null,
   error: null,
   history: [],
+  held: 0,
   fresh: true,
   speaker: true,
   firstOutputMs: 500,
@@ -280,13 +286,15 @@ export const useVoice = create<VoiceState>((set, get) => ({
     const last = !fresh && asked && result?.answer?.text ? [{ heard: asked, answer: result.answer.text }] : [];
     set({ running: true, error: null, result: null, phase: mode === "listen" ? "listening" : answerFirst ? "thinking" : "speaking", history: fresh ? [] : [...get().history, ...last] });
     const bits = arithmetic === "float" ? null : Number(arithmetic);
+    // The conversation's cache holds the design's context, as the chip's does.
+    const context_tokens = Number(useDesign.getState().params.context_tokens) || 0;
     // Listening: the clip, heard and answered, and said too when the chip also speaks.
     // Speaking: the text, answered first if asked, and said.
     const says = mode === "speak" || parts.speaks;
     const body =
       mode === "listen"
-        ? { wav: question!.wav, listen, think, speak: says ? speak : null, sound: says ? sound : null, bits, fresh, speaker: says && speaker, system: systemPrompt() }
-        : { text, think: answerFirst ? think : null, speak, sound, bits, fresh, speaker, system: systemPrompt() };
+        ? { wav: question!.wav, listen, think, speak: says ? speak : null, sound: says ? sound : null, bits, fresh, speaker: says && speaker, system: systemPrompt(), context_tokens }
+        : { text, think: answerFirst ? think : null, speak, sound, bits, fresh, speaker, system: systemPrompt(), context_tokens };
     set({ asked: mode === "speak" ? text : null });
     const response = await fetch("/api/voice", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     if (!response.ok) {
@@ -323,7 +331,7 @@ function poll(set: (partial: Partial<VoiceState>) => void) {
       }
       if (timer) clearInterval(timer);
       timer = null;
-      if (status.state === "done") set({ running: false, result: status.result, fresh: false });
+      if (status.state === "done") set({ running: false, result: status.result, fresh: false, ...(status.result?.answer?.held !== undefined ? { held: status.result.answer.held } : {}) });
       else if (status.state === "error") set({ running: false, error: status.error, result: status.partial });
       else set({ running: false });
     } catch {

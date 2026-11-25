@@ -121,6 +121,9 @@ pub struct Conversation {
     pub dir: std::path::PathBuf,
     /// The fixed system prompt it starts with, empty for none.
     pub system: String,
+    /// The most tokens the cache holds, as the chip's context; zero for no limit. A question
+    /// that does not fit is refused, and an answer ends when the cache is full.
+    pub context: usize,
 }
 
 impl Conversation {
@@ -131,7 +134,7 @@ impl Conversation {
         let style = PromptStyle::read(&family, |name| std::fs::read_to_string(dir.join(name)).ok(), token_id);
         let system = system.trim().to_string();
         let messages = if system.is_empty() { Vec::new() } else { vec![("system".to_string(), system.clone())] };
-        Ok(Self { model: Model::open(dir, arithmetic)?, style, messages, tokens: Vec::new(), arithmetic, dir: dir.to_path_buf(), system })
+        Ok(Self { model: Model::open(dir, arithmetic)?, style, messages, tokens: Vec::new(), arithmetic, dir: dir.to_path_buf(), system, context: 0 })
     }
 
     /// Questions asked so far.
@@ -156,6 +159,13 @@ impl Conversation {
         } else {
             encode(&self.style.next_turn(&self.system, question, false)?, false)?
         };
+        if self.context > 0 && self.tokens.len() + new.len() >= self.context {
+            return Err(if self.tokens.is_empty() {
+                format!("the prompt takes {} tokens and the chip remembers {}: raise the design's context", new.len(), self.context)
+            } else {
+                format!("the conversation takes {} tokens and the question {} more, and the chip remembers {}: start a new conversation", self.tokens.len(), new.len(), self.context)
+            });
+        }
         let mut logits = Vec::new();
         for token in &new {
             logits = self.model.step(*token)?;
@@ -164,7 +174,7 @@ impl Conversation {
         let mut reply = Vec::new();
         for _ in 0..limit {
             let next = argmax(&logits);
-            if self.style.stop.contains(&next) {
+            if self.style.stop.contains(&next) || (self.context > 0 && self.tokens.len() + reply.len() >= self.context) {
                 break;
             }
             reply.push(next);

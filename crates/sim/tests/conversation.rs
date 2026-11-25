@@ -37,4 +37,14 @@ fn a_conversation_goes_on_from_its_cache() {
     }
     let worst = replayed.iter().zip(&logits).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
     assert!(worst < 1e-3, "{worst}");
+
+    // A chip's context bounds the conversation: a question that does not fit is refused and
+    // leaves the cache as it was; an answer ends when the cache is full.
+    let held = conversation.tokens().len();
+    conversation.context = held + 3;
+    assert!(conversation.ask("And of Spain?", 30, &encode, &decode).is_err());
+    assert_eq!(conversation.tokens().len(), held);
+    conversation.context = held + 20;
+    conversation.ask("And of Spain?", 30, &encode, &decode).unwrap();
+    assert_eq!(conversation.tokens().len(), held + 20, "the answer stops when the cache is full");
 }

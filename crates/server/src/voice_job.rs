@@ -43,6 +43,10 @@ pub struct VoiceStart {
     /// question, as the chip runs it.
     #[serde(default)]
     pub system: String,
+    /// The design's context: the most tokens the conversation's cache holds, as the chip's;
+    /// zero for no limit.
+    #[serde(default)]
+    pub context_tokens: u64,
 }
 
 impl VoiceStart {
@@ -153,10 +157,11 @@ pub fn run(start: &VoiceStart, job: &VoiceJob, kept: &Mutex<Option<Conversation>
                 *slot = Some(Conversation::new(think, arithmetic, &start.system, &|t| tokenizer.token_to_id(t))?);
             }
             let conversation = slot.as_mut().unwrap();
+            conversation.context = start.context_tokens as usize;
             let (said, _) = conversation.ask(&question, 60, &encode, &decode)?;
-            let turn = conversation.turns();
+            let (turn, held) = (conversation.turns(), conversation.tokens().len());
             drop(slot);
-            step("speaking", "answer", json!({ "text": said, "seconds": started.elapsed().as_secs_f64(), "turn": turn }));
+            step("speaking", "answer", json!({ "text": said, "seconds": started.elapsed().as_secs_f64(), "turn": turn, "held": held, "context": start.context_tokens }));
             said
         }
         None => question,
