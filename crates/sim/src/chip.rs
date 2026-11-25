@@ -719,11 +719,13 @@ pub struct FpgaOptions {
     pub tokenizer_words: usize,
     /// The manufacturing tests and the chain to other chips, for boards joined together.
     pub chain: bool,
+    /// The host port's links besides its byte port: a board's USB serial port, a quad SPI.
+    pub links: netlist::soc::HostLinks,
 }
 
 impl Default for FpgaOptions {
     fn default() -> Self {
-        Self { factor_steps: 1, table_inside: false, dictionary: true, tokenizer_words: 0, chain: false }
+        Self { factor_steps: 1, table_inside: false, dictionary: true, tokenizer_words: 0, chain: false, links: Default::default() }
     }
 }
 
@@ -778,7 +780,7 @@ pub fn fpga_chip_for(models: &[(&Program, &Weights)], trial: DieConfig, context:
     // the tokenizer's tables, if any, go after them.
     let data_bits = (TOKENIZER_WORD + options.tokenizer_words).next_power_of_two().ilog2();
     let vocabulary = models.iter().map(|(p, _)| p.vocab as u64).max().unwrap_or(2);
-    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: bits_for(vocabulary).max(4), entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits, fifo_bits: 6, links: options.links }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: bits_for(vocabulary).max(4), entries: 4, lanes: 1 } };
     let design = if options.chain { chip_design(config) } else { chip_design_alone(config) };
     Ok(FpgaChip { design, config, models: built })
 }

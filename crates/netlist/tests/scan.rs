@@ -403,7 +403,7 @@ fn the_stil_file_runs_the_patterns_and_fails_with_a_fault() {
 fn small_chip() -> netlist::chip::ChipConfig {
     use netlist::demo::block_config;
     netlist::chip::ChipConfig {
-        soc: netlist::soc::SocConfig { program_words: 1 << 8, data_bits: 8, fifo_bits: 4 },
+        soc: netlist::soc::SocConfig { program_words: 1 << 8, data_bits: 8, fifo_bits: 4, links: Default::default() },
         die: netlist::DieConfig { reg_bits: 3, index_bits: 4, microcode_bits: 6, cell: CellConfig { addr_bits: 4, ..block_config().cell }, ..block_config() },
         sampler: netlist::sampler::SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 },
     }

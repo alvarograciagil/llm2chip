@@ -304,7 +304,7 @@ fn firmware_matches(firmware: &FirmwareImage, path: &Path, failures: &mut Vec<St
     let setup = GenerationSetup { max_new: 0, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: false, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     let info = chip_info(&die, &code, 1, 248_077, &setup);
     let image = build_image(&firmware.program, &firmware.data, &info, &tables, &[]).unwrap();
-    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: (tables.len() + (1 << 14)).next_power_of_two().ilog2(), fifo_bits: 6 };
+    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: (tables.len() + (1 << 14)).next_power_of_two().ilog2(), fifo_bits: 6, links: Default::default() };
     let _ = ChipConfig { soc, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 18, entries: 4, lanes: 1 } };
 
     // A prompt of several thousand tokens, which some models encode as a single piece.

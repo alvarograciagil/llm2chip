@@ -103,7 +103,7 @@ fn chip_in_gates(die: netlist::DieConfig, tag: &str, table_outside: bool, design
     let die = sim::chip::with_code_dictionary(sim::chip::compact_die(die, &layout), &code);
     let die = netlist::DieConfig { features: die.features.with_queue_bits(queue), ..die };
     eprintln!("microcode dictionary: 2^{} words", die.features.dictionary_bits);
-    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6, links: Default::default() }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let design = design(config);
     let (sim, die_busy) = says_the_same_in_gates(config, &design, &layout, &code, CONFIG, &dir);
     (sim, die_busy, layout, dir)
@@ -211,7 +211,7 @@ fn text_goes_through_the_whole_chip_in_icarus_verilog() {
     let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let die = sim::chip::with_code_dictionary(sim::chip::compact_die(die, &layout), &code);
-    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6, links: Default::default() }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let (image, input) = image_and_input(config, &layout, &code, CONFIG, &dir);
     let engine = VmEngine::new(program, Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
     let model = ChipModel::new(engine, code.clone(), SamplerModel { config: config.sampler, rng: 0, table: exponential_table() });
@@ -320,7 +320,7 @@ fn any_token_on_the_stop_list_ends_the_answer() {
     let program = compile_qwen3_5(CONFIG).unwrap();
     let die = netlist::DieConfig { microcode_bits: 15, ..cell_die_config() };
     let sampler = SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 };
-    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 };
+    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6, links: Default::default() };
     let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, CHIP_TOKENS).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let generate = |stop: Vec<u32>| {
@@ -392,7 +392,7 @@ fn conversation_on(die: netlist::DieConfig, tag: &str) -> Vec<netlist::chip::Cle
     make_checkpoint(&dir);
     let program = compile_qwen3_5(CONFIG).unwrap();
     let sampler = SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 };
-    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 };
+    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6, links: Default::default() };
     let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), die, 16).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let state = layout.conversation_state(&program);
@@ -488,7 +488,7 @@ fn the_host_asks_and_steers_the_chip_in_messages() {
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &segments).unwrap();
     let engine = VmEngine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), die, 16).unwrap();
     let model = ChipModel::new(engine, code.clone(), SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() });
-    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 };
+    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6, links: Default::default() };
     let mut talk = Talk { bus: SocBus::booted_with(soc, &image, &[], model).unwrap(), cpu: Rv32Iss::default() };
     // Runs until the chip has sent `count` messages of its own after the boot, and gives them.
     let mut seen = 0;
@@ -554,7 +554,7 @@ fn the_clear_pin_works_in_gates_as_at_instruction_level() {
     let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), base, CHIP_TOKENS).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let die = sim::chip::with_code_dictionary(sim::chip::compact_die(base, &layout), &code);
-    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6, links: Default::default() }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let setup = GenerationSetup { max_new: 2, greedy: true, limit: 1, temperature: 256, seed: 1, raw_tokens: true, stop: Vec::new(), draft_depth: 0, draft_logits: 0, think: None, think_budget: u32::MAX };
     let mut info = chip_info(&die, &code, layout.logits_register(&program), 8, &setup);
     netlist::chip::add_conversation(&mut info, CHIP_TOKENS as u32, &layout.conversation_state(&program)).unwrap();
@@ -686,7 +686,7 @@ fn a_real_model_writes_the_same_text_through_the_whole_chip() {
     let mut tables = sim::tokenizer::TokenizerTables::from_file(&dir.join("tokenizer.json"), context as u64).unwrap();
     tables.set_add_special(true);
     let tables = tables.to_words();
-    let options = FpgaOptions { factor_steps: trial.features.factor_steps, table_inside: false, dictionary: true, tokenizer_words: tables.len(), chain: false };
+    let options = FpgaOptions { factor_steps: trial.features.factor_steps, table_inside: false, dictionary: true, tokenizer_words: tables.len(), chain: false, links: Default::default() };
     let FpgaChip { design, config, models } = fpga_chip_for(&[(&program, &weights)], trial, context, options).unwrap();
     let (layout, code) = &models[0];
 
@@ -800,7 +800,7 @@ fn two_chips_in_a_chain_pass_their_text_on_their_pins() {
     let layout = Layout::with_cells(&program, &Weights::open(&dir).unwrap(), base, CHIP_TOKENS).unwrap();
     let code = layout.microprogram(&program).unwrap();
     let die = sim::chip::with_code_dictionary(sim::chip::compact_die(base, &layout), &code);
-    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6, links: Default::default() }, die, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     let design = chip_design(config);
     let (image, input) = image_and_input(config, &layout, &code, CONFIG, &dir);
     const LIMIT: u64 = 20_000_000;

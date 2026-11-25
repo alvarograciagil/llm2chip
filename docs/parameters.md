@@ -348,6 +348,24 @@ How many activations each link passes per cycle. The hidden vector crosses every
 
 *From 1 to 4096 activations/cycle, on a logarithmic scale.*
 
+### Serial port (UART) (`host_uart`)
+
+Adds a serial port to the host port, beside its byte port: two pins, a byte in ten bits. It carries the same messages, and the chip answers on the link the last message came from. A board's USB serial port is the usual one; it cannot hold the chip back, so a byte that arrives while another link is inside a message is dropped and counted.
+
+*On or off.*
+
+### Serial port rate (`uart_baud`)
+
+Bits a second on the serial port: a byte takes ten. Text needs little; speech needs about 640,000 baud to listen and 1,920,000 to speak.
+
+*From 9600 to 12000000 baud, on a logarithmic scale.*
+
+### Quad SPI (`host_qspi`)
+
+Adds a quad SPI target to the host port: four data lines, a clock, a select and an interrupt line that says the chip has something to send. The host writes, reads and asks how much room and how much waiting there is. Its clock may be up to an eighth of the chip's, so it carries a byte every 16 cycles: some 60 MB/s at 1 GHz.
+
+*On or off.*
+
 ### Weight loading (`load_interface`)
 
 Where the weights arrive from when the chip powers up: NVMe, PCIe 5.0 or UART. It only affects start-up time, not generation speed.

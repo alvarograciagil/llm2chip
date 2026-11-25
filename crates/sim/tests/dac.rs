@@ -240,7 +240,7 @@ fn the_firmware_decodes_window_by_window_as_the_host_does() {
     let input = netlist::port::stream(&sim::speak::dac_chip::schedule_input(&config, &codes, chunk));
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() };
     let model = ChipModel::new(chip.die_engine(code.clone()), code, sampler).with_queue(queue);
-    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, &image, &input, model).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6, links: Default::default() }, &image, &input, model).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);

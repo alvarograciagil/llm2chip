@@ -38,6 +38,9 @@ pub const DEBUG_SAMPLER_BUSY: u64 = 2;
 pub const DEBUG_CPU_PC: u64 = 3;
 pub const DEBUG_LINK_CORRECTED: u64 = 4;
 pub const DEBUG_LINK_FAILED: u64 = 5;
+/// Bytes the host port dropped: a serial link's, while another link was inside a message or
+/// the queue was full.
+pub const DEBUG_HOST_DROPPED: u64 = 6;
 /// Cycles the chip keeps itself in reset after the external signal is released.
 pub const RESET_STRETCH: u64 = 15;
 /// Cycles from the release of the reset pin until the chip is out of reset: the two
@@ -78,6 +81,21 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
     let host_rx_ready = b.output("host_rx_ready", 1);
     let host_tx_valid = b.output("host_tx_valid", 1);
     let host_tx_data = b.output("host_tx_data", 8);
+    // The host port's serial links, when the chip has them.
+    let serial: Vec<(&str, Vec<Bit>)> = c
+        .soc
+        .links
+        .uart
+        .map(|_| vec![("uart_rx", b.input("uart_rx", 1)), ("uart_tx", b.output("uart_tx", 1))])
+        .unwrap_or_default()
+        .into_iter()
+        .chain(if c.soc.links.qspi {
+            vec![("qspi_sck", b.input("qspi_sck", 1)), ("qspi_cs_n", b.input("qspi_cs_n", 1)), ("qspi_in", b.input("qspi_in", 4)), ("qspi_out", b.output("qspi_out", 4)), ("qspi_oe", b.output("qspi_oe", 1)), ("qspi_irq", b.output("qspi_irq", 1))]
+        } else {
+            Vec::new()
+        })
+        .collect();
+    let host_dropped = b.wire("host_dropped", 1)[0];
     let halted = b.output("halted", 1);
     let booting = b.output("booting", 1);
     let image_req_valid = b.output("image_req_valid", 1);
@@ -163,7 +181,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
     let internal_reset = b.wire("internal_reset", 1)[0];
     let cpu_pc = b.wire("cpu_pc", 32);
     b.group("Control system");
-    b.inst("control", &control, &[
+    let mut control_pins: Vec<(&str, Vec<Bit>)> = vec![
         ("reset", vec![internal_reset]),
         ("debug_pc", cpu_pc.clone()),
         ("cpu_hold", vec![cpu_hold]),
@@ -190,7 +208,10 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         ("peripheral_address", bus_address.clone()),
         ("peripheral_wdata", bus_wdata.clone()),
         ("peripheral_rdata", bus_rdata.clone()),
-    ]);
+        ("host_dropped", vec![host_dropped]),
+    ];
+    control_pins.extend(serial);
+    b.inst("control", &control, &control_pins);
 
     let die_halted = b.wire("die_halted", 1);
     let vector_out = b.wire("vector_out", activation as u32);
@@ -488,7 +509,7 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
         let idle_flag = l.any(&[parked, entry_order, start]);
         let not_idle = l.not(idle_flag);
         let die_busy = l.and(not_halted, not_idle);
-        let counters: Vec<Vec<Bit>> = [Bit::One, die_busy, streaming]
+        let counters: Vec<Vec<Bit>> = [Bit::One, die_busy, streaming, host_dropped]
             .into_iter()
             .map(|event| {
                 let q = l.fresh_bus(32);
@@ -517,7 +538,9 @@ fn chip(gen: &mut Gen, c: ChipConfig, alone: bool) -> String {
                 q
             })
             .collect();
-        let mut leaves: Vec<Vec<Bit>> = counters.into_iter().chain([cpu_pc.clone()]).chain(link_counters).collect();
+        let mut counters = counters;
+        let dropped = counters.pop().expect("the dropped bytes' counter");
+        let mut leaves: Vec<Vec<Bit>> = counters.into_iter().chain([cpu_pc.clone()]).chain(link_counters).chain([dropped]).collect();
         leaves.resize(8, constant(0, 32));
         let chosen_view = l.mux_bus(tap_override, &debug_select, &tap_select);
         let shown = l.select(&chosen_view, &leaves);

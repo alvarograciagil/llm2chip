@@ -1101,7 +1101,7 @@ fn build_chip(loaded: &mut Loaded, carried: &[u32], special: bool, context: u64,
     let image = build_image(&firmware.program, &firmware.data, &info, tables, &[])?;
     // The memory the chip needs for this model's tables and its image layout.
     let data_bits = (image.len().max(1 << 13).next_power_of_two().ilog2()).max(13);
-    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits, fifo_bits: 6 };
+    let soc = SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits, fifo_bits: 6, links: Default::default() };
     // The image must boot before the engine goes into the chip.
     SocBus::booted(soc, &image, &[])?;
     let unit = sampler_model(vocabulary, seed, request.fidelity.sampler_lanes);

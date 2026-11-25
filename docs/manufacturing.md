@@ -28,8 +28,9 @@ Along the way another bug came up, this one in the instruction-level simulator: 
 
 ## Rules for the board
 
-- **A single clock.** The host port, the image port and the chip-to-chip links are synchronous: valid and ready are read on the same edge of the chip's clock. Whatever sits on the other side must use that clock, or a copy in phase, for instance an FPGA bridge or a microcontroller fed from the board's clock output. A device with its own clock needs a dual-clock FIFO outside the chip.
+- **A single clock.** The host port's byte port, the image port and the chip-to-chip links are synchronous: valid and ready are read on the same edge of the chip's clock. Whatever sits on the other side must use that clock, or a copy in phase, for instance an FPGA bridge or a microcontroller fed from the board's clock output. A device with its own clock needs a dual-clock FIFO outside the chip.
 - **Reset.** The pin can be released at any time: it goes through two flip-flops before use, and then the chip stays in reset for 15 more cycles (`RESET_RELEASE` = 17 cycles from the pin). Wait for `booting` to go low before sending bytes to the host port.
+- **The host port's serial links** have no clock in common with the chip. The serial port's line and the quad SPI's clock, select and data lines each go through two flip-flops, so a host on its own clock needs nothing more. The quad SPI clock may be up to an eighth of the chip's (see [full-chip.md](full-chip.md#the-host-ports-links)).
 - **JTAG.** TCK, TMS and TDI each go through two flip-flops. The chip's clock must run at least 4 times faster than TCK, with each half period of TCK lasting 4 cycles or more.
 - **`follower` pin.** It is static: set it on the board and do not change it while the chip runs.
 

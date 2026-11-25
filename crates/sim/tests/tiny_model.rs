@@ -597,7 +597,7 @@ fn the_firmware_scores_the_draft_head_like_the_software() {
     let mut chip_engine = engine();
     let runner = RunnerEngine::new(&mut chip_engine, 16, 0);
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
-    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6, links: Default::default() }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
@@ -667,7 +667,7 @@ fn the_firmware_closes_the_reasoning_when_its_budget_runs_out() {
     let mut chip_engine = engine();
     let runner = RunnerEngine::new(&mut chip_engine, 16, 0);
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
-    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6, links: Default::default() }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
@@ -721,7 +721,7 @@ fn the_firmware_runs_the_chips_system_prompt_before_the_hosts() {
     let mut chip_engine = engine();
     let runner = RunnerEngine::new(&mut chip_engine, 16, 0);
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
-    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6, links: Default::default() }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
@@ -763,7 +763,7 @@ fn the_cpu_profile_adds_up_and_tells_waiting_from_work() {
     let mut engine = Engine::new(compile_qwen3_5(CONFIG).unwrap(), Weights::open(&dir).unwrap(), Numeric::Float).unwrap();
     let runner = RunnerEngine::new(&mut engine, 16, 1000);
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
-    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6 }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6, links: Default::default() }, &image, &input, ChipModel::new(runner, code, sampler)).unwrap();
     let mut cpu = Rv32Iss::default();
     let mut profile = CpuProfile::from_elf(elf);
     let mut orders = 0;
@@ -1048,7 +1048,7 @@ fn a_real_model_s_token_on_the_die_matches_the_exact_machine() {
     let addr_bits = bits_for(depth.max(2 * groups));
     let index_bits = bits_for(program.buffers.iter().map(|b| *b as u64).max().unwrap_or(1).max(context as u64 * 512).max((program.vocab * program.hidden) as u64)).max(addr_bits);
     let trial = DieConfig { index_bits, cell: netlist::CellConfig { addr_bits, ..roomy.cell }, ..roomy };
-    let options = FpgaOptions { factor_steps: 1, table_inside: true, dictionary: false, tokenizer_words: 0, chain: false };
+    let options = FpgaOptions { factor_steps: 1, table_inside: true, dictionary: false, tokenizer_words: 0, chain: false, links: Default::default() };
     let FpgaChip { config, models, .. } = fpga_chip_for(&[(&program, &weights)], trial, context, options).unwrap();
     let (layout, code) = &models[0];
     let c = config.die;
@@ -1219,7 +1219,7 @@ fn the_firmware_holds_a_conversation_on_a_kept_engine_until_the_clear_pin() {
     let image = build_image(&firmware.program, &firmware.data, &info, &[], &[]).unwrap();
     let runner = RunnerEngine::keeping(Box::new(engine()), 16, 0);
     let sampler = SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 4, entries: 4, lanes: 1 }, rng: 1, table: exponential_table() };
-    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6 }, &image, &[], ChipModel::new(runner, code, sampler)).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 13, fifo_bits: 6, links: Default::default() }, &image, &[], ChipModel::new(runner, code, sampler)).unwrap();
     let mut cpu = Rv32Iss::default();
     let mut ask = |bus: &mut SocBus<_>, prompt: &[u32]| {
         let start = bus.tx.len();

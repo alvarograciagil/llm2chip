@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn the_port_reads_framed_bytes_as_the_host_wrote_them() {
-        let mut bus = crate::soc::SocBus::new(crate::soc::SocConfig { program_words: 16, data_bits: 4, fifo_bits: 4 }, &[], &[], &[], crate::soc::NoPeripheral);
+        let mut bus = crate::soc::SocBus::new(crate::soc::SocConfig { program_words: 16, data_bits: 4, fifo_bits: 4, links: Default::default() }, &[], &[], &[], crate::soc::NoPeripheral);
         bus.send(&[set(9, 0xC0DB_C0DB), stop()].concat());
         let entries: Vec<u16> = bus.rx.iter().copied().collect();
         let start = (crate::soc::MARK_START << 8) as u16;

@@ -157,7 +157,7 @@ The microcode, the dictionary, the register table, the function tables and the w
 
 1. Generate the Verilog with the `fpga` example and the image with the same die.
 2. Replace the generic memories (`llm2chip_sram`, `llm2chip_ram2p`, `llm2chip_rom`) with the FPGA's blocks; Yosys already infers them.
-3. Connect the host port to a UART (over USB) and the image request to the board's flash or to the UART itself.
-4. Send a prompt and compare the output with the simulation: they must match byte for byte.
+3. Generate the chip with a serial port (`--uart CLOCKS_A_BIT`: the board's clock over the baud rate, for instance 50 MHz / 3 Mbaud = 16) and connect `uart_rx` and `uart_tx` to the board's USB serial port. Connect the image request to the board's flash. A quad SPI link (`--qspi`) also works, with a microcontroller as host.
+4. Send a question with `tools/host/chip_host.py PORT ask "Once upon a time"` and compare the answer with the simulation's: the messages must match byte for byte.
 
 Sources for prices and specifications: [Tang Mega 138K Pro](https://en.wiki.sipeed.com/hardware/en/tang/tang-mega-138k/mega-138k-pro.html), [CNX on the Tang Mega](https://cnx-software.com/2023/10/01/sipeed-tang-mega-138k-pro-dock-features-gowin-gw5ast-fpga-risc-v-soc), [Tang Primer 25K](https://cnx-software.com/?p=123307), [ALINX AX7202](https://boards.fpgadeveloper.com/boards/AX7202), [Nexys Video](https://www.digikey.co.uk/en/products/detail/digilent-inc/410-316/5456481), [Arty A7](https://pcbsync.com/xilinx-fpga-buying-guide/). Prices vary by shop and region: they are only a guide.

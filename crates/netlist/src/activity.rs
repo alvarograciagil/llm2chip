@@ -206,8 +206,13 @@ impl CpuProfile {
 /// The task an access to the outside starts.
 fn task_of(access: BusAccess) -> CpuTask {
     match access.address >> 28 {
-        2 if access.address & 0xC == 0 || access.address & 0xC == 4 => CpuTask::Receive,
-        2 => CpuTask::Send,
+        // Reading the queue, its status or its head receives; writing a message's bytes, its
+        // start or its end sends.
+        2 => match access.address & 0x1C {
+            0x00 | 0x04 => CpuTask::Receive,
+            0x10 if !access.write => CpuTask::Receive,
+            _ => CpuTask::Send,
+        },
         3 => CpuTask::Load,
         4 => {
             let register = (access.address >> 2) & ((1 << PERIPHERAL_BITS) - 1);

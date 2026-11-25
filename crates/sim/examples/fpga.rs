@@ -1,7 +1,7 @@
 //! The whole chip, in Verilog, to synthesise for an FPGA: the RISC-V controller, the die
 //! with only the logic its microprogram uses, and the sampling unit.
 //!
-//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR]... [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary] [--factor-steps N] [--group N] [--tokenizer FILE] [--chain] [--path NET] [--groups]`
+//! `cargo run --release -p sim --example fpga -- OUT.v [--dsp] [--model DIR]... [--context N] [--cells N] [--lanes N] [--table-inside] [--no-dictionary] [--factor-steps N] [--group N] [--tokenizer FILE] [--chain] [--uart CLOCKS_A_BIT] [--qspi] [--path NET] [--groups]`
 //!
 //! With `--dsp`, each one-cycle multiplier is written as a signed product so the FPGA
 //! tools put it in their multiplier blocks. Without `--model`, the chip is the one
@@ -121,6 +121,9 @@ fn main() {
         dictionary: !args.iter().any(|a| a == "--no-dictionary"),
         tokenizer_words,
         chain: args.iter().any(|a| a == "--chain"),
+        // A board's serial port, at the given clocks a bit (the board's clock over the baud
+        // rate), and a quad SPI target.
+        links: netlist::soc::HostLinks { uart: option("--uart").map(|n| n.parse().unwrap()), qspi: args.iter().any(|a| a == "--qspi") },
     };
     let pairs: Vec<(&compiler::Program, &Weights)> = models.iter().map(|(p, w)| (p, w)).collect();
     let FpgaChip { design, config, models: built } = fpga_chip_for(&pairs, trial, context, options).unwrap();

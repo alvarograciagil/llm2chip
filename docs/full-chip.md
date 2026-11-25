@@ -47,6 +47,38 @@ Everything that crosses the host port is a message, both ways, so a host can ask
 
 **Integrity** is left to the physical link. The framing limits a lost or corrupted byte to one message, and a host can always clear the conversation and start again.
 
+### The host port's links
+
+Besides its byte port (`host_*`: valid, ready and a byte each way, on the chip's clock), a chip can have physical links, chosen in the design (`host_uart`, `uart_baud`, `host_qspi`; `netlist::soc::HostLinks`). Each carries the same messages:
+
+| Link | Pins | Carries | Costs |
+|---|---|---|---|
+| Byte port | `host_rx_*`, `host_tx_*` | A byte a cycle each way; the chip holds the host back when its queue is full | Always there |
+| Serial port (UART) | `uart_rx`, `uart_tx` | 8N1, a byte in ten bits at the chosen rate | 234 gates, 48 flip-flops |
+| Quad SPI target | `qspi_sck`, `qspi_cs_n`, `qspi_in` (4), `qspi_out` (4), `qspi_oe`, `qspi_irq` | Four bits each clock edge, the clock up to an eighth of the chip's: about 60 MB/s at 1 GHz, 2 MB/s at 35 MHz | 227 gates, 42 flip-flops |
+
+**Which link answers.** The chip answers on the link the last message came from. Before any message it speaks on the first serial link it has (the quad SPI one, then the serial port), or the byte port. What waits in the send queue goes out on whichever link the next message names, so a host that speaks first gets the boot report too.
+
+**One link at a time.** A message that starts on one link holds the port until its end. In the meantime the byte port waits, but a serial link cannot be held back, so its bytes are dropped and counted, as are a serial link's bytes that come with the receive queue full. `debug_select` = 6 (`DEBUG_HOST_DROPPED`) reads the count.
+
+**The quad SPI target** works in SPI mode 0, the high nibble first. After the select falls, the first byte is a command:
+
+| Command | Then |
+|---|---|
+| `0x01` write | The host's bytes, into the receive queue |
+| `0x02` read | A dummy byte while the lines turn round, then the chip's bytes; with nothing to send it sends `0xC0`, which a host's reader skips |
+| `0x05` status | A dummy byte, then two bytes: the room in the receive queue and the bytes waiting to be read |
+
+The interrupt line is high while the chip has something to send on this link. The host should read the status before writing more than the room it gives.
+
+**Timing.** The serial port's line and the quad SPI's pins go through two flip-flops into the chip's clock. A read's byte is taken from the send queue a few cycles after the last one went out, which is why the quad SPI clock may be up to an eighth of the chip's.
+
+**Speech** goes over the host port as words: about 64 KB/s to listen and 192 KB/s to speak. A serial port slower than that would make the chip wait for it, and the estimate warns about it.
+
+**A host for a board.** `tools/host/chip_host.py` frames what you ask over a board's serial port and prints what the chip answers: a question as text or tokens, the status (with the context in use as a percentage), the options, setting one, a stop and a clear.
+
+**Checked:** `each_link_is_answered_on_its_own` (in `crates/netlist/tests/links.rs`) runs the control system with the real firmware in gates, with a serial port and a quad SPI target beside its byte port. Before any message the boot report comes out on the quad SPI link, and its interrupt line goes down once it is read. Then a status asked on the serial port is answered there, an option asked on the byte port is answered there, and one written over the quad SPI link is read back from it, escapes and all. A serial byte sent while the byte port is inside a message is dropped and counted.
+
 **Checked:** `the_host_asks_and_steers_the_chip_in_messages` (in `chip.rs`) asks a chip its options, sets one and sees the next answer follow it, asks for its status while it waits and in the middle of an answer, stops an answer, asks for a clear as a message, and gets the errors of what the chip does not take. Every test of the whole chip in gates checks the framing both ways, byte for byte and cycle for cycle against the instruction level.
 
 ## Blocks

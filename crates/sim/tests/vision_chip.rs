@@ -163,7 +163,7 @@ fn image_and_input(chip: &Chip) -> (Vec<u32>, Vec<u8>) {
 }
 
 fn soc() -> SocConfig {
-    SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }
+    SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6, links: Default::default() }
 }
 
 /// The chip at instruction level: its output bytes and cycles, and the last logits.
@@ -271,7 +271,7 @@ fn the_firmware_drives_a_software_die_that_reads_the_picture() {
     input.extend(netlist::port::tokens(&PROMPT));
     let runner = RunnerEngine::new(&mut engine, 16, 0).with_image(ImageTokens::OnChip(count), Placement::Grid(chip.image.rows, chip.image.cols, merge), chip.vision.image_token);
     let model = ChipModel::new(runner, code, SamplerModel { config: sampler_config(), rng: 0, table: exponential_table() });
-    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, &image, &input, model).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6, links: Default::default() }, &image, &input, model).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);

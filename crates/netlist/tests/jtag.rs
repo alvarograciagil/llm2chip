@@ -8,7 +8,7 @@ use netlist::soc::SocConfig;
 use netlist::Simulator;
 
 fn chip() -> Simulator {
-    let config = ChipConfig { soc: SocConfig { program_words: 1 << 8, data_bits: 8, fifo_bits: 4 }, die: netlist::DieConfig { reg_bits: 3, index_bits: 4, microcode_bits: 6, cell: netlist::CellConfig { addr_bits: 4, ..block_config().cell }, ..block_config() }, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
+    let config = ChipConfig { soc: SocConfig { program_words: 1 << 8, data_bits: 8, fifo_bits: 4, links: Default::default() }, die: netlist::DieConfig { reg_bits: 3, index_bits: 4, microcode_bits: 6, cell: netlist::CellConfig { addr_bits: 4, ..block_config().cell }, ..block_config() }, sampler: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 } };
     Simulator::new(&chip_design(config)).unwrap()
 }
 

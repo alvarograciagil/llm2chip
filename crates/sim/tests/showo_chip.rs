@@ -367,7 +367,7 @@ fn the_firmware_runs_show_o_s_pass_as_the_host_ordered_it() {
     let input = netlist::port::stream(&[0, text, first].into_iter().chain(ids.iter().copied()).chain(image.iter().copied()).collect::<Vec<u32>>());
     let engine = sim::chip::VmEngine::new(program.clone(), open().2, die, context).unwrap();
     let model = ChipModel::new(engine, code.clone(), SamplerModel { config: SamplerConfig { logit_bits: 16, index_bits: 12, entries: 4, lanes: 1 }, rng: 0, table: exponential_table() });
-    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }, &chip_image, &input, model).unwrap();
+    let mut bus = SocBus::booted_with(SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6, links: Default::default() }, &chip_image, &input, model).unwrap();
     let mut cpu = Rv32Iss::default();
     while !cpu.halted {
         cpu.step(&mut bus);
@@ -407,7 +407,7 @@ fn fill_engine(dir: &Path, program: &compiler::Program, die: netlist::DieConfig,
 }
 
 fn fill_soc() -> netlist::soc::SocConfig {
-    netlist::soc::SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6 }
+    netlist::soc::SocConfig { program_words: netlist::soc::PROGRAM_WORDS, data_bits: 14, fifo_bits: 6, links: Default::default() }
 }
 
 fn fill_sampler() -> netlist::sampler::SamplerConfig {
