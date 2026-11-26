@@ -723,11 +723,19 @@ fn blocks_for(i: &AreaInputs<'_>, dies: u32) -> Vec<BlockArea> {
     let tokenizer_density = if p.weight_backend == WeightBackend::Rom { tech.rom_mbit_mm2 } else { tech.sram_density(1024.0) };
     push("tokenizer_tables", "Tokenizer tables", tokenizer_bits / 1e6 / tokenizer_density,
         "Vocabulary and merges the firmware uses to turn text into tokens and back.");
-    // Not in the tech file's CPU figure: this grows with the context the design allows.
+    // The CPU's memories as the SoC builds them, not in the tech file's CPU figure: the
+    // program memory, and a data memory of a power of two words holding the firmware's
+    // data, stack and the chip's description (the words below `TOKENIZER_WORD`), then the
+    // tokenizer's tables, then the input text and the tokenizer's working memory, which grow
+    // with the context. The tables are their own block; the rest of the data memory, its
+    // rounding up included, is counted here.
     let (text_bytes, arena_words) = tokenizer_rt::memory_for_context(p.context_tokens);
-    let cpu_memory_bits = 8.0 * (FIRMWARE_PROGRAM_BYTES as f64 + text_bytes as f64 + 4.0 * arena_words as f64);
+    let table_words = (tokenizer_bits / 32.0).ceil();
+    let data_words = netlist::soc::TOKENIZER_WORD as f64 + table_words + (text_bytes as f64 / 4.0).ceil() + arena_words as f64;
+    let data_words_built = data_words.log2().ceil().exp2();
+    let cpu_memory_bits = 8.0 * FIRMWARE_PROGRAM_BYTES as f64 + 32.0 * (data_words_built - table_words);
     push("cpu_memory", "CPU memory", cpu_memory_bits / 1e6 / tech.sram_density(1024.0),
-        "The firmware's program and the memory where the tokenizer works on the input text.");
+        "The firmware's program and data memory: its stack and the chip's description, and the input text the tokenizer works on.");
     if p.host_uart || p.host_qspi || p.host_i2c {
         // Measured on the generated control system (`link_cost` example): a serial port
         // adds 242 gates and 49 flip-flops, a quad SPI target 227 and 42, an I2C target 275
@@ -1206,18 +1214,33 @@ fn estimate_design(model: &ModelGraph, p: &ChipParams) -> Result<Report, String>
     let mut dies = if p.dies > 0 { p.dies } else { 1 };
     let mut blocks = blocks_for(&inputs, dies);
     if p.dies == 0 {
-        while total(&blocks) > die_limit && dies < MAX_AUTO_DIES {
+        // What every die repeats (the CPU, its memories, the tokenizer's tables) does not
+        // shrink with more dies: if the most dies allowed do not fit, none do.
+        let fits_at_all = total(&blocks) <= die_limit || total(&blocks_for(&inputs, MAX_AUTO_DIES)) <= die_limit;
+        while fits_at_all && total(&blocks) > die_limit && dies < MAX_AUTO_DIES {
             dies += 1;
             blocks = blocks_for(&inputs, dies);
         }
     }
     let die_area = total(&blocks);
     if die_area > die_limit {
-        violations.push(Violation {
-            severity: Severity::Error,
-            message: format!("Each die takes {die_area:.0} mm² and the limit is {die_limit:.0} mm²."),
-            fix: "Add dies, reduce multipliers or context, or turn on memory optimizations.".into(),
-            field: Some("dies"), value: Some(serde_json::json!(0)),
+        // Searched and nothing fits: more dies are no fix, a larger die or a node with
+        // denser memory is.
+        let repeated = p.dies == 0 && dies < MAX_AUTO_DIES;
+        violations.push(if repeated {
+            Violation {
+                severity: Severity::Error,
+                message: format!("Each die takes {die_area:.0} mm² and the limit is {die_limit:.0} mm²: what every die repeats does not fit, however many there are."),
+                fix: "Choose a node with a larger die or denser memory, or reduce the context.".into(),
+                field: None, value: None,
+            }
+        } else {
+            Violation {
+                severity: Severity::Error,
+                message: format!("Each die takes {die_area:.0} mm² and the limit is {die_limit:.0} mm²."),
+                fix: "Add dies, reduce multipliers or context, or turn on memory optimizations.".into(),
+                field: Some("dies"), value: Some(serde_json::json!(0)),
+            }
         });
     }
     let d = dies as f64;
@@ -1695,6 +1718,34 @@ mod tests {
     }
 
     #[test]
+    fn a_die_that_fits_on_no_count_is_said_without_searching_hundreds() {
+        // At 180 nm the CPU's memories alone pass the die limit, and every die repeats them.
+        let stories = ModelGraph::from_config_json("s", include_str!("../../../models/stories260k.json")).unwrap();
+        let p = ChipParams { node: "gf180".into(), max_params_g: 0.00028, context_tokens: 64, use_model_mix: false, group_size: 0, weight_bits: 8, ..Default::default() };
+        let r = estimate(&stories, &p).unwrap();
+        assert_eq!(r.dies, 1);
+        let error = r.violations.iter().find(|v| v.severity == Severity::Error && v.message.contains("however many")).expect("it does not fit");
+        assert_eq!(error.field, None);
+    }
+
+    #[test]
+    fn the_cpu_memory_is_the_data_memory_the_soc_builds() {
+        // A power of two words of data memory: the firmware's own words, the tables, the text
+        // and the tokenizer's working memory, rounded up.
+        let stories = ModelGraph::from_config_json("s", include_str!("../../../models/stories260k.json")).unwrap();
+        let p = ChipParams { node: "gf180".into(), max_params_g: 0.00028, context_tokens: 64, ..Default::default() };
+        let r = estimate(&stories, &p).unwrap();
+        let tech = node("gf180").unwrap();
+        let area = |id: &str| r.blocks.iter().find(|b| b.id == id).unwrap().per_die_mm2;
+        let (text, arena) = tokenizer_rt::memory_for_context(64);
+        let tables = (stories.vocab_size as f64 * TOKENIZER_BITS_PER_TOKEN / 32.0).ceil();
+        let words = (netlist::soc::TOKENIZER_WORD as f64 + tables + (text as f64 / 4.0).ceil() + arena as f64).log2().ceil().exp2();
+        let bits = 8.0 * FIRMWARE_PROGRAM_BYTES as f64 + 32.0 * (words - tables);
+        assert!(words >= 2.0 * netlist::soc::TOKENIZER_WORD as f64);
+        assert!((area("cpu_memory") - bits / 1e6 / tech.sram_density(1024.0)).abs() < 1e-9, "{}", area("cpu_memory"));
+    }
+
+    #[test]
     fn fixed_rom_needs_less_silicon_than_sram() {
         let sram = estimate(&qwen(), &ChipParams::default()).unwrap();
         let rom = estimate(&qwen(), &ChipParams { weight_backend: WeightBackend::Rom, ..Default::default() }).unwrap();
@@ -1928,7 +1979,10 @@ mod tests {
             let report = estimate(&qwen(), &ChipParams { context_tokens: context, ..Default::default() }).unwrap();
             report.blocks.iter().find(|b| b.id == "cpu_memory").unwrap().per_die_mm2
         };
-        assert!(area(32768) > 3.0 * area(8192));
+        // The data memory grows in powers of two words, so a longer context can fit in the
+        // rounding of a shorter one.
+        assert!(area(32768) >= area(8192));
+        assert!(area(131_072) > 2.0 * area(8192));
     }
 
     #[test]

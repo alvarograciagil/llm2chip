@@ -13,43 +13,44 @@ The main target: Qwen3.8-27B (27 billion parameters, 64 layers mixing Gated Delt
 
 ### The default design, estimated
 
-`cargo run --release -p arch --example report` with the application's default parameters: weights in SRAM next to their multipliers, TSMC N6, 1 GHz, 16-bit activations, one user.
+`cargo run --release -p arch --example report -- models/qwen3.8-27b.json '{"target_tok_s": 4000}'`, the application's default parameters, with which a new design asks for 4,000 tok/s: weights in SRAM next to their multipliers, TSMC N6, 1 GHz, 16-bit activations, one user.
 
 | | |
 |---|---|
 | Parameters | 26.9 G |
 | Weights in memory | 19.5 GB (chip capacity 25.4 GB) |
-| Dies | 13 of 806.5 mm² (reticle limit 815 mm²), in 3 packages |
-| Total silicon | 10,485 mm² |
-| Weight multipliers | 1,768,000 (136,000 per die), 14.4 KB of weights each |
-| Generation, one user | **3,755 tok/s** (265,500 cycles per token) |
-| Prompt reading | 48,960 tok/s |
-| Energy | 56 mJ per token, **240 W** while generating |
-| Weights read per token | 18.2 GB, 68 TB/s from the cells' own memories |
+| Dies | 14 of 779.8 mm² (reticle limit 815 mm²), in 3 packages |
+| Total silicon | 10,917 mm² |
+| Weight multipliers | 2,067,000 (147,600 per die), 12.3 KB of weights each |
+| Generation, one user | **3,979 tok/s** (250,600 cycles per token) |
+| Prompt reading | 55,880 tok/s |
+| Energy | 56 mJ per token, **254 W** while generating |
+| Weights read per token | 18.2 GB, 72 TB/s from the cells' own memories |
 | KV cache | 0.54 GB, 64 KiB per context token |
 | DeltaNet and convolution state | 154 MB |
-| Die-to-die traffic | 38 MB/s |
+| Die-to-die traffic | 41 MB/s |
 | Time to load the image | 1.4 s |
 
 Where each die's area goes:
 
 | Block | mm² per die |
 |---|---|
-| Cells: weight memory | 717.2 |
-| Cells: multipliers | 24.3 |
-| Scale and bias per group | 17.1 |
-| Attention KV cache | 12.0 |
-| Cells: ECC correction | 7.2 |
+| Cells: weight memory | 683.2 |
+| Cells: multipliers | 26.4 |
+| Scale and bias per group | 18.5 |
+| Attention KV cache | 11.1 |
+| Cells: ECC correction | 7.8 |
 | Control and load CPU | 6.0 |
 | Clock, power and test | 6.0 |
+| CPU memory (program, and the data memory as built) | 4.5 |
 | Tokenizer tables | 3.9 |
-| DeltaNet state | 3.4 |
+| DeltaNet state | 3.2 |
 | Die-to-die links | 2.9 |
+| Activation network | 2.8 |
 | Vector units | 2.7 |
-| Activation network | 2.5 |
-| Sequencer, CPU memory, function units, buffers | 1.4 |
+| Sequencer, function units, buffers | 1.0 |
 
-Weight memory takes 89 % of the silicon: this kind of chip is a memory with multipliers inside, and SRAM density, which has barely improved since N5, sets its size and cost. That is why weight format matters more than anything else (see below), and why the estimator offers ROM (weights fixed at manufacture) and stacked DRAM as alternatives.
+Weight memory takes 88 % of the silicon: this kind of chip is a memory with multipliers inside, and SRAM density, which has barely improved since N5, sets its size and cost. That is why weight format matters more than anything else (see below), and why the estimator offers ROM (weights fixed at manufacture) and stacked DRAM as alternatives.
 
 For reference, the same estimator gives 781 mm² and 15,122 tok/s for the Taalas HC1 preset (Llama 3.1 8B in mask ROM, N6), against the 815 mm² and more than 15,000 tok/s published for that chip ([research.md](research.md)).
 
